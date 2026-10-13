@@ -407,7 +407,12 @@ impl PtyRuntime {
                 command.env_clear().envs(environment);
             }
             command.env("PTY_ROOT", &self.root);
-            let output = match output_within(command, self.command_timeout) {
+            // A later failed attempt cannot close a producer created by an earlier
+            // attempt. Only failure to create the first launcher proves rejection.
+            let operation = (attempt == 0)
+                .then(|| env.get("ST3_START_OPERATION").map(String::as_str))
+                .flatten();
+            let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = std::fs::remove_file(&fence);
@@ -863,12 +868,29 @@ impl PtyRuntime {
 }
 
 /// A wedged PTY command must not stall the reconciler indefinitely.
-pub(crate) fn output_within(mut command: Command, timeout: Duration) -> Result<Output> {
+pub(crate) fn output_within(command: Command, timeout: Duration) -> Result<Output> {
+    output_for_start(command, timeout, None)
+}
+
+fn output_for_start(
+    mut command: Command,
+    timeout: Duration,
+    operation: Option<&str>,
+) -> Result<Output> {
     let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| {
+            let error = anyhow::Error::from(error);
+            match operation {
+                Some(operation) => error.context(crate::StartRejected {
+                    operation: Some(operation.to_owned()),
+                }),
+                None => error,
+            }
+        })?;
     let pid = child.id();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

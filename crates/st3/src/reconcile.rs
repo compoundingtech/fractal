@@ -771,6 +771,16 @@ impl NativeRuntime {
                     .get(crate::rollout::PREDECESSOR_ENV)
                     .context("rollout launch needs its predecessor fence")?;
                 if let Some(guard) = guard {
+                    // PtyRuntime invokes this guard before the current attempt creates
+                    // its launcher. Preserve that positive rejection evidence even though
+                    // the outer call has entered the PTY backend.
+                    let checked_guard = || {
+                        guard().map_err(|error| {
+                            error.context(st_runtime::StartRejected {
+                                operation: member.tags.get(start_jobs::OPERATION_TAG).cloned(),
+                            })
+                        })
+                    };
                     *producer_entered = true;
                     runtime.spawn_after_checked(
                         &member.runtime_id,
@@ -782,7 +792,7 @@ impl NativeRuntime {
                         member.terminal_size,
                         predecessor,
                         operation,
-                        guard,
+                        &checked_guard,
                     )
                 } else {
                     *producer_entered = true;
@@ -16911,6 +16921,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         observe_at: Mutex<Option<u128>>,
         failed_stops: Mutex<std::collections::HashSet<String>>,
         started_members: Mutex<Vec<MemberSpec>>,
+        start_operations: Mutex<HashMap<(String, String), String>>,
         stops: Mutex<Vec<String>>,
         kills: Mutex<Vec<String>>,
         removes: Mutex<Vec<String>>,
@@ -17028,24 +17039,39 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
 
     impl RuntimeControl for FakeRuntime {
         fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
-            // This fixture models launch effects separately from planner observations,
-            // which individual tests replace to exercise lifecycle transitions.
-            Ok(self.started_members.lock().unwrap().iter().rev()
+            let started = self.started_members.lock().unwrap().iter().rev()
                 .find(|started| started.tags.get(start_jobs::OPERATION_TAG)
                     == member.tags.get(start_jobs::OPERATION_TAG))
-                .map(|started| RuntimeObservation {
-                    runtime_id: started.runtime_id.clone(),
-                    terminal: started.terminal,
-                    status: "running".into(),
-                    exit_code: None,
-                    incarnation_id: Some(format!("fake-start:{}", started.tags[start_jobs::OPERATION_TAG])),
-                }))
+                .cloned();
+            let Some(started) = started else {
+                return Ok(None);
+            };
+            // Honor each fixture's post-start publication and fast-exit hooks. Bind
+            // that first launch incarnation once; later planner observations cannot
+            // manufacture provenance for another incarnation.
+            let observation = if member.terminal {
+                self.snapshot_ptys()?.into_iter().find(|item| item.runtime_id == member.runtime_id)
+            } else {
+                self.observe_exec(&member.runtime_id)?
+            }.unwrap_or_else(|| RuntimeObservation {
+                runtime_id: started.runtime_id.clone(),
+                terminal: started.terminal,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(format!("fake-start:{}", started.tags[start_jobs::OPERATION_TAG])),
+            });
+            if let Some(incarnation) = &observation.incarnation_id {
+                let operation = &started.tags[start_jobs::OPERATION_TAG];
+                let mut bindings = self.start_operations.lock().unwrap();
+                if !bindings.values().any(|bound| bound == operation) {
+                    bindings.insert((started.runtime_id, incarnation.clone()), operation.clone());
+                }
+            }
+            Ok(Some(observation))
         }
         fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> Result<Option<String>> {
-            Ok(self.started_members.lock().unwrap().iter().find(|member|
-                member.runtime_id == id && member.tags.get(start_jobs::OPERATION_TAG)
-                    .is_some_and(|operation| incarnation == format!("fake-start:{operation}")))
-                .and_then(|member| member.tags.get(start_jobs::OPERATION_TAG).cloned()))
+            Ok(self.start_operations.lock().unwrap()
+                .get(&(id.into(), incarnation.into())).cloned())
         }
         fn start_operation_closed(&self, _member: &MemberSpec) -> Result<bool> {
             // This fixture spawns no process or detached producer. Observable mocked
@@ -17488,6 +17514,13 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             .unwrap()
             .0;
         let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let incarnation = store
+            .observations_for(&desired.subject, "runtime.action.succeeded")
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.body["fields"]["action"] == "start")
+            .unwrap().body["fields"]["incarnation_id"]
+            .as_str().unwrap().to_owned();
         runtime.execs.lock().unwrap().insert(
             runtime_id.clone(),
             RuntimeObservation {
@@ -17495,7 +17528,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 terminal: false,
                 status: "running".into(),
                 exit_code: None,
-                incarnation_id: Some("wrapper-one".into()),
+                incarnation_id: Some(incarnation),
             },
         );
         // The driver publishes its provider's result before its own process exits. A

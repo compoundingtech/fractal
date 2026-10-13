@@ -851,7 +851,7 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             root.path().to_owned()
         };
         let program = if failure == "missing-program" {
-            root.path().join("missing-program").display().to_string()
+            format!("missing-native-program-{}", uuid::Uuid::new_v4())
         } else {
             "/bin/sleep".into()
         };
@@ -868,7 +868,8 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             .desired_subjects_named(&["exec/example/rejected".into()])
             .unwrap()
             .remove(0);
-        assert!(dispatch(&desired).is_err());
+        let rejected = dispatch(&desired);
+        assert!(rejected.is_err(), "{failure}: {rejected:?}");
         assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
         let result: String = store
             .readers
@@ -908,5 +909,125 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
                 observation.incarnation_id.as_deref(),
             )
             .unwrap();
+    }
+}
+
+#[test]
+fn native_rollout_guard_rejection_proves_no_producer_was_created() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let called = root.path().join("producer-called");
+    let pty = root.path().join("pty");
+    std::fs::write(
+        &pty,
+        format!("#!/bin/sh\nprintf called > {:?}\nexit 99\n", called),
+    )
+    .unwrap();
+    std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let intent = parse_intent(&format!("version 2\nagent \"example/guard\" {{ workspace {:?}; argv \"/bin/sleep\" \"1000\"; }}", root.path().display().to_string()), "node").unwrap();
+    let mut member = intent
+        .subjects
+        .values()
+        .find_map(|subject| subject.member.clone())
+        .unwrap();
+    member.environment.insert(
+        "PATH".into(),
+        format!("{}:${{PATH}}", root.path().display()),
+    );
+    member
+        .tags
+        .insert(start_jobs::OPERATION_TAG.into(), "guard-operation".into());
+    member
+        .environment
+        .insert(start_jobs::OPERATION_ENV.into(), "guard-operation".into());
+    member.environment.insert(
+        crate::rollout::OPERATION_ENV.into(),
+        "rollout-operation".into(),
+    );
+    member.environment.insert(
+        crate::rollout::PREDECESSOR_ENV.into(),
+        "old:incarnation".into(),
+    );
+    let runtime = NativeRuntime::new(&root.path().join("state"), None, &pty);
+    let guard_called = AtomicBool::new(false);
+    let error = runtime
+        .start_guarded(&member, &|| {
+            guard_called.store(true, Ordering::Release);
+            anyhow::bail!("declaration changed before launch")
+        })
+        .unwrap_err();
+    assert!(guard_called.load(Ordering::Acquire));
+    assert_eq!(
+        error
+            .downcast_ref::<st_runtime::StartRejected>()
+            .unwrap()
+            .operation
+            .as_deref(),
+        Some("guard-operation")
+    );
+    assert!(
+        !called.exists(),
+        "a rejected guard reached the producer binary"
+    );
+}
+
+#[test]
+fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    for (binary, rejected) in [
+        ("invalid executable format", true),
+        ("#!/bin/sh\nexit 1\n", false),
+        (
+            "#!/bin/sh\nrm -- \"$0\"\nprintf 'already in use' >&2\nexit 1\n",
+            false,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let pty = root.path().join("pty");
+        std::fs::write(&pty, binary).unwrap();
+        std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let intent = parse_intent(&format!("version 2\nagent \"example/rejected-pty\" {{ workspace {:?}; argv \"/bin/sleep\" \"1000\"; }}", root.path().display().to_string()), "node").unwrap();
+        let mut member = intent
+            .subjects
+            .values()
+            .find_map(|subject| subject.member.clone())
+            .unwrap();
+        member.environment.insert(
+            "PATH".into(),
+            format!("{}:${{PATH}}", root.path().display()),
+        );
+        member
+            .tags
+            .insert(start_jobs::OPERATION_TAG.into(), "pty-operation".into());
+        member
+            .environment
+            .insert(start_jobs::OPERATION_ENV.into(), "pty-operation".into());
+        let runtime = NativeRuntime::new(&root.path().join("state"), None, &pty);
+        let error = runtime.start_guarded(&member, &|| Ok(())).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<st_runtime::StartRejected>().is_some(),
+            rejected,
+            "{error:#}"
+        );
+        if rejected {
+            assert_eq!(
+                error
+                    .downcast_ref::<st_runtime::StartRejected>()
+                    .unwrap()
+                    .operation
+                    .as_deref(),
+                Some("pty-operation")
+            );
+        }
+        assert!(
+            !runtime.start_operation_closed(&member).unwrap(),
+            "a returned old-producer error is not closure proof"
+        );
     }
 }
