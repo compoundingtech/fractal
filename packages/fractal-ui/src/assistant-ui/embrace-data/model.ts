@@ -9,6 +9,20 @@ export type Sender = {
   readonly label: string
   readonly via?: string
 }
+/** Host-recorded mailbox delivery; its verdict is the only source of a verification claim. */
+export type IncomingDelivery = {
+  readonly messageId: string
+  readonly from: string
+  readonly to?: string
+  readonly title?: string
+  readonly provenance?: {
+    readonly verdict: 'verified' | 'unsigned' | 'held' | 'invalid'
+    readonly signer?: string
+    readonly device?: string
+    readonly key?: string
+    readonly reason?: string
+  }
+}
 export type Attachment = {
   readonly id: string
   readonly mediaType: string
@@ -37,6 +51,8 @@ export type ConversationItem =
       readonly model?: string
       readonly at: string
       readonly sender?: Sender
+      /** Present only when the host recorded this prompt as a mailbox delivery. */
+      readonly delivery?: IncomingDelivery
     }
   | {
       readonly _tag: 'Message'

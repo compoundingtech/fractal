@@ -14,6 +14,7 @@ import { ErrorOverlay, ErrorOverlayHost } from './ErrorOverlay'
 import { HighlightedSource, Markdown, MarkdownImagePolicy, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
 import { ThinkingEntry } from './ThinkingEntry'
 import { SendFailure, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
+import { IncomingMessage } from './IncomingMessage'
 import { Icon } from './Icons'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
@@ -85,6 +86,7 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
     measure()
     return () => observer.disconnect()
   }, [item.text, expanded])
+  if (item.delivery !== undefined) return <MessagePrimitive.Root data-item-id={item.id}><IncomingMessage delivery={item.delivery} text={item.text} /></MessagePrimitive.Root>
   return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
 /** Settled metadata remains below the prose; unknown time is omitted rather than invented. */
