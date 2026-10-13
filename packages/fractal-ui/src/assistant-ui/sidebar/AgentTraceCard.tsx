@@ -4,7 +4,7 @@ import * as stylex from '@stylexjs/stylex'
 import { VisuallyHidden } from 'react-aria-components'
 import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { compactTime, type SidebarAgentRow as Row } from './model'
-import { SidebarStatus } from './SidebarStatus'
+import { Icon } from '../composition/Icons'
 import { absenceNote, type AgentTrace, type ContextHistory, type SpendPoint, type SpendTotals, type TokenSplit, type TraceSubagent } from './trace-model'
 
 const tokenCount = Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
@@ -181,7 +181,7 @@ export function AgentTraceCard({ row, trace, now }: AgentTraceCardProps) {
   const subline = [row.statusSince === undefined ? row.statusLabel : `${row.statusLabel} · ${compactTime({ at: row.statusSince, now })}`, row.model, row.harness, row.host].filter((part): part is string => part !== undefined)
   return <div data-testid="agent-trace-card" aria-labelledby={headerId} role="group" {...stylex.props(styles.card)}>
     <div {...stylex.props(styles.header)}>
-      <span {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" freshness={row.freshness} iconOnly /></span>
+      <span {...stylex.props(styles.glyph, row.status === 'working' && styles.glyphWorking, row.status === 'waiting' && styles.glyphWaiting)}><Icon name="dot" scale="status" /></span>
       <strong id={headerId} {...stylex.props(styles.title)}>{row.title}</strong>
       <span {...stylex.props(styles.subline)}>{subline.join(' · ')}</span>
     </div>
@@ -197,7 +197,9 @@ export function AgentTraceCard({ row, trace, now }: AgentTraceCardProps) {
 const styles = stylex.create({
   card: { display: 'flex', flexDirection: 'column', gap: s.lg, width: g.panelMin, maxWidth: '100%', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere' },
   header: { display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr)`, columnGap: s.md, rowGap: s.xs2, alignItems: 'center' },
-  glyph: { display: 'flex', alignItems: 'center', justifyContent: 'center' },
+  glyph: { display: 'flex', alignItems: 'center', justifyContent: 'center', color: ink.fgMuted },
+  glyphWorking: { color: tone.runningFg },
+  glyphWaiting: { color: tone.attention },
   title: { fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightSemibold, color: ink.fg },
   subline: { gridColumn: '2', color: ink.fgSoft },
   goal: { margin: s.zero, color: ink.fgSoft },
