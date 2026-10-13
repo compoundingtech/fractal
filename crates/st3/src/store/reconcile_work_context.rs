@@ -6,6 +6,7 @@ const CHUNK: usize = 128;
 #[cfg(test)]
 thread_local! {
     static MAX_SNAPSHOT_CALL_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static AFTER_OWNERS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 // LEFT JOIN keeps missing owner rows equivalent to the old optional lookup. json_each is
@@ -27,6 +28,9 @@ const DEFINITIONS: &str = "SELECT requested.value, revisions.body
     LEFT JOIN mission_runs AS runs ON runs.id=generations.run_id
     LEFT JOIN mission_revisions AS revisions
       ON revisions.mission_id=runs.mission_id AND revisions.revision=generations.revision";
+
+const PHASES: &str = "SELECT id, phase FROM mission_runs
+    WHERE id IN (SELECT value FROM json_each(?1) AS requested)";
 
 struct Inputs {
     views: Vec<StepRunView>,
@@ -111,14 +115,16 @@ fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
         .map(|view| view.run.strip_prefix("mission-run/").unwrap_or(&view.run))
         .collect::<BTreeSet<_>>();
     let phases = connection
-        .prepare_cached(
-            "SELECT id, phase FROM mission_runs WHERE id IN (SELECT value FROM json_each(?1))",
-        )?
+        .prepare_cached(PHASES)?
         .query_map([serde_json::to_string(&runs)?], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })?
         .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
     let owners = owners(&connection, &views)?;
+    #[cfg(test)]
+    if let Some(after) = AFTER_OWNERS.with(|hook| hook.borrow_mut().take()) {
+        after();
+    }
     let generations = views
         .iter()
         .map(|view| generation_id_from_subject(&view.generation))
@@ -153,14 +159,30 @@ fn owners(
     connection: &Connection,
     views: &[StepRunView],
 ) -> Result<Vec<Option<EffectiveStepOwner>>> {
-    let mut owners = Vec::with_capacity(views.len());
-    for chunk in views.chunks(CHUNK) {
+    // Ownership depends on the exact (run, generation) pair, not the step. Read a shared
+    // pair once in this invocation's snapshot, then apply its unchanged rules to every step.
+    let key = |view: &StepRunView| {
+        (
+            view.run
+                .strip_prefix("mission-run/")
+                .unwrap_or(&view.run)
+                .to_owned(),
+            generation_id_from_subject(&view.generation).to_owned(),
+        )
+    };
+    let contexts = views
+        .iter()
+        .map(key)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut owners = BTreeMap::new();
+    for chunk in contexts.chunks(CHUNK) {
         let requested = chunk
             .iter()
-            .map(|view| {
+            .map(|(run, generation)| {
                 json!({
-                    "run": view.run.strip_prefix("mission-run/").unwrap_or(&view.run),
-                    "generation": generation_id_from_subject(&view.generation),
+                    "run": run, "generation": generation,
                 })
             })
             .collect::<Vec<_>>();
@@ -188,10 +210,18 @@ fn owners(
         );
         for (expected, (ordinal, owner)) in rows.into_iter().enumerate() {
             anyhow::ensure!(ordinal == expected, "work owner batch changed input order");
-            owners.push(owner);
+            owners.insert(chunk[expected].clone(), owner);
         }
     }
-    Ok(owners)
+    views
+        .iter()
+        .map(|view| {
+            owners
+                .get(&key(view))
+                .cloned()
+                .context("work owner batch missed a requested context")
+        })
+        .collect()
 }
 
 #[cfg(test)]
