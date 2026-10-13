@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove unreferenced dated eval receipts and orphan task text",
+  "replay": {
+    "status": "none",
+    "detail": "Delete three unreferenced dated eval evidence/receipt JSON files and the unused restart-continuity task.md. Current eval declarations, personas, judges and CI boot-canary scripts and target outputs remain unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Delete three unreferenced dated eval evidence/receipt JSON files and the unused restart-continuity task.md. Current eval declarations, personas, judges and CI boot-canary scripts and target outputs remain unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Delete three unreferenced dated eval evidence/receipt JSON files and the unused restart-continuity task.md. Current eval declarations, personas, judges and CI boot-canary scripts and target outputs remain unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Delete three unreferenced dated eval evidence/receipt JSON files and the unused restart-continuity task.md. Current eval declarations, personas, judges and CI boot-canary scripts and target outputs remain unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Delete three unreferenced dated eval evidence/receipt JSON files and the unused restart-continuity task.md. Current eval declarations, personas, judges and CI boot-canary scripts and target outputs remain unchanged."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Delete three unreferenced dated eval evidence/receipt JSON files and the unused restart-continuity task.md. Current eval declarations, personas, judges and CI boot-canary scripts and target outputs remain unchanged."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Delete three unreferenced dated eval evidence/receipt JSON files and the unused restart-continuity task.md. Current eval declarations, personas, judges and CI boot-canary scripts and target outputs remain unchanged."
+  }
+}
