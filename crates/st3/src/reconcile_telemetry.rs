@@ -193,7 +193,7 @@ pub(crate) fn record_idle_loop_gates(count: u64) {
 
 pub(crate) fn record_loop_gate_start_latency(ready_at_unix_ms: u128) {
     if crate::otel::metrics_enabled() {
-        let elapsed = crate::store::now_ms().saturating_sub(ready_at_unix_ms);
+        let elapsed = smallclaims::store::now_ms().saturating_sub(ready_at_unix_ms);
         let seconds = std::time::Duration::from_millis(u64::try_from(elapsed).unwrap_or(u64::MAX))
             .as_secs_f64();
         METRICS.loop_gate_start_latency.record(seconds, &[]);

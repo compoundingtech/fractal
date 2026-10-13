@@ -3057,21 +3057,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 )?;
                             }
                             None => {
-                                // Absence is not an exited generation while a worker or its
-                                // detached producer still owns launch admission. In particular,
-                                // never retire/relaunch a starting one-shot during its live start.
-                                if let Some(operation) =
-                                    self.store.runtime_start_for(&subject.subject)?
-                                {
-                                    if operation.finished && self.is_loop_gate(subject)? {
-                                        anyhow::bail!(
-                                            "refine-loop gate runtime `{}` is missing after start operation `{}` ended; launch admission remains held until exact producer closure is verified. Inspect the gate's start operation and runtime owner before explicitly restarting it",
-                                            member.runtime_id,
-                                            operation.id,
-                                        );
-                                    }
-                                    return blocked.map_or(Ok(()), Err);
-                                }
                                 let prior = self.store.latest_actual_value(&subject.subject)?;
                                 if prior.is_some()
                                     && !self.member_was_launched_for_selected_desired(
@@ -3119,25 +3104,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                                             .map(str::to_owned),
                                     };
                                     self.record_member(subject, &observation, false)?;
-                                    if prior.as_ref().is_some_and(|actual| {
-                                        actual_field(actual, "status").and_then(Value::as_str)
-                                            == Some("starting")
-                                    }) && self.is_loop_gate(subject)?
-                                    {
-                                        self.record_once(
-                                            &subject.subject,
-                                            "harness.diagnostic",
-                                            BTreeMap::from([
-                                                ("severity".into(), Value::from("error")),
-                                                ("code".into(), Value::from("gate-runtime-missing")),
-                                                ("runtime_id".into(), Value::from(member.runtime_id.clone())),
-                                                ("incarnation_id".into(), serde_json::json!(observation.incarnation_id)),
-                                                ("reason".into(), Value::from(
-                                                    "the refine-loop gate's starting runtime disappeared and no launch is in flight; the declared restart policy determines recovery. Inspect the owning round's report; explicitly restart a stopped gate or publish a corrected round",
-                                                )),
-                                            ]),
-                                        )?;
-                                    }
                                     if member.one_shot
                                         && !self.fresh_context_recovery_stopped(
                                             &subject.subject,
@@ -3166,11 +3132,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                                             return Err(error);
                                         }
                                         self.reconcile_restart(subject, member, &observation)?;
-                                    } else if self.is_loop_gate(subject)? {
-                                        anyhow::bail!(
-                                            "refine-loop gate runtime `{}` vanished and its restart policy does not permit recovery; inspect the owning round's report, then explicitly restart the gate or publish a corrected round",
-                                            member.runtime_id,
-                                        );
                                     }
                                 } else {
                                     if let Some(error) = blocked.take() {
@@ -17168,7 +17129,6 @@ mod tests {
     mod run_report_tests;
     mod start_spacing_loop;
     mod start_preemption;
-    mod gate_recovery_tests;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
