@@ -15,6 +15,7 @@ const styles = stylex.create({
   // only a span longer than the line wraps, within the line, instead of overflowing it.
   // The ink is the host's own C18 ink; the fill mixes the C18 muted ink, so both schemes follow without a new grey.
   // 10% keeps fgMuted spans in semantic rows at AA on the canvas (4.65:1 dark, 4.86:1 light); 14% drops dark below 4.5.
+  // The size follows the host at 0.9em but never drops below the dense size (11px), so meta rows stay legible.
   code: {
     display: 'inline-block',
     maxWidth: '100%',
@@ -25,7 +26,7 @@ const styles = stylex.create({
     backgroundColor: `color-mix(in srgb, ${ink.fgMuted} 10%, transparent)`,
     color: 'inherit',
     fontFamily: t.fontMono,
-    fontSize: t.inlineCodeSize,
+    fontSize: `max(${t.denseSize}, ${t.inlineCodeSize})`,
     lineHeight: 'normal',
     whiteSpace: 'pre-wrap',
     overflowWrap: 'anywhere',

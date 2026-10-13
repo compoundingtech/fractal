@@ -68,14 +68,14 @@ type Story = StoryObj<typeof meta>
 
 type Ink = 'fg' | 'fgSoft' | 'fgMuted'
 const inkVar: Record<Ink, string> = { fg: ink.fg, fgSoft: ink.fgSoft, fgMuted: ink.fgMuted }
-type Resolved = Pick<CSSStyleDeclaration, 'fontFamily' | 'paddingLeft' | 'paddingRight' | 'borderTopLeftRadius' | 'backgroundColor' | 'color'>
+type Resolved = Pick<CSSStyleDeclaration, 'fontFamily' | 'fontSize' | 'paddingLeft' | 'paddingRight' | 'borderTopLeftRadius' | 'backgroundColor' | 'color'>
 /** Resolves token-built declarations in the code's own cascade, so the comparison sees the active scheme. */
 function resolved(host: HTMLElement, declarations: Partial<CSSStyleDeclaration>): Resolved {
   const probe = host.ownerDocument.createElement('span')
   Object.assign(probe.style, declarations)
   host.append(probe)
   const css = getComputedStyle(probe)
-  const snapshot: Resolved = { fontFamily: css.fontFamily, paddingLeft: css.paddingLeft, paddingRight: css.paddingRight, borderTopLeftRadius: css.borderTopLeftRadius, backgroundColor: css.backgroundColor, color: css.color }
+  const snapshot: Resolved = { fontFamily: css.fontFamily, fontSize: css.fontSize, paddingLeft: css.paddingLeft, paddingRight: css.paddingRight, borderTopLeftRadius: css.borderTopLeftRadius, backgroundColor: css.backgroundColor, color: css.color }
   probe.remove()
   return snapshot
 }
@@ -83,11 +83,12 @@ function resolved(host: HTMLElement, declarations: Partial<CSSStyleDeclaration>)
 function inlineCodeMismatches(code: HTMLElement, expectedInk: Ink): readonly string[] {
   const host = code.parentElement!
   const css = getComputedStyle(code)
-  const token = resolved(host, { fontFamily: t.fontMono, paddingInline: s.xs, borderRadius: r.inlineCode, backgroundColor: `color-mix(in srgb, ${ink.fgMuted} 10%, transparent)`, color: inkVar[expectedInk] })
+  const token = resolved(host, { fontFamily: t.fontMono, fontSize: t.denseSize, paddingInline: s.xs, borderRadius: r.inlineCode, backgroundColor: `color-mix(in srgb, ${ink.fgMuted} 10%, transparent)`, color: inkVar[expectedInk] })
   const mismatches: string[] = []
   if (code.tagName !== 'CODE' || !code.hasAttribute('data-inline-code')) mismatches.push('not an InlineCode element')
   if (css.fontFamily !== token.fontFamily) mismatches.push(`font ${css.fontFamily}`)
-  if (Math.abs(parseFloat(css.fontSize) - 0.9 * parseFloat(getComputedStyle(host).fontSize)) > 0.05) mismatches.push(`size ${css.fontSize}`)
+  // 0.9 of the host, floored at the dense size token.
+  if (Math.abs(parseFloat(css.fontSize) - Math.max(parseFloat(token.fontSize), 0.9 * parseFloat(getComputedStyle(host).fontSize))) > 0.05) mismatches.push(`size ${css.fontSize}`)
   if (css.paddingLeft !== token.paddingLeft || css.paddingRight !== token.paddingRight) mismatches.push(`padding ${css.paddingLeft} ${css.paddingRight}`)
   if (css.borderTopLeftRadius !== token.borderTopLeftRadius) mismatches.push(`radius ${css.borderTopLeftRadius}`)
   if (css.backgroundColor !== token.backgroundColor) mismatches.push(`fill ${css.backgroundColor}`)
@@ -143,6 +144,17 @@ async function verify(canvasElement: HTMLElement, revision: number, fresh: boole
   await expectInlineCode(transcript, 'pnpm build-storybook', '[data-item-id="inline/system"]', 'fgMuted')
   await expectInlineCode(transcript, 'git status', '[data-item-id="inline/event"]', 'fgMuted')
   await expectSingleLine(codeFor(transcript, 'pnpm build-storybook'))
+  // Meta rows (12px) would give 10.8px at 0.9em; the floor keeps their code at 11px or more.
+  const metaCode = codeFor(transcript, 'pnpm build-storybook')
+  await expect(parseFloat(getComputedStyle(metaCode.parentElement!).fontSize)).toBeLessThan(12.5)
+  await expect(parseFloat(getComputedStyle(metaCode).fontSize)).toBeGreaterThanOrEqual(11)
+  // Negative control: the same span without the floor computes below 11px, so the check above would fail.
+  const unfloored = metaCode.cloneNode(true) as HTMLElement
+  unfloored.style.fontSize = t.inlineCodeSize
+  metaCode.after(unfloored)
+  const unflooredSize = parseFloat(getComputedStyle(unfloored).fontSize)
+  unfloored.remove()
+  await expect(unflooredSize).toBeLessThan(11)
   const long = codeFor(transcript, longSpan)
   const prose = long.closest<HTMLElement>('[data-testid="markdown"]')!
   await expect(long.getBoundingClientRect().right).toBeLessThanOrEqual(prose.getBoundingClientRect().right + 0.5)
