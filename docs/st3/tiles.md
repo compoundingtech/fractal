@@ -116,8 +116,10 @@ The supervisor's st daemon serves `st.sock` there, the tile's restricted st endp
 `/run/st/st.sock` inside the tile. The daemon follows root's registry and serves every tile
 whose `supervisor_uid` is its own Unix user, from the moment root makes the tile's endpoint
 directory (`st tiles run` or `st tiles prepare`); a registry change starts or stops endpoints
-without a restart. A connection is the tile's only when the kernel names it: anyone else's is
-closed before a byte is read. Requests then act as the tile's agent alone:
+without a restart. When the registry withdraws a tile, removes its `supervisor_uid` or changes
+its entry, the endpoint stops and every open connection to it closes, so no connection keeps
+acting for an identity root has withdrawn. A connection is the tile's only when the kernel names
+it: anyone else's is closed before a byte is read. Requests then act as the tile's agent alone:
 
 | Route | What a tile may do |
 |---|---|
@@ -126,6 +128,8 @@ closed before a byte is read. Requests then act as the tile's agent alone:
 | `GET /v1/messages` | Its own mailbox. Asking for another's is refused. |
 | `GET /v1/messages/read/ID` | A message it sent or received. Any other is not found. |
 
+A message a tile sends may reach any agent and may carry `in_reply_to`, tags and a hash-pinned
+document reference in its content, as a seat's message can today; only its sender is fixed.
 Every other route the daemon serves, including its administrative API, is refused with 403.
 `ST_AGENT`, `--as` and `--from` therefore cannot widen what a tile does; harness integration
 (step 2) widens this list route by route.
@@ -167,8 +171,9 @@ that will run tiles; that gate is part of step 2.
   refused sending as its sibling, reading its sibling's mailbox and the administrative API; the
   graph holds its message from its own agent and never the forged one. The sibling's endpoint
   answers for the sibling alone. Unit tests in `api/tile_endpoint.rs` cover each route, a
-  connection from this user outside the tile's slice or from another tile's slice, and the
-  daemon following the registry and the endpoint directory as they appear.
+  connection from this user outside the tile's slice or from another tile's slice, the daemon
+  following the registry and the endpoint directory as they appear, and a kept-open connection
+  closing when the registry withdraws the tile.
 
 ## Not built yet
 

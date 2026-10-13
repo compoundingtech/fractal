@@ -175,27 +175,47 @@ fn identify(
     })
 }
 
-/// Serve tile `name` on `listener` until the listener fails. A connection from anyone but the
-/// tile is closed before a byte is read.
+/// Serve tile `name` on `listener` for as long as this future lives. A connection from anyone
+/// but the tile is closed before a byte is read. Every connection belongs to this future: when
+/// it is dropped, as when root's registry no longer names the tile, open connections close too,
+/// so none keeps acting for an identity the registry has withdrawn.
 pub(crate) async fn serve_listener(
     state: AppState,
     registry: Arc<Registry>,
     name: String,
     listener: tokio::net::UnixListener,
     kernel: Arc<dyn Kernel>,
-) -> std::io::Result<()> {
+) {
     use hyper::body::Incoming;
     use hyper_util::rt::TokioIo;
     use tower::ServiceExt as _;
     let app = router(state);
+    let mut connections = tokio::task::JoinSet::new();
+    let mut backoff = ACCEPT_BACKOFF_START;
     loop {
-        let (stream, _) = listener.accept().await?;
+        while connections.try_join_next().is_some() {}
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => {
+                backoff = ACCEPT_BACKOFF_START;
+                stream
+            }
+            // Running out of descriptors, or a peer that hung up before it was accepted, fails
+            // one accept. Keep the listener and back off, as the daemon's own API does.
+            Err(error) => {
+                if backoff == ACCEPT_BACKOFF_START {
+                    eprintln!("st3: tile {name}'s endpoint: accept a connection: {error}");
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
+                continue;
+            }
+        };
         let Some(caller) = identify(&stream, &registry, &name, kernel.as_ref()) else {
             drop(stream);
             continue;
         };
         let app = app.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let service =
                 hyper::service::service_fn(move |request: axum::http::Request<Incoming>| {
                     let mut request = request.map(Body::new);
@@ -209,6 +229,9 @@ pub(crate) async fn serve_listener(
     }
 }
 
+const ACCEPT_BACKOFF_START: std::time::Duration = std::time::Duration::from_millis(50);
+const ACCEPT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Serve the endpoint of every tile this daemon's Unix user supervises, following root's
 /// registry as it changes and each tile's endpoint directory as root makes it.
 pub fn spawn(state: AppState) {
@@ -221,7 +244,8 @@ pub fn spawn_from(state: AppState, path: PathBuf) {
         let path = path.clone();
         move || Registry::load(&path)
     };
-    spawn_with(state, path, load, Arc::new(Proc));
+    // SAFETY: getuid has no preconditions.
+    spawn_with(state, path, load, Arc::new(Proc), unsafe { libc::getuid() });
 }
 
 /// Follow the registry at `registry_path`, read with `load`: root's file, checked, for the daemon.
@@ -230,9 +254,8 @@ fn spawn_with(
     registry_path: PathBuf,
     load: impl Fn() -> anyhow::Result<Registry> + Send + 'static,
     kernel: Arc<dyn Kernel>,
+    supervisor: u32,
 ) {
-    // SAFETY: getuid has no preconditions.
-    let uid = unsafe { libc::getuid() };
     tokio::spawn(async move {
         let mut serving: BTreeMap<String, (Tile, tokio::task::JoinHandle<()>)> = BTreeMap::new();
         let mut reported = None;
@@ -260,7 +283,7 @@ fn spawn_with(
                     registry
                         .tiles
                         .iter()
-                        .filter(|(_, tile)| tile.supervisor_uid == Some(uid))
+                        .filter(|(_, tile)| tile.supervisor_uid == Some(supervisor))
                         .map(|(name, tile)| (name.clone(), tile.clone()))
                         .collect::<BTreeMap<_, _>>()
                 })
@@ -281,7 +304,6 @@ fn spawn_with(
                         state.clone(),
                         Arc::clone(registry),
                         name.clone(),
-                        uid,
                         Arc::clone(&kernel),
                     ));
                     serving.insert(name, (tile, task));
@@ -297,15 +319,16 @@ async fn serve_tile(
     state: AppState,
     registry: Arc<Registry>,
     name: String,
-    uid: u32,
     kernel: Arc<dyn Kernel>,
 ) {
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() };
     let directory = registry.endpoint_dir(&name);
     loop {
         Change::exists(&directory).await;
         match bind(&directory, uid) {
             Ok(listener) => {
-                if let Err(error) = serve_listener(
+                serve_listener(
                     state.clone(),
                     Arc::clone(&registry),
                     name.clone(),
@@ -313,9 +336,6 @@ async fn serve_tile(
                     Arc::clone(&kernel),
                 )
                 .await
-                {
-                    eprintln!("st3: tile {name}'s endpoint stopped: {error}");
-                }
             }
             Err(error) => {
                 eprintln!("st3: tile {name}'s endpoint: {error:#}");
@@ -600,15 +620,50 @@ mod tests {
         }
     }
 
+    /// Write one keep-alive request on `stream` and read its response; `None` once the endpoint
+    /// has closed the connection.
+    fn keep_alive_get(stream: &mut std::os::unix::net::UnixStream, path: &str) -> Option<String> {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: tile\r\n\r\n").ok()?;
+        let mut response = Vec::new();
+        let mut byte = [0u8; 1];
+        while !response.ends_with(b"\r\n\r\n") {
+            match stream.read(&mut byte) {
+                Ok(1) => response.push(byte[0]),
+                _ => return None,
+            }
+        }
+        let head = String::from_utf8_lossy(&response).into_owned();
+        let length = head
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::to_owned)
+            })
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = vec![0u8; length];
+        stream.read_exact(&mut body).ok()?;
+        Some(format!("{head}{}", String::from_utf8_lossy(&body)))
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_daemon_follows_the_registry_and_serves_once_root_makes_the_directory() {
+    async fn the_daemon_follows_the_registry_and_withdraws_open_connections() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::state(root.path());
         // SAFETY: getuid has no preconditions.
         let uid = unsafe { libc::getuid() };
+        // This test process is the tile; the daemon serves as if it were another user, its
+        // supervisor, so the registry can name both without a tile supervising itself.
+        let supervisor = uid + 1;
         let runtime = root.path().join("run");
         let registry_path = root.path().join("etc").join("tiles.toml");
-        let kernel = Arc::new(FakeKernel(Mutex::new(String::new())));
+        let kernel = Arc::new(FakeKernel(Mutex::new(
+            crate::tiles::registry::tools_cgroup("atlas"),
+        )));
         let load = {
             let path = registry_path.clone();
             // The daemon requires root's file; here the same text is parsed without that check.
@@ -619,15 +674,15 @@ mod tests {
             registry_path.clone(),
             load,
             Arc::new(Arc::clone(&kernel)),
+            supervisor,
         );
         let socket = runtime.join("atlas").join("endpoint").join(SOCKET);
         // Served means something listens; who may talk to it is the other tests' concern.
-        let served =
-            |socket: PathBuf| async move { std::os::unix::net::UnixStream::connect(&socket).ok() };
+        let served = |socket: PathBuf| std::os::unix::net::UnixStream::connect(socket).ok();
         let until = |socket: PathBuf, want: bool| async move {
             // The daemon reacts to file system events; give it a bounded moment to do so.
             for _ in 0..200 {
-                if served(socket.clone()).await.is_some() == want {
+                if served(socket.clone()).is_some() == want {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
@@ -638,25 +693,36 @@ mod tests {
             );
         };
 
-        // The registry appears after the daemon starts, naming this user as the supervisor of
-        // another user's tile; then root makes the tile's endpoint directory.
+        // The registry appears after the daemon starts; then root makes the endpoint directory.
         std::fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
         let text = format!(
-            "runtime_root = {runtime:?}\n[tiles.atlas]\nuid = {tile}\ngid = {tile}\n\
+            "runtime_root = {runtime:?}\n[tiles.atlas]\nuid = {uid}\ngid = {uid}\n\
              agent = \"agent/fleet/fixture-example/atlas\"\nperson = \"person/ada\"\n\
-             supervisor_uid = {uid}\n",
-            tile = uid + 1,
+             supervisor_uid = {supervisor}\n"
         );
         std::fs::write(&registry_path, &text).unwrap();
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         until(socket.clone(), true).await;
 
-        // When the registry no longer names this user as the supervisor, the endpoint stops.
+        // A connection kept open across requests acts as the tile...
+        let mut open = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        let response =
+            tokio::task::block_in_place(|| keep_alive_get(&mut open, "/v1/tile/whoami")).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            response.contains("agent/fleet/fixture-example/atlas"),
+            "{response}"
+        );
+
+        // ...until the registry withdraws the tile: the endpoint stops, and the open connection
+        // is closed rather than left acting for the withdrawn identity.
         std::fs::write(
             &registry_path,
-            text.replace(&format!("supervisor_uid = {uid}\n"), ""),
+            text.replace(&format!("supervisor_uid = {supervisor}\n"), ""),
         )
         .unwrap();
         until(socket.clone(), false).await;
+        let after = tokio::task::block_in_place(|| keep_alive_get(&mut open, "/v1/tile/whoami"));
+        assert_eq!(after, None, "the open connection still answers");
     }
 }

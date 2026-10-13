@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Removing a tile or its supervisor_uid from the registry stops its endpoint."
+    "detail": "Removing a tile or its supervisor_uid from the registry stops its endpoint and closes its open connections."
   }
 }
