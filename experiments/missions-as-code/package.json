@@ -1,0 +1,11 @@
+{
+  "name": "missions-as-code-experiments",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "effect": "4.0.4",
+    "esbuild": "0.25.10",
+    "typescript": "6.0.3"
+  }
+}
