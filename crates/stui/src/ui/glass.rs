@@ -6796,6 +6796,17 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_turn_is_described_by_kinds_and_counts_never_names() {
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
+        screen(&ui);
+        let context = ui.slow_context();
+        assert!(context.starts_with("pane agent, 120x32"), "{context}");
+        assert!(context.contains("agents ") && context.contains("missions "), "{context}");
+        assert!(!context.contains("atlas") && !context.contains('/'), "{context}");
+    }
+
+    #[test]
     fn ctrl_h_opens_home_and_closes_it_again() {
         let mut ui = glass();
         ctrl(&mut ui, 'h');

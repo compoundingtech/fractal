@@ -72,6 +72,76 @@ impl Drop for Run {
     }
 }
 
+/// When this stui's own executable was last written, as it was at start.
+static EXE_AT_START: std::sync::OnceLock<Option<std::time::SystemTime>> = std::sync::OnceLock::new();
+
+fn executable_written() -> Option<std::time::SystemTime> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|meta| meta.modified().ok())
+}
+
+/// Whether the executable this stui runs from was replaced on disk since it started, once: a
+/// deploy that writes over a running program can make the system stop it (macOS does for a
+/// binary whose signature no longer matches), which looks like a crash with no panic. The fact
+/// is written to `exits.log` before anything can stop it, so the cause is on record.
+pub fn binary_replaced() -> bool {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(Some(at_start)) = EXE_AT_START.get() else {
+        return false;
+    };
+    if executable_written().is_none_or(|now| now == *at_start)
+        || SAID.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        return false;
+    }
+    if let Some(file) = directory().and_then(|runs| runs.parent().map(|dir| dir.join("exits.log"))) {
+        write_line(
+            &file,
+            &format!(
+                "{} pid {}: the program was replaced on disk while this stui ran (a deploy); the system may stop it",
+                now_unix(),
+                std::process::id()
+            ),
+        );
+    }
+    true
+}
+
+/// Say that a turn of the main loop was slow, and what was on screen, in `slow.log` beside the
+/// panic log (Nathan, 2026-10-13: "understand why the tui crashes or is slow, if it ever is").
+/// One line a ten seconds at most, bounded to 100 KB; the context holds kinds and counts, never
+/// names, ids, paths or text.
+pub fn note_slow(what: &str, context: &str, build: &str) {
+    use std::sync::Mutex;
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let Ok(mut last) = LAST.lock() else {
+        return;
+    };
+    if last.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(10)) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    if let Some(file) = directory()
+        .and_then(|runs| runs.parent().map(|dir| dir.join("slow.log")))
+    {
+        write_line(&file, &format!("{} {build} pid {} {what}; {context}", now_unix(), std::process::id()));
+    }
+}
+
+/// Append one line to a log in the cache that is cleared once it passes 100 KB.
+fn write_line(file: &Path, line: &str) {
+    use std::io::Write as _;
+    let _ = std::fs::create_dir_all(file.parent().unwrap_or(Path::new(".")));
+    if std::fs::metadata(file).is_ok_and(|meta| meta.len() > 100_000) {
+        let _ = std::fs::remove_file(file);
+    }
+    if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+        let _ = writeln!(out, "{}", line.replace('\n', " "));
+    }
+}
+
 /// Append one line to `exits.log`, which is cleared once it passes 100 KB: when this stui ended,
 /// how long it had run, and why.
 fn write_exit(file: &Path, ran_seconds: u64, reason: &str) {
@@ -178,6 +248,7 @@ fn alive(pid: u32) -> bool {
 /// cleanly: its file is there and its process is gone. The newest such trace is returned
 /// (and every one is cleared), as "started 3h ago".
 pub fn begin(build: &str) -> (Run, Option<String>) {
+    let _ = EXE_AT_START.set(executable_written());
     let Some(directory) = directory() else {
         return (
             Run {
@@ -365,6 +436,18 @@ mod tests {
         write_exit(&file, 1, "quit (Ctrl+Q)");
         let cut = std::fs::read_to_string(&file).unwrap();
         assert!(cut.len() < 200 && cut.contains("quit (Ctrl+Q)"), "{cut}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_log_line_is_one_line_and_the_log_stays_small() {
+        let root = std::env::temp_dir().join(format!("stui-slow-{}", std::process::id()));
+        let file = root.join("stui").join("slow.log");
+        write_line(&file, "draw 300 ms, turn 400 ms; pane agent\nsecond");
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1);
+        std::fs::write(&file, "x".repeat(100_001)).unwrap();
+        write_line(&file, "after the cut");
+        assert!(std::fs::read_to_string(&file).unwrap().len() < 100);
         let _ = std::fs::remove_dir_all(root);
     }
 }
