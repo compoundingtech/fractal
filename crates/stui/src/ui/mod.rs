@@ -451,6 +451,9 @@ pub struct Ui {
     drafts_backoff: Option<Instant>,
     /// The conversations whose alert band the person expanded; every other one is a single line.
     alerts_open: HashSet<String>,
+    /// The options chosen so far on each harness question alert, by question, before sending: by
+    /// the alert and its exact question call (`alerts::question_key`).
+    question_choices: HashMap<String, std::collections::BTreeMap<usize, BTreeSet<usize>>>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
     /// sidebar layout.
     pub(crate) glasses: Option<glass::Glasses>,
@@ -753,6 +756,7 @@ impl Ui {
             drafts_wrote: Instant::now(),
             drafts_backoff: None,
             alerts_open: HashSet::new(),
+            question_choices: HashMap::new(),
             glasses: None,
             session_focus: None,
             build: false,
@@ -6143,6 +6147,9 @@ impl Ui {
             Hit::Answer(index) => self.answering = Some(index),
             Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
             Hit::Alert(id, AlertTap::Answer(answer)) => self.answer_alert(&id, &answer),
+            Hit::Alert(id, AlertTap::Choose(question, option)) => {
+                self.choose_answer(&id, question, option)
+            }
             Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
             Hit::Voice => {
                 self.editing = true;
