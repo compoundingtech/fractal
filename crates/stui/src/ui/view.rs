@@ -84,6 +84,10 @@ pub struct World {
     pub agent_messages: Option<st3_client::AgentMessageEstimate>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
+    #[serde(skip)]
+    pub inventory_supported: Option<bool>,
+    #[serde(skip)]
+    pub inventory_partial: Vec<String>,
 }
 
 /// A client connected to this member, as it describes itself.

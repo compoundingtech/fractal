@@ -1,3 +1,5 @@
+import { withQueueWatch } from './queue-watch.ts'
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave, optionalQueueCacheSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { readFileSync } from 'node:fs'
@@ -102,10 +104,10 @@ const linuxStageJob = ({
 })
 
 // Required gate. Label events belong to macos.yml so they never restart or cancel this workflow.
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
   name: 'Workspace CI',
   on: {
-    pull_request: {},
+    pull_request: { types: readyPullRequestTypes },
     // GitHub's merge queue runs the required checks on each queued entry; without this trigger the
     // queue never receives them and merges freeze.
     merge_group: {},
@@ -126,6 +128,34 @@ export default githubWorkflow(auditCaches({
   },
   jobs: {
     [pickRunnerJobId]: pickRunnerJob,
+    // Non-required provenance only: it runs alongside the gate and has no signer or key.
+    // Retain the complete effective merge tree even after its ephemeral ref disappears.
+    'evidence-source': {
+      name: 'evidence-source',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      'continue-on-error': true,
+      permissions: { contents: 'read' },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        {
+          name: 'Retain effective tested source',
+          // Execute the workflow's embedded producer outside the checkout. It observes Git
+          // objects only; it never executes source or carries a production signing key.
+          run: `cat > "$RUNNER_TEMP/ci-evidence-source-producer.py" <<'EVIDENCE_SOURCE_PY'\n${readFileSync(new URL('../../scripts/ci-evidence-source', import.meta.url), 'utf8').trimEnd()}\nEVIDENCE_SOURCE_PY\npython3 "$RUNNER_TEMP/ci-evidence-source-producer.py"`,
+        },
+        {
+          name: 'Upload effective tested source',
+          uses: 'actions/upload-artifact@v4',
+          with: {
+            name: 'ci-evidence-source-${{ github.run_attempt }}',
+            path: '${{ runner.temp }}/ci-evidence-source/',
+            'if-no-files-found': 'error',
+            'retention-days': 14,
+          },
+        },
+      ],
+    },
     // Start immediately on hosted capacity: no Nix setup, downloads or compilation.
     'upgrade-impact': {
       name: 'upgrade-impact',
@@ -157,7 +187,7 @@ fi`,
     'namespace-capacity': {
       name: 'namespace-capacity',
       if: "github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group'",
-      'runs-on': `\${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('${JSON.stringify(linuxRunner).replaceAll('${{ github.run_id }}', '{0}').replaceAll("${{ github.event_name == 'merge_group' && 1 || 2 }}", '{1}')}', github.run_id, github.event_name == 'merge_group' && 1 || 2)) }}`,
+      'runs-on': `\${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('${JSON.stringify(linuxRunner).replaceAll('${{ github.run_id }}', '{0}').replaceAll("${{ github.event_name == 'merge_group' && 1 || 3 }}", '{1}')}', github.run_id, github.event_name == 'merge_group' && 1 || 3)) }}`,
       'timeout-minutes': 120,
       permissions: { contents: 'read', actions: 'write' },
       defaults: { run: { shell: 'bash' } },
@@ -206,7 +236,7 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       steps: [
         ...commonSetupSteps.filter((step) => !('id' in step && step.id === 'cargo-cache') && step !== buildSnapshotPrepare && step !== buildSnapshotRestore),
         { name: 'Check frozen workspace dependency license coverage', run: 'python3 scripts/ci-fractal-web-licenses-test && python3 scripts/ci-fractal-web-licenses --check-lockfile' },
-        nixDevelopStep({ name: 'Check runner selection and generated files', flake: '.#genie', command: ['bash', '-c', 'python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'] }),
+        nixDevelopStep({ name: 'Check runner selection and generated files', flake: '.#genie', command: ['bash', '-c', 'python3 scripts/ci-ready-pr-test && python3 scripts/ci-draft-admission-test && python3 scripts/ci-workflow-concurrency-test && python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'] }),
         { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
       ],
     },
@@ -428,4 +458,4 @@ printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...fractalWebJobs,
   },
-}, {"pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing."}))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing."}))))

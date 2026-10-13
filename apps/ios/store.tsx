@@ -16,6 +16,8 @@ import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from 
 import { sendFences } from './sendFence';
 import { Feed } from './feed';
 import { ownerTerminalRouting } from './ownerTerminalBridge';
+import { quality, localDrafts } from './qualityNative';
+import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, type Context } from './observations';
 import { buildFabricDefault, decodeFabricTarget, encodeFabricTarget, fabricGatewayId, fabricTargetFromText, isFabricGatewayId, type FabricTarget } from './fabricTarget';
@@ -136,6 +138,21 @@ function useAppStore(proof?: FabricProfile) {
   const sidebarSeen = useRef(new Map<string, SidebarResource>());
   const cachedActor = useRef(''), cacheSavedAt = useRef(0), cacheGeneration = useRef(0);
   const conversationCache = useRef(new Map<string, Conversation<TimelineEntry>>()), draftCache = useRef(new Map<string, string>());
+  const [draftsReady, setDraftsReady] = useState(0);
+  const draftsOwner = useRef('');
+  useEffect(() => {
+    const owner = caps?.session_actor;
+    if (proof || !owner || draftsOwner.current === owner) return;
+    draftsOwner.current = owner;
+    let current = true;
+    void quality.ready.then(() => localDrafts.restore(owner, draftCache.current, () => current && draftsOwner.current === owner)).then(restored => {
+      if (!current) return;
+      if (quality.wasUnclean) quality.counters.add('drafts_restored_unclean', restored);
+      setDraftsReady(n => n + 1);
+    });
+    return () => { current = false; };
+  }, [proof, caps?.session_actor]);
+  useEffect(() => foreground.current.subscribe(active => { if (!active && !proofRef.current) void localDrafts.save(draftsOwner.current, draftCache.current); }), []);
   // Images messages carry, as data URIs, so a conversation scrolled back to does not read them again.
   const imageCache = useRef(new Map<string, Promise<string>>());
   // Attention the person acted on from here: st closing it is their doing, not a vanishing.
@@ -273,20 +290,23 @@ function useAppStore(proof?: FabricProfile) {
     sidebarSeen.current.clear(); sidebarCreation.current = null;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
+    draftsOwner.current = '';
+    if (!proofRef.current) void localDrafts.clear();
     setGlasses([]); setGlassesIssue(''); setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]); setSidebarResources([]); setSidebarResourcesIssue(''); sidebarResourcesRead.current = null;
     setData(emptyData); setTruncated({}); setHasSynced(false); setCachedHostId(''); setSnapshot(null);
   }
   async function clearCachedProjection() { cacheGeneration.current++; clearCaches(); if (!proof) await AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
 
   // Capabilities once per connection: limits, the session's actor, and what it may control.
-  const loadCapabilities = useCallback(async () => {
+  const loadCapabilities = useCallback(async (current: () => boolean) => {
     if (!client) return;
     try {
       const capability = await client.capabilities();
+      if (!current()) return;
       if (cachedActor.current && cachedActor.current !== capability.value.session_actor) { clearCaches(); if (!proofRef.current) void AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
       cachedActor.current = capability.value.session_actor;
       setCaps(capability.value);
-    } catch (e) { if (e instanceof ClientError && e.status >= 400 && e.status < 500) setError(errorText(e)); }
+    } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
 
   const ownerFailures = useRef({ credential, memory: new TerminalRouteMemory() });
@@ -299,13 +319,19 @@ function useAppStore(proof?: FabricProfile) {
   useEffect(() => {
     if (!client || !credential) { if (!credential) setStatus('setup'); return; }
     const generation = cacheGeneration.current;
-    const current = () => generation === cacheGeneration.current;
+    let active = true;
+    let connection = 0;
+    const current = () => active && generation === cacheGeneration.current;
     attentionLive.current = false;
     if (!proofRef.current && timers.current.connect === null) timers.current.connect = observations.begin('ios-connect');
     const opened = new Feed(client, {
-      onWindow: (name, rows, hasMore, at) => {
+      onWindow: (name, rows, hasMore, at, received) => {
         if (!current()) return;
         if (at?.id) lastSnapshot.current = at.id;
+        if (!proofRef.current) {
+          if (name === 'attention') { quality.received(1, received); quality.attentionWindow(rows as Attention[], hasMore); }
+          if (name === 'agents') quality.received(2, received);
+        }
         // Home decides what of attention to show, as stui does; agents drop only history.
         const shown = name === 'agents' ? (rows as Array<{ operational?: { layer?: string } }>).filter(currentAgent) : rows;
         // Nothing leaves Home by itself: what st closes while it is shown stays until cleared.
@@ -321,6 +347,7 @@ function useAppStore(proof?: FabricProfile) {
       onConnection: (state, issue) => {
         if (!current()) return;
         proofRef.current?.record('feed', { state });
+        if (!proofRef.current) { quality.live(state === 'live'); if (state !== 'live') quality.resetWindows(); }
         setStatus(state === 'live' ? 'online' : state === 'connecting' ? 'connecting' : 'offline');
         setConnectionIssue(issue ?? '');
         if (!proofRef.current) {
@@ -337,7 +364,12 @@ function useAppStore(proof?: FabricProfile) {
             if (state === 'reconnecting' && held.everLive && held.recover === null) held.recover = observations.begin('ios-recover');
           }
         }
-        if (state === 'live') { setError(''); void loadCapabilities(); carrier.feedLive(); feedMisses.current = 0; }
+        if (state !== 'live') { connection++; setCaps(null); }
+        if (state === 'live') {
+          const epoch = connection;
+          setError(''); void loadCapabilities(() => current() && epoch === connection);
+          carrier.feedLive(); feedMisses.current = 0;
+        }
         // The bridge's own connection failing twice running (one dropped socket the feed mends itself):
         // a refusal ends the trial, anything else is redialed.
         else if (state === 'reconnecting' && routeRef.current.kind === 'fabric' && ++feedMisses.current >= 2) void carrier.feedFailed();
@@ -347,7 +379,7 @@ function useAppStore(proof?: FabricProfile) {
       // The next focused mission screen follows again and replaces them with a snapshot.
       onConversationFrame: (rows, replace) => { if (current()) proofRef.current?.record('conversation', { rows, replace }); },
       onTiming: (target, ms) => { if (current() && !proofRef.current) observations.observe(target, ms); },
-    }, foreground.current, actionId, undefined, undefined, false, undefined, ownerTerminalRouting({
+    }, foreground.current, actionId, undefined, undefined, false, undefined, nativeCollectionSocket, ownerTerminalRouting({
       gatewayUrl: connectUrl, credential,
       clientName: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD),
       built: () => terminalOptions.current.built,
@@ -358,7 +390,7 @@ function useAppStore(proof?: FabricProfile) {
     // Paired: connecting from here on, even while the app waits to be active before it dials.
     setStatus(previous => previous === 'setup' ? 'connecting' : previous);
     setFeed(opened);
-    return () => { opened.close(); setFeed(held => held === opened ? null : held); };
+    return () => { active = false; opened.close(); setFeed(held => held === opened ? null : held); };
   }, [client, credential, loadCapabilities, observations, carrier]);
   // No client yet: either nothing is paired, fabric is opening, or neither route can be used.
   useEffect(() => {
@@ -375,6 +407,9 @@ function useAppStore(proof?: FabricProfile) {
     return () => subscription.remove();
   }, []);
 
+  const inventoryGranted = caps === null ? undefined : caps.capabilities.some(capability => capability.id === 'inventory-collections' && capability.version >= 1 && capability.state === 'granted');
+  useEffect(() => { feed?.setInventoryGranted(inventoryGranted === true); }, [feed, inventoryGranted]);
+
   // Spaces: followed on the feed's socket when the gateway grants them.
   useEffect(() => { void AsyncStorage.getItem(SIMPLE_KEY).then(value => setSimpleOn(value !== '0')).catch(() => {}); }, []);
   const arrangementPerson = caps?.session_actor.match(/^person\/[^/]+/)?.[0];
@@ -386,6 +421,7 @@ function useAppStore(proof?: FabricProfile) {
   }, [feed, arrangementPerson, arrangementsGranted]);
   const loadSidebarTerminals = useCallback(async () => {
     if (!client) return;
+    if (inventoryGranted !== false) return;
     const generation = cacheGeneration.current;
     try {
       const result = await listCollectionPages(options => client.terminalsList({ ...options, history: false }), 200);
@@ -393,7 +429,14 @@ function useAppStore(proof?: FabricProfile) {
       setSidebarTerminals(result.pages.flatMap(page => page.value.items.filter((item): item is Runtime => item.kind === 'runtime' && !!item.terminal_id)));
       setSidebarTerminalsIssue(result.truncated ? 'More terminals exist beyond this window.' : '');
     } catch (error) { if (generation === cacheGeneration.current) setSidebarTerminalsIssue(errorText(error)); }
-  }, [client]);
+  }, [client, inventoryGranted]);
+  const watchSidebarTerminals = useCallback(() => {
+    if (!feed || inventoryGranted !== true) return () => {};
+    return feed.watchInventory('terminals', {
+      onRows: (rows, hasMore) => { setSidebarTerminals(rows.filter(row => !!row.terminal_id)); setSidebarTerminalsIssue(hasMore ? 'More terminals exist beyond this window.' : ''); },
+      onIssue: setSidebarTerminalsIssue,
+    });
+  }, [feed, inventoryGranted]);
   const loadSidebarResources = useCallback((focused?: string): Promise<void> => {
     if (!client || status !== 'online') return Promise.resolve();
     const generation = cacheGeneration.current;
@@ -428,10 +471,12 @@ function useAppStore(proof?: FabricProfile) {
     return () => clearTimeout(timer);
   }, [caps, data, glasses, arrangements, hasSynced, snapshot, truncated, url]);
 
-  // Launches, machines, devices, and sessions have no window: a screen loads them when it opens,
-  // and again after an action there. A list that fails is named; the others still show.
+  // Launches and older daemons retain their HTTP reads. Granted inventory windows carry
+  // action updates themselves, so an action does not reread them.
   const loadLists = useCallback(async (keys: readonly OnDemand[]) => {
     if (!client || !keys.length) return;
+    keys = keys.filter(key => key === 'launches' || inventoryGranted === false);
+    if (!keys.length) return;
     const generation = cacheGeneration.current;
     const limit = Math.min(capsRef.current?.limits.max_page_items ?? 30, 30);
     const read = (key: OnDemand): Promise<{ rows: Data[OnDemand]; truncated: boolean }> => {
@@ -450,7 +495,20 @@ function useAppStore(proof?: FabricProfile) {
         setLoadErrors(previous => { if (!(key in previous)) return previous; const rest = { ...previous }; delete rest[key]; return rest; });
       } else if (!isSnapshotChurn(result.reason)) setLoadErrors(previous => ({ ...previous, [key]: errorText(result.reason) }));
     });
-  }, [client]);
+  }, [client, inventoryGranted]);
+
+  const watchLists = useCallback((keys: readonly OnDemand[]) => {
+    if (inventoryGranted !== true || !feed) return () => {};
+    const stops = keys.filter(key => key !== 'launches').map(key => feed.watchInventory(key as 'machines' | 'devices' | 'sessions', {
+      onRows: (rows, hasMore, at) => {
+        setData(previous => ({ ...previous, [key]: rows }));
+        setTruncated(previous => ({ ...previous, [key]: hasMore }));
+        setSnapshot(at);
+      },
+      onIssue: issue => setLoadErrors(previous => { const next = { ...previous }; if (issue) next[key] = issue; else delete next[key]; return next; }),
+    }));
+    return () => { for (const stop of stops) stop(); };
+  }, [feed, inventoryGranted]);
 
   /** A fence on a snapshot read just now: one read seconds ago has nearly always moved on a busy host. */
   async function fence(revisions: Record<string, string> = {}) {
@@ -599,6 +657,8 @@ function useAppStore(proof?: FabricProfile) {
       if (typeof typed === 'string') { setError(typed); return false; }
       if (status !== 'online' || (proof && !proof.ready)) { setError('Still connecting; try again in a moment.'); return false; }
       setBusy(true);
+      const qualityToken = proof ? 0 : quality.answerSent(item.id);
+      let qualityAccepted = false;
       try {
         // An answer that landed is an answer, however the reply came back (Cos, 2026-10-10: the app
         // said it failed for a decision that was recorded, and Nathan answered it again).
@@ -612,10 +672,11 @@ function useAppStore(proof?: FabricProfile) {
           wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
         });
         if (!outcome.ok) { setError(errorText(outcome.error)); return false; }
+        qualityAccepted = true;
         setError('');
         await loadLists([]);
         return true;
-      } finally { setBusy(false); }
+      } finally { if (qualityToken) quality.answerConfirmed(item.id, qualityToken, qualityAccepted); setBusy(false); }
     },
     /** Clear an item st closed: only the person's own word removes it from Home. */
     clearClosed(id: string) {
@@ -634,7 +695,10 @@ function useAppStore(proof?: FabricProfile) {
       const prompt = promptAnswers(item);
       if (!prompt || !prompt.answers.includes(answer)) { setError('This prompt cannot be answered here. Answer it in the terminal.'); return false; }
       acted.current.add(item.id);
-      return runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer } }); });
+      const qualityToken = proof ? 0 : quality.answerSent(item.id);
+      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer } }); });
+      if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
+      return accepted;
     },
     /** An image a message carries, as a data URI; st reads it from the member that has it. */
     image(image: { sha256: string; message: string; mediaType: string }): Promise<string> {
@@ -819,12 +883,13 @@ function useAppStore(proof?: FabricProfile) {
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
-    error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, client,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, actions,
+    error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
+    saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
     carrierInfo: { choice: carrierChoice, built: fabricBuilt, target: fabricTarget, fallback: fallbackOn, route: selected.route, routeText: routeLabel(selected.route), pending: selected.pending, issue: selected.issue, fabric: fabricSnapshot, node: fabricNode, path: fabricPath },
-    sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources,
+    sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, watchSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources,
   };
 }
 

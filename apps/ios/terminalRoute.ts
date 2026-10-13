@@ -2,6 +2,7 @@ import type { CollectionStream, Snapshot, St3Client, TerminalRoute, TerminalScre
 import { plainError } from '../../clients/typescript/st3-client';
 import { daemonRouteLabel, fabricRouteLabel, terminalRoute, TerminalRouteMemory } from '@smalltalk/st3-views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type TerminalFollowHandlers } from './terminalControls';
+import type { HeartbeatSocketFactory } from './collectionSocket';
 
 export type TerminalClient = Pick<St3Client, 'terminalScreen' | 'terminalAttach' | 'terminalDetach' | 'terminalInput' | 'terminalResize' | 'collectionStream'>;
 export type OwnerTarget = {
@@ -39,13 +40,15 @@ export class RoutedTerminalFollow {
   private timer?: ReturnType<typeof setTimeout>;
   private failures = 0;
   private routeReason = '';
+  private qualityAttached = false;
   private first?: { resolve(): void; reject(error: Error): void };
 
   constructor(private readonly gateway: TerminalClient, private readonly id: string,
     private readonly handlers: TerminalFollowHandlers, private readonly actionId: () => string,
     private readonly gatewaySocket: () => CollectionStream | undefined,
     private readonly routing: TerminalRouting, private readonly active: () => boolean,
-    private readonly released: () => void, private readonly retries: readonly number[]) { this.pin = handlers.expectedIncarnation ?? ''; }
+    private readonly released: () => void, private readonly retries: readonly number[],
+    private readonly socketFactory?: HeartbeatSocketFactory) { this.pin = handlers.expectedIncarnation ?? ''; }
 
   async attach(): Promise<void> {
     if (this.closed || this.starting || this.direct || !this.active()) return;
@@ -83,9 +86,12 @@ export class RoutedTerminalFollow {
           const attachment = await this.obtain(target.client);
           if (!valid() || controller.signal.aborted) { void this.detach(target.cleanup, attachment.id); return; }
           this.attached = { client: target.cleanup, id: attachment.id };
+          this.qualityAttached = true;
+          this.handlers.onQuality?.('attached');
           const first = new Promise<void>((resolve, reject) => { this.first = { resolve, reject }; });
           void first.catch(() => {}); // A close/error can precede the socket-open promise.
           const socket = await target.client.collectionStream({
+            ...(this.socketFactory ? { socket: this.socketFactory } : {}),
             onFrame: frame => {
               if (!valid() || controller.signal.aborted || frame.id !== 'terminal') return;
               if (frame.kind === 'screen' && frame.collection === 'terminal') {
@@ -143,14 +149,20 @@ export class RoutedTerminalFollow {
   }
 
   private async obtain(client: TerminalClient): Promise<{ id: string; capability: string }> {
-    const result = await withFreshTerminalFence(client, this.id, this.pin, fence => {
-      const id = this.actionId();
-      return client.terminalAttach({ id, idempotency_key: id, fence, parameters: { target_id: this.id } });
-    });
-    const attachment = result.value.terminal_attachment;
-    if (!attachment?.stream_capability || !attachment.attachment_id) throw new Error('The terminal issuer returned no attachment or stream capability');
-    if (attachment.runtime_incarnation && attachment.runtime_incarnation !== this.pin) throw new Error(TERMINAL_RESTARTED);
-    return { id: attachment.attachment_id, capability: attachment.stream_capability };
+    this.handlers.onQuality?.('attempt');
+    try {
+      const result = await withFreshTerminalFence(client, this.id, this.pin, fence => {
+        const id = this.actionId();
+        return client.terminalAttach({ id, idempotency_key: id, fence, parameters: { target_id: this.id } });
+      });
+      const attachment = result.value.terminal_attachment;
+      if (!attachment?.stream_capability || !attachment.attachment_id) throw new Error('The terminal issuer returned no attachment or stream capability');
+      if (attachment.runtime_incarnation && attachment.runtime_incarnation !== this.pin) throw new Error(TERMINAL_RESTARTED);
+      return { id: attachment.attachment_id, capability: attachment.stream_capability };
+    } catch (error) {
+      if (!this.closed && this.active() && this.current === client) this.handlers.onQuality?.('error');
+      throw error;
+    }
   }
 
   private async attachGateway(valid: () => boolean): Promise<void> {
@@ -165,6 +177,8 @@ export class RoutedTerminalFollow {
       const attachment = await this.obtain(this.gateway);
       if (!valid()) { void this.detach(this.gateway, attachment.id); return; }
       this.attached = { client: this.gateway, id: attachment.id };
+      this.qualityAttached = true;
+      this.handlers.onQuality?.('attached');
       this.gatewaySocket()?.subscribeTerminal('terminal', this.id, this.pin, attachment.capability);
       this.handlers.onIssue('');
     } catch (error) {
@@ -191,9 +205,10 @@ export class RoutedTerminalFollow {
     else this.retry(message);
   }
 
-  socketLost(): void {
+  socketLost(unexpected = false): void {
     // Gateway recovery does not close a healthy owner stream. Background closes both routes.
     if (this.active() && this.direct) return;
+    if (unexpected) this.dead();
     ++this.generation;
     this.starting = false;
     this.dispose();
@@ -215,6 +230,7 @@ export class RoutedTerminalFollow {
 
   private async ownerFailed(error: unknown): Promise<void> {
     if (this.closed || !this.direct) return;
+    this.dead();
     if (restarted(error)) { this.stop(TERMINAL_RESTARTED); return; }
     const generation = ++this.generation;
     this.direct = false; this.snapshot = '';
@@ -231,6 +247,7 @@ export class RoutedTerminalFollow {
 
   private retry(issue: string): void {
     if (this.closed) return;
+    this.dead();
     this.handlers.onIssue(`Terminal stream interrupted; reconnecting (${issue}).`);
     clearTimeout(this.timer);
     this.timer = setTimeout(() => { void this.attach(); }, this.retries[Math.min(this.failures++, this.retries.length - 1)]);
@@ -244,6 +261,7 @@ export class RoutedTerminalFollow {
   }
 
   private dispose(): void {
+    this.qualityAttached = false;
     this.handlers.onReady?.(false);
     this.controller?.abort(); this.controller = undefined;
     this.first?.reject(new Error('Terminal route cancelled')); this.first = undefined;
@@ -257,6 +275,7 @@ export class RoutedTerminalFollow {
   }
 
   private stop(issue: string): void {
+    if (issue) this.dead();
     this.closed = true;
     ++this.generation;
     clearTimeout(this.timer);
@@ -265,4 +284,7 @@ export class RoutedTerminalFollow {
     if (issue) this.handlers.onIssue(issue);
   }
   close(): void { if (!this.closed) this.stop(''); }
+  private dead(): void {
+    if (this.qualityAttached) { this.qualityAttached = false; this.handlers.onQuality?.('dead'); }
+  }
 }

@@ -497,6 +497,18 @@ impl WriterConnection {
         self.install_transaction_hooks(|_| Ok(()), callback)
     }
 
+    /// Install the runtime's bounded source maintenance without occupying the explicit
+    /// adapter slot. It runs before the adapter's finalizer, inside the same outer commit;
+    /// either callback failing rolls back both source and derived writes. Only one runtime
+    /// owns this slot. The lifetime, coverage and work bounds of the adapter also apply.
+    pub fn install_transaction_maintenance(
+        &self,
+        callback: impl Fn(&Transaction<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        let _writer = self.write_fence();
+        self.finalizers.install_maintenance(callback)
+    }
+
     /// Install one paired adapter. Prepare runs INSIDE the newly begun outer transaction
     /// before any managed source job/helper; finalize runs before its commit. An adapter can
     /// reject/fence preexisting raw capture and set/clear its transaction-owned scope marker.

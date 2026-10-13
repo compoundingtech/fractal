@@ -5,6 +5,13 @@ use std::path::Path;
 
 pub const MODE_ENV: &str = "ST_ACCESS_MODE";
 pub const CODEX_PROFILE: &str = "st-managed";
+/// Set to `1` by the daemon when the setup screen's "Let Codex work without asking" box is
+/// unticked: Codex then keeps its own approval defaults instead of the install access mode's.
+pub const CODEX_ASKS_ENV: &str = "ST_CODEX_ASKS";
+
+pub fn codex_asks() -> bool {
+    std::env::var(CODEX_ASKS_ENV).as_deref() == Ok("1")
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -75,6 +82,14 @@ pub fn codex_defaults(
                 )?,
                 "-c".into(),
                 format!("default_permissions=\"{CODEX_PROFILE}\""),
+                // The remote TUI that owns the thread flattens the named profile and drops its
+                // network table, so the daemon socket gets EPERM. Only this legacy key carries
+                // network through (verified against Codex 0.160.1 through server plus remote TUI).
+                "-c".into(),
+                "sandbox_workspace_write.network_access=true".into(),
+                // Live search is Codex's default only with no sandbox; an agent without it is not useful.
+                "-c".into(),
+                "web_search=\"live\"".into(),
                 "-a".into(),
                 "on-request".into(),
                 "-c".into(),

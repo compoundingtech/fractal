@@ -34,11 +34,11 @@ function harness({ refused, openError, built = true, fallback = true, first = tr
     describe: async () => { state.describes++; if (describeError) throw describeError; return descriptor; },
     open: async (_route, signal) => { state.opens++; if (openError) throw openError; if (open) await open(signal); return { client: owner.client, cleanup: owner.client, release: async () => { state.releases++; }, failure: async error => ({ reason: error.message, unreachable: !error.response }) }; },
   };
-  const feed = new Feed(gateway.client, { onWindow() {}, onConnection() {} }, gate, () => `action/${Math.random()}`, [5], 1000, false, 30_000, routing);
-  const screens = [], issues = [], routes = [], ready = [];
-  const follow = () => feed.followTerminal(id, { onScreen: screen => screens.push(screen.runtime_incarnation), onIssue: issue => issues.push(issue), onRoute: route => routes.push(route), onReady: value => ready.push(value) });
+  const feed = new Feed(gateway.client, { onWindow() {}, onConnection() {} }, gate, () => `action/${Math.random()}`, [5], 1000, false, 30_000, undefined, routing);
+  const screens = [], issues = [], routes = [], ready = [], quality = [];
+  const follow = () => feed.followTerminal(id, { onScreen: screen => screens.push(screen.runtime_incarnation), onIssue: issue => issues.push(issue), onRoute: route => routes.push(route), onReady: value => ready.push(value), onQuality: event => quality.push(event) });
   const subscriptions = socket => socket.sent.filter(frame => frame.collection === 'terminal');
-  return { feed, gateway, owner, state, gate, follow, screens, issues, routes, ready, subscriptions };
+  return { feed, gateway, owner, state, gate, follow, screens, issues, routes, ready, quality, subscriptions };
 }
 test('owner capability, snapshot and socket stay local; gateway windows stay connected', async () => {
   const h = harness(); h.follow(); await settle();
@@ -49,9 +49,11 @@ test('owner capability, snapshot and socket stay local; gateway windows stay con
   h.gateway.sockets[0].drop(new Error('gateway changed')); await settle(); assert.equal(h.state.releases, 0); assert.equal(h.owner.calls.attaches.length, 1); assert.equal(h.ready.at(-1), true);
   h.feed.close(); await settle(); assert.equal(h.owner.calls.detaches.length, 1); assert.equal(h.owner.calls.detaches[0].parameters.target_id, `terminal-attachment/owner/${h.owner.calls.attaches[0].id}`); assert.equal(h.gateway.calls.detaches.length, 0); assert.equal(h.state.releases, 1);
   assert.throws(() => h.feed.terminalControl(id, 'runtime:one'), /not ready/);
+  assert.deepEqual(h.quality, ['attempt', 'attached'], 'gateway loss and intentional close do not count a healthy owner as dead');
 });
 test('refusal falls back visibly with fresh gateway capability and unchanged pin', async () => {
   const h = harness({ refused: failure('owner refused read scope', 'forbidden') }); h.follow(); await settle();
+  assert.deepEqual(h.quality, ['attempt', 'error', 'attempt', 'attached']);
   assert.match(h.routes.at(-1), /via the daemon.*owner refused read scope/); assert.equal(h.gateway.calls.attaches[0].fence.runtime_incarnation, 'runtime:one');
   assert.equal(h.subscriptions(h.gateway.sockets[0])[0].capability, 'cap/gateway');
   h.gateway.sockets[0].frame({ kind: 'screen', id: 'terminal', collection: 'terminal', snapshot: { id: 'snapshot/gateway/frame' }, value: h.gateway.screen() });
@@ -116,4 +118,13 @@ test('a gateway local failure remains a named error rather than a reconnect loop
     h.follow(); await settle(40); assert.equal(reads, 1); assert.equal(h.gateway.calls.attaches.length, 0);
     assert.match(h.issues.at(-1), /gateway PTY path is broken/); h.feed.close();
   }
+});
+
+test('routed quality counts owner loss once and excludes background suspension', async () => {
+  const h = harness(); h.follow(); await settle();
+  h.owner.sockets[0].drop(new Error('owner disconnected')); await settle();
+  assert.deepEqual(h.quality, ['attempt', 'attached', 'dead', 'attempt', 'attached']);
+  h.gate.update('background');
+  h.feed.close();
+  assert.equal(h.quality.filter(event => event === 'dead').length, 1);
 });

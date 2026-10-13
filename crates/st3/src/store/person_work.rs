@@ -1552,6 +1552,7 @@ mission "person-work" state="ready" {{
                     &moved.subject,
                     "claim",
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some("agent/alder.asker".into()),
                         incarnation: Some("asker-one".into()),
                         summary: None,
@@ -2386,6 +2387,7 @@ mission "writer-load" state="ready" {
                         &worker.subject,
                         "renew",
                         &WorkRequest {
+                            wait_ms: None,
                             actor: Some("agent/birch.worker".into()),
                             incarnation: Some("worker-one".into()),
                             summary: None,
@@ -2721,6 +2723,7 @@ mission "writer-load" state="ready" {
                 &origin.subject,
                 "release",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(input.actor.clone()),
                     incarnation: input.incarnation.clone(),
                     summary: None,
