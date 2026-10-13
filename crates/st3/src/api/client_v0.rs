@@ -93,6 +93,8 @@ pub(super) mod arrangements;
 pub(super) mod conversation_blocks;
 mod collection_windows;
 mod inventory;
+#[cfg(test)]
+mod conversation_follow_tests;
 mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
@@ -1328,7 +1330,7 @@ fn conversation_open_local_marked(
     });
     let (page, source_generation) =
         match conversation_first_page_at_generation(state, &snapshot, session, session_id) {
-            Ok(page) => page,
+            Ok((page, generation, _)) => (page, generation),
             Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS => return Err(error),
             // OPEN keeps the established managed-transcript availability notice and stored
             // fallback. Successful native reads still capture page and generation together;
@@ -6970,13 +6972,14 @@ fn conversation_read_now(
 }
 
 /// Read OPEN and change-replay pages through the same bounded fold, retaining the generation
-/// of the returned page without a second native read.
+/// of the returned page without a second native read. The final flag says whether the page
+/// came from the native projection rather than the stored timeline.
 fn conversation_first_page_at_generation(
     state: &AppState,
     snapshot: &ClientSnapshot,
     session: &ClientSession,
     session_id: &str,
-) -> Result<(Value, u64), ApiError> {
+) -> Result<(Value, u64, bool), ApiError> {
     let query = ClientListQuery { limit: Some(200), ..Default::default() };
     match conversation_blocks::source(state, session_id) {
         // Replay selects only its newest bounded projection, including for OpenCode.
@@ -6996,9 +6999,9 @@ fn conversation_first_page_at_generation(
             } else {
                 generation
             };
-            Ok((page.0, fence))
+            Ok((page.0, fence, true))
         }
-        Err(_) => Ok((timeline_value(state, snapshot, session, session_id, &query)?.0, 0)),
+        Err(_) => Ok((timeline_value(state, snapshot, session, session_id, &query)?.0, 0, false)),
     }
 }
 
@@ -7009,7 +7012,7 @@ fn conversation_read_now_unbounded(
     after: Option<&str>,
 ) -> Result<Value, ApiError> {
     let snapshot = new_client_snapshot(state);
-    let (page, source_generation) =
+    let (page, source_generation, native_replay) =
         conversation_first_page_at_generation(state, &snapshot, session, session_id)?;
     let all = page["items"]
         .as_array()
@@ -7055,7 +7058,10 @@ fn conversation_read_now_unbounded(
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
-        if let Some(owner) = owner.as_deref() {
+        // Native pages contain native records and Small Talk messages, not the driver's
+        // mirrored harness.timeline entries. Requiring those IDs in a native page creates
+        // a false gap on every observation, even when the native transcript is unchanged.
+        if let Some(owner) = owner.as_deref().filter(|_| !native_replay) {
             for claim in state
                 .store
                 .claims_page(Some(owner), None, store_index, None, false, 10_000)
@@ -7086,22 +7092,24 @@ fn conversation_read_now_unbounded(
                 message_indexes.insert(claim.store_index);
             }
         }
-        for claim in state
-            .store
-            .local_observations_after(local_position, 10_000)
-            .map_err(ApiError::internal)?
-        {
-            if claim.subject == owner.as_deref().unwrap_or_default()
-                && claim.kind == "harness.timeline"
+        if !native_replay {
+            for claim in state
+                .store
+                .local_observations_after(local_position, 10_000)
+                .map_err(ApiError::internal)?
             {
-                retention_changed |= claim.body.pointer("/fields/entry_type")
-                    .and_then(Value::as_str) == Some("truncation");
-                if let Some(id) = claim
-                    .body
-                    .pointer("/fields/entry_id")
-                    .and_then(Value::as_str)
+                if claim.subject == owner.as_deref().unwrap_or_default()
+                    && claim.kind == "harness.timeline"
                 {
-                    explicit_ids.insert(id.to_owned());
+                    retention_changed |= claim.body.pointer("/fields/entry_type")
+                        .and_then(Value::as_str) == Some("truncation");
+                    if let Some(id) = claim
+                        .body
+                        .pointer("/fields/entry_id")
+                        .and_then(Value::as_str)
+                    {
+                        explicit_ids.insert(id.to_owned());
+                    }
                 }
             }
         }
