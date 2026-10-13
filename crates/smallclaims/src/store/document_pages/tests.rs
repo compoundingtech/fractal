@@ -425,11 +425,17 @@ fn specialized_pages_match_old_full_metadata_filters_cursors_and_randomized_name
             }
         }
     }
-    // An all-maximal prefix has no upper bound. Exercise both matching and excluded
-    // named rows, including a cursor beyond the name, rather than only an empty result.
-    let maximal_name = "\u{10ffff}/tail";
+    // All-maximal prefixes have no upper bound but cannot match a valid doc/NAME.
+    // Keep them as empty-page controls alongside a matching prefix with a maximal tail.
+    let maximal_name = "doc/\u{10ffff}/tail";
     let maximal = bind(&store, maximal_name, "maximal", 60_000, "maximal", None);
-    for prefix in ["", "\u{10ffff}", "\u{10ffff}\u{10ffff}", "doc/"] {
+    for prefix in [
+        "",
+        "\u{10ffff}",
+        "\u{10ffff}\u{10ffff}",
+        "doc/",
+        "doc/\u{10ffff}",
+    ] {
         for history in [false, true] {
             parity(&store, Some(maximal_name), Some(prefix), history, None, 10);
             for cursor in [
@@ -894,11 +900,17 @@ fn isolated_blob_boundary_explains_the_retained_one_step_difference() {
             None,
         );
     }
-    // Retained f04 history/prefix statement: remove only the newly required index hints.
+    // Frozen f04 history/prefix statement, without later planner hints. This explains
+    // the retained f04/de4 negative; it must not follow changes to the production query.
     // Probe changes only blobs, never documents, so it isolates the lookup's boundary.
-    let sql = query(false, true, true, true, true, false)
-        .replace(" INDEXED BY document_canonical_latest", "")
-        .replace(" INDEXED BY sqlite_autoindex_blobs_1", "");
+    let sql = "SELECT d.name,d.hash,b.size,d.created_index,
+        d.hash=(SELECT n.hash FROM documents n WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1),
+        d.binding_claim_id,c.accepted_at_unix_ms,c.actor,c.origin
+        FROM documents d CROSS JOIN blobs b CROSS JOIN claims c
+        WHERE b.hash=d.hash AND c.id=d.binding_claim_id
+        AND d.name COLLATE BINARY>=?5 AND d.name COLLATE BINARY<?6
+        AND substr(d.name,1,length(?2))=?2
+        ORDER BY d.name,d.binding_key DESC LIMIT ?7";
     let execute = || {
         let conn = store.readers.get();
         let scope = SqliteWorkScope::start();

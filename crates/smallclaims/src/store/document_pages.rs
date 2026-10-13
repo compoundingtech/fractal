@@ -45,12 +45,20 @@ fn query(
     } else {
         "1".to_owned()
     };
+    // Keep the document index as the only outer loop. With metadata joins, low ANALYZE
+    // estimates can lose that loop's order proof and add sorts to both the page and latest
+    // lookup. Indexed scalar metadata lookups run only for returned rows. The existence
+    // predicates preserve the old inner joins' row eligibility before the page limit.
     let mut sql = format!(
-        "SELECT d.name,d.hash,b.size,d.created_index,{latest},
-        d.binding_claim_id,c.accepted_at_unix_ms,c.actor,c.origin
+        "SELECT d.name,d.hash,
+        (SELECT b.size FROM blobs b INDEXED BY sqlite_autoindex_blobs_1 WHERE b.hash=d.hash),
+        d.created_index,{latest},d.binding_claim_id,
+        (SELECT c.accepted_at_unix_ms FROM claims c WHERE c.id=d.binding_claim_id),
+        (SELECT c.actor FROM claims c WHERE c.id=d.binding_claim_id),
+        (SELECT c.origin FROM claims c WHERE c.id=d.binding_claim_id)
         FROM documents d INDEXED BY document_canonical_latest
-        CROSS JOIN blobs b INDEXED BY sqlite_autoindex_blobs_1 CROSS JOIN claims c
-        WHERE b.hash=d.hash AND c.id=d.binding_claim_id"
+        WHERE EXISTS (SELECT 1 FROM blobs b INDEXED BY sqlite_autoindex_blobs_1 WHERE b.hash=d.hash)
+        AND EXISTS (SELECT 1 FROM claims c WHERE c.id=d.binding_claim_id)"
     );
     if named {
         // Equal inclusive BINARY bounds select exactly this name. Retaining a range
