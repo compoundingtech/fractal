@@ -65,7 +65,8 @@ fn read_at_snapshot(store: &Store, subject: &str, token: &str) -> anyhow::Result
         Some(selected) if selected != token => store
             .launch_request_source(subject, selected)?
             .map(|(_, token)| token),
-        _ => requested.as_ref().map(|(_, token)| token.clone()),
+        Some(_) => requested.as_ref().map(|(_, token)| token.clone()),
+        None => None,
     };
     let destination = store
         .desired_subjects_named(&[subject.to_owned()])?

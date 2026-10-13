@@ -411,6 +411,7 @@ fn readiness_poll_work_does_not_grow_with_unread_harness_history() {
     );
     ready_receipt(&store, subject, "first");
     let mut samples = Vec::new();
+    let mut retained = 0;
     for count in [7, 71, 701] {
         for n in 0..count {
             claim(
@@ -422,6 +423,15 @@ fn readiness_poll_work_does_not_grow_with_unread_harness_history() {
                 }),
             );
         }
+        retained += count;
+        assert_eq!(
+            store
+                .claims_for(subject, Some("harness.observed"))
+                .unwrap()
+                .len(),
+            retained,
+            "the growth control must keep real durable history"
+        );
         let scope = SqliteWorkScope::start();
         let status = st3::agent_launch::read(&store, subject, &token).unwrap();
         let work = scope.finish();
