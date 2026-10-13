@@ -242,6 +242,8 @@ struct Caller {
     pid: i32,
     person: String,
     view: CallerView,
+    /// The tile this caller's Unix user is, when it is one.
+    tile: Option<String>,
 }
 
 impl Caller {
@@ -394,6 +396,7 @@ impl Gateway {
             .as_ref()
             .and_then(|registry| registry.tile_for_uid(uid))
             .map(|(name, tile)| (name.to_owned(), tile.clone()));
+        let tile_name = tile.as_ref().map(|(name, _)| name.clone());
         let (person, tile_view) = match (person, tile) {
             (Some(_), Some((name, _))) => bail!(
                 "Unix user {uid} is both a person in the gateway's configuration and tile {name} \
@@ -424,6 +427,7 @@ impl Gateway {
             pid,
             person: person.to_owned(),
             view: classify(None),
+            tile: tile_name,
         };
         while let Some((request, fds)) = protocol::recv::<Request>(stream)? {
             let reply = match request {
@@ -782,7 +786,7 @@ impl Gateway {
             );
             return self.refuse(stream, caller, &run, Some(&owner), Some(&profile), reason);
         }
-        let mut prepared = match self.prepare(&usable.profile, &run, fds) {
+        let mut prepared = match self.prepare(&usable.profile, &run, fds, caller.tile.as_deref()) {
             Ok(prepared) => prepared,
             Err(error) => {
                 return self.refuse(
@@ -836,7 +840,13 @@ impl Gateway {
         reachable(&path)
     }
 
-    fn prepare(&self, profile: &Profile, run: &RunRequest, fds: Vec<OwnedFd>) -> Result<Prepared> {
+    fn prepare(
+        &self,
+        profile: &Profile,
+        run: &RunRequest,
+        fds: Vec<OwnedFd>,
+        tile: Option<&str>,
+    ) -> Result<Prepared> {
         let Some(name) = run.argv.first() else {
             bail!("no command");
         };
@@ -857,7 +867,16 @@ impl Gateway {
         // otherwise (a 0700 home, or somewhere outside the checkout roots) in the profile's home,
         // with no checkout, and the caller is told.
         let mut note = None;
-        if let Err(reason) = self.servable(&fds[0]) {
+        if let Some(tile) = tile {
+            // A tile's directories live in its own mount namespace; the sandbox binds a checkout
+            // by the path the gateway's namespace gives a descriptor, which does not name them.
+            // Until that is qualified (tiles design step 4), a tile's checkout is never bound.
+            note = Some(format!(
+                "running in the profile's home, without your directory: tile {tile}'s directories \
+                 are not served yet"
+            ));
+            fds.clear();
+        } else if let Err(reason) = self.servable(&fds[0]) {
             note = Some(format!(
                 "running in the profile's home, without your directory: {reason:#}"
             ));

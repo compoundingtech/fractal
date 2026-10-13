@@ -121,7 +121,10 @@ directory (`st tiles run` or `st tiles prepare`); a registry change starts or st
 without a restart. When the registry withdraws a tile, removes its `supervisor_uid` or changes
 its entry, the endpoint stops and every open connection to it closes, so no connection keeps
 acting for an identity root has withdrawn. A connection is the tile's only when the kernel names
-it: anyone else's is closed before a byte is read. Requests then act as the tile's agent alone:
+it: anyone else's is closed before a byte is read. The daemon classifies a connection once, from
+the process `SO_PEERCRED` names when it connects; a process number reused before its cgroup is
+read must still run as the tile's Unix user in the tile's slice to count, which only the tile's
+own processes do. Requests then act as the tile's agent alone:
 
 | Route | What a tile may do |
 |---|---|
@@ -202,7 +205,8 @@ that will run tiles; that gate is part of step 2.
   harness and its tools need, measured from real runs, would close new kernel interfaces by
   default. Decide it with step 2, when the workload is known.
 - git and gh through sekrets from a tile's own checkout: the gateway's sandbox binds a checkout
-  by the path the kernel gives a passed descriptor, which a tile's mount namespace does not share
+  by the path the kernel gives a passed descriptor, which a tile's mount namespace does not share,
+  so today the gateway never binds a tile's directory and runs its commands in the profile's home
   (design step 4).
 - Landlock and an AppArmor or SELinux profile on top of the namespaces.
 - macOS.

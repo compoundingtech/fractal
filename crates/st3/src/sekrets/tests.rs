@@ -1387,3 +1387,58 @@ fn a_unix_user_that_is_both_a_person_and_a_tile_is_refused() {
         }
     );
 }
+
+#[test]
+fn a_tiles_directory_is_never_bound_into_a_command() {
+    let fixture = Fixture::new();
+    fixture
+        .manage(Request::ProfileCreate {
+            profile: "ada/agent-gh".into(),
+            description: None,
+            policy: policy(&[], &["where here"]),
+            default: false,
+        })
+        .unwrap();
+    fixture
+        .manage(Request::GrantAdd {
+            profile: "ada/agent-gh".into(),
+            to: TILE_AGENT.into(),
+            policy: policy(&[], &["where here"]),
+            until_unix_ms: None,
+        })
+        .unwrap();
+    fixture.tool("where", "pwd");
+    let socket = tile_gateway(&fixture, "", &tile_registry(fixture.uid));
+    *fixture.kernel.cgroup.lock().unwrap() = crate::tiles::registry::tools_cgroup("atlas");
+    // Even a directory under the checkout roots, which a seat's call would bind.
+    let cwd = fixture.checkout("tile-work");
+    let output = run(Connection::open(&socket).unwrap(), None, &["where", "here"], &cwd);
+    if sandbox_available() {
+        assert_eq!(output.result.as_ref().unwrap(), &0, "{}", output.stderr);
+        assert!(!output.stdout.contains("tile-work"), "{}", output.stdout);
+    }
+    // The call is logged in the profile's home, with or without a sandbox to run it in.
+    let log = Connection::open(&socket)
+        .unwrap()
+        .manage(&Request::Log {
+            after: 0,
+            limit: 100,
+            wait_ms: 0,
+        })
+        .unwrap();
+    let call = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["event"] == "call")
+        .unwrap_or_else(|| panic!("the call is logged: {log}"));
+    assert_eq!(call["actor"], TILE_AGENT);
+    assert_eq!(
+        call["detail"]["cwd"],
+        fixture
+            .store
+            .join("profiles/ada/agent-gh/home")
+            .display()
+            .to_string()
+    );
+}

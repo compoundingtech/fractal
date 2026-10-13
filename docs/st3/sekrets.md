@@ -84,13 +84,19 @@ such as a login session or a user manager, the same Unix user is unidentified. A
 from a tile changes nothing: no daemon speaks for a tile. A Unix user that is both a person in the
 gateway configuration and a tile in the registry is refused, because a tile is never a person.
 The registry is read for each connection, so a change applies to the next call, and grants work
-as for any agent (`st sekrets grant ada/agent-gh --to agent/web/atlas ...`).
+as for any agent (`st sekrets grant ada/agent-gh --to agent/web/atlas ...`). The tile's person
+comes from the registry, which does not make anyone a sekrets person: profiles and grants
+belong to people in the gateway configuration, so a tile whose person is not there has nothing
+to use. The caller is classified once, when it connects, from the process `SO_PEERCRED` names.
+If that process exits and its number is reused before the gateway reads its cgroup, the reused
+process must still run as the tile's Unix user in the tile's slice to be taken for the tile, and
+only the tile's own processes do; a reused number anywhere else is unidentified.
 
 When the registry names the gateway's socket (`sekrets_socket`), every tile reaches it at the
 client's default `/run/st-sekrets/gateway.sock`, and a tile is refused at launch when that socket
-is missing. A command a tile runs through sekrets still runs in the gateway's sandbox, which
-cannot yet bind a checkout from inside a tile's mount namespace; qualifying git and gh from tiles
-is a later step.
+is missing. A command a tile runs through sekrets runs in the gateway's sandbox in the profile's
+home: the gateway never binds a directory a tile passes, since a tile's checkout lives in its own
+mount namespace, and it tells the caller so. Qualifying git and gh from tiles is a later step.
 
 While seats run as their person's Unix user, the line between seats of the same person is only as
 strong as that user's files: a seat that reads its daemon's node key, or moves itself into another
