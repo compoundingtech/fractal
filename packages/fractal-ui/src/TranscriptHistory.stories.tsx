@@ -167,6 +167,9 @@ function activeHistoryRow(lane: HTMLElement, id: number): HTMLElement | null {
 
 async function focusHistoryKeyboardRow(lane: HTMLElement, id?: number): Promise<void> {
   const focusedRow = await waitFor(async () => {
+    // Keys go to a settled lane, as before rows opted back into pointer events: RAC marks its
+    // content `pointer-events: none` while it is still applying a scroll.
+    await expect(getComputedStyle(lane.firstElementChild!).pointerEvents, 'History keyboard setup: RAC scroll settled').not.toBe('none')
     const viewport = lane.getBoundingClientRect()
     const candidates = id === undefined ? lane.querySelectorAll<HTMLElement>('[role="row"]') : [activeHistoryRow(lane, id)?.closest<HTMLElement>('[role="row"]') ?? null]
     let target: HTMLElement | null = null
