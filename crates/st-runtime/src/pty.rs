@@ -2216,6 +2216,7 @@ exit 0
     #[test]
     fn a_background_seat_and_its_children_outlive_the_process_that_started_them() {
         let Some(pty) = installed_pty() else {
+            assert!(std::env::var_os("CI").is_none(), "CI must provide pty");
             eprintln!("skipped: no pty binary");
             return;
         };
