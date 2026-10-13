@@ -919,7 +919,8 @@ Do not copy one live SQLite file over another. A file copy can discard concurren
 ### Carrier evidence for exchanges
 
 Replication and fleet status expose optional `last_successful_exchange` and
-`last_failed_exchange` per peer. Each records `at_unix_ms`, the locally dialed
+`last_failed_exchange` per peer. Each describes the last **locally initiated**
+exchange or attempt of that outcome and records `at_unix_ms`, the locally dialed
 `carrier` (`tailscale`, `fabric`, `loopback`, or `unknown`), and, for Fabric,
 `fabric_route: "unknown"`. A failed record names the attempted carrier; a
 successful record names the carrier of the accepted exchange. Client sync notices
@@ -928,9 +929,12 @@ expose the same two optional records with an ISO timestamp in `at`.
 These are two independent host-local records kept in memory, never replicated
 claims or a growing history. A successful fallback replaces the successful
 record and preserves the failed one, even after the existing `last_error` clears.
-An incoming exchange replaces the successful record with carrier `unknown`:
-this host has no local dial evidence, and Fabric tunnels can arrive on loopback.
-Old workers likewise leave the carrier unknown. Restart clears both records;
+An incoming exchange updates ordinary last-seen status but preserves the outbound
+carrier record and its original timestamp. It cannot establish an incoming carrier:
+Fabric tunnels can arrive on loopback. An inbound-only peer has no carrier record;
+absence means unknown/unavailable evidence, not an inferred loopback route. An older
+worker's locally initiated success can still have carrier `unknown`.
+Restart clears both records;
 absence means evidence is unavailable, even when durable last-seen status exists.
 Worker phase changes, connectivity events and separate probes do not rewrite them.
 

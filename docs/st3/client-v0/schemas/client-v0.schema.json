@@ -1725,7 +1725,7 @@
     "ExchangeTransport": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Host-local evidence for one exchange attempt; absent after restart. Success and failure records are independent. Inbound carrier is unknown without local dial evidence; probes never rewrite these records.",
+      "description": "Host-local evidence for a locally initiated exchange or attempt; absent after restart. Success and failure records are independent. Incoming receipt updates last-seen but preserves the original outbound record and timestamp; an inbound-only peer has no record. Probes never rewrite these records.",
       "required": ["at", "carrier"],
       "properties": {
         "at": { "$ref": "#/$defs/Timestamp" },

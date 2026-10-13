@@ -9129,7 +9129,7 @@ async fn replication_receive(
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
-    let (response, reconcile_changed) = blocking_action(move || {
+    let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let before_index = store
             .index()
             .map_err(|error| St3Error::new("internal", error.to_string()))?;
@@ -9139,6 +9139,7 @@ async fn replication_receive(
         if let Some(round_trip_ms) = request.round_trip_ms {
             store.record_replication_round_trip(Duration::from_millis(round_trip_ms));
         }
+        let notice_was_visible = store.replication_peer_in_sync_notice(&request.peer);
         // Only the worker's own requests carry a round trip, and only they heal.
         let receipt = store.receive_replication_exchange_via(
             &request.peer,
@@ -9229,20 +9230,24 @@ async fn replication_receive(
                 store_index,
             },
             changed && !quiet_only && projected,
+            notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
     .await?;
-    if response.changed {
-        if reconcile_changed {
-            crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::ReplicationReceive, None);
-            state.notify.notify_one();
-        }
+    if response.changed && reconcile_changed {
+        crate::reconcile_telemetry::record_wake(
+            crate::reconcile_telemetry::WakeCause::ReplicationReceive,
+            None,
+        );
+        state.notify.notify_one();
     }
-    // Receipt updates host-local exchange evidence even when the graph stayed unchanged.
-    // Wake client streams, without asking the reconciler or replication worker to run.
-    state
-        .event_notify
-        .send_modify(|generation| *generation = generation.saturating_add(1));
+    // Outside the sync notice set, local carrier evidence has no client representation.
+    // Quiet exchanges must not wake every client stream merely to advance a timestamp.
+    if response.changed || notice_visible {
+        state
+            .event_notify
+            .send_modify(|generation| *generation = generation.saturating_add(1));
+    }
     Ok(Json(response))
 }
 
@@ -9319,10 +9324,10 @@ async fn replication_peer_failure(
     State(state): State<AppState>,
     Json(request): Json<ReplicationPeerFailureRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let carrier_observed = request.carrier.is_some();
     let store = state.store.clone();
-    let changed = blocking_store(move || {
+    let (changed, visible_carrier_changed) = blocking_store(move || {
         let before_index = store.index()?;
+        let previous = store.replication_peer_transport(&request.peer).1;
         let stale = store.record_peer_failure_via(
             &request.peer,
             &request.status,
@@ -9340,12 +9345,24 @@ async fn replication_peer_failure(
         // A peer that fails mid-sync sends no more exchanges, so project what it delivered.
         let projected = store.replication_projection_deferred()
             && store.project_replication_backlog_unless_catching_up()? == Some(true);
-        Ok(store.index()? != before_index || projected)
+        let current = store.replication_peer_transport(&request.peer).1;
+        // Repeated failures on the same carrier retain a fresh local timestamp without
+        // waking all clients. First evidence or a carrier change matters only in a notice.
+        let carrier = |record: &smallclaims::replication::ReplicationExchangeTransport| {
+            (record.carrier, record.fabric_route.clone())
+        };
+        let visible_carrier_changed = previous.as_ref().map(carrier)
+            != current.as_ref().map(carrier)
+            && store.replication_peer_in_sync_notice(&request.peer);
+        Ok((
+            store.index()? != before_index || projected,
+            visible_carrier_changed,
+        ))
     })
     .await?;
     if changed {
         signal_changed(&state);
-    } else if carrier_observed {
+    } else if visible_carrier_changed {
         state
             .event_notify
             .send_modify(|generation| *generation = generation.saturating_add(1));
@@ -21117,6 +21134,66 @@ agent "good" {{ workspace {:?}; command "true" }}
     }
 
     #[tokio::test]
+    async fn idle_replication_receipts_do_not_wake_client_streams() {
+        const FLEET: &str = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.configured_peers = vec!["cedar".into()];
+        state.store.bind_fleet(FLEET).unwrap();
+        state
+            .store
+            .record_transport_observation("cedar", "up", None, None)
+            .unwrap();
+        let source = Store::open_memory("cedar").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        let exchange = source.export_replication_summary(FLEET).unwrap();
+        let mut events = state.event_notify.subscribe();
+        let app = router(state.clone());
+        for carrier in ["fabric", "fabric", "loopback"] {
+            let (status, response) = json_request(
+                app.clone(),
+                "/v1/internal/replication/receive",
+                json!({
+                    "peer": "cedar", "fleet_id": FLEET, "exchange": exchange,
+                    "round_trip_ms": 10, "carrier": carrier
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{response}");
+            assert_eq!(response["changed"], false, "{response}");
+            assert!(
+                !events.has_changed().unwrap(),
+                "idle receipts have no visible client notice"
+            );
+        }
+        // Leaving the notice set is visible even if no envelope or claim changed.
+        state
+            .store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .get_mut("cedar")
+            .unwrap()
+            .observe(0, Some((1_000, 0)), smallclaims::store::now_ms());
+        assert!(state.store.replication_peer_in_sync_notice("cedar"));
+        let (status, response) = json_request(
+            app,
+            "/v1/internal/replication/receive",
+            json!({
+                "peer": "cedar", "fleet_id": FLEET, "exchange": exchange,
+                "round_trip_ms": 10, "carrier": "loopback"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["changed"], false);
+        assert!(
+            events.has_changed().unwrap(),
+            "a disappearing sync notice must notify clients"
+        );
+    }
+
+    #[tokio::test]
     async fn replication_exchange_carrier_status_notifies_clients_without_replicating_evidence() {
         let root = tempfile::tempdir().unwrap();
         let mut state = state(root.path());
@@ -21127,6 +21204,14 @@ agent "good" {{ workspace {:?}; command "true" }}
             .record_transport_observation("cedar", "unknown", None, None)
             .unwrap();
         let index = state.store.index().unwrap();
+        state
+            .store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .entry("cedar".into())
+            .or_default()
+            .observe(0, Some((1_000, 0)), smallclaims::store::now_ms());
         let mut events = state.event_notify.subscribe();
         let app = router(state.clone());
         let (status, response) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
@@ -21156,6 +21241,30 @@ agent "good" {{ workspace {:?}; command "true" }}
             tokio::time::timeout(Duration::from_millis(20), state.notify.notified())
                 .await
                 .is_err()
+        );
+        let (status, _) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
+            "peer": "cedar", "status": "refused", "error": "service grant refused", "carrier": "fabric"
+        })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !events.has_changed().unwrap(),
+            "an unchanged-carrier repeat stays quiet"
+        );
+        state
+            .store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .get_mut("cedar")
+            .unwrap()
+            .observe(0, Some((0, 0)), smallclaims::store::now_ms());
+        let (status, _) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
+            "peer": "cedar", "status": "refused", "error": "service grant refused", "carrier": "loopback"
+        })).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !events.has_changed().unwrap(),
+            "an idle peer's carrier is not in client notices"
         );
         // Old-worker/liveness reports have no dial evidence and leave the record intact.
         let (status, _) = json_request(

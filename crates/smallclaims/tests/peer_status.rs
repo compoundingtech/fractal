@@ -72,6 +72,10 @@ fn a_failed_exchange_makes_last_seen_and_sync_staleness_agree_and_recovery_clear
         .replication_status(true, Some("sample-fleet"), &peers)
         .unwrap();
     assert_eq!(status.peers[0].status, "up");
+    assert!(
+        status.peers[0].last_successful_exchange.is_none(),
+        "inbound-only traffic has no local carrier evidence"
+    );
     assert!(status.peers[0].last_failure_at_unix_ms.is_none());
     assert!(!status.peers[0].sync.as_ref().unwrap().stale);
 }
@@ -144,12 +148,31 @@ fn exchange_carrier_records_are_independent_local_and_cleared_on_restart() {
             Some(&record)
         );
         assert_eq!(store.index().unwrap(), before);
-        // An inbound success is unknown, not proof of loopback or the earlier outgoing carrier.
+        store
+            .receive_replication_exchange_via(
+                "birch",
+                "sample-fleet",
+                &exchange,
+                true,
+                ReplicationCarrier::Fabric,
+            )
+            .unwrap();
+        let outbound = store.replication_peer_transport("birch").0.unwrap();
+        assert_eq!(outbound.carrier, ReplicationCarrier::Fabric);
+        assert_eq!(outbound.fabric_route.as_deref(), Some("unknown"));
+        // Inbound success updates reachability, preserving the original outbound evidence/time.
         store
             .receive_replication_exchange("birch", "sample-fleet", &exchange)
             .unwrap();
         let (success, failure) = store.replication_peer_transport("birch");
-        assert_eq!(success.unwrap().carrier, ReplicationCarrier::Unknown);
+        assert_eq!(success, Some(outbound.clone()));
+        assert!(
+            store
+                .replication_peer_last_success("birch")
+                .unwrap()
+                .unwrap()
+                >= outbound.at_unix_ms
+        );
         assert_eq!(failure, Some(record.clone()));
         // A stale completion cannot rewrite a newer record.
         store.record_replication_exchange_transport(

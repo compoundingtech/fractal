@@ -15608,7 +15608,7 @@ subscription "watch/source" {
             .unwrap();
         state
             .store
-            .receive_replication_exchange("edge", FLEET, &exchange)
+            .receive_replication_exchange_asking("edge", FLEET, &exchange, true)
             .unwrap();
         state
             .store

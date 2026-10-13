@@ -2051,11 +2051,15 @@ as waiting records until upgrade; see [rolling upgrades](../replication.md#rolli
 `SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each
 an `ExchangeTransport` with `at` (ISO timestamp), `carrier` (an open string:
 `tailscale`, `fabric`, `loopback`, or `unknown` today), and optional `fabric_route`
-(`unknown` for Fabric today). They describe this serving host's local observation,
-not replicated reachability or advertised endpoints. Success and failure records
+(`unknown` for Fabric today). They describe this serving host's last **locally initiated** exchange or attempt of
+each outcome, with its original timestamp, not replicated reachability or advertised
+endpoints. Success and failure records
 are independent: a successful fallback preserves the failed attempt's carrier.
-Incoming exchanges have unknown carrier without local dial evidence; Fabric's
-loopback tunnel address cannot establish an incoming carrier. Restart clears
-these records, and probes never change them. Existing sync notice conditions
+Incoming exchanges advance ordinary last-seen status and preserve the original
+outbound carrier record and timestamp; an inbound-only peer has no carrier record,
+which means evidence is unknown/unavailable. Fabric's loopback tunnel address cannot
+establish an incoming carrier. Restart clears these records, and probes never change
+them. Idle receipts outside the sync notice set do not notify client streams;
+repeated same-carrier failures likewise stay quiet when the graph is unchanged. Existing sync notice conditions
 remain the same. Older servers omit these optional fields; older clients ignore
 the additions. No API version, scope, operation or claim shape changes.

@@ -4391,6 +4391,7 @@ mod tests {
             .await
             .unwrap();
         let (success, failure) = store.replication_peer_transport("source");
+        let outbound = success.clone().unwrap();
         let success = success.unwrap();
         assert_eq!(
             success.carrier,
@@ -4436,8 +4437,9 @@ mod tests {
             .unwrap();
         let (success, failure) = store.replication_peer_transport("source");
         assert_eq!(
-            success.unwrap().carrier,
-            smallclaims::replication::ReplicationCarrier::Unknown
+            success,
+            Some(outbound),
+            "incoming receipt preserves original Fabric evidence and time"
         );
         assert_eq!(
             failure,

@@ -6256,7 +6256,11 @@ impl Store {
             transaction.commit().map_err(internal)?;
             counts
         };
-        self.record_replication_exchange_transport(relay, true, received_at, carrier);
+        // Only a response to our own dial is carrier evidence for a locally initiated
+        // exchange. Incoming traffic updates last-seen but cannot relabel an earlier dial.
+        if asks {
+            self.record_replication_exchange_transport(relay, true, received_at, carrier);
+        }
         drop(timing);
         self.replication_timers
             .exchanges
@@ -7557,6 +7561,17 @@ impl Store {
                 at_unix_ms, carrier,
             ));
         }
+    }
+
+    /// Whether this peer's local status is currently visible in a client sync notice.
+    /// This checks one in-memory row, without folding membership or reading the graph.
+    pub fn replication_peer_in_sync_notice(&self, peer: &str) -> bool {
+        self.replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(peer)
+            .and_then(|progress| progress.view(now_ms()))
+            .is_some_and(|sync| sync.catching_up || sync.diverged)
     }
 
     pub fn replication_peer_transport(

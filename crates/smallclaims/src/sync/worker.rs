@@ -2152,10 +2152,9 @@ pub async fn exchange<B: Backend>(
     auth: &FleetAuth,
     fleet: &FleetContext,
 ) -> Result<(bool, bool)> {
-    let carrier = parse_route(&peer.url)
-        .map(|route| route.carrier())
-        .unwrap_or_default();
-    exchange_via(http, backend, node, peer, auth, fleet, carrier).await
+    // This entry point receives only an HTTP URL, which may already be a Fabric tunnel.
+    // Only dial_peer retains the selected Route and can supply defensible carrier evidence.
+    exchange_via(http, backend, node, peer, auth, fleet, Default::default()).await
 }
 
 #[allow(clippy::too_many_arguments)]

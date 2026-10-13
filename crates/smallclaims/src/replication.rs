@@ -465,7 +465,7 @@ impl ReplicationCarrier {
     }
 }
 
-/// One host-local exchange observation. Absent after restart; never a replicated claim.
+/// One locally initiated exchange observation. Absent after restart; never a replicated claim.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReplicationExchangeTransport {
     pub at_unix_ms: u128,
@@ -487,8 +487,10 @@ impl ReplicationExchangeTransport {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplicationPeerStatus {
+    /// Last successful locally initiated exchange, with its original dial evidence and time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_successful_exchange: Option<ReplicationExchangeTransport>,
+    /// Last failed locally initiated exchange/attempt, independent of success and last_error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failed_exchange: Option<ReplicationExchangeTransport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
