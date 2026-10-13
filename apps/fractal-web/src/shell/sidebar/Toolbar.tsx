@@ -124,7 +124,7 @@ export const SidebarToolbar = ({
                   size="sm"
                   variant="secondary"
                   onPress={() =>
-                    update({ ...defaultFilters, query: filters.query, sort: filters.sort })
+                    update({ ...defaultFilters, query: parseSidebarQuery(filters.query).query, sort: filters.sort })
                   }
                 >
                   Reset filters

@@ -4,7 +4,7 @@ import * as fc from 'fast-check'
 
 import { applyOp, createFolder, emptyDoc, place, project } from '../../folders/core.mts'
 import { dailyDriver } from '../fixtures/layouts.ts'
-import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './filter.ts'
+import { filterFolders, matchesRow, matchesSidebarHost, parseSidebarQuery, sortMembers, type SidebarRow } from './filter.ts'
 import { defaultFilters } from './state.ts'
 
 const row = (
@@ -108,6 +108,12 @@ describe('sidebar machine query', () => {
     ['other:dev3 compiler-machine:dev3', 'other:dev3 compiler-machine:dev3', []],
   ] as const)('parses %j without highlighting facets', (input, query, machines) => {
     expect(parseSidebarQuery(input)).toEqual({ query, machines })
+  })
+
+  it('shares row host namespace stripping without rewriting query values', () => {
+    expect(matchesSidebarHost('HOST/DEV3', parseSidebarQuery('machine:dev').machines)).toBe(true)
+    expect(matchesSidebarHost('host/dev3', parseSidebarQuery('machine:host/dev3').machines)).toBe(false)
+    expect(parseSidebarQuery('machine:HOST/DEV3').machines).toEqual([['host/dev3']])
   })
 
   const machineRows = [

@@ -55,6 +55,11 @@ export const parseSidebarQuery = (query: string): SidebarQuery => {
   }
   return { query: terms.join(' '), machines }
 }
+/** Row host IDs omit their host/ namespace; query values remain literal shared-contract prefixes. */
+export const matchesSidebarHost = (hostId: string, machines: SidebarQuery['machines']): boolean => {
+  const host = hostId.toLowerCase().replace(/^host\//, '')
+  return machines.every((values) => values.some((value) => host.startsWith(value)))
+}
 /** Matches a sidebar row against visibility, status, host and contextual search filters. */
 export const matchesRow = ({
   row,
@@ -74,11 +79,7 @@ export const matchesRow = ({
     (filters.host !== '' && row.workspace.host !== filters.host) ||
     (filters.statuses.length > 0 && !filters.statuses.includes(row.status))
   ) return false
-  if (parsedQuery.machines.length > 0) {
-    const host = row.workspace.host.toLowerCase().replace(/^host\//, '')
-    if (!parsedQuery.machines.every((values) => values.some((value) => host.startsWith(value))))
-      return false
-  }
+  if (!matchesSidebarHost(row.workspace.host, parsedQuery.machines)) return false
   return parsedQuery.query === '' ||
     scoreTokens({
       tokens: tokenize(parsedQuery.query),

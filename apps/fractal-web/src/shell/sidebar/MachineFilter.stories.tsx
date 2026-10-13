@@ -132,6 +132,13 @@ export const MachineFilter: Story = {
     await search('machine:')
     await assertHosts(hosts)
     await expect(canvas.getByRole('button', { name: 'Filter agents' })).toBeInTheDocument()
+    await search('session machine:dev3 host:dev')
+    await assertHosts(['dev3'])
+    await userEvent.click(canvas.getByRole('button', { name: 'Filter agents · 2 active' }))
+    await userEvent.click(within(canvasElement.ownerDocument.body).getByRole('button', { name: 'Reset filters' }))
+    await expect(input).toHaveValue('session')
+    await assertHosts(hosts)
+    await userEvent.keyboard('{Escape}')
     await search('machine:dev3,dev5')
     await assertHosts(['dev3', 'dev5'])
   },

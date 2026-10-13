@@ -3,7 +3,7 @@ import tailwindcss from '@tailwindcss/vite'
 import stylex from '@stylexjs/unplugin'
 
 const config: StorybookConfig = {
-  stories: ['../src/**/*.stories.tsx', '../../../apps/fractal-web/src/shell/sidebar/*.stories.tsx'],
+  stories: ['../src/**/*.stories.tsx'],
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],
   core: { disableTelemetry: true },
