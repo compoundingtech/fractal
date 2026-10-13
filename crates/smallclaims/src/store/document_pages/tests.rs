@@ -513,6 +513,41 @@ fn corrupt_document_metadata_stays_an_error_without_a_partial_page() {
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].binding_claim_id, good.id);
     }
+    // Three rows with only the middle one ineligible: each metadata failure independently
+    // leaves two page slots for the surrounding rows, including a cursor before the page.
+    for missing_blob in [false, true] {
+        let gap = node();
+        let first = bind(&gap, "doc/a", "first", 3000, "gap", None);
+        bind(&gap, "doc/b", "middle", 3001, "gap", None);
+        let last = bind(&gap, "doc/c", "last", 3002, "gap", None);
+        {
+            let conn = gap.connection.write();
+            if missing_blob {
+                conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+                conn.execute(
+                    "DELETE FROM blobs WHERE hash=(SELECT hash FROM documents WHERE name='doc/b')",
+                    [],
+                )
+                .unwrap();
+                conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+            } else {
+                conn.execute(
+                    "UPDATE documents SET binding_claim_id='absent' WHERE name='doc/b'",
+                    [],
+                )
+                .unwrap();
+            }
+        }
+        for history in [false, true] {
+            for cursor in [None, Some(("doc/", 0))] {
+                parity(&gap, None, Some("doc/"), history, cursor, 2);
+                let page = read(&gap, None, Some("doc/"), history, cursor, 2).unwrap();
+                assert_eq!(page.len(), 2);
+                assert_eq!(page[0].binding_claim_id, first.id);
+                assert_eq!(page[1].binding_claim_id, last.id);
+            }
+        }
+    }
 }
 
 fn plans(
@@ -692,6 +727,11 @@ fn normal_and_upgraded_document_read_indexes_match_the_required_layout() {
                 "sqlite_autoindex_blobs_1",
                 vec![("hash".to_owned(), 0_i64, "BINARY".to_owned())],
             ),
+            (
+                "claims",
+                "sqlite_autoindex_claims_1",
+                vec![("id".to_owned(), 0_i64, "BINARY".to_owned())],
+            ),
         ] {
             let exists: bool = conn
                 .query_row(
@@ -701,6 +741,16 @@ fn normal_and_upgraded_document_read_indexes_match_the_required_layout() {
                 )
                 .unwrap();
             assert!(exists, "{table} lacks required {index}");
+            if table != "documents" {
+                let unique: bool = conn
+                    .query_row(
+                        "SELECT \"unique\" FROM pragma_index_list(?1) WHERE name=?2",
+                        params![table, index],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(unique, "scalar metadata requires unique {table}/{index}");
+            }
             let columns = conn
                 .prepare(
                     "SELECT name,desc,coll FROM pragma_index_xinfo(?1) WHERE key=1 ORDER BY seqno",
@@ -939,17 +989,14 @@ fn isolated_blob_boundary_explains_the_retained_one_step_difference() {
             None,
         );
     }
-    // Frozen f04 history/prefix statement, without later planner hints. This explains
+    // Verbatim generated f04 history/prefix statement, without later planner hints. This explains
     // the retained f04/de4 negative; it must not follow changes to the production query.
+    // Its +1, exact flatness, blob-only mutation and full-metadata assertions stay unchanged.
     // Probe changes only blobs, never documents, so it isolates the lookup's boundary.
-    let sql = "SELECT d.name,d.hash,b.size,d.created_index,
-        d.hash=(SELECT n.hash FROM documents n WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1),
+    let sql = "SELECT d.name,d.hash,b.size,d.created_index,d.hash=(SELECT n.hash FROM documents n WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1),
         d.binding_claim_id,c.accepted_at_unix_ms,c.actor,c.origin
         FROM documents d CROSS JOIN blobs b CROSS JOIN claims c
-        WHERE b.hash=d.hash AND c.id=d.binding_claim_id
-        AND d.name COLLATE BINARY>=?5 AND d.name COLLATE BINARY<?6
-        AND substr(d.name,1,length(?2))=?2
-        ORDER BY d.name,d.binding_key DESC LIMIT ?7";
+        WHERE b.hash=d.hash AND c.id=d.binding_claim_id AND d.name COLLATE BINARY>=?5 AND d.name COLLATE BINARY<?6 AND substr(d.name,1,length(?2))=?2 ORDER BY d.name,d.binding_key DESC LIMIT ?7";
     let execute = || {
         let conn = store.readers.get();
         let scope = SqliteWorkScope::start();
