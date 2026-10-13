@@ -106,6 +106,11 @@ const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 
 #[derive(Subcommand)]
 enum Command {
+    /// Configure this machine and start st, with flags for unattended setup.
+    Setup(st3::setup::SetupArgs),
+    /// Open the terminal interface: spaces, conversations, Home and agent terminals.
+    #[command(version = st_drivers::version::display_version())]
+    Ui(stui::Args),
     /// Validate and publish KDL files containing seats, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     Apply(ApplyArgs),
@@ -2683,11 +2688,11 @@ enum ServiceCommand {
 enum ClaudeChannelCommand {
     /// Install channel assets and approval policy; activate only in st seats.
     Install {
-        /// Install only plugin assets. An administrator will manage the machine policy.
+        /// Install user assets only; seats use development admission without machine policy.
         #[arg(long)]
         no_policy: bool,
     },
-    /// Verify the embedded files, Claude registration, plugin, and machine policy.
+    /// Verify user assets and report approved or development channel admission.
     Status,
     /// Remove the user plugin, marketplace, embedded files, and machine policy.
     Uninstall {
@@ -4773,8 +4778,6 @@ fn main() -> ExitCode {
         }
         None => {}
     }
-    // What `st clients` lists for this process: its name and build, as reported.
-    st3_client::set_client_name(format!("st {}", st_drivers::version::machine_version()));
     // A shell stub from `st completions` calls back with `COMPLETE=<shell>` on each TAB. Answer
     // before any config, runtime, or daemon work; this exits when the variable is set.
     clap_complete::env::CompleteEnv::with_factory(Cli::command).complete();
@@ -4806,16 +4809,24 @@ fn main() -> ExitCode {
         st_drivers::provider_session::install_stop_handlers();
         st_drivers::reexec::unblock_stop_signals();
     }
-    if let Some(stui) = bare_st_opens(
+    if plain_ui_requested(
         arguments.len(),
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
         std::env::var_os("ST_AGENT").is_some(),
-        std::env::var_os("PATH").as_deref(),
     ) {
-        use std::os::unix::process::CommandExt as _;
-        // Only returns when stui could not start; the help below is the fallback.
-        let error = std::process::Command::new(stui).exec();
-        eprintln!("st: stui did not start ({error}); here is the help instead");
+        let subject = match st3::setup::prepare_plain_ui() {
+            Ok(subject) => subject,
+            Err(error) => {
+                eprintln!("st: {}", plain_error(&error));
+                return ExitCode::FAILURE;
+            }
+        };
+        let options = match subject {
+            Some(subject) => stui::Args::default().with_initial_subject(subject),
+            None => stui::Args::default(),
+        };
+        return run_terminal_ui(options, None);
     }
     if cli_help::all_help_requested(&arguments) {
         print!("{}", cli_help::root_help(true));
@@ -4837,6 +4848,11 @@ fn main() -> ExitCode {
         Err(error) => exit_usage_error(error),
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    if let Command::Ui(options) = cli.command {
+        return run_terminal_ui(options, cli.endpoint.as_deref());
+    }
+    // Set the CLI identity only after the TUI path has chosen its stui client identity.
+    st3_client::set_client_name(format!("st {}", st_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
         record_daemon_commands(args);
     }
@@ -4858,20 +4874,31 @@ fn main() -> ExitCode {
     )
 }
 
-/// Bare `st` on a person's terminal opens stui, found on PATH; scripts, pipes and agent seats
-/// keep the help. `None` means print the help.
-fn bare_st_opens(
-    argument_count: usize,
-    interactive: bool,
-    in_seat: bool,
-    path: Option<&std::ffi::OsStr>,
-) -> Option<PathBuf> {
-    if argument_count != 1 || !interactive || in_seat {
-        return None;
+/// Bare st opens the TUI only for a person using both sides of a terminal.
+fn plain_ui_requested(arguments: usize, stdin: bool, stdout: bool, seat: bool) -> bool {
+    arguments == 1 && stdin && stdout && !seat
+}
+
+/// The TUI owns its runtime and terminal restoration; never enter it from run_cli.
+fn run_terminal_ui(mut options: stui::Args, endpoint: Option<&str>) -> ExitCode {
+    let result = (|| -> Result<()> {
+        if let Some(endpoint) = endpoint {
+            match Endpoint::parse(endpoint) {
+                Endpoint::Unix(path) => options = options.with_endpoint(path),
+                _ => anyhow::bail!(
+                    "st ui uses a local Unix socket; pair remote devices with st devices complete"
+                ),
+            }
+        }
+        stui::run(options)
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("st: {}", plain_error(&error));
+            ExitCode::FAILURE
+        }
     }
-    std::env::split_paths(path?)
-        .map(|directory| directory.join("stui"))
-        .find(|candidate| candidate.is_file())
 }
 
 /// Export the runtime fence before any provider or runtime worker thread starts. Fresh
@@ -4922,6 +4949,11 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
             .filter(|value| !value.is_empty())
             .context("the channel resume state has no runtime incarnation")?;
         return Ok(Some(incarnation.to_owned()));
+    }
+    // Serve scoped Claude MCP initialization while asynchronous bootstrap discovers
+    // and binds ownership. Local argument and resume validation above still applies.
+    if args.driver == "claude-mcp" {
+        return Ok(None);
     }
     let config = Config::load_unvalidated(None)?;
     let endpoint = cli
@@ -5176,6 +5208,9 @@ async fn run(cli: Cli) -> Result<()> {
     let own = std::env::var("ST_AGENT").ok();
     let mission_run = std::env::var("ST_MISSION_RUN").ok();
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
+    if let Command::Setup(args) = cli.command {
+        return st3::setup::run(args).await.map(|_| ());
+    }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
         command:
@@ -5280,8 +5315,10 @@ async fn run(cli: Cli) -> Result<()> {
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
     let immediate = Client::new(endpoint.clone());
     match cli.command {
+        Command::Setup(_) => unreachable!(),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
+        Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Up(_) => unreachable!(),
         Command::Skill(_) => unreachable!(),
         Command::Evidence(_) => unreachable!(),
@@ -5990,30 +6027,6 @@ fn select_private_gateway(
 }
 
 #[cfg(test)]
-mod bare_st_tests {
-    use super::*;
-
-    #[test]
-    fn bare_st_opens_stui_only_for_a_person_on_a_terminal_with_stui_on_path() {
-        let directory = tempfile::tempdir().unwrap();
-        let stui = directory.path().join("stui");
-        std::fs::write(&stui, "").unwrap();
-        let path = std::env::join_paths([directory.path()]).unwrap();
-        let path = Some(path.as_os_str());
-        assert_eq!(bare_st_opens(1, true, false, path), Some(stui));
-        // A subcommand or flag, a pipe or script, and an agent seat keep their behavior.
-        assert_eq!(bare_st_opens(2, true, false, path), None);
-        assert_eq!(bare_st_opens(1, false, false, path), None);
-        assert_eq!(bare_st_opens(1, true, true, path), None);
-        // Without stui on PATH the help is printed.
-        let empty = tempfile::tempdir().unwrap();
-        let none = std::env::join_paths([empty.path()]).unwrap();
-        assert_eq!(bare_st_opens(1, true, false, Some(none.as_os_str())), None);
-        assert_eq!(bare_st_opens(1, true, false, None), None);
-    }
-}
-
-#[cfg(test)]
 mod private_gateway_tests {
     use super::*;
 
@@ -6221,7 +6234,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
-    st3::fleet::activate(&store, &config)?;
+    st3::fleet::prepare(&store, &config)?;
     // Every claim this node writes is signed; keys are made here the first time, silently.
     let keys = st3::fleet::join::key_directory(&config.state_dir);
     if config.fleet.is_none() {
@@ -6388,20 +6401,6 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
     ));
-    if config.checkpoint.enabled {
-        tokio::spawn(run_checkpoints(
-            store.clone(),
-            st3::store::CheckpointContext {
-                now_unix_ms: 0,
-                configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
-                scratch: config.state_dir.join("checkpoint"),
-                reviewer: config
-                    .person
-                    .clone()
-                    .unwrap_or_else(|| "person/operator".into()),
-            },
-        ));
-    }
     if let Some(otlp) = &config.observations.otlp {
         let exporter = st3::otlp::OtlpExporter::new(otlp, &config.node)?;
         eprintln!(
@@ -6460,11 +6459,47 @@ async fn run_up(args: UpArgs) -> Result<()> {
     st3::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     st3::api::start_agent_roster(&state);
+    // Nor does a missions window fold the missions it shows.
+    st3::api::start_published_lists(&state);
     startup.phase("bind-listeners");
     startup_telemetry.phase("bind-listeners");
     let bound = std::sync::atomic::AtomicUsize::new(0);
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            let activation_store = store.clone();
+            let checkpoint_context = config
+                .checkpoint
+                .enabled
+                .then(|| st3::store::CheckpointContext {
+                    now_unix_ms: 0,
+                    configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
+                    scratch: config.state_dir.join("checkpoint"),
+                    reviewer: config
+                        .person
+                        .clone()
+                        .unwrap_or_else(|| "person/operator".into()),
+                });
+            tokio::spawn(async move {
+                match tokio::task::spawn_blocking({
+                    let store = activation_store.clone();
+                    move || store.complete_replication_activation()
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("st: replication history activation failed: {error:#}");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!("st: replication history activation stopped: {error}");
+                        return;
+                    }
+                }
+                if let Some(context) = checkpoint_context {
+                    run_checkpoints(activation_store, context).await;
+                }
+            });
             startup_telemetry.serving();
             startup.serving();
             eprintln!("st: local API listening at {}", config.socket.display());
@@ -12157,7 +12192,10 @@ fn render_checkpoint_plan(plan: &st3::store::CheckpointPlanView) -> String {
 fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
     match command {
         ServiceCommand::Install { config } => {
-            st3::service::install(Config::load_with_fleet(config.as_deref())?)
+            st3::service::install_from_config_path(
+                Config::load_with_fleet(config.as_deref())?,
+                config.as_deref(),
+            )
         }
         ServiceCommand::Status => {
             let mut report = st3::service::status()?;
@@ -13703,6 +13741,33 @@ async fn run_agent_new(
     if args.print_kdl {
         print!("{kdl}");
         return Ok(());
+    }
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let host = args
+        .host
+        .as_deref()
+        .unwrap_or(local)
+        .trim_start_matches("host/");
+    if host == local || host == "local" {
+        match client.get::<Vec<String>>("/v1/harnesses").await {
+            Ok(available) => anyhow::ensure!(
+                available.contains(&args.harness),
+                "{} is not installed on the daemon's login PATH; install it and open a new login shell before creating a seat",
+                args.harness
+            ),
+            // An install does not restart the daemon, so a new st can meet an older daemon.
+            Err(error)
+                if st3::client::is_missing_route(&error) || st3::client::is_not_found(&error) =>
+            {
+                eprintln!(
+                    "st: the daemon is older than this st and cannot check which providers are installed; creating the seat anyway"
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
     let source_name = format!("st agents new {}", args.name);
     let preview: MissionResponse = client
@@ -16040,7 +16105,14 @@ async fn run_work(
                 .await;
             }
             let generated = generated_client(endpoint, None)?;
-            let response = if let Some(actor) = actor.as_deref() {
+            // A current list's first page is as of this command: it sees the command's own
+            // writes, waiting for the work list to be published and retrying within the daemon
+            // wait. Later pages continue the publication the first page read.
+            let response = if cursor.is_none() && !all {
+                generated
+                    .work_list_fresh(actor.as_deref(), Some(limit))
+                    .await?
+            } else if let Some(actor) = actor.as_deref() {
                 generated
                     .work_list_for_actor(actor, cursor.as_deref(), Some(limit), all)
                     .await?
@@ -18133,11 +18205,10 @@ async fn run_driver(client: &Client, args: DriverArgs, catalog: Option<&Path>) -
             None => NativePaths::legacy(subject, "claude")?,
         };
         if push_mailbox_enabled() {
-            let incarnation = wait_for_agent_incarnation(client, subject).await?;
             return st3::claude_channel::run(
                 client,
                 subject,
-                &incarnation,
+                wait_for_agent_incarnation(client, subject),
                 &paths.resolved(),
                 &paths.identity,
                 &paths.runtime_id,
@@ -18722,6 +18793,8 @@ struct NativeLoopState {
     claude_attachment_reconciled: bool,
     #[serde(default)]
     claude_attachment_terminal: Option<ClaudeAttachmentTerminal>,
+    #[serde(default)]
+    claude_readiness_fallback: ClaudeReadinessFallback,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -18938,6 +19011,7 @@ async fn drive_st2_native(
         let _ = write_driver_log(subject, &format!("Claude attachment check will retry: {error:#}"));
     }
     let mut observations = NativeObservations::start(&agent_dir, &incarnation)?;
+    loop_state.claude_readiness_fallback.native_state_seen |= observations.native_state_seen;
     let harness_state_path = st_drivers::harness_state::harness_state_path(&agent_dir);
     let inbox = st_drivers::message::inbox_dir(&agent_dir);
     let archive = st_drivers::message::archive_dir(&agent_dir);
@@ -19007,6 +19081,7 @@ async fn drive_st2_native(
                 }
             }
             result = &mut task, if completion_announced || fixture_completion_task_enabled() => {
+                loop_state.claude_readiness_fallback.native_state_seen |= observations.native_state_seen;
                 let outcome = result?;
                 if let Some(session) = detached_session(&outcome) {
                     loop_state.delivery_episode = delivery.episode;
@@ -19090,6 +19165,16 @@ async fn drive_st2_native(
 
                 if observations.retry_pending {
                     match observations.drain_live(client, subject, driver, &mut loop_state.ready).await {
+                        Ok(ended) => completion_announced |= ended,
+                        Err(error) => note_driver_tick_failure(subject, error, &mut last_control_warning),
+                    }
+                    if completion_announced { continue; }
+                }
+
+                if driver == "claude" && mailbox.subscription.is_some() {
+                    match publish_claude_readiness_fallback(
+                        client, &mailbox, &mut observations, &mut loop_state, current_unix_ms()? as u64,
+                    ).await {
                         Ok(ended) => completion_announced |= ended,
                         Err(error) => note_driver_tick_failure(subject, error, &mut last_control_warning),
                     }
@@ -19241,8 +19326,9 @@ async fn drive_st2_native(
                         && let Some(observed) = st_drivers::harness_state::read(&harness_state_path, None)
                     {
                         // A session claim is a startup fence, not an observation. Preserve the
-                        // explicit `starting` state until a hook or the initialized ST3 channel
-                        // supplies positive evidence; publishing the derived `claimed`
+                        // explicit `starting` state until a native observation supplies positive
+                        // evidence. Push Claude startup readiness has a separate grace fallback;
+                        // publishing the derived `claimed`
                         // indeterminacy would erase the more precise lifecycle state.
                         let claim_placeholder =
                             observed.state == st_drivers::harness_state::Activity::Unknown
@@ -19565,6 +19651,7 @@ struct NativeObservations {
     runtime: String,
     enabled: bool,
     provider_incarnation: Option<String>,
+    native_state_seen: bool,
     evidence_deadline: Option<serde_json::Value>,
     retry_pending: bool,
     initial_wake: bool,
@@ -19592,6 +19679,11 @@ impl NativeObservations {
             st_drivers::harness_state::read_raw_at(raw, None, st_drivers::message::now_ms())
                 .evidence_incarnation
         });
+        let native_state_seen = snapshot.as_deref().is_some_and(|raw| {
+            let state = st_drivers::harness_state::read_raw_at(raw, None, st_drivers::message::now_ms());
+            !(state.state == st_drivers::harness_state::Activity::Unknown
+                && state.reason.as_deref() == Some("claimed"))
+        });
         let evidence_deadline = snapshot
             .as_deref()
             .and_then(|raw| serde_json::from_slice(raw).ok());
@@ -19600,6 +19692,7 @@ impl NativeObservations {
             runtime: runtime.into(),
             enabled,
             provider_incarnation,
+            native_state_seen,
             evidence_deadline,
             retry_pending: enabled,
             initial_wake: enabled,
@@ -19758,6 +19851,11 @@ impl NativeObservations {
                         == st_drivers::harness_state::Activity::Unknown
                         && observed.reason.as_deref() == Some("claimed");
                     if !placeholder {
+                        // Even an unknown, blocked or ended native state prevents a synthetic
+                        // startup-ready claim. Mark before POST, including a failed publication.
+                        if event.runtime_incarnation == self.runtime && source_driver == driver {
+                            self.native_state_seen = true;
+                        }
                         publish_harness_activity(
                             &publisher,
                             subject,
@@ -23189,6 +23287,111 @@ fn push_mailbox_enabled() -> bool {
     std::env::var("ST3_MAILBOX_TRANSPORT").as_deref() == Ok("push")
 }
 
+/// Startup-only fallback for a channel whose provider never writes native state.
+/// The single driver loop orders this before any subsequently published hook event.
+/// A native state permanently suppresses it, including failed/unknown/terminal state.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ClaudeReadinessFallback {
+    initialized_at_ms: Option<u64>,
+    native_state_seen: bool,
+}
+impl ClaudeReadinessFallback {
+    fn observe_attachment(&mut self, checked: &Result<st3::mailbox::Attachment>, now_ms: u64) {
+        if checked.as_ref().is_ok_and(|attachment| attachment.attached) {
+            self.initialized_at_ms.get_or_insert(now_ms);
+        } else {
+            self.initialized_at_ms = None;
+        }
+    }
+}
+
+async fn publish_claude_readiness_fallback(
+    client: &Client,
+    mailbox: &NativeMailbox,
+    observations: &mut NativeObservations,
+    state: &mut NativeLoopState,
+    now_ms: u64,
+) -> Result<bool> {
+    state.claude_readiness_fallback.native_state_seen |= observations.native_state_seen;
+    if !observations.enabled
+        || state.ready
+        || state.claude_readiness_fallback.native_state_seen
+        || !state
+            .claude_readiness_fallback
+            .initialized_at_ms
+            .is_some_and(|started| now_ms.saturating_sub(started) >= 15_000)
+    {
+        return Ok(false);
+    }
+    let fence = &mailbox.fence;
+    anyhow::ensure!(
+        fence.incarnation == observations.runtime && fence.component == "title",
+        "the Claude readiness fallback belongs to another native mailbox incarnation"
+    );
+    // A bounded drain may leave a backlog. The current runtime snapshot still reveals
+    // native state already queued behind that backlog, without granting readiness.
+    if let Some(raw) =
+        st_drivers::harness_events::read_runtime_state(&observations.dir, &observations.runtime)?
+    {
+        let observed = st_drivers::harness_state::read_raw_at(&raw, None, now_ms);
+        if !(observed.state == st_drivers::harness_state::Activity::Unknown
+            && observed.reason.as_deref() == Some("claimed"))
+        {
+            observations.native_state_seen = true;
+            state.claude_readiness_fallback.native_state_seen = true;
+            return Ok(false);
+        }
+    }
+    let checked =
+        checked_claude_attachment(client, &fence.subject, &fence.incarnation, fence).await;
+    state
+        .claude_readiness_fallback
+        .observe_attachment(&checked, now_ms);
+    if !checked?.attached {
+        return Ok(false);
+    }
+    // Consume queued native state first, independently of the wake/tick select order.
+    // If publication fails, no readiness claim may bypass that native observation.
+    let drained = observations
+        .drain_live(client, &fence.subject, "claude", &mut state.ready)
+        .await;
+    state.claude_readiness_fallback.native_state_seen |= observations.native_state_seen;
+    if drained? {
+        return Ok(true);
+    }
+    if state.ready || state.claude_readiness_fallback.native_state_seen {
+        return Ok(false);
+    }
+    let _: ClaimRecord = client
+        .post(
+            "/v1/claims",
+            &ClaimInput {
+                subject: fence.subject.clone(),
+                kind: "harness.observed".into(),
+                actor: Some(fence.subject.clone()),
+                fields: with_quiescence(BTreeMap::from([
+                    ("state".into(), json!("ready")),
+                    ("driver".into(), json!("claude")),
+                    ("transport".into(), json!("claude-channel")),
+                    ("incarnation_id".into(), json!(fence.incarnation)),
+                    (
+                        "reason".into(),
+                        json!("channelInitializedWithoutNativeState"),
+                    ),
+                ])),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!(
+                    "claude-hookless-ready:{}:{}",
+                    fence.subject, fence.incarnation
+                )),
+            },
+        )
+        .await?;
+    state.ready = true;
+    Ok(false)
+}
+
 async fn check_claude_attachment(
     client: &Client,
     subject: &str,
@@ -23199,6 +23402,7 @@ async fn check_claude_attachment(
 ) -> Result<()> {
     let fence = &mailbox.fence;
     let mut checked = checked_claude_attachment(client, subject, incarnation, fence).await;
+    state.claude_readiness_fallback.observe_attachment(&checked, current_unix_ms()? as u64);
     // Readiness is independent of diagnostic publication. A rejected or uncertain
     // POST must not silence a current subscription's readiness report.
     report_claude_attachment(mailbox, &checked, state.claude_attachment_terminal.as_ref())?;
@@ -26917,6 +27121,7 @@ mod tests {
                 claude_attachment_pending: None,
                 claude_attachment_reconciled: false,
                 claude_attachment_terminal: None,
+                claude_readiness_fallback: ClaudeReadinessFallback::default(),
             },
         };
         let back: DriverResume =
@@ -32353,5 +32558,75 @@ mission "review" state="ready" {
             "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
         })).unwrap();
         tokio::time::timeout(Duration::from_secs(1), observations.recv()).await.unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod terminal_ui_tests {
+    use super::*;
+
+    #[test]
+    fn plain_st_requires_two_terminals_and_no_seat() {
+        for arguments in [1, 2] {
+            for stdin in [false, true] {
+                for stdout in [false, true] {
+                    for seat in [false, true] {
+                        assert_eq!(
+                            plain_ui_requested(arguments, stdin, stdout, seat),
+                            arguments == 1 && stdin && stdout && !seat
+                        );
+                    }
+                }
+            }
+        }
+        assert!(Cli::try_parse_from(["st"]).is_err());
+    }
+
+    #[test]
+    fn terminal_ui_arguments_and_help_match_the_documented_surface() {
+        Cli::command().debug_assert();
+        for flag in [
+            "--client",
+            "--local",
+            "--space",
+            "--classic",
+            "--demo",
+            "--glass",
+            "--glasses",
+        ] {
+            let mut argv = vec!["st", "ui", flag];
+            if matches!(flag, "--space" | "--glass") {
+                argv.push("harbor");
+            }
+            assert!(matches!(
+                Cli::try_parse_from(argv).unwrap().command,
+                Command::Ui(_)
+            ));
+        }
+        assert!(Cli::try_parse_from(["st", "ui", "--client", "--local"]).is_err());
+        assert!(Cli::try_parse_from(["st", "ui", "--space", "harbor", "--classic"]).is_err());
+        assert!(Cli::try_parse_from(["st", "ui", "pair"]).is_err());
+        assert!(Cli::try_parse_from(["st", "ui", "--space"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "st", "ui", "--demo", "--dump", "--click", "5,8", "--pane", "home"
+            ])
+            .is_ok()
+        );
+        for flag in ["--version", "-V"] {
+            let error = match Cli::try_parse_from(["st", "ui", flag]) {
+                Err(error) => error, Ok(_) => panic!("version exits"),
+            };
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        }
+        let error = match Cli::try_parse_from(["st", "ui", "--help"]) {
+            Err(error) => error,
+            Ok(_) => panic!("help exits"),
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(error.to_string().contains("st ui"));
+        let help = cli_help::root_help(false);
+        assert!(help.contains("Open the terminal interface"));
+        assert!(help.contains("Run st in a terminal"));
     }
 }

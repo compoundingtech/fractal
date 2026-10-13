@@ -89,3 +89,13 @@ snapshots and fresh fences; there is no offline mutation queue.
 
 Run `cargo test --locked -p st3-feed -p stui` to check the extracted feed, cursor-gap recovery,
 cache and consumers. Server-backed tests run outside an st seat's `ST_AGENT` environment.
+
+Optional screen inventories use `Command::Inventories(Inventories { .. })`.
+`InventorySupport` reports admission and the member build once per connection;
+only granted `inventory-collections` and sixteen-slot `collections` capabilities
+activate them. At most six inventory slots (one usage period) coexist with the
+existing ten reserved window, conversation and terminal slots.
+`Window::Inventory(Inventory::Usage(hours))` identifies the requested period, so
+a late old-period frame cannot overwrite the new period. Retained server resyncs
+report staleness; a permanent refusal does not silently switch to HTTP. The UI
+owns its leave grace and decides its compatibility reads on older members.

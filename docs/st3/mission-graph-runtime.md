@@ -38,7 +38,7 @@ not replace it. The ready state is written before the diagnosis. Diagnostic and 
 are logged without failing admission or execution. The next evaluation records recovery when
 the run no longer waits for first readiness, and termination also closes the fault. Its durable
 fault and recovery history remain available. An open fault appears immediately in `st missions show
-mission-run/EXAMPLE`, `st doctor` (`mission-first-readiness`), and the mission blocker in stui.
+mission-run/EXAMPLE`, `st doctor` (`mission-first-readiness`), and the mission blocker in the terminal UI.
 The leaf mission-run response adds optional `scheduler_fault`. Mission client views project
 `state: "blocked"` while the fault is open and set `run.blocker.scope` to
 `"scheduler/first-readiness"` with the fault reason. Pending steps also show that reason. These
@@ -1138,7 +1138,8 @@ without `report-stalls` / `report_stalls` keep stall reports enabled with the ex
 (30 minutes unless set).
 
 A stall is measured from the run's last sign of life: its last state change, any step's last
-change or progress record, and the end of any step's lease. A run in cleanup, and a run that
+change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
+including loop rounds and nested work, counts too. A run in cleanup, and a run that
 still waits on `after`, cannot stall. A stalled run is not failed and can go on; if it makes progress and then goes
 quiet again, that is a new stall and a new message. The daemon keeps each run's stall limit as a
 deadline on that run's evaluation, so a quiet fleet does no work to watch for stalls.
