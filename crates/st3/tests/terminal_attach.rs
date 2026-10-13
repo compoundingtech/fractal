@@ -970,7 +970,7 @@ async fn expose_fabric_points_fabric_at_the_daemons_terminal_socket() {
     let root = tempfile::tempdir().unwrap();
     remote_terminal(root.path(), &incarnation(CREATED_AT));
     fabric_shim(root.path(), None);
-    let mut command = st3::test_support::command(test_bin!("st3-fixture").to_path_buf());
+    let mut command = st3::test_support::command(test_bin!("st3-fixture"));
     command
         .env_remove("ST_AGENT")
         .env_remove("ST_MISSION_RUN")
