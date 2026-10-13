@@ -5,10 +5,16 @@ Smalltalk next to the default one. Use it to try a build without risking your wo
 to see the first run again from a clean start.
 
 ```sh
+st --instance trial setup
 st --instance trial service install
 st --instance trial agents ls
 st --instance trial uninstall --yes --erase-local-graph
 ```
+
+`st --instance NAME setup` runs the first-run questions for the instance: it installs `st3`, `st` and
+`pty` into the instance's own `bin/` (nothing goes on your login PATH or into `~/.local/bin`), and
+the built-in expert works in the instance's `agents/` directory. Run the instance's commands from
+there, or with `--instance`.
 
 A name is 1 to 24 lowercase letters, digits and single hyphens. The flag works before or after the
 subcommand and wins over the environment variable. Inside an instance, a different name is an

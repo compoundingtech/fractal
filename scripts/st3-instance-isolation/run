@@ -78,6 +78,14 @@ stop_daemons() {
   daemon_log=instance-daemon.log
   start_daemon "${inst[@]}"
   test -d "$home/.st-instance/proof/state" && echo "instance state: ok"
+  # First-run setup for the instance: its binaries go below the instance, never into ~/.local/bin.
+  "${inst[@]}" setup --person avery --yes --service false >"$out/instance-setup.txt" 2>&1 \
+    || { echo "FAIL: instance setup"; cat "$out/instance-setup.txt"; exit 1; }
+  for name in st3 st pty; do
+    test -e "$home/.st-instance/proof/bin/$name" || { echo "FAIL: instance bin/$name is missing"; exit 1; }
+  done
+  test ! -e "$home/.local/bin" || { echo "FAIL: setup touched the default bin directory"; exit 1; }
+  echo "instance setup: binaries are in the instance"
   "${inst[@]}" skill install >/dev/null
   "${inst[@]}" agents ls || true
   "${inst[@]}" uninstall --dry-run
