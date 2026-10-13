@@ -103,11 +103,12 @@ const formIn = (root: HTMLElement) => {
   return form
 }
 const laneIn = (root: HTMLElement) => within(root).getByTestId('question-lane')
-const nativeTitles = (root: Element) => root.querySelectorAll('[title]').length
-/** Every surface: no native title tooltips and no placeholder "Unknown" copy. The detector is checked against a planted title first. */
+/** Native tooltips come from non-empty titles; React Aria's hidden inputs carry `title=""` to suppress them. */
+const nativeTitles = (root: Element) => root.querySelectorAll('[title]:not([title=""])').length
+/** Every surface: no native title tooltips and no placeholder "Unknown" copy. The detector is checked against planted titles first. */
 const assertHygiene = async (root: HTMLElement) => {
   const planted = document.createElement('div')
-  planted.innerHTML = '<span title="planted"></span>'
+  planted.innerHTML = '<span title="planted"></span><input title="">'
   await expect(nativeTitles(planted)).toBe(1)
   await expect(nativeTitles(root)).toBe(0)
   await expect(root.textContent ?? '').not.toMatch(/unknown/i)
