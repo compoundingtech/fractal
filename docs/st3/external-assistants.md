@@ -55,6 +55,7 @@ Reject missing owner configuration, remote, agent, non-owner, absent-consent, un
 ## B. Explicit proof-gated reads
 
 Use native snapshot/page envelope semantics and typed generated clients, never CLI output, KDL, arbitrary claim parsing, or prose scraping. The six scopes are closed and unrelated person scopes are not accepted:
+The attention, missions, and agents pages retain the optional native `sync` notice during replication catch-up or divergence. Its closed `SyncNotice` contract is shared with ordinary pages and decoded by the generated SDKs.
 
 | GET route under `/v1/client/assistant/` | Scope | Allowed fields, in addition to snapshot/page metadata |
 | --- | --- | --- |
