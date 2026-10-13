@@ -1,14 +1,15 @@
 import { spawnSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { ANCHOR_MS, catalog, loadWorld, type Slice } from '../src/index.ts'
-import { decodeFixtures, decodeSlice, everyVariant } from '../scripts/decode.ts'
+import { decodeFixtures, decodeRecordings, decodeSlice, everyVariant, RECORDINGS_DIR } from '../scripts/decode.ts'
 import { checkTree, FIXTURES_DIR, generate } from '../scripts/emit.ts'
-import { checkPublicRepo, scanContent, scanIdentities, scanTree, scanVocabulary } from '../scripts/scan.ts'
+import { checkPublicRepo, scanContent, scanIdentities, scanRecordingContent, scanTree, scanVocabulary } from '../scripts/scan.ts'
+import { decodeRecording } from '../scripts/recordings.ts'
 
 const scratch: string[] = []
 afterEach(() => scratch.splice(0).forEach((dir) => rmSync(dir, { recursive: true, force: true })))
@@ -58,6 +59,33 @@ describe('decode gate', () => {
       'fleet-mid-refactor/roster/state/agents/1',
     ])
   })
+
+  it('strict-decodes imported raw and normalized slices at anchor and rebased time', () => {
+    expect(decodeRecordings(RECORDINGS_DIR, [ANCHOR_MS, Date.UTC(2101, 6, 4, 3, 2, 1, 7)])).toEqual([])
+  })
+
+  for (const suffix of ['script.json', 'recording.jsonl', 'normalized.json']) {
+    it('rejects a corrupt recording ' + suffix + ' input independently', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'st3-scenarios-recording-decode-'))
+      scratch.push(dir)
+      cpSync(RECORDINGS_DIR, dir, { recursive: true })
+      writeFileSync(join(dir, 'fleet-mid-refactor-proof.' + suffix), '{}\\n')
+      expect(decodeRecordings(dir).length).toBeGreaterThan(0)
+    })
+  }
+
+  for (const suffix of ['recording.jsonl', 'normalized.json']) {
+    it('detects schema-valid stale content in ' + suffix, () => {
+      const dir = mkdtempSync(join(tmpdir(), 'st3-scenarios-recording-stale-'))
+      scratch.push(dir)
+      cpSync(RECORDINGS_DIR, dir, { recursive: true })
+      const path = join(dir, 'fleet-mid-refactor-proof.' + suffix)
+      const rows = decodeRecording(readFileSync(path, 'utf8')).map((row) => row.kind === 'pty_output'
+        ? { ...row, value: { ...row.value, text: 'different captured PTY bytes' } } : row)
+      writeFileSync(path, JSON.stringify(rows))
+      expect(decodeRecordings(dir).map(({ message }) => message)).toContain('normalized recording is stale or corrupt')
+    })
+  }
 })
 
 describe('freshness gate', () => {
@@ -79,6 +107,16 @@ describe('freshness gate', () => {
         { path: 'fleet-mid-refactor/stray.json', problem: 'extra' },
       ]),
     )
+  })
+})
+
+describe('recording input budget', () => {
+  it('keeps committed scripts, raw captures and normalized oracles within 12 MiB combined', () => {
+    const names = readdirSync(RECORDINGS_DIR).filter((name) => /\.(?:script\.json|recording\.jsonl|normalized\.json)$/u.test(name))
+    expect(names).toContain('fleet-mid-refactor-proof.normalized.json')
+    const bytes = names.reduce((sum, name) => sum + statSync(join(RECORDINGS_DIR, name)).size, 0)
+    expect(bytes).toBeGreaterThan(0)
+    expect(bytes).toBeLessThanOrEqual(12 * 1024 * 1024)
   })
 })
 
@@ -129,6 +167,27 @@ describe('privacy gate', () => {
     expect(scanVocabulary('bank.ts', "  'merged on 2029-03-04',")).toHaveLength(1)
     expect(scanVocabulary('bank.ts', "  'standup at 9:30',")).toHaveLength(1)
     expect(scanVocabulary('bank.ts', "  'about an hour ago',")).toEqual([])
+  })
+
+  it('rejects scratch paths and live recording capabilities, allowing only numbered placeholders', () => {
+    for (const key of ['capability', 'stream_capability']) {
+      expect(scanRecordingContent('recordings/x.json', JSON.stringify({ [key]: 'capability#1' }))).toEqual([])
+      expect(scanRecordingContent('recordings/x.json', JSON.stringify({ [key]: 'live-' + 'scratch-secret' })).map(({ rule }) => rule))
+        .toContain('live terminal capability')
+    }
+    expect(scanRecordingContent('recordings/x.json', JSON.stringify({ cwd: '/' + 'tmp/recorder-owned' })).map(({ rule }) => rule)).toContain('scratch path')
+  })
+
+  it('applies recording hygiene to raw, script and normalized package inputs', () => {
+    const root = mkdtempSync(join(tmpdir(), 'st3-scenarios-recording-scan-'))
+    scratch.push(root)
+    expect(spawnSync('git', ['init', '-q'], { cwd: root }).status).toBe(0)
+    for (const dir of ['fixtures', 'pkg/recordings', 'pkg/src/vocabulary']) mkdirSync(join(root, dir), { recursive: true })
+    for (const suffix of ['script.json', 'recording.jsonl', 'normalized.json']) {
+      writeFileSync(join(root, 'pkg/recordings/proof.' + suffix), JSON.stringify({ capability: 'live-' + 'scratch-secret' }))
+    }
+    const findings = scanTree({ fixturesDir: join(root, 'fixtures'), packageRoot: join(root, 'pkg'), vocabularyDir: join(root, 'pkg/src/vocabulary') })
+    expect(findings.filter(({ rule }) => rule === 'live terminal capability')).toHaveLength(3)
   })
 
   it('scans every published file of the package, including root-level files, but not ignored output or node_modules', () => {

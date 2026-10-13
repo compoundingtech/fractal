@@ -123,6 +123,16 @@ export const scanIdentities = (path: string, text: string): Finding[] =>
       .map((match) => ({ path, line: index + 1, rule: `identity outside the namespace: ${match[0]}` })),
   )
 
+/** Raw captures contain registered scratch identities; only nonfunctional capability tokens are public. */
+export const scanRecordingContent = (path: string, text: string): Finding[] => [
+  ...scanContent(path, text),
+  ...text.split('\n').flatMap((line, index) => [
+    ...(/\/tmp\/|st3-scenario-|nix-shell\./u.test(line) ? [{ path, line: index + 1, rule: 'scratch path' }] : []),
+    ...([...line.matchAll(/"(?:stream_capability|capability)"\s*:\s*"([^"]*)"/gu)].some((match) => !/^capability#[1-9]\d*$/u.test(match[1]!))
+      ? [{ path, line: index + 1, rule: 'live terminal capability' }] : []),
+  ]),
+]
+
 export const scanVocabulary = (path: string, text: string): Finding[] =>
   text.split('\n').flatMap((line, index) => {
     const code = line.replace(/\/\/.*$/, '').replace(/^\s*\*.*$/, '')
@@ -172,7 +182,8 @@ export const scanTree = ({ fixturesDir, packageRoot, vocabularyDir }: ScanRoots)
   const rel = (path: string) => relative(REPO_ROOT, path)
   return [
     ...filesUnder(fixturesDir).flatMap((path) => [...scanContent(rel(path), read(path)), ...scanIdentities(rel(path), read(path))]),
-    ...publishedFiles(packageRoot).flatMap((path) => scanContent(rel(path), read(path))),
+    ...publishedFiles(packageRoot).flatMap((path) => relative(packageRoot, path).startsWith('recordings/')
+      ? scanRecordingContent(rel(path), read(path)) : scanContent(rel(path), read(path))),
     ...filesUnder(vocabularyDir).flatMap((path) => scanVocabulary(rel(path), read(path))),
   ]
 }

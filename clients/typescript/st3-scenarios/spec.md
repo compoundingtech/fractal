@@ -486,12 +486,18 @@ Proof captures may be committed incrementally; one proof is not this narrative c
 frames and HTTP exchanges alike:
 
 1. **Identities:** scratch ids map to the world's namespace through one id map, built from the
-   script. An id without a mapping fails the import. One scratch daemon represents one cast
+   script's explicit `id_map`, including deterministic generated identities and path identities.
+   An unregistered schema-located identity fails at its exact pointer. Opaque native payloads
+   are not recursively rewritten. One scratch daemon represents one cast
    host: all captured host-bearing data maps to the narrative terminal's owning cast host;
    other hosts remain synthetic.
 2. **Time:** receive times become offsets from the explicitly marked last pre-timeline frame,
    rounded to milliseconds, never scaled. Historical past comes from native transcript
    timestamps. Schema instants are rebased to the anchor as in [Time](#time-d5).
+   The header's wall-clock origin is paired with the monotonic receive clock; the baseline
+   witness is ordinal 7 at receive 30543 ms in the proof capture. Offset zero refers to that
+   frame, not the later baseline marker. Replay starts its clock before the earliest input,
+   so pre-baseline HTTP reads, attach and subscription commands execute at negative offsets.
 3. **Fences and cursors:** each distinct raw `store_index` becomes an ordinal store version
    (`store#1`, `store#2`, …) in increasing order, and a snapshot id becomes the token of its store
    version and host; page cursors become `cursor#n`. Equal raw values get equal tokens, so two
@@ -508,23 +514,40 @@ Each recording has a **fidelity world**, `recorded-<name>`: every slice comes fr
 none from factories. Fidelity worlds are test-only; they are not in the catalog or in
 `fixtures/scenarios`.
 
+The TypeScript proof world is `recorded-fleet-mid-refactor-proof`, defined only in the test tree.
+Its six slices are imported from captured state and events. Optional typed `recording` transport
+metadata preserves frame ordinals, receive offsets, selectors, event indices (or baseline),
+replacement/`has_more` flags and fences; HTTP metadata preserves method, route, query, status,
+envelope ids, page boundaries and attach fields. Frame metadata never contains response items.
+HTTP timeline boundaries contain only entry-id selections and block-field presence: the captured
+HTTP page omitted native blocks that the socket carried for those same entries. Replay selects
+the entries from folded slice state and applies that projection without changing their other
+fields. Replay reconstructs item arrays and terminal values from the slices, not from the
+oracle's response table. The normalized oracle is a separate emitted recording input.
+
+
 The fidelity test replays `recorded-<name>` with `now` pinned to the anchor, sends the normalized
 commands and HTTP reads at their recorded offsets, normalizes the replay output with the same
 `N`, and compares with the normalized recording:
 
 - per subscription: the sequence of frames, each with its kind, boundaries (which items one frame
   carries), items, revisions, `order`, `has_more` and store-version token;
-- per HTTP read: route, query, status and body, with cursor tokens.
+- per HTTP exchange (including attach): method, route, query, status and full body, with cursor tokens.
 
 Fences are compared as tokens, so the oracle checks the equality relationships between fences
 (two frames at the same recorded store version share a replayed store version, and frames at
 different versions do not) without equal raw values. Fidelity worlds take each event's `store`
 from the recording; see [Store versions](#store-versions).
+The same `N` applies to replay outputs in normalized context: numeric slice stores become
+oracle `store#n` tokens without reranking; existing normalized tokens remain unchanged.
+Independent mutations to slice items/revisions and typed metadata `has_more`, frame boundaries,
+store fences and HTTP status must fail fidelity while leaving the oracle untouched.
 
-Narrative worlds reuse a recording's `conversation` and `terminal` slices and generate their
-other slices from the same cast. The fidelity oracle covers the recorded slices through the
-fidelity world; the narrative world's synthetic slices are covered by the decode and consumer
-gates. Edge-state worlds are synthetic.
+The required narrative end state reuses a recording's `conversation` and `terminal` slices and
+generates other slices from the same cast. This proof wave does not perform that cutover:
+the ordinary 24 catalog worlds and their fixture bytes remain unchanged. Edge-state worlds
+remain synthetic. The proof capture has a reusable attachment; it does not prove a single-use
+capability recording or complete native PTY-server asciicast.
 
 ## Replay (D8)
 
@@ -562,10 +585,11 @@ replay.actions  // actions the client submitted, in order, for test assertions
 ### Store versions
 
 The replay models one store per world, as st's SQLite store index is one counter per host. The
-initial state is store version 1. Each timeline event that changes state names its resulting
-version in `store`; synthetic worlds increment it by one per state-changing event, and fidelity
-worlds take it from the recording, so several recorded frames can share one version. Events that
-change no state (sync transport events) keep the current version.
+initial synthetic state is store version 1. Each timeline event that changes state names its
+resulting version in numeric `store`; synthetic worlds increment it by one per state-changing
+event. Fidelity worlds preserve imported versions unchanged, so several recorded events can share
+one version. Their baseline is not necessarily version 1: older HTTP fences may precede it.
+Events that change no state (sync transport events) keep the current version.
 
 - Every collection `snapshot`/`changes` frame, every terminal `screen` frame, and every page
   response carries a fence for the store version current when it is built; only conversation
@@ -573,6 +597,8 @@ change no state (sync transport events) keep the current version.
   version. A screen does not advance the store.
 - Subscriptions read without an intervening state change carry the same fence.
 - On each socket, `store_index` is nondecreasing; it increases only when the store advances.
+- Captured HTTP fences retain their published version even when it lags a newer socket fence;
+  fidelity does not impose global receive-order monotonicity across HTTP and socket streams.
 
 ### Replay dispatch
 
@@ -829,12 +855,17 @@ The path-filtered `fractal-web-execution` job runs these gates as lanes of `scri
    consumption check, including its negative
    case; size budget; no `Math.random`/`Date.now` in generators; no Effect import in runtime
    exports.
-2. Freshness: `emit --check`, including each file's `times` list.
+2. Freshness: `emit --check`, including each file's `times` list and the normalized recording
+   regenerated from committed script/raw inputs. Only `emit` writes normalized artifacts.
 3. Decode: every wire value in every committed slice and in every in-process variant is decoded
    with `@smalltalk/st3-client/schema` in strict mode, once at the anchor and once rebased to a
    random `now`. `huge` is the exception: every variant decodes at the anchor, and only its default
    slices decode at the random `now`, which runs the rebase path on scale-sized data and keeps the
    lane bounded. `unknown-fields` decodes tolerant and fails strict at exactly its declared paths.
+   Recording scripts, raw NDJSON and normalized JSON are decoded independently; imports
+   strict-decode all capture-derived slice values at anchor and rebased time. Corrupt or stale
+   inputs fail this gate. Combined script/raw/normalized recording bytes are limited to 12 MiB
+   independently of the unchanged scenario fixture budgets.
 4. Privacy: `scripts/check-public-repo` covers the committed files and fails the gate when it
    cannot run, is killed, or exits non-zero without a finding in this package or the scenarios.
    `scripts/scan.ts` walks every published file of the package (skipping `node_modules` and
@@ -846,6 +877,10 @@ The path-filtered `fractal-web-execution` job runs these gates as lanes of `scri
    `example.org` or `example.net` name. It checks that every subject reference is in the
    [identity namespace](#identity-namespace), and rejects date and clock patterns in vocabulary
    banks.
+   Recording inputs additionally reject scratch paths and live terminal capabilities; only
+   numbered nonfunctional `capability#n` placeholders are allowed. Registered scratch identities
+   in raw captures are validated by the script-directed normalization gate, not treated as
+   already-normalized scenario identities.
 5. Consumers: the SDK sync-matrix fold, stui's contract test, the Rust and Swift rebase vectors
    and the fractal-web bundle check run in their own jobs (see below).
 
