@@ -1621,6 +1621,9 @@ fn refresh_fleet_worker(no_service: bool) -> Result<()> {
         st3::service::install(Config::load_with_fleet(None)?)?;
     } else {
         println!("Restart st3 replication-worker for the change to take effect.");
+        println!(
+            "The old worker no longer publishes endpoints after its settings change; restart it to resume publication."
+        );
     }
     Ok(())
 }
@@ -1661,14 +1664,6 @@ async fn run_fleet_transports(
         );
     }
     let mut endpoints = member_endpoints(client, &config.node).await?;
-    let fabric = Fabric::new(
-        resolve_tool(file.fabric.as_deref(), "fabric")
-            .context("this machine cannot use Fabric: fabric is not installed")?,
-    );
-    let node = fabric
-        .id()
-        .await
-        .context("this machine cannot use Fabric")?;
     let protocol = file
         .fabric_protocol
         .clone()
@@ -1686,13 +1681,23 @@ async fn run_fleet_transports(
             let port = file
                 .port
                 .context("adding Fabric requires this member's configured replication port")?;
-            anyhow::ensure!(port != 0,
-                "adding Fabric requires a fixed nonzero replication port; run st fleet mode listening --port PORT first");
+            anyhow::ensure!(
+                port != 0,
+                "adding Fabric requires a fixed nonzero replication port; run st fleet mode listening --port PORT first"
+            );
             let protocol = fabric_protocol.unwrap_or(protocol);
             anyhow::ensure!(
                 !protocol.trim().is_empty(),
                 "Fabric protocol must not be empty"
             );
+            let fabric = Fabric::new(
+                resolve_tool(file.fabric.as_deref(), "fabric")
+                    .context("this machine cannot use Fabric: fabric is not installed")?,
+            );
+            let node = fabric
+                .id()
+                .await
+                .context("this machine cannot use Fabric")?;
             fabric
                 .expose(&protocol, &format!("127.0.0.1:{port}"))
                 .await
@@ -1744,15 +1749,18 @@ async fn run_fleet_transports(
             file.transports.retain(|transport| transport != "fabric");
             // Retain the existing protocol setting so a later add can restore it.
             save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
-            let result = fabric.unexpose(&protocol).await;
+            let result = match resolve_tool(file.fabric.as_deref(), "fabric") {
+                Some(program) => Fabric::new(program).unexpose(&protocol).await,
+                None => Err(anyhow::anyhow!("fabric is not installed")),
+            };
             drop(lock);
             // Refresh even when cleanup fails: no worker may keep using the removed carrier.
             refresh_fleet_worker(no_service)?;
-            result.with_context(|| {
-                format!(
-                    "Fabric endpoint removed; unexposure failed; run fabric unexpose {protocol}"
-                )
-            })?;
+            if let Err(error) = result {
+                println!(
+                    "Fabric endpoint removed; unexposure still needs cleanup: {error:#}. When Fabric is available, run fabric unexpose {protocol}"
+                );
+            }
             println!(
                 "Fabric removed; remaining transports: {}.",
                 file.transports.join(",")

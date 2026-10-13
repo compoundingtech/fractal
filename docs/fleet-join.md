@@ -906,10 +906,12 @@ remove it and add it with `--fabric-protocol PROTOCOL`. Configure Fabric trust a
 the peers as described below.
 
 Removing Fabric first publishes the endpoint list without Fabric, then unexposes the saved
-protocol. It refuses an absent or unusable Fabric transport, the last configured transport,
+protocol. It refuses an absent configured Fabric transport, the last configured transport,
 or a listening member with no usable remaining configured endpoint. The saved protocol is
 retained for a later add. If unexposure fails, the endpoint stays withdrawn and the command
-reports the exact `fabric unexpose PROTOCOL` cleanup command.
+reports the exact `fabric unexpose PROTOCOL` cleanup command. Withdrawal succeeds even when
+the Fabric executable or daemon is unavailable, so a broken carrier can be removed; the
+reported cleanup remains to be done when Fabric is available.
 
 If endpoint publication fails after the settings write, the command reports that partial
 result and keeps the exposure reachable: a lost response can follow a committed claim.
@@ -921,6 +923,8 @@ to apply its new transport selection. Until that restart, the old worker cannot 
 Fabric or republish its previous endpoint list after a settings change. The worker restores
 the configured exposure from `fleet.toml` when it starts. `st fleet status` shows the local
 configured transports and enabled Fabric protocol, including before the worker restart.
+A local settings read or lock failure stops the worker with an error. Repair that settings
+problem and restart the worker to restore publication and exposure.
 
 The endpoint claim's shape is unchanged. Older membership-capable builds read the new claim
 through their existing membership fold and derive routes from its complete endpoint list:
@@ -1362,7 +1366,10 @@ files. For each test, the "fails if" clause is the assertion that would catch a 
     are checked, as is sync over loopback after removal and restart.
 17. `fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged`: refused exposure
     leaves settings and membership unchanged; default protocol persistence, last-transport
-    refusal, unavailable remaining carriers, and unusable Fabric are checked.
+    refusal, unavailable remaining carriers, and rollback with unavailable Fabric are checked.
+18. `a_local_settings_failure_fails_the_worker_and_repair_allows_restart`: a temporary settings
+    read error fails the whole worker visibly, then repairing the file and restarting restores
+    endpoint publication and actual graph sync.
 
 The docs step adds `readme_multi_machine_section_runs` to this file. It extracts the commands from
 the README section on running st on more than one machine and runs them against isolated nodes.

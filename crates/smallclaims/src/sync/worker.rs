@@ -415,6 +415,7 @@ pub async fn run<B: Backend>(
     wake: watch::Sender<u64>,
     routes: Router<PeerState<B>>,
 ) -> Result<()> {
+    let mut settings_tasks = tokio::task::JoinSet::new();
     let fleet_id = config.fleet_id.as_str();
     let secret_file = config.secret_file.as_path();
     let member_key = match &config.fleet {
@@ -586,7 +587,7 @@ pub async fn run<B: Backend>(
                 .fabric_protocol
                 .clone()
                 .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
-            tokio::spawn(keep_fabric_exposed(
+            settings_tasks.spawn(keep_fabric_exposed(
                 fabric,
                 protocol,
                 address,
@@ -596,7 +597,7 @@ pub async fn run<B: Backend>(
                 file.clone(),
             ));
         }
-        tokio::spawn(keep_endpoints_published(
+        settings_tasks.spawn(keep_endpoints_published(
             backend,
             file.mode.as_str(),
             endpoints.clone(),
@@ -604,19 +605,33 @@ pub async fn run<B: Backend>(
             file.clone(),
         ));
     }
-    // A dial-out member accepts no connections.
-    let Some(listener) = listener else {
-        std::future::pending::<()>().await;
-        return Ok(());
+    let serving = async move {
+        // A dial-out member accepts no connections, but still supervises publication.
+        let Some(listener) = listener else {
+            return std::future::pending::<Result<()>>().await;
+        };
+        use axum::serve::ListenerExt as _;
+        let listener = listener.tap_io(|tcp| {
+            if let Err(error) = tcp.set_nodelay(true) {
+                eprintln!("st: could not disable Nagle on peer socket: {error}");
+            }
+        });
+        axum::serve(listener, app).await?;
+        Ok(())
     };
-    use axum::serve::ListenerExt as _;
-    let listener = listener.tap_io(|tcp| {
-        if let Err(error) = tcp.set_nodelay(true) {
-            eprintln!("st: could not disable Nagle on peer socket: {error}");
-        }
-    });
-    axum::serve(listener, app).await?;
-    Ok(())
+    tokio::select! {
+        result = serving => result,
+        result = settings_task_failure(&mut settings_tasks) => result,
+    }
+}
+
+/// A deliberate settings retirement leaves outbound sync running until the operator's
+/// restart. A local settings failure must fail the worker visibly, not strand two tasks.
+async fn settings_task_failure(tasks: &mut tokio::task::JoinSet<Result<()>>) -> Result<()> {
+    while let Some(result) = tasks.join_next().await {
+        result.context("fleet settings task failed")??;
+    }
+    std::future::pending::<Result<()>>().await
 }
 
 /// The endpoints this member announces, as its transports come up.
@@ -741,15 +756,13 @@ async fn keep_fabric_exposed(
     mut connectivity: watch::Receiver<u64>,
     state_dir: PathBuf,
     settings: FleetFile,
-) {
+) -> Result<()> {
     loop {
-        let lock = match lock_current_settings(&state_dir, &settings).await {
-            Ok(Some(lock)) => lock,
-            Ok(None) => return,
-            Err(error) => {
-                eprintln!("st: cannot verify fleet settings before Fabric exposure: {error:#}");
-                return;
-            }
+        let Some(lock) = lock_current_settings(&state_dir, &settings)
+            .await
+            .context("cannot verify fleet settings before Fabric exposure")?
+        else {
+            return Ok(());
         };
         if fabric.expose(&protocol, &address.to_string()).await.is_ok()
             && let Ok(node) = fabric.id().await
@@ -880,15 +893,13 @@ async fn keep_endpoints_published<B: Backend>(
     endpoints: Endpoints,
     state_dir: PathBuf,
     settings: FleetFile,
-) {
+) -> Result<()> {
     loop {
-        let lock = match lock_current_settings(&state_dir, &settings).await {
-            Ok(Some(lock)) => lock,
-            Ok(None) => return,
-            Err(error) => {
-                eprintln!("st: cannot verify fleet settings before endpoint publication: {error:#}");
-                return;
-            }
+        let Some(lock) = lock_current_settings(&state_dir, &settings)
+            .await
+            .context("cannot verify fleet settings before endpoint publication")?
+        else {
+            return Ok(());
         };
         let _ = backend.publish_endpoints(mode, &endpoints.list()).await;
         drop(lock);

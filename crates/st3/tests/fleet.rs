@@ -3551,14 +3551,17 @@ async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged
     file.transports.push("loopback".into());
     file.fabric = Some(root.path().join("absent-fabric"));
     file.save(&node.state_dir()).unwrap();
-    let before = fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap();
-    let output = node.st(&["fleet", "transports", "remove", "fabric", "--no-service"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot use Fabric"));
-    assert_eq!(
-        fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
-        before
-    );
+    let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
+    assert!(output.contains("unexposure still needs cleanup"));
+    assert!(output.contains(&format!(
+        "run fabric unexpose {}",
+        file.fabric_protocol.as_deref().unwrap()
+    )));
+    assert_eq!(configured_file(&node).transports, ["loopback"]);
+    assert!(!member_has_fabric(
+        &node.st_json(&["fleet", "status"]),
+        "birch"
+    ));
     file.fabric = Some(fabric_shim(root.path(), &node.name));
     file.transports = vec!["loopback".into()];
     file.save(&node.state_dir()).unwrap();
@@ -3571,6 +3574,57 @@ async fn fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged
         fs::read(st3::config::FleetFile::path(&node.state_dir())).unwrap(),
         before
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_settings_failure_fails_the_worker_and_repair_allows_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let a = anchor(root.path(), "spruce").await;
+    let mut b = joined(root.path(), &a, "willow", &[]).await;
+    b.wait_listening().await;
+    let path = st3::config::FleetFile::path(&b.state_dir());
+    let settings = configured_file(&b);
+    // This local defect must be visible as a failed worker, rather than leaving it alive
+    // forever with endpoint publication silently gone or adding local interval retries.
+    let unreadable = path.with_extension("unreadable");
+    std::os::unix::fs::symlink(&b.root, &unreadable).unwrap();
+    fs::rename(unreadable, &path).unwrap();
+    wait_until(
+        "local settings failure reaches the worker driver",
+        30,
+        || {
+            let exited = b.worker.as_mut().unwrap().try_wait().unwrap().is_some();
+            async move { exited }
+        },
+    )
+    .await;
+    let status = b.worker.as_mut().unwrap().wait().unwrap();
+    assert!(!status.success());
+    assert!(
+        fs::read_to_string(b.root.join("worker.stderr.log"))
+            .unwrap()
+            .contains("cannot verify fleet settings before endpoint publication")
+    );
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", b.port))
+            .await
+            .is_err()
+    );
+    settings.save(&b.state_dir()).unwrap();
+    b.stop_worker();
+    b.start_worker();
+    b.wait_listening().await;
+    b.note("after-settings-repair").await;
+    wait_for_notes(
+        &a,
+        &BTreeSet::from(["custom/fleet-test/after-settings-repair".to_owned()]),
+        30,
+        &[&a, &b],
+    )
+    .await;
 }
 
 /// Legacy helper ports must be unnecessary after membership advertises native Fabric routes.
