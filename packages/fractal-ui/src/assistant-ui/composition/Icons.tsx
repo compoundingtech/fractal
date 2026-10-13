@@ -8,7 +8,7 @@ export type IconName =
   | 'attach' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'spinner' | 'folder' | 'message' | 'dot'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle'
-  | 'person' | 'question' | 'radio' | 'radio-selected' | 'checkbox' | 'checkbox-checked' | 'arrow-right' | 'arrow-left'
+  | 'person' | 'question' | 'arrow-left'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   search: <><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></>,
@@ -39,11 +39,6 @@ const PATHS: Record<IconName, React.ReactNode> = {
   'stop-circle': <><circle cx="8" cy="8" r="6" /><rect x="5" y="5" width="6" height="6" rx=".5" fill="currentColor" stroke="none" /></>,
   person: <><circle cx="8" cy="5" r="2.5" /><path d="M2.5 14v-1a5.5 5.5 0 0 1 11 0v1" /></>,
   question: <><circle cx="8" cy="8" r="6" /><path d="M6.5 5.5a1.6 1.6 0 1 1 2.4 1.4C8.2 7.3 8 7.7 8 8.5M8 11h.01" /></>,
-  radio: <circle cx="8" cy="8" r="5.5" />,
-  'radio-selected': <><circle cx="8" cy="8" r="5.5" /><circle cx="8" cy="8" r="2.5" fill="currentColor" stroke="none" /></>,
-  checkbox: <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />,
-  'checkbox-checked': <><rect x="2.5" y="2.5" width="11" height="11" rx="1.5" /><path d="M5 8 7 10 11 5.5" /></>,
-  'arrow-right': <path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" />,
   'arrow-left': <path d="M13.5 8h-11M7 3.5 2.5 8 7 12.5" />,
 }
 
