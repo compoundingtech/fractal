@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The fractal-ui kit adds an interactive QuestionForm for harness asks: radio and checkbox options, an automatic Other row, per-question notes, Recommended badges, markdown option previews, a tab strip with answered markers that stacks below 600 px, and keyboard answering (arrows, 1-9, Tab, Enter). It ships with an Explore story.",
+  "replay": { "status": "none", "detail": "Kit presentation only." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "Additive kit export. The props mirror the application's question model; the application keeps its current read-only renderer until it adopts the kit form." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No manual steps required." },
+  "recovery": { "status": "none", "detail": "No persisted state changes." }
+}

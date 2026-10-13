@@ -31,6 +31,7 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Explore / Question form**: the interactive `QuestionForm` exploration. `Explore` has Scenario (S1 one question, S2 four tabbed questions, S3 multi-select with Other and a note), State (P pending, S submitted, E expired) and Width (W440, W1440) pickers. `OneQuestion`, `FourTabbed`, `MultiOtherNote` and `Expired` each have a 440 and a 1440 entry; their plays drive the keyboard flow and assert the submitted payload.
 
 ## Families
 
@@ -115,6 +116,14 @@ Failed-command reason lines select the final top-level named exception from a tr
 ### Thread header
 
 `ThreadHeader` shows **Toggle terminal drawer** only when `terminalAvailable` is set. A host that knows why the terminal is unavailable passes `terminalDisabledReason?: string`: the toggle then stays visible but disabled, keeps its exact name, and carries the reason as its accessible description and hover title. Without a reason the toggle stays hidden. `@smalltalk/fractal-ui/assistant-ui/shell` also exports `TerminalDrawer`. The `Thread header` stories cover both cases.
+
+### Question form
+
+`QuestionForm` (`assistant-ui/questions`) is the interactive form for harness asks, with omp ask tool parity. Its props and request, answer and state types mirror the application's `questions/model.ts` contract verbatim (`questions/model.ts` here; keep both in step). Single choice uses a React Aria `RadioGroup`, multi choice a `CheckboxGroup` and text answers a `TextField`. Every `allowOther` question gets an automatic **Other (type your own)** row whose text field opens when it is chosen; `allowNote` adds a per-question **Note** field that becomes `answers[id].note`. Recommended options carry an outlined **Recommended** badge. Markdown option previews render beside the options, or below them when stacked; command, diff and URL previews are not rendered yet.
+
+Several questions share a React Aria `Tabs` strip with one header chip per question and an answered check. Below `geometryNumbers.questionStack` (600) of measured form width the strip stacks vertically, switches to vertical arrow keys and moves previews below the options. Keyboard: arrows move between options (radios select as they move; checkboxes toggle with Space), 1–9 pick the numbered row (Other included), Tab from a question's last field opens the next question, and Enter submits a complete form or else moves to the next unanswered required question. Digits typed into text fields stay text.
+
+The host owns the request state and transport: `onSubmit` receives trimmed answers (empty Other or note text is omitted), and the host moves the request to `submitting`, `answered` or `failed`. Pending, submitting and failed requests render the form; `answered`, `answered-elsewhere`, `expired` (with its automatic answers) and `cancelled` render a read-only summary in which a question without an answer reads **No answer**. Drafts are controlled when `draft` is passed, and every change is reported through `onDraftChange`. Icon-only host actions (`onOpenTerminal`, `onJump`) use the kit `Tooltip`.
 
 
 ### Portable sync seam
