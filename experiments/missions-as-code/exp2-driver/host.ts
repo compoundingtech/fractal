@@ -1,11 +1,13 @@
 // Prints the host mission for a program: one agentless step whose exec is the driver.
-// Usage: node host.ts PROGRAM_FILE [--lab] [--name MISSION] [--extra "DRIVER FLAGS"]
+// Usage: node host.ts PROGRAM_FILE [--lab] [--name MISSION] [--ref doc/NAME@SHA] [--extra "DRIVER FLAGS"]
+// With --ref, the driver loads that stored version instead of a file path.
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 
 const file = resolve(process.argv[2]!)
 const lab = process.argv.includes("--lab")
-const program = (await import(pathToFileURL(file).href)).default
+const mod = await import(pathToFileURL(file).href)
+const program = mod.program ?? mod.default // a version bundle or a development .ts
 const opt = (flag: string) => {
   const i = process.argv.indexOf(flag)
   return i >= 0 ? process.argv[i + 1] : undefined
@@ -30,7 +32,7 @@ mission "${name}" state="ready" {
     exec "driver" {
       host "local"
       workspace "\${ST_WORKSPACE}"
-      command "node ${driver} --program ${file}${flags}"
+      command "node ${driver} --program ${opt("--ref") ?? file}${flags}"
       restart "on-failure"
     }
     gate "the program completed" {

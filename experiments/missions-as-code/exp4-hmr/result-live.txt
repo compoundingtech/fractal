@@ -1,0 +1,62 @@
+asked orchard/ship-change-hmr/hmr-5 to move to doc/mac/programs/orchard-ship-change@816da071bfd002308331233ef3bb1827ccdbb7c38006c70fa8b7c48065524019
+killing driver 1719542 after the move
+asked orchard/ship-change-hmr/hmr-6 to move to doc/mac/programs/orchard-ship-change@816da071bfd002308331233ef3bb1827ccdbb7c38006c70fa8b7c48065524019
+asked orchard/ship-change-hmr/hmr-6 to move to doc/mac/programs/orchard-ship-change@719a2d0e9ac31a0c7681c54c189fc80ea874c16252edf770a583cf527814e8bc
+== orchard/ship-change-hmr/hmr-5: completed
+2026-10-13T21:51:17.924Z started orchard/ship-change doc/mac/programs/orchard-ship-change@a0b7960588aea312bd3544cf0e8ba4e8bae036ec783c9a33a31d55233f2d4ffb as orchard/ship-change-hmr/hmr-5
+2026-10-13T21:51:20.268Z schedule step build
+2026-10-13T21:51:21.516Z schedule step docs
+2026-10-13T21:51:31.882Z failed build
+2026-10-13T21:51:31.936Z schedule timer build-backoff
+2026-10-13T21:51:32.021Z completed build-backoff
+2026-10-13T21:51:32.186Z schedule step build.2
+2026-10-13T21:51:36.152Z completed docs
+2026-10-13T21:51:46.242Z completed build.2
+2026-10-13T21:51:46.376Z schedule step review
+2026-10-13T21:51:46.402Z schedule timer review-deadline
+2026-10-13T21:51:48.772Z reload to doc/mac/programs/orchard-ship-change@816da071bfd002308331233ef3bb1827ccdbb7c38006c70fa8b7c48065524019: moved: the history replays exactly
+2026-10-13T21:51:50.110Z resumed orchard/ship-change doc/mac/programs/orchard-ship-change@816da071bfd002308331233ef3bb1827ccdbb7c38006c70fa8b7c48065524019 as orchard/ship-change-hmr/hmr-5: replaying 12 journal events
+2026-10-13T21:52:11.354Z completed review-deadline
+2026-10-13T21:52:11.544Z cancel review
+2026-10-13T21:52:11.698Z schedule ask review-overdue
+2026-10-13T21:52:17.014Z completed review-overdue
+2026-10-13T21:52:17.114Z schedule step review-reassigned
+2026-10-13T21:52:30.649Z completed review-reassigned
+2026-10-13T21:52:30.796Z schedule step security-scan
+2026-10-13T21:52:45.384Z completed security-scan
+2026-10-13T21:52:46.122Z schedule gate round-1/ci
+2026-10-13T21:53:03.183Z failed round-1/ci
+2026-10-13T21:53:04.600Z schedule step round-1/fix
+2026-10-13T21:53:16.987Z completed round-1/fix
+2026-10-13T21:53:17.161Z schedule gate round-2/ci
+2026-10-13T21:53:31.071Z completed round-2/ci
+2026-10-13T21:53:31.171Z completed: {"shipped":true,"rounds":2,"review":"review-reassigned completed"} (252 st calls, 11531 ms in st)
+-- reload answers
+moved c48065524019 the history replays exactly
+== orchard/ship-change-hmr/hmr-6: completed
+2026-10-13T21:51:54.232Z started orchard/ship-change doc/mac/programs/orchard-ship-change@a0b7960588aea312bd3544cf0e8ba4e8bae036ec783c9a33a31d55233f2d4ffb as orchard/ship-change-hmr/hmr-6
+2026-10-13T21:51:54.394Z schedule step build
+2026-10-13T21:51:54.551Z schedule step docs
+2026-10-13T21:52:08.437Z completed docs
+2026-10-13T21:52:08.496Z failed build
+2026-10-13T21:52:08.561Z schedule timer build-backoff
+2026-10-13T21:52:08.608Z completed build-backoff
+2026-10-13T21:52:08.723Z schedule step build.2
+2026-10-13T21:52:23.157Z completed build.2
+2026-10-13T21:52:23.408Z schedule step review
+2026-10-13T21:52:23.462Z schedule timer review-deadline
+2026-10-13T21:52:47.149Z completed review-deadline
+2026-10-13T21:52:47.275Z cancel review
+2026-10-13T21:52:47.394Z schedule ask review-overdue
+2026-10-13T21:52:52.784Z completed review-overdue
+2026-10-13T21:52:52.936Z schedule step review-reassigned
+2026-10-13T21:53:11.496Z completed review-reassigned
+2026-10-13T21:53:14.426Z schedule gate round-1/ci
+2026-10-13T21:53:27.021Z failed round-1/ci
+2026-10-13T21:53:27.317Z schedule step round-1/fix
+2026-10-13T21:53:31.461Z reload to doc/mac/programs/orchard-ship-change@816da071bfd002308331233ef3bb1827ccdbb7c38006c70fa8b7c48065524019: refused: event 17, op round-1/ci: the history scheduled an op this program never asked for here
+2026-10-13T21:53:36.879Z reload to doc/mac/programs/orchard-ship-change@719a2d0e9ac31a0c7681c54c189fc80ea874c16252edf770a583cf527814e8bc: moved: the history replays exactly
+2026-10-13T21:53:40.893Z completed round-1/fix
+2026-10-13T21:53:41.017Z schedule gate round-2/ci
+2026-10-13T21:53:55.092Z completed round-2/ci
+2026-10-13T21:53:55.148Z completed: {"shipped":true,"rounds":2,"review":"review-reassigned completed"} (348 st calls, 15446 ms in st)
