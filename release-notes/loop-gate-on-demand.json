@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Start round gate agents only for ready work, report missing gate runtimes, and measure idle gates and start latency",
+  "replay": {"status": "none", "detail": "No new replay trigger or projection rebuild. Existing mission, step, desired, observation and durable launch records retain their formats."},
+  "schema": {"status": "none", "detail": "No database table, index, trigger or claim field changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules, digest or coordinated fleet version transition."},
+  "compatibility": {"status": "changed", "detail": "Round gate launch is deferred until unclaimed work is ready, including dependency and predicate readiness. Agent identities and client/protocol/provider formats are unchanged. OpenTelemetry adds two unlabeled instruments. Mixed binaries retain the same durable records but older reconcilers can still pre-start their local gates."},
+  "downtime": {"status": "unknown", "detail": "No extra restart is requested by this change. Normal daemon replacement is required to use the new admission and recovery behavior; restart-to-API and restart-to-health were not measured."},
+  "manual": {"status": "changed", "detail": "Install this source on the host that owns affected round gates. Existing running idle gates are not forcibly stopped. A missing gate with restart never or an unresolved launch producer now reports an actionable fault; inspect the owning round and start operation, then explicitly restart or stop through the normal operator controls after resolving producer uncertainty."},
+  "recovery": {"status": "changed", "detail": "Live unfinished launch admission is preserved. Missing finished unverified gate producers are reported without releasing their safety fence or creating a duplicate runtime. Without pending admission, existing restart policy recovers a vanished gate or a durable fault reports why it cannot recover. A binary rollback does not clear existing fault or start-operation history and restores eager gate admission."}
+}

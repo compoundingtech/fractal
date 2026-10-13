@@ -35,6 +35,7 @@ use crate::store::Store;
 
 mod channel_recovery;
 mod idle_nudge;
+mod loop_gate;
 mod placement;
 mod run_report;
 mod start_spacing;
@@ -3243,6 +3244,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.reconcile_disk_space(&desired)
         });
         self.isolate("stage/faults", &daemon, || self.deliver_faults(&desired));
+        if crate::otel::metrics_enabled() {
+            self.isolate("stage/loop-gate-metrics", &daemon, || {
+                self.record_loop_gate_metrics(&desired)
+            });
+        }
         self.isolate("stage/subagents", &daemon, || self.end_stale_subagents());
         self.reconcile_github_watches_stage();
         self.file_watchers_used
@@ -6018,6 +6024,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             "a bound terminal seat cannot be spawned"
         );
         self.store.owned_desired_guard(subject)?;
+        if self.is_loop_gate(subject)? && self.store.loop_gate_ready_at(subject)?.is_none() {
+            return Ok(false);
+        }
         let explicit_person = request.is_some_and(|request| {
             request
                 .actor
@@ -17108,6 +17117,7 @@ mod tests {
     mod differential;
     mod doctor_eligibility_tests;
     mod first_readiness_tests;
+    mod loop_gate_tests;
     mod github_watch_selection;
     mod incremental_deadlines;
     mod ownership_guard_tests;

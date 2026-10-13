@@ -1,7 +1,7 @@
 //! One root per reconciler operation; bounded labels alongside the existing meter.
 use opentelemetry::{
     KeyValue,
-    metrics::{Counter, Histogram},
+    metrics::{Counter, Gauge, Histogram},
 };
 use std::sync::{
     LazyLock,
@@ -132,9 +132,10 @@ struct Instruments {
     wakes: Counter<u64>,
     observation_drops: Counter<u64>,
     duration: Histogram<f64>,
+    idle_loop_gates: Gauge<u64>,
+    loop_gate_start_latency: Histogram<f64>,
 }
-static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
-    let meter = opentelemetry::global::meter("st3.reconcile");
+fn instruments(meter: &opentelemetry::metrics::Meter) -> Instruments {
     Instruments {
         wakes: meter
             .u64_counter("st.reconcile.wakes")
@@ -148,7 +149,20 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
             .f64_histogram("st.reconcile.pass.duration")
             .with_unit("s")
             .build(),
+        idle_loop_gates: meter
+            .u64_gauge("st.loop.gate.agents.idle")
+            .with_description("Local round gate agents with a running runtime and idle harness")
+            .with_unit("{agent}")
+            .build(),
+        loop_gate_start_latency: meter
+            .f64_histogram("st.loop.gate.start.latency")
+            .with_description("Time from gate work readiness to verified runtime start")
+            .with_unit("s")
+            .build(),
     }
+}
+static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
+    instruments(&opentelemetry::global::meter("st3.reconcile"))
 });
 pub(crate) fn init() {
     LazyLock::force(&ATTRIBUTES);
@@ -168,6 +182,21 @@ pub(crate) fn record_wake(cause: WakeCause, detail: Option<&str>) {
 pub(crate) fn record_runtime_observation_drop() {
     if crate::otel::metrics_enabled() {
         METRICS.observation_drops.add(1, &[]);
+    }
+}
+
+pub(crate) fn record_idle_loop_gates(count: u64) {
+    if crate::otel::metrics_enabled() {
+        METRICS.idle_loop_gates.record(count, &[]);
+    }
+}
+
+pub(crate) fn record_loop_gate_start_latency(ready_at_unix_ms: u128) {
+    if crate::otel::metrics_enabled() {
+        let elapsed = smallclaims::store::now_ms().saturating_sub(ready_at_unix_ms);
+        let seconds = std::time::Duration::from_millis(u64::try_from(elapsed).unwrap_or(u64::MAX))
+            .as_secs_f64();
+        METRICS.loop_gate_start_latency.record(seconds, &[]);
     }
 }
 
@@ -240,6 +269,43 @@ impl Drop for Operation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn loop_gate_metrics_export_idle_count_and_start_latency_without_agent_labels() {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        let metrics = instruments(&provider.meter("st3.reconcile"));
+        metrics.idle_loop_gates.record(2, &[]);
+        metrics.idle_loop_gates.record(0, &[]);
+        metrics.loop_gate_start_latency.record(1.25, &[]);
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+        let idle = exported.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "st.loop.gate.agents.idle").unwrap();
+        let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = idle.data() else {
+            panic!("idle gate count must be a u64 gauge");
+        };
+        let point = gauge.data_points().next().unwrap();
+        assert_eq!(point.value(), 0, "idle count resets when no gate is idle");
+        assert_eq!(point.attributes().count(), 0);
+        let latency = exported.iter().flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == "st.loop.gate.start.latency").unwrap();
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = latency.data() else {
+            panic!("gate start latency must be an f64 histogram");
+        };
+        let point = histogram.data_points().next().unwrap();
+        assert_eq!(point.count(), 1);
+        assert_eq!(point.sum(), 1.25);
+        assert_eq!(point.attributes().count(), 0);
+    }
+
     #[test]
     fn otel_existing_wake_sources_are_closed() {
         let sources = [

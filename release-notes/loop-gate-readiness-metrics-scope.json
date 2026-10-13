@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Scope correction: loop gate readiness and metrics ship separately from missing-runtime recovery and identity changes",
+  "replay": {"status": "none", "detail": "No replay or projection rebuild change. This corrects the broader branch-only scope described in loop-gate-on-demand.json before upstream publication; the effective PR contains only launch admission and telemetry."},
+  "schema": {"status": "none", "detail": "No database or claim-registry field changes in this PR."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or retention transition."},
+  "compatibility": {"status": "changed", "detail": "Round gate launch now requires unclaimed ready work at admission and guarded spawn. Durable agent identities, assignments, client/protocol/provider contracts and launch records stay unchanged. OpenTelemetry adds idle round gate count and ready-to-verified-start latency without identity labels."},
+  "downtime": {"status": "unknown", "detail": "No additional service restart is requested beyond replacing the daemon to activate the new behavior. Restart-to-API and restart-to-health are not measured."},
+  "manual": {"status": "none", "detail": "No new manual migration or operator recovery steps. Existing running idle gates are not forcibly stopped. Missing-runtime recovery and hash-name migration are explicitly outside this PR."},
+  "recovery": {"status": "none", "detail": "Missing-runtime reporting/recovery changes have been removed from this PR for a separate reproduction-first review. Existing restart, fault, manual stop and launch-producer closure behavior is unchanged. A binary rollback restores eager gate admission; it does not undo previously recorded runtime history."}
+}
