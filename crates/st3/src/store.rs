@@ -24723,30 +24723,6 @@ fn attention_request_view_tx(
     }))
 }
 
-fn pending_attention_requests_tx(
-    connection: &Connection,
-    person: Option<&str>,
-) -> Result<Vec<AttentionRequestView>> {
-    let mut statement = connection.prepare(&canonical_sql(
-        "SELECT request.subject FROM claims request
-         WHERE request.kind='attention.requested'
-           AND (?1 IS NULL OR json_extract(request.body, '$.fields.reviewer')=?1)
-           AND NOT EXISTS (
-             SELECT 1 FROM claims resolution
-             WHERE resolution.subject=request.subject
-               AND resolution.kind='attention.resolved'
-           )
-         ORDER BY CANONICAL_ASC(request)",
-    ))?;
-    let subjects = statement
-        .query_map([person], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    subjects
-        .iter()
-        .filter_map(|subject| attention_request_view_tx(connection, subject).transpose())
-        .collect()
-}
-
 const MESSAGE_CANONICAL_KEY_BATCH_SIZE: usize = 128;
 
 fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
@@ -25386,10 +25362,6 @@ fn attention_item_from_revision(
         ],
         request: None,
     }
-}
-
-pub(crate) fn agent_attention_requester(actor: &str) -> bool {
-    actor.starts_with("agent/") && actor != "agent/st3/reconciler"
 }
 
 fn attention_item_from_failure(request: AttentionRequestView) -> AttentionItemView {
