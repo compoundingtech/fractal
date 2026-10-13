@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "fractal-ui ships SidebarTree, a measured RAC treegrid with sticky ancestors, host-owned drag filing, item-named rows and filter-stable row layout, and SidebarQueryContext, which lets search highlights update without re-rendering memoized sidebar rows",
+  "summary": "fractal-ui ships SidebarTree, a measured RAC treegrid with sticky ancestors, host-owned drag filing, item-named rows and filter-stable row layout, and SidebarQueryContext, which lets search highlights update without re-rendering memoized sidebar rows. Each tree row's accessible name is its item's optional accessibleName, applied as the row's aria-label, or its textValue when none is given; the name follows the item through filtering and repositioning, and the aria-hidden sticky copies never add a second name",
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No tables, columns, indexes or triggers." },
   "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
