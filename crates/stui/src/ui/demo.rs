@@ -97,6 +97,7 @@ pub fn world() -> World {
         quiet_missions: 6,
         usage: Load::Ready(usage()),
         usage_limits: usage_limits(),
+        usage_accounts: Vec::new(),
         agent_messages: None,
         clients: Load::Ready(vec![
             Connected {
@@ -158,6 +159,7 @@ pub fn loading() -> World {
         quiet_missions: 0,
         usage: Load::Loading,
         usage_limits: Vec::new(),
+        usage_accounts: Vec::new(),
         agent_messages: None,
         clients: Load::Loading,
     }
