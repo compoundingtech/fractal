@@ -26,7 +26,7 @@ fn isolated(test: &str) -> bool {
     for path in [&tools, &home, &state, &config, &tmp] {
         std::fs::create_dir(path).unwrap();
     }
-    for program in ["git", "ssh-keygen", "python3"] {
+    for program in ["git", "ssh-keygen", "python3", "timeout"] {
         let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .filter(|directory| !directory.join("st3-recorder.json").exists())
             .filter_map(|directory| std::fs::canonicalize(directory.join(program)).ok())
