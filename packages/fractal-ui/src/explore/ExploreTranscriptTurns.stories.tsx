@@ -428,7 +428,8 @@ function hitArea(control: HTMLElement) {
   let total = 0, hit = 0
   for (let y = 0.5; y < box.height; y++) for (let x = 0.5; x < box.width; x++) {
     const dx = Math.max(radius - x, x - (box.width - radius), 0), dy = Math.max(radius - y, y - (box.height - radius), 0)
-    if (dx * dx + dy * dy > radius * radius) continue
+    // Chrome hit-tests the corner arc on device pixels, so the last pixel ring along each arc may fall either side of it.
+    if (dx > 0 && dy > 0 && Math.hypot(dx, dy) > radius - 1) continue
     total++
     const target = control.ownerDocument.elementFromPoint(box.left + x, box.top + y)
     if (target !== null && control.contains(target)) hit++
