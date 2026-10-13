@@ -141,6 +141,8 @@ pub struct Limits {
     /// which take 4096.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_message_bytes: Option<usize>,
+    pub max_assistant_response_bytes: Option<usize>,
+    pub default_assistant_response_bytes: Option<usize>,
     pub max_glass_body_bytes: Option<usize>,
     pub max_glasses: Option<usize>,
     pub max_glass_depth: Option<usize>,
