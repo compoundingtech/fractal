@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button as AriaButton } from 'react-aria-components'
-import { accentVars as accent, textVars as text, spaceVars as s, geometryVars as g, typeVars as t } from '../composition-tokens.stylex'
+import { interactionVars as interaction, textVars as text, spaceVars as s, geometryVars as g, typeVars as t } from '../composition-tokens.stylex'
 import { Markdown } from './Markdown'
 import { Icon } from './Icons'
 
@@ -19,5 +19,5 @@ export function ThinkingEntry({ text: value, streaming = false }: { text: string
 
 const styles = stylex.create({
   thinking: { color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  thinkingControl: { display: 'flex', alignItems: 'center', gap: s.sm, padding: 0, minHeight: g.toolRow, borderWidth: 0, backgroundColor: 'transparent', color: text.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: text.fgSoft }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  thinkingControl: { display: 'flex', alignItems: 'center', gap: s.sm, padding: 0, minHeight: g.toolRow, borderWidth: 0, backgroundColor: 'transparent', color: text.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: text.fgSoft }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
 })
