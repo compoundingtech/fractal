@@ -3036,6 +3036,7 @@ mod tests {
         async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<st3::store::Store>, tokio::task::JoinHandle<()>) {
             let store = Arc::new(st3::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
             let state = st3::api::AppState {
+                owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
                 fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),

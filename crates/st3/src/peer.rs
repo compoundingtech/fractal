@@ -2470,6 +2470,7 @@ mod tests {
         let owner_root = tempfile::tempdir().unwrap();
         let gateway_root = tempfile::tempdir().unwrap();
         let app_state = |root: &Path, node: &str| crate::api::AppState {
+            owning_person: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: watch::channel(0_u64).0,
