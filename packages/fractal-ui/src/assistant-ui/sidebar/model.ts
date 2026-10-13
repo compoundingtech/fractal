@@ -1,4 +1,5 @@
 export { matchPositions } from './fuzzy.ts'
+import type { AgentTrace } from './trace-model.ts'
 export type SidebarUsage = { readonly _tag: 'Known'; readonly scope: '24h-root-and-subagents' | 'lifetime-incl-subagents'; readonly tokens: number; readonly usd: number } | { readonly _tag: 'Unknown' }
 export type SidebarDuration = { readonly _tag: 'Known'; readonly scope: '24h-activity-span' | 'lifetime'; readonly ms: number } | { readonly _tag: 'Unknown' }
 export type SidebarLastTurn = { readonly _tag: 'Known'; readonly kind: 'turn-completed' | 'activity'; readonly at: number } | { readonly _tag: 'Unknown' }
@@ -37,6 +38,8 @@ export interface SidebarAgentRow extends SidebarReported {
   readonly duration: SidebarDuration
   readonly lastTurn: SidebarLastTurn
   readonly childrenKnown?: boolean
+  /** Trace-card series (layout B). Absent: the row keeps the compact hover card; present: each chart renders only for a Known series. */
+  readonly trace?: AgentTrace
   readonly children: readonly SidebarAgentRow[]
 }
 

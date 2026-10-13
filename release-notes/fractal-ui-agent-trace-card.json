@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fractal UI adds AgentTraceCard, a 360px sidebar hover card with a 24 h context histogram (compaction and model-change marks, idle gaps), a cumulative spend line (session vs subagents), a token split bar and compact facts with a subagent table. Each chart renders only when its series is reported; otherwise the section shows the scalar reading and a muted reason such as 'History not retained'. A new trace-bucket type seam (AgentTrace, TraceSeries) lets hosts fill the series as they arrive. A sidebar agent row whose data carries a trace opens this card on hover and focus instead of the compact card.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Additive kit exports and an optional trace field on the sidebar row data. Rows without it render exactly as before." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

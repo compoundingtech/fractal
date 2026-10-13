@@ -37,6 +37,9 @@ export { Button as CompositionButton, IconButton as CompositionIconButton } from
 export { SidebarAgentRow, AgentHoverCard, sidebarRowDescription } from './sidebar/SidebarAgentRow.tsx'
 export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
 export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+/** Sidebar trace card (layout B) and its trace-bucket seam; hosts set `SidebarAgentRowData.trace` to switch the row hover card to it. */
+export { AgentTraceCard } from './sidebar/AgentTraceCard.tsx'
+export type { AgentTrace, TraceSeries, TraceAbsence, ContextBucket, ContextMark, ContextHistory, ContextReading, SpendPoint, SpendTotals, TokenSplit, TraceActivity, TraceSubagent, TraceSubagentState } from './sidebar/trace-model.ts'
 
 export { ResourceCardV1, ResourceChipV1 } from './resources/ResourceCardV1.tsx'
 export type { ResourceData, ResourceFile, ResourceMetadata } from './resources/resource-model.ts'
