@@ -515,7 +515,7 @@ mod tests {
         value["how"]["model"]["route"] = json!("unknown");
         let bytes = serde_json::to_vec(&value).unwrap();
         std::fs::write(&path, &bytes).unwrap();
-        assert!(refresh(&path, "agent/example", "execution-one", Some(&lease()), Some("example-mission")).is_err());
+        assert!(refresh(&path, "agent/example", "execution-one", ClaimPurpose::Bound(&lease()), Some("example-mission")).is_err());
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 
@@ -524,7 +524,7 @@ mod tests {
         for status in ["claimed", "working", "verifying", "blocked"] {
             let mut step = lease();
             step.status = status.into();
-            assert!(build(&facts(), Some(&step)).unwrap().how.issuance.is_some());
+            assert!(build(&facts(), ClaimPurpose::Bound(&step)).unwrap().how.issuance.is_some());
         }
     }
 }
