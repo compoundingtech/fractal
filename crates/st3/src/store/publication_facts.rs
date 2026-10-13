@@ -253,7 +253,7 @@ fn sync_from_source(transaction: &Transaction<'_>, source: &Connection, id: &str
 pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
     let started = std::time::Instant::now();
     let pending = transaction
-        .prepare_cached("SELECT claim_id FROM local_publication_pending LIMIT ?1")?
+        .prepare_cached("SELECT claim_id FROM local_publication_pending WHERE claim_id>='' ORDER BY claim_id LIMIT ?1")?
         .query_map([PAGE], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (offset, id) in pending.iter().enumerate() {
