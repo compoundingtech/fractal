@@ -221,9 +221,6 @@
           "st2-pty-stats-component"
           "--exclude"
           "st2-vista-component"
-          # The standalone decision model has its own hermetic gate.
-          "--exclude"
-          "st-decision-fold"
           # `checks.st3` gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
@@ -801,6 +798,9 @@
       {
         packages.st2 = st2;
         packages.st = st3;
+        # Release runners need a host linker for Cargo build scripts and stamp tests.
+        # The release target still links through the pinned Zig/glibc-baseline wrapper.
+        packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
@@ -1199,6 +1199,9 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.git
+            # Git evidence fixtures sign observations and serve API responses with Python.
+            pkgs.openssh
+            pkgs.python3
             pkgs.sccache
             pkgs.cargo-nextest
             pkgs.pkg-config
@@ -1226,6 +1229,7 @@
           shellHook = ''
             source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              source ${./scripts/ci-cargo-tools-env} || exit $?
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
           '';

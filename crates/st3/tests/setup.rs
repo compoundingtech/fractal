@@ -458,6 +458,43 @@ fn seats_cannot_run_setup_or_open_a_plain_st_prompt() {
 }
 
 #[test]
+fn an_instance_setup_installs_below_the_instance_and_leaves_the_default_install_alone() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.unpack_archive();
+    let text = success(
+        &fixture
+            .command(&fixture.path("archive/st3"))
+            .args([
+                "--instance",
+                "demo",
+                "setup",
+                "--person",
+                "ada",
+                "--yes",
+                "--service",
+                "false",
+                "--start",
+                "false",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let instance = fixture.path("home/.st-instance/demo");
+    assert_eq!(fs::read_link(instance.join("bin/st")).unwrap(), Path::new("st3"));
+    assert!(instance.join("bin/st3").is_file() && instance.join("bin/pty").is_file());
+    assert!(instance.join("config/st3/config.toml").is_file());
+    assert!(text.contains("This instance's commands are in"), "{text}");
+    assert!(!text.contains("export PATH"), "{text}");
+    // The default install's places stay exactly as the fixture made them.
+    assert!(!fixture.path("home/.local").exists());
+    assert!(!fixture.path("home/.config/st3/config.toml").exists());
+    assert!(!fixture.path("home/.config/systemd").exists());
+}
+
+#[test]
 fn archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harness() {
     if st3::test_support::supervise_test() {
         return;

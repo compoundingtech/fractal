@@ -242,6 +242,10 @@ async fn expert_status(client: &Client) -> Result<Option<crate::model::SubjectSt
 }
 
 pub(crate) fn workspace() -> Result<PathBuf> {
+    // An instance keeps its agents' workspaces below its own directory.
+    if let Some(instance) = crate::instance::current() {
+        return Ok(instance.agents_dir().join("st-expert"));
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
