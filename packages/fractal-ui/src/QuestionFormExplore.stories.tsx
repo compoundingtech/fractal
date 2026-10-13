@@ -3,7 +3,7 @@
  *
  * Variant dimensions:
  * - Scenario (S1–S3): one question, four tabbed questions, multi-select with Other and a note.
- * - State (P/S/E): pending, submitted, expired.
+ * - State (P/S/E/F/R): pending, submitted, expired, failed to send, read-only (shown to someone who cannot answer).
  * - Width (W440/W1440): the host window width; the form sits in the reading lane and stacks below 600 px of its own width.
  */
 import * as React from 'react'
@@ -12,15 +12,15 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { ToggleButton } from 'react-aria-components'
 import { QuestionForm, OTHER_LABEL } from './assistant-ui/questions/QuestionForm'
-import { questionScenarios, questionStateFor, submittedAt, type QuestionPhase, type QuestionScenario } from './assistant-ui/questions/fixtures'
+import { askedAt, questionScenarios, questionStateFor, submittedAt, viewedAt, type QuestionPhase, type QuestionScenario } from './assistant-ui/questions/fixtures'
 import type { Answers, QuestionRequestView } from './assistant-ui/questions/model'
 import { Icon } from './assistant-ui/composition/Icons'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, geometryVars as g, geometryNumbers, radiusVars as r, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, statusVars as status, geometryVars as g, geometryNumbers, radiusVars as r, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 type ScenarioId = 'S1' | 'S2' | 'S3'
-type StateId = 'P' | 'S' | 'E'
+type StateId = 'P' | 'S' | 'E' | 'F' | 'R'
 type WidthId = 'W440' | 'W1440'
 interface Variant<T extends string> { readonly id: T; readonly description: string }
 const SCENARIOS: readonly Variant<ScenarioId>[] = [
@@ -32,13 +32,15 @@ const STATES: readonly Variant<StateId>[] = [
   { id: 'P', description: 'Pending: interactive; Enter submits or moves to the next unanswered question' },
   { id: 'S', description: 'Submitted: read-only summary of the sent answers and notes' },
   { id: 'E', description: 'Expired: the automatic answers the agent continued with' },
+  { id: 'F', description: 'Failed: the answer was not sent; the form stays open with the error' },
+  { id: 'R', description: 'Read only: pending, but this viewer cannot answer; no keys, no attention' },
 ]
 const WIDTHS: readonly Variant<WidthId>[] = [
   { id: 'W440', description: '440 px window: tabs stack and previews move below the options' },
   { id: 'W1440', description: '1440 px window: reading lane, tabs in one row, previews beside the options' },
 ]
 const SCENARIO: Record<ScenarioId, QuestionScenario> = { S1: 'one', S2: 'tabbed', S3: 'multi' }
-const PHASE: Record<StateId, QuestionPhase> = { P: 'pending', S: 'submitted', E: 'expired' }
+const PHASE: Record<StateId, QuestionPhase> = { P: 'pending', S: 'submitted', E: 'expired', F: 'failed', R: 'pending' }
 
 /** Colocated variant picker: ID buttons plus the current variant's description. */
 function VariantPicker<T extends string>({ label, variants, value, onChange }: { label: string; variants: readonly Variant<T>[]; value: T; onChange: (value: T) => void }) {
@@ -55,12 +57,16 @@ function VariantPicker<T extends string>({ label, variants, value, onChange }: {
 /** The host side of the contract: it owns the request state and records the submitted payload. */
 function QuestionHost({ scenario, state, onSubmitted }: { scenario: ScenarioId; state: StateId; onSubmitted: (answers: Answers) => void }) {
   const key = SCENARIO[scenario]
-  const [request, setRequest] = React.useState<QuestionRequestView>(() => ({ ...questionScenarios[key], state: questionStateFor(key, PHASE[state]) }))
+  const [request, setRequest] = React.useState<QuestionRequestView>(() => ({
+    ...questionScenarios[key],
+    state: questionStateFor(key, PHASE[state]),
+    ...(state === 'R' ? { answerable: false, readOnlyReason: 'Another person was asked; you can read along.' } : {}),
+  }))
   const submit = (answers: Answers) => {
     onSubmitted(answers)
     setRequest(current => ({ ...current, state: { _tag: 'answered', answers, by: 'You', at: submittedAt } }))
   }
-  return <QuestionForm request={request} variant="transcript" autoFocus onSubmit={submit} onOpenTerminal={scenario === 'S2' ? () => {} : undefined} />
+  return <QuestionForm request={request} variant="transcript" now={viewedAt} autoFocus onSubmit={submit} onOpenTerminal={scenario === 'S2' ? () => {} : undefined} />
 }
 
 interface StoryArgs { scheme: Scheme; scenario: ScenarioId; state: StateId; width: WidthId; explore: boolean; onSubmitted: (answers: Answers) => void }
@@ -141,6 +147,27 @@ const assertStrip = async (form: HTMLElement) => {
   const rects = within(form).getAllByRole('tab').map(tab => tab.getBoundingClientRect())
   await expect(stripLayout(rects)).toBe(stacked(form) ? 'stacked' : 'row')
   await expect(within(form).getByRole('tablist')).toHaveAttribute('aria-orientation', stacked(form) ? 'vertical' : 'horizontal')
+  // Chips sit s.md (8 px) apart along the strip in both layouts.
+  const [first, second] = rects
+  await expect(Math.round(stacked(form) ? second!.top - first!.bottom : second!.left - first!.right)).toBe(8)
+}
+/** A token's computed colour inside the themed story root, read from a probe element. */
+const tokenColor = (root: HTMLElement, className: string | undefined) => {
+  const probe = document.createElement('span')
+  probe.className = className ?? ''
+  root.querySelector('main')!.append(probe)
+  const color = getComputedStyle(probe).color
+  probe.remove()
+  return color
+}
+/** E37: a question waiting on this user carries the attention hairline and glyph; anything else stays neutral. */
+const assertAttention = async (root: HTMLElement, form: HTMLElement, attentive: boolean) => {
+  const attention = tokenColor(root, stylex.props(styles.attentionInk).className)
+  const neutral = tokenColor(root, stylex.props(styles.neutralHairline).className)
+  // Negative control: the two inks differ, so either expectation below can fail.
+  await expect(attention).not.toBe(neutral)
+  await expect(getComputedStyle(form).borderTopColor).toBe(attentive ? attention : neutral)
+  await expect(getComputedStyle(form.querySelector('[data-question-glyph]')!).color === attention).toBe(attentive)
 }
 const assertPreviewPlacement = async (form: HTMLElement) => {
   const options = form.querySelector<HTMLElement>('[data-question-stop="options"]')!.getBoundingClientRect()
@@ -163,7 +190,32 @@ const oneQuestion: Story = {
     await expect(radios).toHaveLength(4)
     await expect(radios[3]).toHaveAccessibleName(OTHER_LABEL)
     await expect(within(form).getAllByText('Recommended')).toHaveLength(1)
-    await expect(radios[0]).toHaveAccessibleName(/Recommended/)
+    // The name is the label plus the badge; the description is the accessible description, not part of the name.
+    await expect(radios[0]).toHaveAccessibleName('Embedded database Recommended')
+    await expect(radios[0]).toHaveAccessibleDescription('No service to operate')
+    await expect(radios[2]).toHaveAccessibleName('Plain files')
+    // Negative control: Other has no description, so nothing is described by it.
+    await expect(radios[3]).not.toHaveAttribute('aria-describedby')
+    await expect(radios[3]).toHaveAccessibleDescription('')
+    // Header: the agent and how long ago it asked, measured against the host clock; never "from".
+    const asked = form.querySelector<HTMLElement>('[data-question-asked]')!
+    await expect(asked).toHaveTextContent(/^Sample agent · asked 3m ago$/)
+    await expect(asked.querySelector('time')).toHaveAttribute('datetime', askedAt)
+    // Card padding: s.md block, s.lg inline.
+    const box = getComputedStyle(form)
+    await expect([box.paddingTop, box.paddingBottom, box.paddingLeft, box.paddingRight]).toEqual(['8px', '8px', '12px', '12px'])
+    await assertAttention(canvasElement, form, true)
+    // The preview figure is named by its caption; the first Markdown block sits flush with the figure's padding.
+    await expect(within(form).getByRole('figure', { name: 'Preview · Embedded database' })).toBeVisible()
+    const markdown = form.querySelector<HTMLElement>('[data-question-preview] [data-testid="markdown"]')!
+    const firstBlock = markdown.firstElementChild as HTMLElement
+    await expect(firstBlock.tagName).toBe('H3')
+    await expect(getComputedStyle(firstBlock).marginTop).toBe('0px')
+    // Negative control: the same heading later in the flow keeps its s.xxl top margin.
+    const laterHeading = firstBlock.cloneNode(true) as HTMLElement
+    markdown.append(laterHeading)
+    await expect(getComputedStyle(laterHeading).marginTop).toBe('20px')
+    laterHeading.remove()
     await waitFor(() => expect(radios[0]).toHaveFocus())
     await expect(form.querySelector('[data-question-preview]')).toHaveAttribute('data-question-preview', 'embedded')
     await assertPreviewPlacement(form)
@@ -181,6 +233,8 @@ const oneQuestion: Story = {
     await waitFor(() => expect(radios[1]).toBeChecked())
     await expect(radios[1]).toHaveFocus()
     await expect(form.querySelector('[data-question-preview]')).toHaveAttribute('data-question-preview', 'managed')
+    await expect(within(form).getByRole('figure', { name: 'Preview · Managed database' })).toBeVisible()
+    await expect(within(form).queryByRole('figure', { name: 'Preview · Embedded database' })).toBeNull()
     await userEvent.keyboard('{ArrowDown}')
     await waitFor(() => expect(radios[2]).toBeChecked())
     await expect(radios[1]).not.toBeChecked()
@@ -203,6 +257,8 @@ const oneQuestion: Story = {
     await expect(within(form).getByText('Other: Shared file 1')).toBeVisible()
     await expect(within(form).queryAllByRole('radio')).toHaveLength(0)
     await expect(form.querySelector('[data-question-state-chip]')).toHaveTextContent('Submitted')
+    // Settled: the attention treatment is gone.
+    await assertAttention(canvasElement, form, false)
     await assertHygiene(canvasElement)
   },
 }
@@ -305,7 +361,12 @@ const multiOtherNote: Story = {
     const boxes = canvas.getAllByRole('checkbox')
     await expect(boxes).toHaveLength(5)
     await expect(boxes[4]).toHaveAccessibleName(OTHER_LABEL)
-    await expect(boxes[0]).toHaveAccessibleName(/Recommended/)
+    await expect(boxes[0]).toHaveAccessibleName('Typecheck Recommended')
+    await expect(boxes[1]).toHaveAccessibleName('Unit tests')
+    await expect(boxes[1]).toHaveAccessibleDescription('Fast, no browser')
+    // Negative control: an option without a description describes nothing.
+    await expect(boxes[0]).not.toHaveAttribute('aria-describedby')
+    await expect(boxes[0]).toHaveAccessibleDescription('')
     await waitFor(() => expect(boxes[0]).toHaveFocus())
     await userEvent.keyboard('{ArrowUp}')
     await expect(boxes[4]).toHaveFocus()
@@ -361,6 +422,7 @@ const expired: Story = {
     await expect(form.querySelector('[data-question-settled]')).toHaveTextContent('Expired; the agent continued with the automatic answers below.')
     await expect(form.querySelector('[data-question-summary="storage"]')).toHaveTextContent('Embedded database')
     await expect(form.querySelector('[data-question-summary="features"]')).toHaveTextContent('No answer')
+    await assertAttention(canvasElement, form, false)
     // Negative control: an expired form has no answering controls, and keys pressed inside it cannot submit.
     await expect(canvas.queryAllByRole('radio')).toHaveLength(0)
     await expect(canvas.queryAllByRole('checkbox')).toHaveLength(0)
@@ -418,6 +480,34 @@ export const Explore: Story = {
     await waitFor(() => expect(formIn(canvasElement).dataset['stacked']).toBe('true'))
     await assertStrip(formIn(canvasElement))
     await assertHygiene(canvasElement)
+
+    // Failed: still waiting on this user, so attention stays; only the alert glyph takes the danger ink.
+    await userEvent.click(picker('State').getByRole('button', { name: 'F' }))
+    await waitFor(() => expect(formIn(canvasElement).dataset['state']).toBe('failed'))
+    const failed = formIn(canvasElement)
+    await assertAttention(canvasElement, failed, true)
+    const alert = within(failed).getByRole('alert')
+    await expect(alert).toHaveTextContent('Not sent: the agent stopped listening before the answer arrived')
+    const danger = tokenColor(canvasElement, stylex.props(styles.dangerInk).className)
+    await expect(getComputedStyle(alert.querySelector('[data-question-problem-glyph]')!).color).toBe(danger)
+    await expect(getComputedStyle(alert).color).not.toBe(danger)
+    await expect(failed.querySelectorAll('[data-question-keycap]').length).toBeGreaterThan(0)
+    await expect(failed.querySelectorAll('kbd').length).toBeGreaterThan(0)
+
+    // Read only: its own label, no keys, no attention; digits pick nothing.
+    await userEvent.click(picker('State').getByRole('button', { name: 'R' }))
+    await waitFor(() => expect(formIn(canvasElement).querySelector('[data-question-state-chip]')).toHaveTextContent(/^Read only$/))
+    const readOnly = formIn(canvasElement)
+    await expect(within(readOnly).queryByText('Waiting for you')).toBeNull()
+    await expect(readOnly.querySelectorAll('[data-question-keycap]')).toHaveLength(0)
+    await expect(readOnly.querySelectorAll('kbd')).toHaveLength(0)
+    await expect(within(readOnly).getByText('Another person was asked; you can read along.')).toBeVisible()
+    await assertAttention(canvasElement, readOnly, false)
+    const readOnlyRadios = within(readOnly).getAllByRole('radio')
+    readOnlyRadios[0]!.focus()
+    await userEvent.keyboard('1')
+    await expect(readOnlyRadios.filter(radio => (radio as HTMLInputElement).checked)).toHaveLength(0)
+    await assertHygiene(canvasElement)
   },
 }
 
@@ -435,4 +525,8 @@ const styles = stylex.create({
   narrow: { maxWidth: g.polishNarrow },
   wide: { maxWidth: g.polishWide },
   lane: { maxWidth: g.lane, marginInline: 'auto', minWidth: 0 },
+  /** Colour probes for the attention, neutral and danger assertions. */
+  attentionInk: { color: status.attention },
+  neutralHairline: { color: border.borderStrong },
+  dangerInk: { color: status.dangerFg },
 })

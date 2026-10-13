@@ -4,6 +4,8 @@ import type { Answers, QuestionRequestView, QuestionState, QuestionView } from '
 export const askedAt = '2026-10-01T12:00:00.000Z'
 export const expiresAt = '2026-10-01T12:30:00.000Z'
 export const submittedAt = '2026-10-01T12:05:00.000Z'
+/** The host clock the stories render with: three minutes after the ask. */
+export const viewedAt = Date.parse('2026-10-01T12:03:00.000Z')
 
 const storage: QuestionView = {
   id: 'storage', header: 'Storage', prompt: 'Which storage should the sample use?', kind: 'single', allowOther: true, allowNote: true,
@@ -61,11 +63,12 @@ export const automaticAnswers: Readonly<Record<QuestionScenario, Answers>> = {
   multi: { checks: { selected: ['typecheck'] } },
 }
 
-export type QuestionPhase = 'pending' | 'submitted' | 'expired'
+export type QuestionPhase = 'pending' | 'submitted' | 'expired' | 'failed'
 export function questionStateFor(scenario: QuestionScenario, phase: QuestionPhase): QuestionState {
   switch (phase) {
     case 'pending': return { _tag: 'pending', expiresAt }
     case 'submitted': return { _tag: 'answered', answers: submittedAnswers[scenario], by: 'You', at: submittedAt }
     case 'expired': return { _tag: 'expired', at: expiresAt, autoAnswer: automaticAnswers[scenario] }
+    case 'failed': return { _tag: 'failed', error: 'the agent stopped listening before the answer arrived' }
   }
 }

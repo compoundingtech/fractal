@@ -125,6 +125,10 @@ Several questions share a React Aria `Tabs` strip with one header chip per quest
 
 The host owns the request state and transport: `onSubmit` receives trimmed answers (empty Other or note text is omitted), and the host moves the request to `submitting`, `answered` or `failed`. Pending, submitting and failed requests render the form; `answered`, `answered-elsewhere`, `expired` (with its automatic answers) and `cancelled` render a read-only summary in which a question without an answer reads **No answer** and typed text of a `secret` question reads **Answer hidden**. Drafts are controlled when `draft` is passed, and every change is reported through `onDraftChange`. Icon-only host actions (`onOpenTerminal`, `onJump`) use the kit `Tooltip`.
 
+A form waiting on this user (pending, submitting or failed, and `answerable`) carries the attention treatment: `statusVars.attention` on the card hairline and the leading glyph. Settled forms and read-only requests stay neutral. A request that is not `answerable` is labelled **Read only**, shows its `readOnlyReason`, and has no keycaps, key hints or answer actions. The header reads **agent · asked 3m ago**; the age is measured against the host clock passed as `now` (epoch milliseconds), which is a kit prop outside the mirrored model. The failed alert glyph uses `statusVars.dangerFg` while its text stays soft. Option descriptions are each control's accessible description (`aria-describedby`), so the accessible name is the label plus **Recommended**. The preview `figure` is named by its caption.
+
+The kit `Markdown` boundary gives its first heading no top margin, so a preview or message that opens with a heading sits flush with its container's padding.
+
 
 ### Portable sync seam
 

@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Checkbox, CheckboxGroup, Input, Label, Radio, RadioGroup, Tab, TabList, TabPanel, Tabs, TextField } from 'react-aria-components'
-import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, geometryVars as g, geometryNumbers, radiusVars as r, spaceVars as s, typeVars as t } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, statusVars as status, geometryVars as g, geometryNumbers, radiusVars as r, spaceVars as s, typeVars as t } from '../composition-tokens.stylex'
 import { Button, IconButton, Tooltip } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
 import { Markdown } from '../composition/Markdown'
@@ -80,6 +80,17 @@ function Clock({ at, prefix }: { at: string; prefix: string }) {
   return <span {...stylex.props(styles.meta)}>{prefix} <time dateTime={at}>{clock.format(time)}</time></span>
 }
 
+/** Coarse age for the header ("3m ago") from the host clock; an unparseable time renders nothing rather than a guess. */
+function relativeAge(at: string, now: number): string | undefined {
+  const elapsed = now - Date.parse(at)
+  if (!Number.isFinite(elapsed)) return undefined
+  const minutes = Math.floor(Math.max(0, elapsed) / 60_000)
+  if (minutes < 1) return 'just now'
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`
+}
+
 const STATE_LABEL: Record<QuestionState['_tag'], string> = {
   pending: 'Waiting for you',
   submitting: 'Submitting',
@@ -96,9 +107,10 @@ const STATE_LABEL: Record<QuestionState['_tag'], string> = {
  * questions share a tab strip whose header chips mark answered questions; it stacks below
  * `geometryNumbers.questionStack`. Keyboard: arrows move, 1–9 pick, Tab from a question's last control
  * moves to the next question, Enter submits (or moves to the next unanswered question). The host owns
- * the request state and transport; drafts are controlled when `draft` is passed.
+ * the request state, transport and clock (`now`, epoch milliseconds, for the "asked" age); drafts are
+ * controlled when `draft` is passed. A question waiting for this user carries the attention hairline and glyph.
  */
-export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, onRetry, onOpenTerminal, onJump, draft, onDraftChange, autoFocus = false }: QuestionFormProps) {
+export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, onRetry, onOpenTerminal, onJump, draft, onDraftChange, autoFocus = false, now }: QuestionFormProps & { readonly now: number }) {
   const rootRef = React.useRef<HTMLElement>(null)
   const stacked = useStacked(rootRef)
   const titleId = React.useId()
@@ -114,6 +126,9 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
   const interactive = state._tag === 'pending' || state._tag === 'submitting' || state._tag === 'failed'
   const busy = state._tag === 'submitting'
   const canAct = request.answerable && (state._tag === 'pending' || state._tag === 'failed')
+  // Attention marks a question waiting on this user; settled and read-only requests stay neutral.
+  const attention = interactive && request.answerable
+  const askedAge = relativeAge(request.askedAt, now)
   const answeredCount = questions.filter(question => isQuestionAnswered(question, draftFor(answers, question.id))).length
   const complete = questions.every(question => question.required === false || isQuestionAnswered(question, draftFor(answers, question.id)))
 
@@ -238,6 +253,7 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     question={question}
     draft={draftFor(answers, question.id)}
     showHeader={questions.length === 1}
+    showKeys={canAct}
     stacked={stacked}
     isDisabled={busy}
     isReadOnly={!request.answerable}
@@ -259,16 +275,16 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     data-stacked={stacked}
     onKeyDownCapture={onKeyDownCapture}
     onKeyDown={onKeyDown}
-    {...stylex.props(styles.form, variant === 'pinned' ? styles.pinned : styles.card)}
+    {...stylex.props(styles.form, variant === 'pinned' ? styles.pinned : styles.card, variant !== 'pinned' && attention && styles.cardAttention)}
   >
     <div {...stylex.props(styles.header)}>
-      <span {...stylex.props(styles.glyph)}><Icon name="message" /></span>
+      <span data-question-glyph="" {...stylex.props(styles.glyph, attention && styles.glyphAttention)}><Icon name="message" /></span>
       <span id={titleId} {...stylex.props(styles.title)}>{title}</span>
-      <span {...stylex.props(styles.meta)}>from {request.agentLabel}</span>
+      <span data-question-asked="" {...stylex.props(styles.meta)}>{request.agentLabel}{askedAge !== undefined && <> · asked <time dateTime={request.askedAt}>{askedAge}</time></>}</span>
       <div {...stylex.props(styles.headerEnd)}>
         {state._tag === 'pending' && state.expiresAt !== undefined && <Clock at={state.expiresAt} prefix="Expires" />}
         {(state._tag === 'answered' || state._tag === 'answered-elsewhere' || state._tag === 'expired' || state._tag === 'cancelled') && <Clock at={state.at} prefix={state._tag === 'expired' ? 'Expired at' : 'At'} />}
-        <span data-question-state-chip="" {...stylex.props(styles.chip)}>{busy && <Icon name="spinner" spinning size={12} />}{STATE_LABEL[state._tag]}</span>
+        <span data-question-state-chip="" {...stylex.props(styles.chip)}>{busy && <Icon name="spinner" spinning size={12} />}{interactive && !request.answerable ? 'Read only' : STATE_LABEL[state._tag]}</span>
         {onOpenTerminal !== undefined && <Tooltip label="Open the agent's terminal"><IconButton icon="drawer" label="Open the agent's terminal" onPress={onOpenTerminal} /></Tooltip>}
         {onJump !== undefined && <Tooltip label="Jump to the conversation"><IconButton icon="chevron-right" label="Jump to the conversation" onPress={onJump} /></Tooltip>}
       </div>
@@ -293,7 +309,7 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
         </TabList>
         {questions.map((question, index) => <TabPanel key={question.id} id={question.id} {...stylex.props(styles.tabPanel)}>{renderQuestion(question, index)}</TabPanel>)}
       </Tabs> : questions.map(renderQuestion)}
-      {state._tag === 'failed' && <p role="alert" {...stylex.props(styles.problem)}><Icon name="alert" size={12} />Not sent: {state.error}</p>}
+      {state._tag === 'failed' && <p role="alert" {...stylex.props(styles.problem)}><span data-question-problem-glyph="" {...stylex.props(styles.problemGlyph)}><Icon name="alert" size={12} /></span>Not sent: {state.error}</p>}
       <div {...stylex.props(styles.footer)}>
         {questions.length > 1 && <span aria-live="polite" {...stylex.props(styles.meta)}>{answeredCount} of {questions.length} answered</span>}
         {canAct ? <span {...stylex.props(styles.hints)}>
@@ -351,6 +367,8 @@ interface QuestionPanelProps {
   readonly question: QuestionView
   readonly draft: AnswerDraft
   readonly showHeader: boolean
+  /** Digit keycaps show only while 1–9 can act. */
+  readonly showKeys: boolean
   readonly stacked: boolean
   readonly isDisabled: boolean
   readonly isReadOnly: boolean
@@ -362,7 +380,7 @@ interface QuestionPanelProps {
   readonly onNote: (value: string) => void
 }
 
-function QuestionPanel({ question, draft, showHeader, stacked, isDisabled, isReadOnly, previewIndex, promptId, onPreview, onChoose, onOther, onNote }: QuestionPanelProps) {
+function QuestionPanel({ question, draft, showHeader, showKeys, stacked, isDisabled, isReadOnly, previewIndex, promptId, onPreview, onChoose, onOther, onNote }: QuestionPanelProps) {
   const hasPreview = question.options.some(option => option.preview !== undefined)
   const selectedIndexes = draft.selected.map(id => question.options.findIndex(option => option.id === id)).filter(index => index >= 0)
   const fallbackIndex = selectedIndexes[0] ?? Math.max(0, question.options.findIndex(option => option.recommended === true))
@@ -371,7 +389,9 @@ function QuestionPanel({ question, draft, showHeader, stacked, isDisabled, isRea
   const otherOpen = question.kind !== 'text' && question.allowOther && draft.other !== undefined
   const multi = usesCheckboxes(question)
   const inputType = question.secret === true ? 'password' : 'text'
-  const rows = question.options.map((option, index) => ({ option, index, value: optionValue(index) }))
+  // A description describes its row rather than naming it, so it is referenced by id and hidden from the name.
+  const rows = question.options.map((option, index) => ({ option, index, value: optionValue(index), descriptionId: option.description === undefined ? undefined : `${promptId}-d${index}` }))
+  const previewCaptionId = `${promptId}-preview`
   /** Hovering or focusing an option row previews it; the Other row has no preview. */
   const previewRow = (event: React.SyntheticEvent<HTMLElement>) => {
     const index = Number((event.target as HTMLElement).closest('label')?.querySelector<HTMLElement>('[data-option-index]')?.dataset['optionIndex'])
@@ -385,12 +405,12 @@ function QuestionPanel({ question, draft, showHeader, stacked, isDisabled, isRea
       </TextField>
     : multi
       ? <CheckboxGroup aria-labelledby={promptId} value={[...selectedIndexes.map(optionValue), ...(otherOpen ? [OTHER_VALUE] : [])]} onChange={onChoose} isDisabled={isDisabled} isReadOnly={isReadOnly} {...stylex.props(styles.options)}>
-          {rows.map(row => <Checkbox key={row.option.id} value={row.value} className={rowClass}>{({ isSelected }) => <OptionContent option={row.option} index={row.index} isSelected={isSelected} multi />}</Checkbox>)}
-          {question.allowOther && <Checkbox value={OTHER_VALUE} className={rowClass}>{({ isSelected }) => <OtherContent index={question.options.length} isSelected={isSelected} multi />}</Checkbox>}
+          {rows.map(row => <Checkbox key={row.option.id} value={row.value} aria-describedby={row.descriptionId} className={rowClass}>{({ isSelected }) => <OptionContent option={row.option} index={row.index} descriptionId={row.descriptionId} showKey={showKeys} isSelected={isSelected} multi />}</Checkbox>)}
+          {question.allowOther && <Checkbox value={OTHER_VALUE} className={rowClass}>{({ isSelected }) => <OtherContent index={question.options.length} showKey={showKeys} isSelected={isSelected} multi />}</Checkbox>}
         </CheckboxGroup>
       : <RadioGroup aria-labelledby={promptId} value={otherOpen ? OTHER_VALUE : selectedIndexes[0] === undefined ? null : optionValue(selectedIndexes[0])} onChange={value => onChoose([value])} isDisabled={isDisabled} isReadOnly={isReadOnly} {...stylex.props(styles.options)}>
-          {rows.map(row => <Radio key={row.option.id} value={row.value} className={rowClass}>{({ isSelected }) => <OptionContent option={row.option} index={row.index} isSelected={isSelected} multi={false} />}</Radio>)}
-          {question.allowOther && <Radio value={OTHER_VALUE} className={rowClass}>{({ isSelected }) => <OtherContent index={question.options.length} isSelected={isSelected} multi={false} />}</Radio>}
+          {rows.map(row => <Radio key={row.option.id} value={row.value} aria-describedby={row.descriptionId} className={rowClass}>{({ isSelected }) => <OptionContent option={row.option} index={row.index} descriptionId={row.descriptionId} showKey={showKeys} isSelected={isSelected} multi={false} />}</Radio>)}
+          {question.allowOther && <Radio value={OTHER_VALUE} className={rowClass}>{({ isSelected }) => <OtherContent index={question.options.length} showKey={showKeys} isSelected={isSelected} multi={false} />}</Radio>}
         </RadioGroup>
 
   return <div data-question-panel={question.id} {...stylex.props(styles.question)}>
@@ -408,8 +428,8 @@ function QuestionPanel({ question, draft, showHeader, stacked, isDisabled, isRea
           </TextField>
         </div>}
       </div>
-      {hasPreview && preview !== undefined && <figure data-question-preview={preview.id} {...stylex.props(styles.preview)}>
-        <figcaption {...stylex.props(styles.meta)}>Preview · {preview.label}</figcaption>
+      {hasPreview && preview !== undefined && <figure data-question-preview={preview.id} aria-labelledby={previewCaptionId} {...stylex.props(styles.preview)}>
+        <figcaption id={previewCaptionId} {...stylex.props(styles.meta)}>Preview · {preview.label}</figcaption>
         <PreviewBody preview={preview.preview} />
       </figure>}
     </div>
@@ -435,7 +455,7 @@ function Indicator({ isSelected, multi }: { isSelected: boolean; multi: boolean 
   </span>
 }
 
-function OptionContent({ option, index, isSelected, multi }: { option: OptionView; index: number; isSelected: boolean; multi: boolean }) {
+function OptionContent({ option, index, descriptionId, showKey, isSelected, multi }: { option: OptionView; index: number; descriptionId: string | undefined; showKey: boolean; isSelected: boolean; multi: boolean }) {
   return <div data-option-index={index} {...stylex.props(styles.optionRow)}>
     <Indicator isSelected={isSelected} multi={multi} />
     <span {...stylex.props(styles.optionText)}>
@@ -444,32 +464,35 @@ function OptionContent({ option, index, isSelected, multi }: { option: OptionVie
         {option.recommended === true && <span data-recommended="" {...stylex.props(styles.badge)}>Recommended</span>}
         {option.tone === 'danger' && <span {...stylex.props(styles.danger)}><Icon name="alert" size={12} label="Destructive" /></span>}
       </span>
-      {option.description !== undefined && <span {...stylex.props(styles.description)}>{option.description}</span>}
+      {option.description !== undefined && <span id={descriptionId} aria-hidden="true" {...stylex.props(styles.description)}>{option.description}</span>}
     </span>
-    {index < 9 && <span aria-hidden="true" {...stylex.props(styles.keycap)}>{index + 1}</span>}
+    {showKey && index < 9 && <span data-question-keycap="" aria-hidden="true" {...stylex.props(styles.keycap)}>{index + 1}</span>}
   </div>
 }
 
-function OtherContent({ index, isSelected, multi }: { index: number; isSelected: boolean; multi: boolean }) {
+function OtherContent({ index, showKey, isSelected, multi }: { index: number; showKey: boolean; isSelected: boolean; multi: boolean }) {
   return <div data-option-index={index} {...stylex.props(styles.optionRow)}>
     <Indicator isSelected={isSelected} multi={multi} />
     <span {...stylex.props(styles.optionText)}><span {...stylex.props(styles.optionLabel)}>{OTHER_LABEL}</span></span>
-    {index < 9 && <span aria-hidden="true" {...stylex.props(styles.keycap)}>{index + 1}</span>}
+    {showKey && index < 9 && <span data-question-keycap="" aria-hidden="true" {...stylex.props(styles.keycap)}>{index + 1}</span>}
   </div>
 }
 
 const styles = stylex.create({
   form: { display: 'flex', flexDirection: 'column', gap: s.lg, width: '100%', minWidth: 0, boxSizing: 'border-box', color: text.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
-  card: { padding: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, backgroundColor: surface.raised },
+  card: { paddingBlock: s.md, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, backgroundColor: surface.raised },
+  /** E37: a question waiting on this user carries the attention hairline. */
+  cardAttention: { borderColor: status.attention },
   pinned: { paddingBlock: s.md, paddingInline: s.zero, backgroundColor: surface.transparent },
   header: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.sm, minWidth: 0 },
   glyph: { display: 'inline-flex', color: text.fgMuted },
+  glyphAttention: { color: status.attention },
   title: { fontWeight: t.weightMedium, color: text.fg },
   meta: { color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   headerEnd: { display: 'flex', alignItems: 'center', gap: s.sm, marginInlineStart: 'auto' },
   chip: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.full, color: text.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, marginInlineEnd: s.sm },
   tabs: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
-  tabList: { display: 'flex', flexWrap: 'wrap', gap: s.xs },
+  tabList: { display: 'flex', flexWrap: 'wrap', gap: s.md },
   tabListStacked: { flexDirection: 'column', flexWrap: 'nowrap' },
   tab: { display: 'inline-flex', alignItems: 'center', gap: s.xs, minWidth: 0, height: g.controlMd, paddingInline: s.md, boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.full, color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', outlineStyle: 'none', ':hover': { color: text.fg } },
   tabStacked: { width: '100%', justifyContent: 'space-between', borderRadius: r.control },
@@ -510,6 +533,7 @@ const styles = stylex.create({
   preview: { margin: s.zero, display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0, padding: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, backgroundColor: surface.washSubtle },
   previewEmpty: { margin: s.zero, color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   problem: { display: 'flex', alignItems: 'center', gap: s.xs, margin: s.zero, color: text.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  problemGlyph: { display: 'inline-flex', color: status.dangerFg },
   footer: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.md, minWidth: 0 },
   hints: { display: 'flex', flexWrap: 'wrap', gap: s.md, color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   kbd: { paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.keyboard, color: text.fgSoft, fontFamily: t.fontMono, fontSize: t.denseSize },
