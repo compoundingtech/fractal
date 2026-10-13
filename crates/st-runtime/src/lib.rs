@@ -11,8 +11,9 @@ mod process;
 mod pty;
 
 pub use environment::{
-    ShellStartupTimeout, expand_path_placeholder, is_shell_startup_timeout, login_environment, login_environment_from,
-    login_environment_within, materialize_environment, overlay_environment, resolve_executable,
+    ShellStartupTimeout, expand_path_placeholder, is_shell_startup_timeout, login_environment,
+    login_environment_from, login_environment_within, materialize_environment, overlay_environment,
+    resolve_executable,
 };
 pub use isolate::{
     Isolation, SCOPE_GRACE, end_scope, initialize_isolation, mode as isolation_mode, scope_unit,
@@ -22,7 +23,9 @@ pub use priority::{
     LIVE_WEIGHT, ServerPlacement, protect_server, protect_servers, report as priority_report,
     server_unit, work_prefix,
 };
-pub use process::{ExecGeneration, ExecObservation, ExecRuntime, process_start_token};
+pub use process::{
+    ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
+};
 pub use pty::{
     Launch, PtyObservation, PtyRuntime, PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
 };

@@ -4208,6 +4208,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-storage-version",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -4289,6 +4290,10 @@ dependencies = [
  "sha2",
  "tempfile",
 ]
+
+[[package]]
+name = "st-storage-version"
+version = "0.1.0"
 
 [[package]]
 name = "st-wire"
@@ -4589,6 +4594,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-storage-version",
  "toml 0.9.12+spec-1.1.0",
 ]
 
