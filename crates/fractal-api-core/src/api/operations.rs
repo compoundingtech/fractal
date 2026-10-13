@@ -121,6 +121,19 @@ pub async fn doctor(
             message,
         });
     }
+    let stalled_store = reader_store.clone();
+    let stalled = crate::api::read_deadline::spawn_blocking(move || {
+        stalled_store.stalled_runs(client_now_ms())
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(|error| ApiError::internal(format!("{error:#}")))?;
+    let (name, status, message) = crate::slo::stalled_runs_line(&stalled);
+    report.checks.push(DoctorCheck {
+        name,
+        status: status.into(),
+        message,
+    });
     report.checks.extend(github_usage_checks(
         &crate::resource::github_usage_report(),
         client_now_ms(),

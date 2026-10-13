@@ -54,6 +54,7 @@ use crate::store::Store;
 pub mod channel_recovery;
 pub mod declared_waits;
 pub mod idle_nudge;
+pub mod quiet_claims;
 pub mod placement;
 pub mod run_report;
 pub mod start_spacing;
@@ -9972,6 +9973,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     if !view.agentless && matches!(view.status.as_str(), "claimed" | "working") {
                         changed |= self.watch_declared_wait(view)?;
+                        changed |= self.check_quiet_claim(run, view)?;
                     }
                     if !self.step_declarations_hold(run, &view.subject)? {
                         return Ok(changed);
@@ -12808,6 +12810,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         not_before_unix_ms: None,
                         nudged_at_unix_ms: None,
                         waiting_on: None,
+                        stalled_at_unix_ms: None,
                         created_at_unix_ms: run.created_at_unix_ms,
                         updated_at_unix_ms: run.updated_at_unix_ms,
                         person_answers: Vec::new(),
@@ -42992,6 +42995,7 @@ mission "ios-proof-blocked" state="ready" {
             not_before_unix_ms: None,
             nudged_at_unix_ms: None,
             waiting_on: None,
+            stalled_at_unix_ms: None,
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
             person_answers: Vec::new(),
@@ -43156,6 +43160,7 @@ mission "ios-proof-blocked" state="ready" {
             not_before_unix_ms: None,
             nudged_at_unix_ms: None,
             waiting_on: None,
+            stalled_at_unix_ms: None,
             created_at_unix_ms: 10,
             updated_at_unix_ms: 10,
             person_answers: Vec::new(),
@@ -43566,6 +43571,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
             not_before_unix_ms: None,
             nudged_at_unix_ms: None,
             waiting_on: None,
+            stalled_at_unix_ms: None,
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
             person_answers: Vec::new(),

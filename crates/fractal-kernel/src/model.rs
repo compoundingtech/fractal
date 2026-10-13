@@ -2762,6 +2762,10 @@ pub struct StepRunView {
     /// and the wait is open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_on: Option<DeclaredWaitView>,
+    /// When this held step became stalled: quiet past its run's stalled-after and the grace
+    /// after its holder's fault, with no open declared wait. Absent once its holder moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_at_unix_ms: Option<u128>,
     /// The `work complete` summary for the current attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_summary: Option<String>,

@@ -291,7 +291,7 @@ impl Default for ReconcileConfig {
     fn default() -> Self {
         Self {
             max_passes_per_minute: None,
-            idle_nudge_after: "30m".into(),
+            idle_nudge_after: "15m".into(),
             idle_nudge_quiet_watch: "2h".into(),
         }
     }
@@ -333,7 +333,7 @@ impl ReconcileConfig {
 }
 
 /// The default idle time before a nudge.
-pub const IDLE_NUDGE_AFTER_MS: u64 = 30 * 60_000;
+pub const IDLE_NUDGE_AFTER_MS: u64 = 15 * 60_000;
 /// The default time a wait holds after it last woke its seat.
 pub const IDLE_NUDGE_QUIET_WATCH_MS: u64 = 2 * 60 * 60_000;
 /// The daemon's idle-nudge settings. `after_ms` is `None` when nudges are off.
@@ -1313,10 +1313,10 @@ sekrets_profile = "nathan/daemon-gh"
     }
 
     #[test]
-    fn idle_nudges_default_to_thirty_minutes_and_a_two_hour_quiet_watch() {
+    fn idle_nudges_default_to_fifteen_minutes_and_a_two_hour_quiet_watch() {
         let config = Config::default();
         let settings = config.reconcile.idle_nudge().unwrap();
-        assert_eq!(settings.after_ms, Some(30 * 60_000));
+        assert_eq!(settings.after_ms, Some(15 * 60_000));
         assert_eq!(settings.quiet_watch_ms, 2 * 3_600_000);
         assert!(!toml::to_string(&config).unwrap().contains("[reconcile]"));
 

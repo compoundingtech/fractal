@@ -2646,7 +2646,7 @@ fn parse_run_report(
 }
 
 /// How long a reported run may go without progress before it counts as stalled.
-pub const DEFAULT_STALLED_AFTER_MS: u64 = 30 * 60_000;
+pub const DEFAULT_STALLED_AFTER_MS: u64 = 3 * 60 * 60_000;
 
 /// A run report goes to an agent. A person is reached through their own agent.
 pub fn validate_report_to(report_to: &str) -> Result<(), St3Error> {

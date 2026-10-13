@@ -1461,6 +1461,9 @@ pub struct Work {
     /// When the open declared wait began.
     #[serde(default)]
     pub waiting_since_unix_ms: Option<u64>,
+    /// When this held step became stalled: no progress past its run's stalled-after and 30 minutes after its holder's fault, and no open declared wait. Absent once its holder moves.
+    #[serde(default)]
+    pub stalled_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_elapsed_ms: u64,
     #[serde(default)]

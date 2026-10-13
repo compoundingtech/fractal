@@ -1516,6 +1516,7 @@ mod tests {
             not_before_unix_ms: None,
             nudged_at_unix_ms: None,
             waiting_on: None,
+            stalled_at_unix_ms: None,
             created_at_unix_ms: 1_000,
             updated_at_unix_ms: 2_000,
             person_answers: Vec::new(),

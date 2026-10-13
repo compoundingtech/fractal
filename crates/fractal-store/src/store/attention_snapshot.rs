@@ -1187,13 +1187,22 @@ impl Store {
                 let Some(step) = person_work::step(&connection, source)? else {
                     continue;
                 };
-                let extension =
-                    step_timeout_extension_at(&connection, source, step.attempt, as_of)?;
-                if !matches!(step.status.as_str(), "claimed" | "working" | "ready")
-                    || claim.body["fields"]["episode"].as_str()
-                        != Some(step_timeout_episode(source, step.attempt, extension).as_str())
-                {
-                    continue;
+                // A quiet or stalled fault holds while the step stays quiet in the same period.
+                let condition = claim.body["fields"]["condition"].as_str().unwrap_or_default();
+                if matches!(condition, STEP_QUIET_CONDITION | STEP_STALLED_CONDITION) {
+                    let episode = claim.body["fields"]["episode"].as_str().unwrap_or_default();
+                    if !quiet_claims::quiet_fault_current(&connection, &step, condition, episode, as_of)? {
+                        continue;
+                    }
+                } else {
+                    let extension =
+                        step_timeout_extension_at(&connection, source, step.attempt, as_of)?;
+                    if !matches!(step.status.as_str(), "claimed" | "working" | "ready")
+                        || claim.body["fields"]["episode"].as_str()
+                            != Some(step_timeout_episode(source, step.attempt, extension).as_str())
+                    {
+                        continue;
+                    }
                 }
             } else if claim.body["fields"]["condition"] == "stop-deferred" {
                 // A retained stop belongs to a terminal run, so declaration_live deliberately

@@ -1364,7 +1364,7 @@ struct MissionRunStartArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
     after: Option<String>,
     /// Tell this agent when the run fails, is cancelled or stalls, replacing the mission's own
-    /// `report-to`. A run that sits 30 minutes without progress counts as stalled unless the
+    /// `report-to`. A run that sits 3 hours without progress counts as stalled unless the
     /// mission sets `stalled-after`.
     #[arg(long, value_name = "AGENT")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
@@ -1409,7 +1409,7 @@ struct MissionReportToArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     agent: Option<String>,
     /// How long the run may go without progress before it counts as stalled, such as `1h`.
-    /// Defaults to the mission's `stalled-after`, else 30 minutes.
+    /// Defaults to the mission's `stalled-after`, else 3 hours.
     #[arg(long, value_name = "DURATION", requires = "agent", conflicts_with = "clear")]
     #[arg(value_parser = parse_stalled_after)]
     stalled_after: Option<u64>,
@@ -13307,6 +13307,17 @@ fn render_client_work_detail(work: &fractal_client::Work) -> String {
             })
             .unwrap_or_default();
         let _ = writeln!(output, "Waiting on: {waiting_on}{since}");
+    }
+    if let Some(stalled) = work
+        .stalled_at_unix_ms
+        .and_then(|at| chrono::DateTime::from_timestamp_millis(i64::try_from(at).ok()?))
+    {
+        let at = stalled.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let _ = writeln!(
+            output,
+            "Stalled: {at} ({}), no progress and no declared wait; the run's report-to was told",
+            ago(&at, now_ms())
+        );
     }
     if let Some(reason) = &work.blocked_reason {
         // The store keeps the reason for any state change here, such as a failure or an

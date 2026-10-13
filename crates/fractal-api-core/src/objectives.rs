@@ -246,6 +246,32 @@ pub fn divergence(open: u64) -> Value {
     })
 }
 
+/// The stalled-runs objective: the runs that have a stalled step now.
+pub fn stalled_runs(runs: &std::collections::BTreeSet<String>) -> Value {
+    let targets = crate::slo::targets();
+    let about = targets.stalled.about.as_str();
+    let max_runs = targets.stalled.max_runs;
+    let count = runs.len() as u64;
+    let met = count <= max_runs;
+    json!({
+        "id": "stalled-runs", "kind": "objective", "about": about,
+        "target": format!("≤ {max_runs} runs"), "current": format!("{count} now"), "window": "now",
+        "remaining_percent": if met { 100.0 } else { 0.0 }, "status": if met { "met" } else { "missed" },
+        "explain": format!(
+            "{about}. Goal: at most {max_runs} runs with a stalled step. {}",
+            if runs.is_empty() {
+                "None has one.".to_owned()
+            } else {
+                format!(
+                    "{} now: {}. `st work show STEP` for each stalled step names its holder and its last progress.",
+                    plural(count, "run"),
+                    runs.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                )
+            }
+        ),
+    })
+}
+
 /// A duration in minutes once it is a minute or more: CI's targets are minutes, not milliseconds.
 fn duration(target_ms: u64) -> String {
     if target_ms < 60_000 {

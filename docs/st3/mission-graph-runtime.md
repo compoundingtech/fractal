@@ -1149,7 +1149,7 @@ st missions report-to RUN --clear --as person/operator
 
 Only a person or the agent that requested the run may change it, and only to an agent. Each
 call states the whole report, as `missions start --report-to` would: `--stalled-after` defaults
-to the mission's `stalled-after`, else 30 minutes; `--report-stalls true|false` defaults to the
+to the mission's `stalled-after`, else 3 hours; `--report-stalls true|false` defaults to the
 mission's `report-stalls`, else true; and the completed event is reported with
 `--report-completed` or when the mission asks for it. `--clear` reports the run to nobody, even
 when its mission names a reporter. The change is a `mission-run.report-to` claim on the run. Its
@@ -1166,7 +1166,7 @@ The reporter gets one message from `daemon/runtime` for each of these events:
 | --- | --- |
 | failed | The run fails, including a mission `timeout`, and starts its cleanup. |
 | cancelled | The run is cancelled and starts its cleanup. |
-| stalled | With `report-stalls=#true` (the default), the run has made no progress for `stalled-after` (30 minutes unless set). |
+| stalled | With `report-stalls=#true` (the default), the run has made no progress for `stalled-after` (3 hours unless set). |
 | completed | The run completes, only with `report-completed`. |
 
 Set the mission property `report-stalls=#false` for a parent that intentionally waits until
@@ -1190,7 +1190,7 @@ mission's policy; schedules retain their timers, catch-up and no-overlap behavio
 does not change schedule admission or schedule faults. `stalled-after` remains a positive
 duration even when stall reports are disabled. Older mission definitions and run claims
 without `report-stalls` / `report_stalls` keep stall reports enabled with the existing limit
-(30 minutes unless set).
+(3 hours unless set).
 
 A stall is measured from the run's last sign of life: its last state change, any step's last
 change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
@@ -1284,7 +1284,7 @@ verdict yet, or another seat's progress on a step this seat depends on.
 A held step with an open [declared wait](#declared-waits) is not idle-holding: st wakes the seat
 when its target moves.
 
-After 30 minutes idle-holding, st sends the seat one message from `daemon/runtime`. The message
+After 15 minutes idle-holding, st sends the seat one message from `daemon/runtime`. The message
 names each held step with its title, goals and last progress line, says how long the seat has been
 idle, and lists the waits that have gone quiet, with each wait's subject and when it last moved.
 It asks the seat to continue the work, declare what the step waits on with `work wait --on`, or
@@ -1294,7 +1294,7 @@ Some movements a source saw but did not deliver mean the seat must act. Today on
 a watched pull request that leaves the merge queue without merging and is still out of it 5
 minutes later. GitHub briefly reports a queued pull request as out of the queue while the queue
 rebuilds; the 5-minute settle skips those. When this happens, an idle seat is nudged at once,
-without waiting out the 30 minutes. The nudge names the pull request and asks the seat to check it:
+without waiting out the 15 minutes. The nudge names the pull request and asks the seat to check it:
 still queued, ejected, or stuck.
 
 Back-off: a step gets at most one nudge per idle period. After a nudge, the next one waits until
@@ -1308,7 +1308,7 @@ Two daemon settings in `[reconcile]` tune this, and are read again without a res
 
 ```toml
 [reconcile]
-idle_nudge_after = "30m"       # or "off"
+idle_nudge_after = "15m"       # or "off"
 idle_nudge_quiet_watch = "2h"
 ```
 
@@ -1323,6 +1323,31 @@ A disposable local message index records pending input and each source's deliver
 writes maintain it, so the reads seek current state without walking retained mailbox history.
 First startup backfills it in resumable batches of at most 64 message subjects; reads never build
 it. See `release-notes/idle-hold-nudge.json` for measured startup and writer costs.
+
+## Quiet claims
+
+A held step is alive while its holder makes progress, not while its lease is renewed: a seat's
+driver renews the lease whether or not the seat works. Progress is `work progress`, a wait
+(declared or a note), a resume, `work extend`, `work ask`, a new claim, or the end of a declared
+wait. A held step with an open [declared wait](#declared-waits) is not quiet.
+
+A held step with no progress and no open declared wait for its run's `stalled-after` (3 hours
+unless the mission or `missions report-to` sets one) raises a fault to its holder, delivered as
+faults are: record progress, declare the wait, ask, or release. Fifteen minutes idle with nothing
+to wake it has already brought one [idle nudge](#idle-holders).
+
+Thirty minutes after the fault, with no answer, the step is stalled. `st work show` prints
+`Stalled:`, the work resource carries `stalled_at_unix_ms`, and the step counts toward the
+`stalled-runs` target that `st doctor` checks (`slo/targets.toml`). A second fault goes to the
+run's report-to, else to its requester when that is an agent, else to the operator.
+
+Both faults are `operational.failure` claims on the step, with conditions `step-quiet` and
+`step-stalled`. Their episode names the attempt and the start of the quiet period, so any progress
+ends both and the stalled label, and the next quiet period starts over.
+
+Each held step has one quiet deadline, its last progress plus `stalled-after`, and then one
+stalled deadline 30 minutes later. Its run's evaluation is due at each, so a quiet fleet does no
+work to find quiet steps.
 
 ## Runtime sequence
 

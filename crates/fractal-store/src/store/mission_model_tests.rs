@@ -1012,7 +1012,7 @@ fn a_mission_reports_to_an_agent_with_a_default_stall_limit() {
     let default = parse(r#"report-to="agent/ops/watcher""#).unwrap();
     let default = &default.missions["watched"];
     assert_eq!(default.report_to.as_deref(), Some("agent/ops/watcher"));
-    assert_eq!(default.stalled_after_ms, Some(30 * 60_000));
+    assert_eq!(default.stalled_after_ms, Some(3 * 60 * 60_000));
     assert!(!default.report_completed);
     assert!(default.report_stalls);
 
@@ -1029,7 +1029,7 @@ fn a_mission_reports_to_an_agent_with_a_default_stall_limit() {
     let muted = parse(r#"report-to="agent/ops/watcher" report-stalls=#false"#).unwrap();
     let muted = &muted.missions["watched"];
     assert!(!muted.report_stalls);
-    assert_eq!(muted.stalled_after_ms, Some(30 * 60_000));
+    assert_eq!(muted.stalled_after_ms, Some(3 * 60 * 60_000));
     assert_ne!(default.revision, muted.revision);
     // Older stored definitions decode and serialize byte-for-byte without a new field.
     let old = serde_json::to_value(default).unwrap();

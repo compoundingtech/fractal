@@ -222,6 +222,8 @@ pub mod work_summaries_ivm;
 pub mod subagents;
 pub mod declared_waits;
 pub use declared_waits::{WORK_WAIT_ENDED_KIND, WaitTarget, WaitWake, describe_wait};
+pub mod quiet_claims;
+pub use quiet_claims::{STALLED_GRACE_MS, STEP_QUIET_CONDITION, STEP_STALLED_CONDITION, quiet_episode};
 pub mod idle_mail;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
@@ -17741,6 +17743,7 @@ pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunVie
         not_before_unix_ms: not_before.and_then(|value| value.parse().ok()),
         nudged_at_unix_ms: None,
         waiting_on: None,
+        stalled_at_unix_ms: None,
         created_at_unix_ms: created.parse().unwrap_or(0),
         updated_at_unix_ms: updated.parse().unwrap_or(0),
         person_answers: Vec::new(),
@@ -17814,6 +17817,7 @@ pub fn enrich_step_queue_cached(
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
     enrich_step_nudge_at(connection, view, snapshot_unix_ms)?;
     declared_waits::enrich_declared_wait_at(connection, view, snapshot_unix_ms)?;
+    quiet_claims::enrich_stalled_at(connection, view, snapshot_unix_ms)?;
     enrich_step_wake_at(connection, view, snapshot_unix_ms)?;
     enrich_step_definition_cached(connection, view, definitions)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;

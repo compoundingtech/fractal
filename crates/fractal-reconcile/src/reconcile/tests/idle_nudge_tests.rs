@@ -286,14 +286,14 @@ fn an_idle_seat_holding_a_step_with_nothing_to_wake_it_is_nudged_once() {
     idle.progress(&step, "Seed list drafted; waiting on the soil report");
     idle.harness("idle");
 
-    idle.at(29 * MINUTE);
+    idle.at(14 * MINUTE);
     idle.evaluate();
     assert!(
         idle.nudges().is_empty(),
-        "29 minutes is not yet idle-holding"
+        "14 minutes is not yet idle-holding"
     );
 
-    idle.at(31 * MINUTE);
+    idle.at(16 * MINUTE);
     idle.evaluate();
     let nudges = idle.nudges();
     assert_eq!(nudges.len(), 1);
@@ -304,10 +304,10 @@ fn an_idle_seat_holding_a_step_with_nothing_to_wake_it_is_nudged_once() {
         "{content}"
     );
     assert!(
-        content.contains("Last progress (31m ago): Seed list drafted; waiting on the soil report"),
+        content.contains("Last progress (16m ago): Seed list drafted; waiting on the soil report"),
         "{content}"
     );
-    assert!(content.contains("idle for 31m"), "{content}");
+    assert!(content.contains("idle for 16m"), "{content}");
     assert!(content.contains("st work wait "), "{content}");
     assert!(
         content.contains(&format!("st work release {step} --as {SEAT}")),
@@ -535,7 +535,7 @@ fn a_merged_pull_request_is_not_an_action() {
     idle.at(10 * MINUTE);
     idle.observe(json!({"merge_queue": null, "state": "closed", "merged": true}));
     idle.read_mail();
-    idle.at(20 * MINUTE);
+    idle.at(14 * MINUTE);
     idle.evaluate();
     assert!(idle.nudges().is_empty());
 }
@@ -989,4 +989,171 @@ fn a_wait_names_a_target_it_can_watch() {
     idle.wait_on(&step, "1h");
     idle.seat.work(&step, "resume", "resume-after-target").unwrap();
     assert_eq!(idle.view(&step).waiting_on, None);
+}
+
+const WATCHER: &str = "agent/node.watcher";
+
+/// A mission whose runs report to another seat, so its report is no wait of the holder's.
+fn reported(idle: &Idle) {
+    apply_source(
+        &idle.seat.store,
+        r#"version 2
+agent "watcher" { workspace "/tmp"; command "true" }
+mission "watched" state="ready" report-to="agent/node.watcher" {
+  concurrent-runs
+  goal "Plant the seed beds once the soil report is in."
+  step "work" { assigned-to "agent/node.worker" }
+}"#,
+        "watched-source",
+    );
+}
+
+impl Idle {
+    fn faults(&self, condition: &str, step: &str) -> Vec<crate::model::ClaimRecord> {
+        self.seat
+            .store
+            .claims_for(step, Some("operational.failure"))
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.body["fields"]["condition"] == condition)
+            .collect()
+    }
+
+    fn fault_messages(&self, to: &str) -> Vec<crate::model::MessageView> {
+        self.seat
+            .store
+            .messages(Some(to), true)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.tags.iter().any(|tag| tag.starts_with("st3-fault:")))
+            .collect()
+    }
+
+    /// Move the clock with the seat idle, evaluating every hour as the daemon's deadlines do.
+    fn idle_until(&self, offset: u128) {
+        while self.now.get() + HOUR < offset {
+            self.at(self.now.get() + HOUR);
+            self.seat.reconciler.reconcile_once().unwrap();
+        }
+        self.at(offset);
+        self.seat.reconciler.reconcile_once().unwrap();
+    }
+}
+
+#[test]
+fn an_idle_seat_holding_a_claim_with_a_note_only_wait_is_woken_then_faulted_then_stalled() {
+    let idle = fixture();
+    reported(&idle);
+    let step = idle.hold("watched", "note-only-quiet");
+    let run = idle.view(&step).run;
+    idle.seat
+        .store
+        .work_action(
+            &step,
+            "wait",
+            &crate::model::WorkRequest {
+                wait_ms: Some(u64::try_from(2 * HOUR).unwrap()),
+                wait_on: None,
+                actor: Some(SEAT.into()),
+                incarnation: Some("seat-one".into()),
+                summary: Some("Waiting for the soil report.".into()),
+                reason: Some("soil report".into()),
+                evidence: Vec::new(),
+                idempotency_key: "note-only-quiet-wait".into(),
+            },
+        )
+        .unwrap();
+    idle.harness("idle");
+
+    // Woken: fifteen minutes idle holding a claim with no declared wait.
+    idle.at(14 * MINUTE);
+    idle.evaluate();
+    assert!(idle.nudges().is_empty());
+    idle.at(16 * MINUTE);
+    idle.evaluate();
+    let nudges = idle.nudges();
+    assert_eq!(nudges.len(), 1);
+    assert!(nudges[0].content.contains("Goal: Plant the seed beds"), "{}", nudges[0].content);
+    assert!(
+        nudges[0].content.contains("Last progress (16m ago): Waiting for the soil report."),
+        "{}",
+        nudges[0].content
+    );
+
+    // Renewals are not progress: three quiet hours raise a fault to the holder.
+    idle.idle_until(3 * HOUR - MINUTE);
+    assert!(idle.faults("step-quiet", &step).is_empty());
+    idle.idle_until(3 * HOUR + MINUTE);
+    let quiet = idle.faults("step-quiet", &step);
+    assert_eq!(quiet.len(), 1);
+    assert_eq!(quiet[0].body["fields"]["reviewer"], SEAT);
+    idle.at(3 * HOUR + 2 * MINUTE);
+    idle.seat.reconciler.reconcile_once().unwrap();
+    let told = idle.fault_messages(SEAT);
+    assert_eq!(told.len(), 1, "the holder gets the fault");
+    assert!(told[0].content.contains("st work wait"), "{}", told[0].content);
+    assert_eq!(idle.view(&step).stalled_at_unix_ms, None);
+    assert!(idle.seat.store.stalled_runs(now_ms()).unwrap().is_empty());
+
+    // Thirty minutes with no answer: stalled, and the run's report-to is told.
+    idle.idle_until(3 * HOUR + 29 * MINUTE);
+    assert!(idle.faults("step-stalled", &step).is_empty());
+    idle.idle_until(3 * HOUR + 31 * MINUTE);
+    let stalled = idle.faults("step-stalled", &step);
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(stalled[0].body["fields"]["reviewer"], WATCHER);
+    idle.at(3 * HOUR + 32 * MINUTE);
+    idle.seat.reconciler.reconcile_once().unwrap();
+    assert_eq!(idle.fault_messages(WATCHER).len(), 1, "the report-to gets the stalled fault");
+    assert!(idle.view(&step).stalled_at_unix_ms.is_some());
+    assert_eq!(
+        idle.seat.store.stalled_runs(now_ms()).unwrap(),
+        BTreeSet::from([run.clone()])
+    );
+
+    // Progress ends both faults and the label, and starts a new quiet period.
+    idle.progress(&step, "Soil report read; planting");
+    assert_eq!(idle.view(&step).stalled_at_unix_ms, None);
+    assert!(idle.seat.store.stalled_runs(now_ms()).unwrap().is_empty());
+    let current = idle
+        .seat
+        .store
+        .fault_snapshot(now_ms())
+        .unwrap()
+        .into_iter()
+        .filter(|fault| fault.item.subject == step)
+        .count();
+    assert_eq!(current, 0);
+    idle.idle_until(6 * HOUR + 30 * MINUTE);
+    assert_eq!(idle.faults("step-quiet", &step).len(), 1, "the new period is not quiet yet");
+    idle.idle_until(6 * HOUR + 34 * MINUTE);
+    assert_eq!(idle.faults("step-quiet", &step).len(), 2);
+}
+
+#[test]
+fn a_seat_waiting_on_a_merge_it_declared_is_never_faulted() {
+    let idle = fixture();
+    reported(&idle);
+    let step = idle.hold("watched", "merge-wait");
+    idle.watch();
+    idle.observe(json!({"merge_queue": {"position": 1, "state": "queued"}}));
+    idle.wait_on(&step, THREAD);
+    idle.harness("idle");
+
+    idle.idle_until(10 * HOUR);
+    idle.evaluate();
+    assert!(idle.nudges().is_empty());
+    assert!(idle.faults("step-quiet", &step).is_empty());
+    assert!(idle.faults("step-stalled", &step).is_empty());
+    assert!(idle.fault_messages(SEAT).is_empty());
+    assert!(idle.seat.store.stalled_runs(now_ms()).unwrap().is_empty());
+
+    // Once it merges, the wait has ended and the quiet clock runs from then.
+    idle.observe(json!({"merge_queue": null, "state": "closed", "merged": true}));
+    idle.seat.reconciler.reconcile_once().unwrap();
+    assert_eq!(idle.wait_ends(&step).len(), 1);
+    idle.idle_until(13 * HOUR - MINUTE);
+    assert!(idle.faults("step-quiet", &step).is_empty());
+    idle.idle_until(13 * HOUR + MINUTE);
+    assert_eq!(idle.faults("step-quiet", &step).len(), 1);
 }

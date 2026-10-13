@@ -21,9 +21,18 @@ pub struct Targets {
     pub transaction: Transaction,
     pub cpu: Cpu,
     pub divergence: Divergence,
+    pub stalled: Stalled,
     pub database: Database,
     pub duration: Vec<DurationTarget>,
     pub count: Vec<CountTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stalled {
+    pub about: String,
+    /// The most runs with a stalled step at once.
+    pub max_runs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +238,22 @@ pub fn parse(text: &str) -> Result<Targets> {
         );
     }
     Ok(targets)
+}
+
+/// `st doctor`'s line for the stalled-runs target: the runs that have a stalled step now.
+pub fn stalled_runs_line(runs: &std::collections::BTreeSet<String>) -> (String, &'static str, String) {
+    let max = targets().stalled.max_runs;
+    let count = runs.len() as u64;
+    let named = runs.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    (
+        "slo/stalled-runs".into(),
+        if count <= max { "pass" } else { "info" },
+        if runs.is_empty() {
+            format!("≤ {max} runs with a stalled step: none now")
+        } else {
+            format!("≤ {max} runs with a stalled step: {count} now ({named})")
+        },
+    )
 }
 
 /// The built-in targets. The file is checked by a test, so this cannot fail in a release.

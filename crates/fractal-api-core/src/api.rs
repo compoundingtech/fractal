@@ -2676,6 +2676,7 @@ fn client_work_values(
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "waiting_on": work.waiting_on.as_ref().map(crate::store::describe_wait),
+                "stalled_at_unix_ms": work.stalled_at_unix_ms,
                 "waiting_since_unix_ms": work.waiting_on.as_ref().map(|wait| wait.since_unix_ms),
                 "execution_elapsed_ms": work.execution_elapsed_ms,
                 "timeout_ms": work.timeout_ms,
@@ -9039,6 +9040,9 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
         rows.insert(budgets, crate::objectives::divergence(open));
     }
+    let stalled = store.stalled_runs(client_now_ms())?;
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    rows.insert(budgets, crate::objectives::stalled_runs(&stalled));
     Ok(rows)
 }
 
