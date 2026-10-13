@@ -134,48 +134,63 @@ const textEdges = (context: HTMLElement) => [...context.querySelectorAll('[data-
 const timingKeys: Record<string, true> = { offset: true, computedOffset: true, easing: true, composite: true }
 
 /** Compositor-only motion: every animation sits inside the fixed layout box, on a box-level element, and changes transform only. */
-function assertMotion(shell: HTMLElement) {
-  const still = shell.dataset.motion === 'M2' || window.matchMedia('(prefers-reduced-motion: reduce)').matches
-  for (const spinner of shell.querySelectorAll<HTMLElement>('[data-spinner]')) {
-    const animations = spinner.getAnimations({ subtree: true })
-    if (still) { expect(animations).toHaveLength(0); continue }
-    expect(animations.length).toBeGreaterThan(0)
-    for (const animation of animations) {
-      const effect = animation.effect as KeyframeEffect
-      const target = effect.target
-      expect(target).not.toBe(spinner)
-      // Compositor transforms need a CSS box: an HTML element or an outermost <svg>, never a shape inside one.
-      expect(target instanceof HTMLElement || (target instanceof SVGSVGElement && target.ownerSVGElement === null)).toBe(true)
-      expect([...new Set(effect.getKeyframes().flatMap(frame => Object.keys(frame).filter(key => timingKeys[key] !== true)))]).toEqual(['transform'])
+function assertMotion(shells: readonly HTMLElement[]) {
+  const failures: string[] = []
+  for (const shell of shells) {
+    const still = shell.dataset.motion === 'M2' || window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    for (const spinner of shell.querySelectorAll<HTMLElement>('[data-spinner]')) {
+      const id = `${shell.getAttribute('aria-label')} / ${spinner.closest<HTMLElement>('[data-context]')!.dataset.context}`
+      const animations = spinner.getAnimations({ subtree: true })
+      if (still) {
+        if (animations.length !== 0) failures.push(`${id}: reduced motion has ${animations.length} animations`)
+        continue
+      }
+      if (animations.length === 0) failures.push(`${id}: animated motion has no animation`)
+      for (const animation of animations) {
+        const effect = animation.effect as KeyframeEffect
+        const target = effect.target
+        if (target === spinner) failures.push(`${id}: layout box animates`)
+        // Compositor transforms need a CSS box: an HTML element or an outermost <svg>, never a shape inside one.
+        if (!(target instanceof HTMLElement || (target instanceof SVGSVGElement && target.ownerSVGElement === null))) failures.push(`${id}: animation target has no CSS box`)
+        const keys = [...new Set(effect.getKeyframes().flatMap(frame => Object.keys(frame).filter(key => timingKeys[key] !== true)))]
+        if (keys.length !== 1 || keys[0] !== 'transform') failures.push(`${id}: animated properties are ${keys.join(', ')}`)
+      }
     }
   }
+  expect(failures).toEqual([])
 }
 /** No spinner shifts text: text edges hold at every animation phase, and match with the spinner removed. */
-function assertBaselines(shell: HTMLElement) {
-  const contexts = [...shell.querySelectorAll<HTMLElement>('[data-context]')]
-  expect(contexts.map(context => context.dataset.context)).toEqual(['sidebar', 'header', 'work', 'composer'])
-  for (const context of contexts) {
-    const spinner = context.querySelector<HTMLElement>('[data-spinner]')!
-    const size = Number(spinner.dataset.spinnerSize)
-    expect([spinner.offsetWidth, spinner.offsetHeight]).toEqual([size, size])
-    const live = textEdges(context)
-    expect(live.length).toBeGreaterThan(0)
-    for (const fraction of [0.25, 0.5, 0.75]) {
-      for (const animation of spinner.getAnimations({ subtree: true })) animation.currentTime = Number(animation.effect?.getComputedTiming().duration) * fraction
-      expect(textEdges(context)).toEqual(live)
-      expect([spinner.offsetWidth, spinner.offsetHeight]).toEqual([size, size])
+function assertBaselines(shells: readonly HTMLElement[]) {
+  const failures: string[] = []
+  for (const shell of shells) {
+    const shellId = shell.getAttribute('aria-label')
+    const contexts = [...shell.querySelectorAll<HTMLElement>('[data-context]')]
+    if (contexts.map(context => context.dataset.context).join(',') !== 'sidebar,header,work,composer') failures.push(`${shellId}: missing or reordered contexts`)
+    for (const context of contexts) {
+      const id = `${shellId} / ${context.dataset.context}`
+      const spinner = context.querySelector<HTMLElement>('[data-spinner]')!
+      const size = Number(spinner.dataset.spinnerSize)
+      if (spinner.offsetWidth !== size || spinner.offsetHeight !== size) failures.push(`${id}: spinner box is not ${size}px square`)
+      const live = textEdges(context)
+      if (live.length === 0) failures.push(`${id}: no baseline-tracked text`)
+      for (const fraction of [0.25, 0.5, 0.75]) {
+        for (const animation of spinner.getAnimations({ subtree: true })) animation.currentTime = Number(animation.effect?.getComputedTiming().duration) * fraction
+        const edges = textEdges(context)
+        if (edges.length !== live.length || edges.some((value, index) => value !== live[index])) failures.push(`${id}: text edges move at phase ${fraction}`)
+        if (spinner.offsetWidth !== size || spinner.offsetHeight !== size) failures.push(`${id}: spinner box changes size at phase ${fraction}`)
+      }
+      spinner.style.display = 'none'
+      const without = textEdges(context)
+      spinner.style.removeProperty('display')
+      if (without.length !== live.length || without.some((value, index) => value !== live[index])) failures.push(`${id}: removing the spinner moves text edges`)
     }
-    spinner.style.display = 'none'
-    const without = textEdges(context)
-    spinner.style.removeProperty('display')
-    expect(without).toEqual(live)
+    // A live row and its settled neighbour place their titles identically.
+    for (const pair of shell.querySelectorAll<HTMLElement>('[data-row-pair]')) {
+      const offsets = [...pair.querySelectorAll<HTMLElement>('[data-row]')].map(row => snap(textBox(row.querySelector('[data-row-title]')!).top - row.getBoundingClientRect().top))
+      if (offsets.length !== 2 || offsets[0] !== offsets[1]) failures.push(`${shellId} / ${pair.dataset.rowPair}: live and settled title offsets differ`)
+    }
   }
-  // A live row and its settled neighbour place their titles identically.
-  for (const pair of shell.querySelectorAll<HTMLElement>('[data-row-pair]')) {
-    const offsets = [...pair.querySelectorAll<HTMLElement>('[data-row]')].map(row => snap(textBox(row.querySelector('[data-row-title]')!).top - row.getBoundingClientRect().top))
-    expect(offsets).toHaveLength(2)
-    expect(offsets[0]).toBe(offsets[1])
-  }
+  expect(failures).toEqual([])
 }
 /** WCAG 2.5.3 label in name: every button's accessible name starts with its visible label. */
 function assertLabelInName(root: HTMLElement) {
@@ -186,7 +201,7 @@ function assertLabelInName(root: HTMLElement) {
     return label === '' ? [] : [{ label, name: button.getAttribute('aria-label') ?? label }]
   })
   expect(labelled.map(({ label }) => label)).toContain('Details')
-  for (const { label, name } of labelled) expect(name.slice(0, label.length)).toBe(label)
+  expect(labelled.filter(({ label, name }) => name.slice(0, label.length) !== label)).toEqual([])
 }
 function assertExplorer(canvas: HTMLElement) {
   const root = canvas.querySelector<HTMLElement>('[data-spinner-explorer]')!
@@ -196,18 +211,22 @@ function assertExplorer(canvas: HTMLElement) {
   expect(inks.size).toBe(3)
   const shells = [...root.querySelectorAll<HTMLElement>('[data-shell]')]
   expect(shells.length).toBeGreaterThan(0)
+  const failures: string[] = []
   for (const shell of shells) {
     const spinners = [...shell.querySelectorAll<HTMLElement>('[data-spinner]')]
-    expect(spinners).toHaveLength(4)
+    if (spinners.length !== 4) failures.push(`${shell.getAttribute('aria-label')}: expected four spinners, found ${spinners.length}`)
     for (const spinner of spinners) {
-      expect(spinner.dataset.spinner).toBe(shell.dataset.spinnerVariant)
-      expect(spinner.dataset.spinnerSize).toBe(shell.dataset.size)
-      expect(spinner.getAttribute('aria-hidden')).toBe('true')
-      expect(inks.has(getComputedStyle(spinner).color)).toBe(true)
+      const id = `${shell.getAttribute('aria-label')} / ${spinner.closest<HTMLElement>('[data-context]')!.dataset.context}`
+      if (spinner.dataset.spinner !== shell.dataset.spinnerVariant) failures.push(`${id}: wrong spinner variant`)
+      if (spinner.dataset.spinnerSize !== shell.dataset.size) failures.push(`${id}: wrong spinner size`)
+      if (spinner.getAttribute('aria-hidden') !== 'true') failures.push(`${id}: decorative spinner is not hidden from accessibility`)
+      if (!inks.has(getComputedStyle(spinner).color)) failures.push(`${id}: spinner ink is not fg, fgSoft or fgMuted`)
     }
-    assertMotion(shell)
-    assertBaselines(shell)
   }
+  // One assertion per invariant group: Storybook's instrumented expect otherwise copies thousands of call records.
+  expect(failures).toEqual([])
+  assertMotion(shells)
+  assertBaselines(shells)
 }
 const pick = (canvasElement: HTMLElement, id: string) => userEvent.click(within(canvasElement).getByRole('button', { name: new RegExp(`^${id}: `) }))
 
@@ -249,13 +268,13 @@ export const ExplorationProbe: Story = { args: { probe: true }, play: async ({ c
     const shell = root().querySelector<HTMLElement>('[data-shell]')!
     const work = shell.querySelector<HTMLElement>('[data-context="work"] [data-spinner]')!
     const layoutMotion = work.firstElementChild!.animate([{ marginLeft: '0px' }, { marginLeft: '1px' }], { duration: 1000, iterations: Infinity })
-    expect(() => assertMotion(shell)).toThrow()
-    layoutMotion.cancel(); assertMotion(shell)
+    expect(() => assertMotion([shell])).toThrow(/S2.*work/)
+    layoutMotion.cancel(); assertMotion([shell])
     work.style.marginBlockStart = g.icon
-    expect(() => assertBaselines(shell)).toThrow()
-    work.style.removeProperty('margin-block-start'); assertBaselines(shell)
+    expect(() => assertBaselines([shell])).toThrow(/S2.*work/)
+    work.style.removeProperty('margin-block-start'); assertBaselines([shell])
     work.style.color = 'rgb(34, 197, 94)'
-    expect(() => assertExplorer(canvasElement)).toThrow()
+    expect(() => assertExplorer(canvasElement)).toThrow(/S2.*work/)
     work.style.removeProperty('color')
     shell.querySelector('[data-context="header"] [data-baseline]')!.setAttribute('title', 'Working')
     expect(() => assertExplorer(canvasElement)).toThrow()

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Running work and streaming thinking use a shared S1 Lucide loader-circle spinner: one compositor-only turn per second, a static frame under reduced motion, and off-screen pause based on fixed boxes rather than rotating glyphs. Waiting for an answer uses a clock; the composer send arrow is unchanged.",
+  "summary": "Running work and streaming thinking use a shared S1 Lucide loader-circle spinner: one compositor-only turn per second, a static frame under reduced motion, and off-screen pause based on fixed boxes rather than rotating glyphs. Waiting for an answer uses a clock; the composer send arrow is unchanged. The exploration play combines invariant checks to avoid thousands of Storybook assertion-log updates, preserving all checks and negative controls.",
   "replay": { "status": "none", "detail": "No replay or rebuild." },
   "schema": { "status": "none", "detail": "No persisted schema change." },
   "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
