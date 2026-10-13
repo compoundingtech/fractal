@@ -143,7 +143,12 @@ export const Inbox: Story = {
     await assertBlockGap(entries[1]!)
     await assertBlockGap(entries[1]!.querySelector('div')!)
     await waitFor(() => expect(getComputedStyle(entries[1]!.querySelector('[data-needs-you-chevron]')!).transform).toBe('matrix(0, 1, -1, 0, 0, 0)'))
-    await assertKeyboardRing(entries[1]!.querySelector('summary')!)
+    await userEvent.tab()
+    const summary = entries[1]!.querySelector('summary')!
+    summary.focus()
+    await expect(summary).toHaveFocus()
+    await expect(getComputedStyle(summary).outlineStyle).toBe('solid')
+    await expect(getComputedStyle(summary).outlineWidth).toBe('2px')
     await userEvent.click(within(entries[1]!).getByRole('button', { name: 'Show in thread' }))
     await expect(onShowInThread).toHaveBeenCalledWith('ask-release-2')
     await assertKeyboardRing(within(entries[1]!).getByRole('button', { name: 'Show in thread' }))
