@@ -167,8 +167,8 @@ const contentVersion = (item: ConversationItem): string => {
 }
 const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
   const detail = React.useCallback((call: WorkLogCall) => <><ToolDetailPreview call={call} onOpen={onOpenTool} /><TranscriptImages anchor={call.id} placement="opened" /></>, [onOpenTool])
-  // Inside an interactive row button the thumbs are decoration; a static row's thumbs open the viewer themselves.
-  const callImages = React.useCallback((call: WorkLogCall) => <ImageRowThumbs anchors={[call.id]} interactive={onOpenTool === undefined} excerpt />, [onOpenTool])
+  // Inside an interactive row button (expandable rows, mirroring WorkLogV1's TimelineCall) the thumbs are decoration; a static row's thumbs open the viewer themselves.
+  const callImages = React.useCallback((call: WorkLogCall) => <ImageRowThumbs anchors={[call.id]} interactive={onOpenTool === undefined || !(call.detail?.length || call.rawInput !== undefined)} excerpt />, [onOpenTool])
   const callIds = turn.work.calls.map(call => call.id)
   const workImages = useAnchorImages(callIds)
   const reasoning = turn.items.filter(item => item._tag === 'Reasoning')
