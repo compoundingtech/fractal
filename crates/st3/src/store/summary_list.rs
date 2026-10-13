@@ -65,8 +65,10 @@ struct Lists {
 pub(crate) struct SummaryList {
     lists: Mutex<Lists>,
     forgotten: AtomicU64,
-    /// The shared counts were computed (or tried) once since the store opened.
+    /// The shared counts were computed once since the store opened.
     started: AtomicBool,
+    /// The newest attempt to compute the shared counts failed.
+    failing: AtomicBool,
 }
 
 impl SummaryList {
@@ -157,6 +159,12 @@ impl Store {
     /// computing them with no window asking, so the first window is served at once.
     pub(crate) fn start_summary_shared(&self) {
         self.smalltalk.summary_list.started.store(true, AtomicOrdering::Release);
+    }
+
+    /// Note whether an attempt to compute the shared counts failed. Returns whether this begins
+    /// a run of failures: the refresher retries every pass, and says so once per run.
+    pub(crate) fn note_summary_shared_failed(&self, failed: bool) -> bool {
+        self.smalltalk.summary_list.failing.swap(failed, AtomicOrdering::AcqRel) != failed && failed
     }
 
     /// Whether the shared counts are still to be computed as the daemon starts.

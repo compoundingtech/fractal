@@ -289,10 +289,15 @@ pub(in crate::api) fn refresh_published(
             let shared = Arc::new(shared);
             store.publish_summary_shared(generation, shared.clone(), inputs);
             store.start_summary_shared();
+            store.note_summary_shared_failed(false);
             Some(shared)
         }
         Err(error) => {
-            eprintln!("st3: the summary's shared counts failed: {error:#}");
+            // Retried every pass (as the daemon starts, until the complete roster is published):
+            // said once until they are computed again.
+            if store.note_summary_shared_failed(true) {
+                eprintln!("st3: the summary's shared counts failed: {error:#}");
+            }
             before.map(|(shared, _)| shared)
         }
     };
