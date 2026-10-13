@@ -303,6 +303,7 @@ fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
     let timeline=super::super::super::timeline_value(&fixture.state,&new_client_snapshot(&fixture.state),
         &session,&session_id,&ClientListQuery::default()).unwrap().0;
     let (reference,revision)=timeline["items"].as_array().unwrap().iter().find_map(|item| {
+        if item["type"] != "content" {return None;}
         let reference=item["body"]["blocks"].as_array()?.iter()
             .find_map(|block|block["continuation"]["ref"].as_str())?;
         Some((reference.to_owned(),item["revision"].to_string()))
