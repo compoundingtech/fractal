@@ -10246,6 +10246,23 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                 if harnesses.is_empty() { "none" } else { &harnesses },
             );
         }
+        let kept = names("keep");
+        if !kept.is_empty() {
+            let _ = writeln!(
+                output,
+                "KEPT  seats this node never stops at the weekly limit ([limits] keep) · {kept}"
+            );
+            let retired = names("keep_retired");
+            if !retired.is_empty() {
+                let count = report["limits_policy"]["keep_retired"]
+                    .as_array()
+                    .map_or(0, Vec::len);
+                let _ = writeln!(
+                    output,
+                    "KEPT  {count} of those seats are no longer declared and keep nothing; remove them from keep when convenient · {retired}"
+                );
+            }
+        }
     }
     // A harness bound to a declared account reports that account's name beside the provider's
     // label, so usage reads against the accounts a person declared.
@@ -26526,12 +26543,20 @@ mod tests {
              "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
             {"account": "claude/bbbb", "weekly_percent": 50.0, "five_hour_percent": null, "exempt": false,
              "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
-        ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": []}});
+        ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": [], "keep": ["agent/example/coordinator", "agent/example/lead"], "keep_retired": ["agent/example/lead"]}});
         let output_exempt = render_usage_report(&exempt, 24, None);
         assert!(output_exempt.contains("codex/aaaa  exempt\n"), "{output_exempt}");
         assert!(output_exempt.contains("claude/bbbb\n"), "{output_exempt}");
         assert!(
             output_exempt.contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
+            "{output_exempt}"
+        );
+        assert!(
+            output_exempt.contains("KEPT  seats this node never stops at the weekly limit ([limits] keep) · agent/example/coordinator, agent/example/lead\n"),
+            "{output_exempt}"
+        );
+        assert!(
+            output_exempt.contains("KEPT  1 of those seats are no longer declared and keep nothing; remove them from keep when convenient · agent/example/lead\n"),
             "{output_exempt}"
         );
         let by_step = render_usage_report(&report, 24, Some(UsageBy::Step));

@@ -545,6 +545,23 @@ pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLi
     Ok(accounts.into_values().collect())
 }
 
+impl Store {
+    /// Which of `seats` are declared agents now. `[limits] keep` lists seats by name and nothing
+    /// removes a retired seat from it, so this lets a report say which entries keep nothing.
+    pub fn declared_seats(&self, seats: &[String]) -> Result<BTreeSet<String>> {
+        let connection = self.readers.get();
+        let mut statement =
+            connection.prepare_cached("SELECT 1 FROM desired WHERE subject=?1 AND kind='agent'")?;
+        let mut declared = BTreeSet::new();
+        for seat in seats {
+            if statement.exists([seat])? {
+                declared.insert(seat.clone());
+            }
+        }
+        Ok(declared)
+    }
+}
+
 /// The host a seat is declared on, when its current declaration is an agent and not a stop.
 fn seat_host(connection: &Connection, seat: &str) -> Result<Option<String>> {
     let row = connection
@@ -1462,6 +1479,17 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
             notify: "agent/alder.operations".into(),
             fresh_ms: HOUR as u64,
         }
+    }
+
+    #[test]
+    fn declared_seats_names_the_kept_entries_that_still_exist() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let kept = ["agent/alder.pooled".to_owned(), "agent/alder.retired".to_owned()];
+        assert_eq!(
+            store.declared_seats(&kept).unwrap(),
+            BTreeSet::from(["agent/alder.pooled".to_owned()])
+        );
     }
 
     #[test]
