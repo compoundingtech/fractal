@@ -7873,13 +7873,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .insert(run.generation.clone());
             }
         }
-        let mut normal_failed = flat.iter().any(|step| {
-            !step.spec.finally
-                && views.get(step.spec.path.as_str()).is_some_and(|view| {
-                    (view.status == "failed" && view.attempt >= step.spec.retry.attempts)
-                        || view.status == "cancelled"
-                })
-        });
+        let mut normal_failed = false;
+        for step in flat.iter().filter(|step| !step.spec.finally) {
+            if let Some(view) = views.get(step.spec.path.as_str())
+                && (view.status == "cancelled" || self.failed_step_is_final(run, step.spec, view)?)
+            {
+                normal_failed = true;
+                break;
+            }
+        }
         let mut normal_failure_reason = normal_failed.then(|| "a normal step failed".to_owned());
         let completion_selected = run.phase == "normal"
             && ((normal_failed && mission.completion.is_some())
@@ -8025,7 +8027,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         return Ok(changed);
                     }
                     if view.status == "failed" {
-                        if view.attempt < step.spec.retry.attempts {
+                        if !self.failed_step_is_final(run, step.spec, view)? {
                             changed |= self.store.retry_step(
                                 &view.subject,
                                 "the step repeat policy permits another attempt",
@@ -8679,6 +8681,41 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(changed)
     }
 
+    /// A failed step has no attempt left when it used its retries, or when it is a loop that
+    /// stopped: a loop that ends on a stop rule or at its exhaustion has said it is finished,
+    /// and another attempt would only run the rounds the rule just ended.
+    fn failed_step_is_final(
+        &self,
+        run: &MissionRunView,
+        spec: &StepSpec,
+        view: &crate::model::StepRunView,
+    ) -> Result<bool> {
+        if view.status != "failed" {
+            return Ok(false);
+        }
+        if view.attempt >= spec.retry.attempts {
+            return Ok(true);
+        }
+        if spec.loop_spec.is_none() {
+            return Ok(false);
+        }
+        let loop_subject = format!(
+            "loop-run/{}/{}",
+            run.generation
+                .strip_prefix("run-generation/")
+                .unwrap_or(&run.generation),
+            spec.path
+        );
+        Ok(self
+            .store
+            .latest_claim(&loop_subject, Some("loop.state"))?
+            .is_some_and(|claim| {
+                claim.body.pointer("/fields/status").and_then(Value::as_str) == Some("failed")
+                    && claim.body.pointer("/fields/round").and_then(Value::as_u64)
+                        == Some(u64::from(view.attempt))
+            }))
+    }
+
     fn mission_completion_selected(
         &self,
         run: &MissionRunView,
@@ -8689,16 +8726,23 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         };
         match completion {
-            crate::model::CompletionSpec::AllStepsExhausted => Ok(flatten_mission_steps(mission)
-                .into_iter()
-                .filter(|step| !step.spec.finally)
-                .all(|step| {
-                    views.get(step.spec.path.as_str()).is_some_and(|view| {
-                        view.status == "completed"
-                            || view.status == "cancelled"
-                            || (view.status == "failed" && view.attempt >= step.spec.retry.attempts)
-                    })
-                })),
+            crate::model::CompletionSpec::AllStepsExhausted => {
+                for step in flatten_mission_steps(mission)
+                    .into_iter()
+                    .filter(|step| !step.spec.finally)
+                {
+                    let Some(view) = views.get(step.spec.path.as_str()) else {
+                        return Ok(false);
+                    };
+                    if !(view.status == "completed"
+                        || view.status == "cancelled"
+                        || self.failed_step_is_final(run, step.spec, view)?)
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
             crate::model::CompletionSpec::Dependencies { dependencies } => {
                 let variables = crate::store::mission_run_variables(run, &run.revision);
                 for dependency in dependencies {
@@ -8887,14 +8931,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut variables = run_variables(run, step, view);
         variables.insert("ST_LOOP_ROUND".into(), view.attempt.to_string());
         variables.insert("loop.round".into(), view.attempt.to_string());
-        let prior_feedback = self
-            .store
-            .claims_for(&loop_subject, Some("loop.round-result"))?
-            .last()
-            .and_then(|claim| claim.body.pointer("/fields/feedback"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let prior_feedback = self.loop_prior_feedback(&loop_subject)?;
         variables.insert("ST_LOOP_FEEDBACK".into(), prior_feedback.clone());
         variables.insert("loop.feedback".into(), prior_feedback.clone());
         variables.insert("ST_LOOP_ITEM_ID".into(), String::new());
@@ -9136,20 +9173,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     None,
                 )?;
                 let (best_round, best_metrics) = self.loop_best(&loop_subject, loop_spec)?;
-                self.record_once(
-                    &loop_subject,
-                    "loop.state",
-                    BTreeMap::from([
-                        ("status".into(), Value::String("running".into())),
-                        ("round".into(), Value::from(view.attempt)),
-                        ("best_round".into(), Value::from(best_round)),
-                        ("best_metrics".into(), serde_json::to_value(&best_metrics)?),
-                        ("feedback".into(), Value::String(feedback.clone())),
-                    ]),
-                )?;
                 let mut passed = !loop_spec.until.is_empty();
                 let mut waiting = false;
+                let mut gate_results = Vec::new();
                 for gate in &loop_spec.until {
+                    let gate_name = crate::graph::gate_name(gate).to_owned();
                     match self.evaluate_context_gate(
                         run,
                         &loop_subject,
@@ -9159,7 +9187,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         gate,
                         &variables,
                     )? {
-                        GateOutcome::Pass => {}
+                        GateOutcome::Pass => gate_results.push(LoopGateResult::new(gate_name, "passed", None)),
                         GateOutcome::Pending
                             if matches!(
                                 gate,
@@ -9178,14 +9206,43 @@ impl<R: RuntimeControl> Reconciler<R> {
                             passed = false;
                             break;
                         }
-                        GateOutcome::Pending | GateOutcome::NotYet | GateOutcome::Fail(_) => {
-                            passed = false
+                        GateOutcome::Pending => {
+                            passed = false;
+                            gate_results.push(LoopGateResult::new(gate_name, "pending", None));
+                        }
+                        GateOutcome::NotYet => {
+                            passed = false;
+                            gate_results.push(LoopGateResult::new(gate_name, "not-yet", None));
+                        }
+                        GateOutcome::Fail(reason) => {
+                            passed = false;
+                            gate_results.push(LoopGateResult::new(gate_name, "failed", Some(reason)));
                         }
                     }
                 }
+                // The next round reads what this round's exit gates said, not only what the
+                // round produced. A round whose gates are still running keeps the pre-gate
+                // feedback until they answer.
+                let feedback = if waiting {
+                    feedback
+                } else {
+                    self.write_loop_outcome(&loop_subject, view.attempt, &metrics, keep, &gate_results)?
+                };
+                self.record_once(
+                    &loop_subject,
+                    "loop.state",
+                    BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("round".into(), Value::from(view.attempt)),
+                        ("best_round".into(), Value::from(best_round)),
+                        ("best_metrics".into(), serde_json::to_value(&best_metrics)?),
+                        ("feedback".into(), Value::String(feedback.clone())),
+                    ]),
+                )?;
                 if waiting {
                     return Ok(false);
                 }
+                let failing = failing_gates_summary(&gate_results);
                 if passed {
                     self.record_once(
                         &loop_subject,
@@ -9200,17 +9257,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     )?;
                     return self.store.set_step_state(&view.subject, "completed", None);
                 }
-                if self.loop_stop_reason(&loop_subject, loop_spec)?.is_some() {
-                    let reason = self
-                        .loop_stop_reason(&loop_subject, loop_spec)?
-                        .expect("the stop reason was present");
+                if let Some(reason) = self.loop_stop_reason(&loop_subject, loop_spec)? {
                     return self.finish_exhausted_loop(
                         run,
                         view,
                         loop_spec,
                         &loop_subject,
                         &variables,
-                        &reason,
+                        &with_failing_gates(&reason, &failing),
                     );
                 }
                 if view.attempt >= loop_spec.max_rounds {
@@ -9220,13 +9274,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                         loop_spec,
                         &loop_subject,
                         &variables,
-                        "the loop reached max-rounds without satisfying until",
+                        &with_failing_gates(
+                            "the loop reached max-rounds without satisfying until",
+                            &failing,
+                        ),
                     )
                 } else {
                     self.store.set_step_state(
                         &view.subject,
                         "failed",
-                        Some("the loop exit gates did not pass"),
+                        Some(&with_failing_gates("the loop exit gates did not pass", &failing)),
                     )
                 }
             }
@@ -9486,6 +9543,71 @@ impl<R: RuntimeControl> Reconciler<R> {
                 prior - current >= metric.min_improvement
             }
         }))
+    }
+
+    /// The feedback the next round reads: the latest outcome document, which says what the
+    /// exit gates answered, else the feedback its last round result recorded.
+    fn loop_prior_feedback(&self, loop_subject: &str) -> Result<String> {
+        if let Some(outcome) = self
+            .store
+            .claims_for(loop_subject, Some("loop.state"))?
+            .iter()
+            .rev()
+            .find_map(|claim| {
+                claim
+                    .body
+                    .pointer("/fields/feedback")
+                    .and_then(Value::as_str)
+                    .filter(|feedback| loop_outcome_reference(feedback).is_some())
+                    .map(str::to_owned)
+            })
+        {
+            return Ok(outcome);
+        }
+        Ok(self
+            .store
+            .claims_for(loop_subject, Some("loop.round-result"))?
+            .last()
+            .and_then(|claim| claim.body.pointer("/fields/feedback"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned())
+    }
+
+    /// Record what a finished round and its exit gates said. The body carries neither the round
+    /// nor the round's mission run, so two rounds that end the same way store the same content,
+    /// and the loop can tell that nothing changed.
+    fn write_loop_outcome(
+        &self,
+        loop_subject: &str,
+        round: u32,
+        metrics: &BTreeMap<String, f64>,
+        keep: bool,
+        results: &[LoopGateResult],
+    ) -> Result<String> {
+        let name = format!(
+            "doc/loop-feedback/{}/{round}/outcome",
+            loop_subject
+                .strip_prefix("loop-run/")
+                .unwrap_or(loop_subject),
+        );
+        let body = serde_json::to_vec_pretty(&serde_json::json!({
+            "decision": if keep { "keep" } else { "discard" },
+            "metrics": metrics,
+            "exit_gates": results,
+            "failing_gates": results
+                .iter()
+                .filter(|result| result.outcome != "passed")
+                .map(|result| result.gate.as_str())
+                .collect::<Vec<_>>(),
+        }))?;
+        let document = self.store.put_document(
+            &name,
+            &body,
+            &None,
+            &format!("loop-outcome:{loop_subject}:{round}"),
+        )?;
+        Ok(format!("{}@{}", document.name, document.hash))
     }
 
     fn write_loop_feedback(
@@ -10748,6 +10870,34 @@ impl<R: RuntimeControl> Reconciler<R> {
             if stalled >= rounds {
                 return Ok(Some(format!(
                     "the loop metric did not improve for {rounds} rounds"
+                )));
+            }
+        }
+        if let Some(rounds) = loop_spec.stop.no_progress {
+            // One outcome per round, in order. The reference ends in the document's content
+            // hash, so equal hashes mean equal metrics and equal exit gate answers.
+            let mut outcomes: Vec<(&str, &str)> = Vec::new();
+            let states = self.store.claims_for(loop_subject, Some("loop.state"))?;
+            for reference in states.iter().filter_map(|claim| {
+                claim
+                    .body
+                    .pointer("/fields/feedback")
+                    .and_then(Value::as_str)
+                    .and_then(loop_outcome_reference)
+            }) {
+                if outcomes.last().is_some_and(|(name, _)| *name == reference.0) {
+                    outcomes.pop();
+                }
+                outcomes.push(reference);
+            }
+            let rounds = rounds as usize;
+            if outcomes.len() >= rounds
+                && outcomes[outcomes.len() - rounds..]
+                    .windows(2)
+                    .all(|pair| pair[0].1 == pair[1].1)
+            {
+                return Ok(Some(format!(
+                    "the loop made no progress: its metrics and exit gate answers were the same for {rounds} rounds in a row"
                 )));
             }
         }
@@ -15943,6 +16093,52 @@ fn token_usage_total(usage: &serde_json::Map<String, Value>) -> Option<u64> {
             })
     });
     found.then_some(total)
+}
+
+/// What one exit gate answered at the end of a loop round.
+#[derive(Debug, serde::Serialize)]
+struct LoopGateResult {
+    gate: String,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl LoopGateResult {
+    fn new(gate: String, outcome: &'static str, reason: Option<String>) -> Self {
+        Self {
+            gate,
+            outcome,
+            reason,
+        }
+    }
+}
+
+/// The failing exit gates and what each said, for the loop's verdict.
+fn failing_gates_summary(results: &[LoopGateResult]) -> String {
+    results
+        .iter()
+        .filter(|result| result.outcome != "passed")
+        .map(|result| match &result.reason {
+            Some(reason) => format!("`{}` {}: {reason}", result.gate, result.outcome),
+            None => format!("`{}` {}", result.gate, result.outcome),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn with_failing_gates(reason: &str, failing: &str) -> String {
+    if failing.is_empty() {
+        reason.to_owned()
+    } else {
+        format!("{reason}; failing exit gates: {failing}")
+    }
+}
+
+/// The document name and content hash of a round's outcome document reference.
+fn loop_outcome_reference(reference: &str) -> Option<(&str, &str)> {
+    let (name, hash) = reference.rsplit_once('@')?;
+    name.ends_with("/outcome").then_some((name, hash))
 }
 
 #[derive(Debug)]
@@ -26914,6 +27110,180 @@ mission "stops" state="ready" {
                 .unwrap();
         }
         assert_eq!(reconciler.repeated_loop_failures(subject).unwrap(), 2);
+    }
+
+    fn run_never_ready_loop(stop: &str, max_rounds: u32, key: &str) -> (Arc<Store>, MissionRunView) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = format!(
+            r#"
+version 2
+resource "result" {{ kind "custom.test.loop-result" }}
+mission "stuck" state="ready" {{
+  goal "Repeat a bounded graph whose exit gate never answers differently."
+  completion {{ when "all-steps-exhausted" }}
+  loop "review" {{
+    max-rounds {max_rounds}
+    {stop}
+    until {{ gate "ready" {{ field "state" "resource/result" is "ready" }} }}
+    round {{
+      completion {{ when "all-steps-exhausted" }}
+      step "work" {{
+        agentless
+        goal "Complete round ${{loop.round}}."
+      }}
+    }}
+  }}
+}}
+"#
+        );
+        apply_source(&store, &source, key);
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "stuck".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: format!("{key}-run"),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..80 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let run = store.mission_run(&run.id).unwrap().unwrap();
+        (store, run)
+    }
+
+    #[test]
+    fn a_loop_that_makes_no_progress_ends_with_a_verdict_naming_the_gate_not_max_rounds() {
+        let (store, run) = run_never_ready_loop("stop { no-progress 3 }", 6, "no-progress-loop");
+        assert_eq!(run.status, "failed");
+        let view = &run.loops[0];
+        assert_eq!(view.status, "failed");
+        let states: Vec<String> = store
+            .claims_for(&view.subject, Some("loop.state"))
+            .unwrap()
+            .iter()
+            .map(|claim| claim.body["fields"].to_string())
+            .collect();
+        assert_eq!(
+            view.round, 3,
+            "the loop stops after three identical rounds, not at max-rounds: {:?} {states:#?}",
+            view.reason
+        );
+        let reason = view.reason.as_deref().unwrap();
+        assert!(reason.contains("made no progress"), "{reason}");
+        assert!(reason.contains("3 rounds in a row"), "{reason}");
+        assert!(reason.contains("failing exit gates: `ready`"), "{reason}");
+        assert!(!reason.contains("max-rounds"), "{reason}");
+
+        // The round after the first receives what the first round's exit gates said.
+        let second = store
+            .mission_run(&store.mission_run_subject_for_idempotency_key(&format!(
+                "loop-round:{}:2",
+                run.steps[0].subject
+            )))
+            .unwrap()
+            .unwrap();
+        let feedback = &second.inputs[LOOP_FEEDBACK_INPUT].value;
+        let (name, hash) = loop_outcome_reference(feedback)
+            .unwrap_or_else(|| panic!("round 2 received `{feedback}`"));
+        assert!(name.ends_with("/1/outcome"), "{name}");
+        let outcome: Value =
+            serde_json::from_slice(&store.get_document(name, hash).unwrap().unwrap()).unwrap();
+        assert_eq!(outcome["failing_gates"], serde_json::json!(["ready"]));
+        assert_eq!(outcome["exit_gates"][0]["gate"], "ready");
+        assert_eq!(outcome["decision"], "keep");
+    }
+
+    #[test]
+    fn without_a_no_progress_rule_the_max_rounds_verdict_still_names_the_failing_gate() {
+        let (_store, run) = run_never_ready_loop("", 3, "max-rounds-loop");
+        let view = &run.loops[0];
+        assert_eq!(view.status, "failed");
+        assert_eq!(view.round, 3);
+        let reason = view.reason.as_deref().unwrap();
+        assert!(reason.contains("max-rounds"), "{reason}");
+        assert!(reason.contains("failing exit gates: `ready`"), "{reason}");
+    }
+
+    #[test]
+    fn a_no_progress_rule_needs_two_to_a_hundred_rounds_and_appears_once() {
+        let parse = |stop: &str| {
+            let source = format!(
+                "version 2\nmission \"m\" state=\"ready\" {{ goal \"g\"; loop \"l\" {{ max-rounds 3; stop {{ {stop} }}; round {{ completion {{ when \"all-steps-exhausted\" }}; step \"s\" {{ agentless }} }} }} }}"
+            );
+            crate::graph::parse_intent(&source, "node")
+        };
+        assert!(parse("no-progress 2").is_ok());
+        assert!(parse("no-progress 100").is_ok());
+        assert!(parse("no-progress 1").is_err());
+        assert!(parse("no-progress 101").is_err());
+        assert!(parse("no-progress 2; no-progress 3").is_err());
+    }
+
+    #[test]
+    fn rounds_with_different_gate_answers_are_progress_and_equal_ones_are_not() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let intent = crate::graph::parse_intent(
+            "version 2\nmission \"m\" state=\"ready\" { goal \"g\"; loop \"l\" { max-rounds 9; stop { no-progress 3 }; round { completion { when \"all-steps-exhausted\" }; step \"s\" { agentless } } } }",
+            "node",
+        )
+        .unwrap();
+        let spec = intent.missions["m"].steps["l"]
+            .loop_spec
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .clone();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let subject = "loop-run/01990000000070008000000000000001/l";
+        let written = std::cell::Cell::new(0_u32);
+        let state = |round: u32, hash: &str| {
+            written.set(written.get() + 1);
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "loop.state".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("round".into(), Value::from(round)),
+                        (
+                            "feedback".into(),
+                            Value::String(format!("doc/loop-feedback/x/l/{round}/outcome@{hash}")),
+                        ),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("state-{round}-{hash}-{}", written.get())),
+                })
+                .unwrap();
+        };
+        let stop = || reconciler.loop_stop_reason(subject, &spec).unwrap();
+        state(1, "aaaa");
+        state(2, "aaaa");
+        assert_eq!(stop(), None, "two equal rounds are fewer than three");
+        state(3, "bbbb");
+        assert_eq!(stop(), None, "a changed answer is progress");
+        state(4, "bbbb");
+        state(5, "bbbb");
+        assert!(stop().unwrap().contains("no progress"));
+        // A second state claim for the same round counts that round once.
+        state(5, "bbbb");
+        assert!(stop().unwrap().contains("3 rounds in a row"));
     }
 
     #[test]

@@ -1,4 +1,6 @@
 //! Portable offline evidence commands and a protected selector-only CI observation command.
+use crate::cli_println as println;
+
 use super::*;
 use clap::{Args, Subcommand};
 

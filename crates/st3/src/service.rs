@@ -1,5 +1,7 @@
 //! Install the st daemon as a native user service.
 
+use crate::{cli_print as print, cli_println as println};
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,6 +46,7 @@ pub struct ServiceSpec {
     config: Config,
     config_path: Option<PathBuf>,
     memory_max_mb: u64,
+    read_cache_kib: Option<usize>,
 }
 
 impl ServiceSpec {
@@ -71,6 +74,7 @@ impl ServiceSpec {
             config,
             config_path: None,
             memory_max_mb,
+            read_cache_kib: None,
         })
     }
 
@@ -182,6 +186,7 @@ pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) 
         crate::peer::FleetAuth::load(fleet_id, secret)?;
     }
     let mut spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
+    spec.read_cache_kib = crate::read_cache::override_kib();
     spec.config_path = config_path.map(|path| absolute_from(&current, path));
     if spec.config.access_mode.is_some() {
         let path = spec.config_path.clone().unwrap_or_else(Config::default_path);
@@ -451,9 +456,10 @@ fn status_native_service() -> Result<ServiceStatusReport> {
 
 #[cfg(target_os = "linux")]
 fn restart_native_service(config: &Config) -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "stop", REPLICATION_SERVICE_NAME])
-        .status();
+    optional_systemd_command(
+        REPLICATION_SERVICE_NAME,
+        &["--user", "stop", REPLICATION_SERVICE_NAME],
+    )?;
     run_command("systemctl", &["--user", "restart", SERVICE_NAME])?;
     if config.fleet_id.is_some() {
         run_command("systemctl", &["--user", "start", REPLICATION_SERVICE_NAME])?;
@@ -468,10 +474,45 @@ fn uninstall_native_service() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn stop_native_service() -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "stop", REPLICATION_SERVICE_NAME])
-        .status();
+    optional_systemd_command(
+        REPLICATION_SERVICE_NAME,
+        &["--user", "stop", REPLICATION_SERVICE_NAME],
+    )?;
     run_command("systemctl", &["--user", "stop", SERVICE_NAME])
+}
+
+#[cfg(target_os = "linux")]
+fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
+    let output = Command::new("systemctl")
+        .args(arguments)
+        .output()
+        .with_context(|| format!("run systemctl {}", arguments.join(" ")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // A unit file may be gone while its service remains loaded. Only the manager can
+    // establish that a failed stop/disable addressed an absent, inactive unit.
+    let status = Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            name,
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--no-pager",
+        ])
+        .output()
+        .with_context(|| format!("check whether {name} is absent"))?;
+    let states = String::from_utf8_lossy(&status.stdout);
+    anyhow::ensure!(
+        states.lines().any(|line| line == "LoadState=not-found")
+            && states.lines().any(|line| line == "ActiveState=inactive"),
+        "systemctl {} failed with {}: {}",
+        arguments.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -706,12 +747,11 @@ fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
 
 #[cfg(target_os = "linux")]
 fn uninstall_systemd_user() -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", SERVICE_NAME])
-        .status();
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", REPLICATION_SERVICE_NAME])
-        .status();
+    optional_systemd_command(SERVICE_NAME, &["--user", "disable", "--now", SERVICE_NAME])?;
+    optional_systemd_command(
+        REPLICATION_SERVICE_NAME,
+        &["--user", "disable", "--now", REPLICATION_SERVICE_NAME],
+    )?;
     let unit_path = systemd_user_unit_path()?;
     if unit_path.exists() {
         fs::remove_file(unit_path)?;
@@ -850,6 +890,9 @@ pub fn render_systemd_user_unit(spec: &ServiceSpec) -> String {
         .map(|argument| systemd_quote_arg(argument))
         .collect::<Vec<_>>()
         .join(" ");
+    let cache_environment = spec.read_cache_kib
+        .map(|kib| format!("Environment=SMALLCLAIMS_READ_CACHE_KIB={kib}\n"))
+        .unwrap_or_default();
     let weight = st_runtime::LIVE_WEIGHT;
     format!(
         "[Unit]\n\
@@ -860,7 +903,7 @@ After=network.target\n\
 Type=simple\n\
 ExecStart={exec_start}\n\
 Environment=MALLOC_ARENA_MAX=2\n\
-Restart=on-failure\n\
+{cache_environment}Restart=on-failure\n\
 RestartSec=5s\n\
 Nice=0\n\
 CPUWeight={weight}\n\
@@ -948,6 +991,13 @@ fn render_launchd_program_plist(
         .iter()
         .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
         .collect::<String>();
+    let cache_environment = if label == SERVICE_LABEL {
+        spec.read_cache_kib.map(|kib| format!(
+            "  <key>EnvironmentVariables</key><dict><key>SMALLCLAIMS_READ_CACHE_KIB</key><string>{kib}</string></dict>\n"
+        )).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let stdout = spec.config.state_dir.join("logs").join(stdout_name);
     let stderr = spec.config.state_dir.join("logs").join(stderr_name);
     format!(
@@ -957,7 +1007,7 @@ fn render_launchd_program_plist(
 <dict>\n\
   <key>Label</key><string>{label}</string>\n\
   <key>ProgramArguments</key>\n  <array>\n{arguments}  </array>\n\
-  <key>RunAtLoad</key><true/>\n\
+{cache_environment}  <key>RunAtLoad</key><true/>\n\
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n\
   <key>ProcessType</key><string>{process_type}</string>\n\
   <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>8192</integer></dict>\n\
@@ -1006,6 +1056,22 @@ fn systemd_quote_arg(argument: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::PeerConfig;
+
+    #[test]
+    fn reader_cache_override_is_persisted_for_the_daemon_on_both_platforms() -> Result<()> {
+        let mut spec = ServiceSpec::new("/usr/bin/st3", Config::default(), 1024)?;
+        assert!(!render_systemd_user_unit(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        assert!(!render_launchd_plist(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        spec.read_cache_kib = Some(1024);
+        assert!(render_systemd_user_unit(&spec)
+            .contains("Environment=SMALLCLAIMS_READ_CACHE_KIB=1024\n"));
+        assert!(render_launchd_plist(&spec).contains(
+            "<key>EnvironmentVariables</key><dict><key>SMALLCLAIMS_READ_CACHE_KIB</key><string>1024</string></dict>"
+        ));
+        assert!(!render_systemd_replication_unit(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        assert!(!render_launchd_replication_plist(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        Ok(())
+    }
 
     #[test]
     fn setup_service_pins_the_config_and_sibling_pty() -> Result<()> {

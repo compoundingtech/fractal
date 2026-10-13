@@ -1,3 +1,4 @@
+mod trace_principal;
 #[cfg(test)]
 mod accountable_tests;
 pub mod custom;
@@ -6247,6 +6248,25 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    /// Linked runs with their effective current steps, without presentation or work history.
+    /// Read the parent link even when empty, so a new round invalidates its parent's evaluation.
+    pub(crate) fn mission_run_children_for_step(&self, step: &str) -> Result<Vec<MissionRunView>> {
+        let step = normalize_step_run(step);
+        smallclaims::touched::note_read(|| format!("children-of-step:{step}"));
+        let connection = self.readers.get();
+        let ids = connection
+            .prepare_cached("SELECT id FROM mission_runs WHERE parent_step_run=?1")?
+            .query_map([step], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| {
+                let view = mission_run_view_for_projection_tx(&connection, &id)?;
+                note_run_view_reads(&view);
+                Ok(view)
+            })
+            .collect()
     }
 
     pub fn adopt_mission_revision(
@@ -23044,6 +23064,7 @@ fn check_mailbox_incarnation(
     let describes_another = fields.get("incarnation_id").and_then(Value::as_str)
         != Some(fence.incarnation.as_str());
     if !live
+        && fence.epoch == 0
         && (describes_another
             || matches!(
                 fields.get("status").and_then(Value::as_str),
@@ -23062,13 +23083,16 @@ fn check_mailbox_incarnation(
         if let Some(harness) = harness {
             let harness: Value = serde_json::from_str(&harness).map_err(internal)?;
             let fields = harness.get("fields").unwrap_or(&harness);
-            if fields.get("state").and_then(Value::as_str) == Some("starting")
+            if matches!(
+                fields.get("state").and_then(Value::as_str),
+                Some("starting" | "ready" | "idle" | "working" | "blocked")
+            )
                 && fields.get("incarnation_id").and_then(Value::as_str) == Some(&fence.incarnation)
             {
                 // The new driver can start while the graph still describes its predecessor,
-                // before reconciliation publishes this incarnation's runtime.running.
+                // and its hooks can advance before reconciliation publishes runtime.running.
                 // Retry without allocating ownership or authorizing any mailbox reads/receipts.
-                // An exited observation for this same incarnation remains terminal.
+                // Ended and indeterminate observations remain terminal.
                 return Err(St3Error::new(
                     "mailbox-session-starting",
                     "waiting for the seat's running incarnation",
@@ -24578,18 +24602,74 @@ fn pending_attention_requests_tx(
         .collect()
 }
 
+const MESSAGE_CANONICAL_KEY_BATCH_SIZE: usize = 128;
+
 fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
-    let mut keys = BTreeMap::new();
-    for message in messages.iter() {
-        keys.insert(
-            message.subject.clone(),
-            message_canonical_key_tx(connection, &message.subject)?,
-        );
+    let mut keys = BTreeMap::<String, canonical::ClaimKey>::new();
+    for chunk in messages.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
+        let subjects = serde_json::to_string(
+            &chunk.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(),
+        )?;
+        let mut statement = connection.prepare_cached(message_canonical_keys_query())?;
+        let mut rows = statement.query([subjects])?;
+        for (ordinal, message) in chunk.iter().enumerate() {
+            let row = rows.next()?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            // An absent earliest claim or its batch leaves a gap. A SQL step error
+            // can precede this check; with multiple faults, error precedence is
+            // unspecified. Every error still leaves the input vector unchanged.
+            if row.get::<_, usize>(6)? != ordinal {
+                return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            }
+            let (time, writer, sequence, batch, position, id) = message_canonical_key_row(row)?;
+            keys.insert(
+                message.subject.clone(),
+                (time.parse()?, writer, sequence, batch, position, id),
+            );
+        }
+        anyhow::ensure!(rows.next()?.is_none(), "duplicate canonical message key row");
     }
+    // Gather every key successfully before changing the caller's message vector.
     messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
     Ok(())
 }
 
+fn message_canonical_keys_query() -> &'static str {
+    // Drive only the supplied subjects. The same required kind index bounds each
+    // earliest-ID lookup, independently of unrelated claims on those subjects.
+    // Join the selected ID afterwards: a missing batch cannot select a younger ID.
+    // One stable statement/parameter for every group size; CROSS JOIN keeps the
+    // supplied JSON array as the outer loop, never a scan of the claims table.
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
+        &format!(
+            "SELECT chosen.accepted_at_unix_ms, batches.origin, batches.replica_sequence,
+                    chosen.batch_id, {}, chosen.id, requested.key
+             FROM json_each(?1) AS requested CROSS JOIN claims AS chosen CROSS JOIN batches
+             WHERE chosen.id=(
+                 SELECT id FROM claims INDEXED BY claims_subject_kind_index
+                 WHERE subject=requested.value AND kind IN ('message.sent','intent.desired')
+                 ORDER BY CANONICAL_ASC(claims) LIMIT 1
+             ) AND batches.id=chosen.batch_id
+             ORDER BY requested.key",
+            canonical::position_sql("chosen"),
+        )
+    ));
+    &QUERY
+}
+
+fn message_canonical_key_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, String, u64, String, u64, String)> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, u64>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, u64>(4)?,
+        row.get::<_, String>(5)?,
+    ))
+}
+
+#[cfg(test)]
 fn message_canonical_key_query() -> &'static str {
     // Requires the named index: create_schema installs it before reader-pool creation.
     // A dropped or renamed index makes preparation fail, rather than using a slower fallback.
@@ -24609,21 +24689,13 @@ fn message_canonical_key_query() -> &'static str {
     &QUERY
 }
 
+#[cfg(test)]
 fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Result<canonical::ClaimKey> {
     // Select the earliest ID without a batch join. An absent batch for that ID is an error,
     // not permission to select a younger claim. Decode exactly the shared key's columns.
     let (time, writer, sequence, batch, position, id) = connection
         .prepare_cached(message_canonical_key_query())?
-        .query_row([subject], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, u64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, u64>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })?;
+        .query_row([subject], message_canonical_key_row)?;
     Ok((time.parse()?, writer, sequence, batch, position, id))
 }
 
