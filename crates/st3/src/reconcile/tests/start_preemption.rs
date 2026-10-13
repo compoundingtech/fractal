@@ -418,6 +418,10 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
         completed.body["fields"]["incarnation_id"],
         "blocked-start-incarnation"
     );
+    let prior_target: String = store.readers.get().query_row(
+        "SELECT json_extract(body,'$.expected_incarnation') FROM local_runtime_starts WHERE subject=?1",
+        [&desired.subject], |row| row.get(0)).unwrap();
+    assert_eq!(prior_target, "prior-incarnation");
     reconciler
         .record_member(&desired, &captured, false)
         .unwrap();
@@ -471,6 +475,12 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
         .unwrap()
         .unwrap();
     assert_eq!(absent.body["fields"]["status"], "exited");
+    let actual = store
+        .latest_actual_value(&desired.subject)
+        .unwrap()
+        .unwrap();
+    assert!(actual_field(&actual, "incarnation_id").unwrap().is_null());
+    assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
 }
 
 #[tokio::test]

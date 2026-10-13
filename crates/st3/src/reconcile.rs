@@ -6203,8 +6203,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             control_request_receipt: None,
             expected_incarnation: self.store.latest_actual_value(&subject.subject)?.and_then(
                 |actual| {
-                    actual
-                        .pointer("/fields/incarnation_id")
+                    actual_field(&actual, "incarnation_id")
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                 },
@@ -16576,13 +16575,19 @@ fn member_fields(
     incarnation_id: Option<&str>,
     adopted: bool,
 ) -> BTreeMap<String, Value> {
-    let mut fields = BTreeMap::from([
+    // Omission retains the earlier field in actual-state folding. Explicit null
+    // clears that old identity when the physical capture cannot identify it.
+    BTreeMap::from([
         ("status".into(), Value::String(status.into())),
         (
             "runtime_id".into(),
             Value::String(member.runtime_id.clone()),
         ),
         ("terminal".into(), Value::Bool(member.terminal)),
+        (
+            "incarnation_id".into(),
+            incarnation_id.map_or(Value::Null, Value::from),
+        ),
         ("host".into(), Value::String(member.host.clone())),
         ("adopted".into(), Value::Bool(adopted)),
         (
@@ -16591,14 +16596,7 @@ fn member_fields(
         ),
         ("reachability".into(), Value::String("reachable".into())),
         ("reason".into(), Value::Null),
-    ]);
-    if let Some(incarnation_id) = incarnation_id {
-        fields.insert(
-            "incarnation_id".into(),
-            Value::String(incarnation_id.into()),
-        );
-    }
-    fields
+    ])
 }
 
 enum RestartDecision {
@@ -17501,9 +17499,37 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             Ok(self.start_operations.lock().unwrap()
                 .get(&(id.into(), incarnation.into())).cloned())
         }
-        fn start_operation_closed(&self, _member: &MemberSpec) -> Result<bool> {
-            // This fixture spawns no process or detached producer. Observable mocked
-            // runtimes are still retired through the normal incarnation-fenced path.
+        fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
+            if member
+                .driver
+                .as_deref()
+                .is_some_and(|driver| driver.ends_with("gate"))
+            {
+                // No fixture process/scope survives an acknowledged exact exit.
+                // Before publication the producer is still outstanding.
+                if self
+                    .failed_starts
+                    .lock()
+                    .unwrap()
+                    .contains(&member.runtime_id)
+                {
+                    return Ok(true);
+                }
+                let Some(observation) = self.observe_exec(&member.runtime_id)? else {
+                    return Ok(false);
+                };
+                let Some(incarnation) = observation.incarnation_id else {
+                    return Ok(false);
+                };
+                return Ok(matches!(observation.status.as_str(), "exited" | "stopped")
+                    && self
+                        .start_operations
+                        .lock()
+                        .unwrap()
+                        .get(&(member.runtime_id.clone(), incarnation))
+                        == member.tags.get(start_jobs::OPERATION_TAG));
+            }
+            // Other virtual fixture launches have no process or detached producer.
             Ok(true)
         }
         fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {

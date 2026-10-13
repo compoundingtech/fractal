@@ -285,9 +285,19 @@ impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn reconcile_start_jobs(&self) -> Result<()> {
         for operation in self.store.pending_runtime_starts()? {
             let subject = operation.subject.clone();
-            self.isolate("start-completion", &subject, || {
-                self.reconcile_start_operation(operation)
-            });
+            if reconcile_decision_admitted(&subject) {
+                self.isolate("start-completion", &subject, || {
+                    self.reconcile_start_operation(operation)
+                });
+            } else {
+                // Gate operations are not admitted reconciliation-fault subjects.
+                // Keep a distinct daemon fault scope for each exact operation.
+                self.isolate(
+                    &format!("start-completion:{subject}"),
+                    &format!("daemon/{}", self.host),
+                    || self.reconcile_start_operation(operation),
+                );
+            }
         }
         Ok(())
     }
@@ -439,10 +449,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                     )?;
                 }
                 match completed {
-                    StartCompletion::Applied(error) => self.record_member_reconcile_result(
-                        &operation.subject,
-                        error.map_or(Ok(()), |error| Err(anyhow::anyhow!(error))),
-                    )?,
+                    StartCompletion::Applied(error) => {
+                        if reconcile_decision_admitted(&operation.subject) {
+                            self.record_member_reconcile_result(
+                                &operation.subject,
+                                error.map_or(Ok(()), |error| Err(anyhow::anyhow!(error))),
+                            )?;
+                        }
+                        // The gate evaluator consumes this exact failed start and
+                        // records its gate result for the owning mission/publisher.
+                    }
                     StartCompletion::Superseded => {
                         self.revoke_start(&operation.subject)?;
                         if self.store.selected_desired_token(&operation.subject)?

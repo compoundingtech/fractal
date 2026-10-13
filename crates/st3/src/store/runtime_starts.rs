@@ -1360,7 +1360,8 @@ mod tests {
                     store
                         .observations_for(subject, "runtime.action.requested")
                         .unwrap()
-                        .is_empty()
+                        .iter()
+                        .all(|claim| claim.body["fields"]["action"] != "start")
                 );
                 assert_eq!(
                     store
