@@ -485,6 +485,19 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
             .id,
         completed.id
     );
+    let wake = *reconciler.event_notify.borrow();
+    reconciler
+        .record_member(&desired, &captured, false)
+        .unwrap();
+    assert_eq!(
+        *reconciler.event_notify.borrow(),
+        wake,
+        "an already faulted unchanged refusal must not spin the reactive loop"
+    );
+    assert_eq!(
+        reconciler.runtime_observation_drops.lock().unwrap()[&desired.subject],
+        3
+    );
     drop(capture_fence);
     let _fresh_capture = store.capture_runtime_observations().unwrap();
     let fresh = runtime.snapshot_ptys().unwrap().remove(0);

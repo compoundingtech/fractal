@@ -1009,6 +1009,7 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Faults that could not be recorded in the graph during the current pass.
     unrecorded_faults: Mutex<Vec<String>>,
     runtime_observation_drops: Mutex<HashMap<String, u32>>,
+    runtime_observation_drop_changes: Mutex<HashSet<String>>,
     /// Bound ownership-error logging across all candidates without caching guard results.
     ownership_error_log: Mutex<OwnershipErrorLog>,
     /// Step-timeout faults this reconciler has already raised, so a pass records each once.
@@ -1157,6 +1158,7 @@ impl Reconciler<NativeRuntime> {
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
             runtime_observation_drops: Mutex::default(),
+            runtime_observation_drop_changes: Mutex::default(),
             ownership_error_log: Mutex::new(OwnershipErrorLog::default()),
             step_timeout_faults: Mutex::new(BTreeSet::new()),
             raised_broken_gates: Mutex::new(BTreeSet::new()),
@@ -1245,6 +1247,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
             runtime_observation_drops: Mutex::default(),
+            runtime_observation_drop_changes: Mutex::default(),
             ownership_error_log: Mutex::new(OwnershipErrorLog::default()),
             step_timeout_faults: Mutex::new(BTreeSet::new()),
             raised_broken_gates: Mutex::new(BTreeSet::new()),
@@ -2281,7 +2284,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             .runtime_observation_drops
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if retries.is_empty() && survivors.is_empty() && drops.is_empty() {
+        let mut drop_changes = self
+            .runtime_observation_drop_changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if retries.is_empty() && survivors.is_empty() && drops.is_empty() && drop_changes.is_empty()
+        {
             return;
         }
         let active = eligible
@@ -2296,11 +2304,34 @@ impl<R: RuntimeControl> Reconciler<R> {
             .collect::<BTreeSet<_>>();
         retries.retain(|subject, _| active.contains(subject.as_str()));
         survivors.retain(|subject, _| active.contains(subject.as_str()));
-        drops.retain(|subject, _| active.contains(subject.as_str()));
+        if !drops.is_empty() || !drop_changes.is_empty() {
+            let mut observed = active;
+            observed.extend(
+                gates
+                    .iter()
+                    .filter(|gate| gate.host == self.host)
+                    .map(|gate| gate.subject.as_str()),
+            );
+            drops.retain(|subject, _| observed.contains(subject.as_str()));
+            drop_changes.retain(|subject| observed.contains(subject.as_str()));
+        }
     }
 
     fn reconcile_pass(&self) -> Result<()> {
         self.reconcile_start_jobs()?;
+        // A refusal changes this item's diagnostic input during its evaluation.
+        // Deliver that change on the next pass, after the current evaluation has
+        // registered its reads, rather than losing a touch when it becomes clean.
+        let drop_changes = std::mem::take(
+            &mut *self
+                .runtime_observation_drop_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for subject in drop_changes {
+            self.incremental
+                .touch(&format!("runtime-observation-drops:{subject}"));
+        }
         let _observation_capture = self.store.capture_runtime_observations()?;
         let observe_span = crate::profile::span("pass/changes");
         self.incremental.observe(&self.store)?;
@@ -7792,20 +7823,28 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn record_runtime_observation_admission(&self, subject: &str, dropped: bool) -> Result<()> {
         const FAULT_AFTER_DROPS: u32 = 3;
-        let consecutive = {
+        smallclaims::touched::note_read(|| format!("runtime-observation-drops:{subject}"));
+        let (consecutive, changed) = {
             let mut drops = self
                 .runtime_observation_drops
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if dropped {
                 let count = drops.entry(subject.into()).or_default();
-                *count = count.saturating_add(1);
-                *count
+                let previous = *count;
+                *count = count.saturating_add(1).min(FAULT_AFTER_DROPS);
+                (*count, *count != previous)
             } else {
-                drops.remove(subject);
-                0
+                (0, drops.remove(subject).is_some())
             }
         };
+        if changed {
+            self.runtime_observation_drop_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(subject.into());
+            self.signal_changed();
+        }
         let target = format!("daemon/{}", self.host);
         let scope = format!("runtime-observation:{subject}");
         if !dropped {
@@ -7853,7 +7892,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 // The worker's durable result superseded this physical capture.
                 // Wake a fresh pass instead of publishing the prior incarnation.
                 self.record_runtime_observation_admission(subject, true)?;
-                self.start_changed(subject);
                 return Ok(());
             };
             self.record_runtime_observation_admission(subject, false)?;
@@ -26678,7 +26716,18 @@ mission "orchid/timeout" state="ready" timeout="1ms" {
             }
         })
         .await
-        .expect("one cancellation wake did not finish cleanup");
+        .unwrap_or_else(|error| {
+            let current = beside_the_loop(|| store.mission_run(&run.id)).unwrap();
+            let pending = beside_the_loop(|| store.pending_runtime_starts()).unwrap();
+            let starts = pending.iter().map(|operation| (
+                operation.subject.as_str(), operation.finished, operation.applied,
+                operation.cleanup_verified, operation.revoked_by.as_deref(),
+                operation.result.as_ref().map(|result| &result["verification"]),
+            )).collect::<Vec<_>>();
+            let drops = reconciler.runtime_observation_drops.lock().unwrap().clone();
+            panic!("one cancellation wake did not finish cleanup: {error}; task_finished={}; run={}/{}; starts={starts:?}; drops={drops:?}",
+                task.is_finished(), current.status, current.phase);
+        });
         task.abort();
 
         assert!(

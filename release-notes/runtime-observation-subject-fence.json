@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Only ledger mutations for the observed subject can invalidate its pre-physical capture serial; unrelated starts cannot starve exit or absence publication. The same actual-incarnation exception remains limited to ordinary observations. A bounded-label telemetry counter records refusals; three consecutive drops for one subject open an existing reconcile fault, and fresh admission recovers it. This is not stop-only identity or closure authority. A signing-key preparation failure refuses admission before any physical/control start request or ledger row is written."
+    "detail": "Only ledger mutations for the observed subject can invalidate its pre-physical capture serial; unrelated starts cannot starve exit or absence publication. The same actual-incarnation exception remains limited to ordinary observations. A bounded-label telemetry counter records refusals; three consecutive drops for one subject open an existing reconcile fault, and fresh admission recovers it. Diagnostic-counter changes are queued as incremental inputs for the next pass, and the counter saturates at its fault threshold so an unchanged refusal does not spin the reactive loop. This is not stop-only identity or closure authority. A signing-key preparation failure refuses admission before any physical/control start request or ledger row is written."
   },
   "downtime": {
     "status": "none",
