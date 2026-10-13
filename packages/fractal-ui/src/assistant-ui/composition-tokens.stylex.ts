@@ -29,10 +29,6 @@ export const borderVars = stylex.defineVars({
   glassBorder: 'rgba(255, 255, 255, 0.05)',
   controlBorder: 'rgba(255, 255, 255, 0.025)',
   focusBorder: 'rgba(255, 255, 255, 0.08)',
-  /** Nesting line beside fold children and nested lists. */
-  rail: 'rgba(255, 255, 255, 0.1)',
-  /** Block quote rule. */
-  railStrong: 'rgba(255, 255, 255, 0.12)',
 })
 
 export const accentVars = stylex.defineVars({
@@ -65,7 +61,7 @@ export const typeVars = stylex.defineVars({
   uiSize: '14px', uiLeading: '20px',
   metaSize: '12px', metaLeading: '16px',
   denseSize: '11px',
-  codeSize: '13px', codeLeading: '18px',
+  codeSize: '13px',
   bodySize: '14px', bodyLeading: '22.75px',
   weightMedium: '500',
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',

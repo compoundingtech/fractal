@@ -29,7 +29,7 @@ export const NeedsYouInbox = ({ requests, ariaLabel = 'Needs you inbox', onShowI
 
 const styles = stylex.create({
   card: { display: 'flex', flexDirection: 'column', gap: s.md, paddingBlock: s.md, paddingInline: s.lg, maxWidth: g.lane, width: '100%', boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: statusVars.attention, borderRadius: r.md, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
-  inboxSummary: { cursor: 'pointer', display: 'flex', alignItems: 'center', gap: s.md, listStyle: 'none', '::-webkit-details-marker': { display: 'none' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accentVars.primary, outlineOffset: g.focusOffset } },
+  inboxSummary: { cursor: 'pointer', display: 'flex', alignItems: 'center', gap: s.md, minHeight: g.controlSm, listStyle: 'none', '::-webkit-details-marker': { display: 'none' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accentVars.primary, outlineOffset: g.focusOffset } },
   inboxLabel: { minWidth: 0, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' },
   chevron: { width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: textVars.fgMuted, transform: { default: 'rotate(0deg)', ':is(details[open] *)': 'rotate(90deg)' }, transitionProperty: 'transform', transitionDuration: { default: m.fast, '@media (prefers-reduced-motion: reduce)': '0s' }, transitionTimingFunction: m.ease },
   body: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
