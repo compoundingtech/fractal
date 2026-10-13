@@ -563,12 +563,22 @@ the profile has no capacity, jobs queue with no matching runner. A queued requir
 a pass. Apart from the ci1 choice below, which is made once per run before any job starts, do not
 fall back to hosted or fleet runners.
 
-### ci1 and ci2: owned pools, with PR overflow to Namespace
+### ci1 and ci2: owned pool and Namespace admission
 
-All required merge-group stages share the picker’s `ci1-priority` on either physical host selection,
-independent of `CI1_RUNNERS`. This is the standing merge-first lane. Existing running work is not preempted;
+All required merge-group stages share the picker's pool selection, independent
+of `CI1_RUNNERS`; by default this is `ci1-priority` on either physical host.
+Existing running work is not preempted;
 the host controller must retain its release/merge-first classification and bounded reservations.
 `CI_MERGE_CI1` and `CI_MERGE_NAMESPACE_PROFILE` no longer redirect required merge jobs.
+`CI_MERGE_OVERFLOW=on` lets a merge group use the existing Linux Namespace
+profile when a valid group-3 census has fewer than `CI_MERGE_MIN_IDLE` idle
+priority runners (default three, for the initial producer, Clippy and fleet
+compatibility jobs). All required jobs follow the same picker output, with
+Namespace priority 1 and affinity to that run. An unset switch keeps the owned
+priority lane. Invalid metadata, an invalid minimum or run ID, and missing
+credentials retain that lane; they do not establish saturation. Priority PRs
+and releases keep their reservations. This changes admission capacity, not
+tests, required contexts, timeouts, cache provenance or resource caps.
 Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
 The declared ci1 pool is five general workers (including one reserved priority worker) and one
 merge worker, with dynamic label lending. The current source run used `ci1-5` with

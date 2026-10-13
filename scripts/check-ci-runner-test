@@ -50,6 +50,9 @@ def check(name, pages, expected=None, api=True, **overrides):
             "QUEUE_REF": "",
             "GH_REPO_TOKEN": "",
             "NEED": "1",
+            "MERGE_OVERFLOW": "off",
+            "MERGE_NEED": "3",
+            "RUN_ID": "123",
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
             "API_CALLS": str(calls),
@@ -134,6 +137,24 @@ check("merge chooses the common priority role on either host", [{'runners': [ci2
       'ci1-priority', EVENT='merge_group')
 check("release chooses the same common priority role", [{'runners': [ci2_priority]}],
       'ci1-priority', EVENT='push', MODE='priority')
+overflow = 'namespace-profile-linux-x86-64;job.priority=1;github.run-id=123'
+check("saturated merge overflows on a positive census", [{'runners':[runner('ci1-priority',busy=True)]}],
+      overflow, EVENT='merge_group',MERGE_OVERFLOW='on')
+check("below initial three-job capacity overflows", [{'runners':[ci2_priority]}],
+      overflow, EVENT='merge_group',MERGE_OVERFLOW='on')
+check("three idle priority slots admit the owned merge", [{'runners':[runner('ci1-priority') for _ in range(3)]}],
+      'ci1-priority',EVENT='merge_group',MERGE_OVERFLOW='on')
+check("overflow requires a qualified census", [], 'ci1-priority',EVENT='merge_group',
+      MERGE_OVERFLOW='on',API_RESPONSE='not JSON')
+check("overflow cannot interpret missing token as saturation", [], 'ci1-priority',api=False,
+      EVENT='merge_group',MERGE_OVERFLOW='on',GH_TOKEN='')
+for values in [dict(MERGE_NEED='0'),dict(MERGE_NEED='x'),dict(RUN_ID=''),dict(RUN_ID='x')]:
+    check("invalid overflow identity/minimum retains priority", [], 'ci1-priority',
+          EVENT='merge_group',MERGE_OVERFLOW='on',**values)
+check("overflow does not redirect a priority PR", [], 'ci1-priority',
+      PR_LABELS='["ci-priority"]',MERGE_OVERFLOW='on')
+check("overflow does not redirect a release", [], 'ci1-priority',
+      EVENT='push',MODE='priority',MERGE_OVERFLOW='on')
 dual = runner('ci1'); dual['labels'].append({'name': 'ci1-priority'})
 check("priority dual-labelled worker cannot serve two jobs", [{'runners': [dual]}],
       'ci1-priority', PR_LABELS='["ci-priority"]')
