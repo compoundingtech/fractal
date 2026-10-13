@@ -14327,9 +14327,6 @@ async fn wait_for_agent_harness(
                     if agent.incarnation_id == status.incarnation_id
                         && status.incarnation_id.is_some()
                     {
-                        if status.stage == "harness-ready" && agent.reachability == "reachable" {
-                            return Ok(agent);
-                        }
                         if agent.state == "waiting" && agent.reachability == "reachable" {
                             if attach {
                                 return Ok(agent);
@@ -14343,6 +14340,11 @@ async fn wait_for_agent_harness(
                                 "`{subject}` failed to start: {}",
                                 agent.fault.as_deref().unwrap_or(reason)
                             );
+                        }
+                        // A reached-readiness milestone must not hide a later fault or
+                        // waiting-for-input state in the same incarnation.
+                        if status.stage == "harness-ready" && agent.reachability == "reachable" {
+                            return Ok(agent);
                         }
                     }
                 }

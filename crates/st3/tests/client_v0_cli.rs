@@ -3673,6 +3673,9 @@ async fn serve_creation_api_with_launch_status(
                     && response.status().is_success()
                     && let Some(harness_state) = harness_state
                 {
+                    let reached_ready = matches!(harness_state, "ready" | "idle" | "working" | "blocked-after-ready");
+                    let blocked_after_ready = harness_state == "blocked-after-ready";
+                    let harness_state = if blocked_after_ready { "blocked" } else { harness_state };
                     let token = store
                         .selected_desired_token("agent/client-v0-cli.demo")
                         .unwrap()
@@ -3701,6 +3704,15 @@ async fn serve_creation_api_with_launch_status(
                         if launch_status.is_some() && kind == "runtime.action.succeeded" {
                             continue;
                         }
+                        if blocked_after_ready && kind == "harness.observed" {
+                            store.append_claim(&ClaimInput {
+                                subject: "agent/client-v0-cli.demo".into(), kind:kind.into(),
+                                actor:Some("agent/client-v0-cli.demo".into()),
+                                fields:serde_json::from_value(serde_json::json!({
+                                    "driver":"omp", "incarnation_id":"demo:1", "state":"ready",
+                                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None,
+                            }).unwrap();
+                        }
                         store
                             .append_claim(&ClaimInput {
                                 subject: "agent/client-v0-cli.demo".into(),
@@ -3713,7 +3725,7 @@ async fn serve_creation_api_with_launch_status(
                             })
                             .unwrap();
                     }
-                    if launch_status.is_none() && matches!(harness_state, "ready" | "idle" | "working") {
+                    if launch_status.is_none() && reached_ready {
                         store.append_claim(&ClaimInput {
                             subject: "agent/client-v0-cli.demo".into(),
                             kind: "runtime.action.succeeded".into(), actor: None,
@@ -4027,6 +4039,7 @@ async fn new_agent_explains_ready_starting_and_waiting_states_and_preserves_json
         (None, false),
         (Some("ready"), false),
         (Some("blocked"), false),
+        (Some("blocked-after-ready"), false),
         (Some("ready"), true),
     ] {
         let root = tempfile::tempdir().unwrap();
