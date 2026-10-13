@@ -66,7 +66,8 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   const service = workServicePresentation(call)
   // Recorded service facts name the row; otherwise a call's intent leads and the kind's verb and target follow.
   const intent = service === undefined ? call.intent : undefined
-  const label = intent === undefined ? call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}` : [intent, presentation.verb, call.argsSummary].filter(value => value !== undefined).join(' · ')
+  const secondary = [presentation.verb, call.argsSummary].filter(value => value !== undefined).join(' ')
+  const label = intent === undefined ? call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}` : `${intent} · ${secondary}`
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   // A non-success outcome stays visible as a word beside the pinned disclosure; running rows say so in the duration column until they end.
@@ -80,7 +81,7 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
     <span {...stylex.props(styles.labelCell)}>
       <span data-call-title {...stylex.props(styles.callLabel)}>
         {service !== undefined ? <>Service {service.name}{service.state === undefined ? null : <> · {service.state}</>}</>
-          : intent !== undefined ? <><span data-tool-intent>{intent}</span><span data-tool-secondary {...stylex.props(styles.secondary)}>{' · '}{[presentation.verb, call.argsSummary].filter(value => value !== undefined).join(' ')}</span></>
+          : intent !== undefined ? <><span data-tool-intent>{intent}</span><span data-tool-secondary {...stylex.props(styles.secondary)}>{' · '}{secondary}</span></>
           : label}
       </span>
       {noOutput && <span data-tool-no-output {...stylex.props(styles.noOutput)}>{' · No output'}</span>}
