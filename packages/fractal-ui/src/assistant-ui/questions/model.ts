@@ -1,6 +1,7 @@
 /**
- * Mirror of the application's `apps/fractal-web/src/web/questions/model.ts` (the ACH `proto/model.ts`
- * contract). The kit cannot import from the app, so the shapes are repeated verbatim; keep both in step.
+ * Mirror of `apps/fractal-web/src/web/questions/model.ts` on the pending question-forms app branch (the ACH
+ * `proto/model.ts` contract); that file is not on main yet. The kit cannot import from the app, so the
+ * shapes are repeated verbatim; keep both in step.
  */
 export type QuestionKind = 'single' | 'multi' | 'text' | 'confirm' | 'permission' | 'plan'
 export type Preview =

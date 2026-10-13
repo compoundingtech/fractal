@@ -10,14 +10,14 @@ import type { AnswerDraft, Answers, OptionView, Preview, QuestionFormProps, Ques
 /** The automatic free-text row every `allowOther` question receives, worded as the omp ask tool words it. */
 export const OTHER_LABEL = 'Other (type your own)'
 
-type FocusTarget = { readonly _tag: 'options' } | { readonly _tag: 'option'; readonly index: number } | { readonly _tag: 'other' }
+/** `row` is a radio or checkbox by value (`option:N` or `other`); `other` is the Other text field. */
+type FocusTarget = { readonly _tag: 'options' } | { readonly _tag: 'row'; readonly value: string } | { readonly _tag: 'other' }
 interface FocusRequest { readonly questionId: string; readonly target: FocusTarget }
 
 const EMPTY_DRAFT: AnswerDraft = { selected: [] }
 const OPTIONS_TARGET: FocusTarget = { _tag: 'options' }
 const OTHER_VALUE = 'other'
 const optionValue = (index: number) => `option:${index}`
-const optionIndexOf = (value: string) => value.startsWith('option:') ? Number(value.slice('option:'.length)) : undefined
 const draftFor = (answers: Answers, id: string) => answers[id] ?? EMPTY_DRAFT
 const filled = (value: string | undefined) => {
   const trimmed = value?.trim()
@@ -55,7 +55,7 @@ function findFocusTarget(root: HTMLElement | null, request: FocusRequest): HTMLE
   if (target._tag === 'other') return panel.querySelector<HTMLElement>('[data-question-stop="other"] input')
   const options = panel.querySelector<HTMLElement>('[data-question-stop="options"]')
   if (options === null) return null
-  if (target._tag === 'option') return options.querySelector<HTMLElement>(`input[value="${optionValue(target.index)}"]`)
+  if (target._tag === 'row') return options.querySelector<HTMLElement>(`input[value="${target.value}"]`)
   return options.querySelector<HTMLElement>('input:checked') ?? options.querySelector<HTMLElement>('input')
 }
 
@@ -120,8 +120,9 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
   const requestFocus = (questionId: string, target: FocusTarget) => {
     const request = { questionId, target }
     const element = findFocusTarget(rootRef.current, request)
-    if (element === null) focusRequest.current = request
-    else element.focus()
+    // A later request that lands immediately supersedes one still waiting for its panel to mount.
+    focusRequest.current = element === null ? request : null
+    element?.focus()
   }
   React.useLayoutEffect(() => {
     const pending = focusRequest.current
@@ -142,42 +143,26 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     setLocalDraft(next)
     onDraftChange?.(next)
   }
-  const rememberOther = (question: QuestionView, current: AnswerDraft) => {
-    if (current.other !== undefined) otherMemory.current[question.id] = current.other
-  }
-  const recalledOther = (question: QuestionView, current: AnswerDraft) => current.other ?? otherMemory.current[question.id] ?? ''
-  const chooseSingle = (question: QuestionView, value: string) => update(question, current => {
-    if (value === OTHER_VALUE) return { ...current, selected: [], other: recalledOther(question, current) }
-    const option = question.options[optionIndexOf(value) ?? -1]
-    if (option === undefined) return current
-    rememberOther(question, current)
-    return { ...current, selected: [option.id], other: undefined }
-  })
-  const chooseMany = (question: QuestionView, values: readonly string[]) => update(question, current => {
+  /** Sets the chosen rows by value; a single-choice question passes one value. Other text survives being switched away from. */
+  const choose = (question: QuestionView, values: readonly string[]) => update(question, current => {
     const selected = question.options.filter((_, index) => values.includes(optionValue(index))).map(option => option.id)
-    if (values.includes(OTHER_VALUE)) return { ...current, selected, other: recalledOther(question, current) }
-    rememberOther(question, current)
+    if (values.includes(OTHER_VALUE)) return { ...current, selected, other: current.other ?? otherMemory.current[question.id] ?? '' }
+    if (current.other !== undefined) otherMemory.current[question.id] = current.other
     return { ...current, selected, other: undefined }
   })
-  const typeOther = (question: QuestionView, value: string) => update(question, current => ({ ...current, selected: usesCheckboxes(question) ? current.selected : [], other: value }))
-  const typeNote = (question: QuestionView, value: string) => update(question, current => ({ ...current, note: value }))
 
-  /** 1–9 picks the numbered row: options first, then the Other row. */
+  /** 1–9 picks the numbered row: options first, then the Other row. Checkbox rows toggle. */
   const pick = (question: QuestionView, index: number) => {
     if (question.kind === 'text') return
-    const current = draftFor(answers, question.id)
     const isOther = question.allowOther && index === question.options.length
     if (!isOther && index >= question.options.length) return
     const value = isOther ? OTHER_VALUE : optionValue(index)
-    if (usesCheckboxes(question)) {
-      const values = [...current.selected.map(id => optionValue(question.options.findIndex(option => option.id === id))), ...(current.other === undefined ? [] : [OTHER_VALUE])]
-      const turningOn = !values.includes(value)
-      chooseMany(question, turningOn ? [...values, value] : values.filter(entry => entry !== value))
-      requestFocus(question.id, isOther && turningOn ? { _tag: 'other' } : { _tag: 'option', index })
-      return
-    }
-    chooseSingle(question, value)
-    requestFocus(question.id, isOther ? { _tag: 'other' } : { _tag: 'option', index })
+    const multi = usesCheckboxes(question)
+    const current = draftFor(answers, question.id)
+    const values = [...current.selected.map(id => optionValue(question.options.findIndex(option => option.id === id))), ...(current.other === undefined ? [] : [OTHER_VALUE])]
+    const turningOn = !values.includes(value)
+    choose(question, !multi ? [value] : turningOn ? [...values, value] : values.filter(entry => entry !== value))
+    requestFocus(question.id, isOther && (turningOn || !multi) ? { _tag: 'other' } : { _tag: 'row', value })
   }
   const submit = () => {
     if (!canAct || !complete) return
@@ -248,14 +233,6 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
       next.focus()
     }
   }
-  const showPreviewFor = (questionId: string, index: number) => setPreviewIndex(current => current[questionId] === index ? current : { ...current, [questionId]: index })
-  const onFocus = (event: React.FocusEvent<HTMLElement>) => {
-    const target = event.target
-    const questionId = target.closest<HTMLElement>('[data-question-panel]')?.dataset['questionPanel']
-    const index = target instanceof HTMLInputElement ? optionIndexOf(target.value) : undefined
-    if (questionId !== undefined && index !== undefined) showPreviewFor(questionId, index)
-  }
-
   const renderQuestion = (question: QuestionView, index: number) => <QuestionPanel
     key={question.id}
     question={question}
@@ -266,11 +243,10 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     isReadOnly={!request.answerable}
     previewIndex={previewIndex[question.id]}
     promptId={`${titleId}-q${index}`}
-    onPreview={index => showPreviewFor(question.id, index)}
-    onSingle={value => chooseSingle(question, value)}
-    onMany={values => chooseMany(question, values)}
-    onOther={value => typeOther(question, value)}
-    onNote={value => typeNote(question, value)}
+    onPreview={index => setPreviewIndex(current => current[question.id] === index ? current : { ...current, [question.id]: index })}
+    onChoose={values => choose(question, values)}
+    onOther={value => update(question, current => ({ ...current, selected: usesCheckboxes(question) ? current.selected : [], other: value }))}
+    onNote={value => update(question, current => ({ ...current, note: value }))}
   />
 
   const title = request.title ?? (questions.length > 1 ? `${questions.length} questions` : 'Question')
@@ -283,7 +259,6 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     data-stacked={stacked}
     onKeyDownCapture={onKeyDownCapture}
     onKeyDown={onKeyDown}
-    onFocus={onFocus}
     {...stylex.props(styles.form, variant === 'pinned' ? styles.pinned : styles.card)}
   >
     <div {...stylex.props(styles.header)}>
@@ -365,10 +340,10 @@ function Settled({ state, questions }: { state: Exclude<QuestionState, { _tag: '
 }
 
 function answerText(question: QuestionView, answer: AnswerDraft | undefined): string {
-  if (answer === undefined) return 'No answer'
-  const labels = answer.selected.flatMap(id => question.options.find(option => option.id === id)?.label ?? [])
-  const other = filled(answer.other)
-  const parts = other === undefined ? labels : [...labels, `Other: ${other}`]
+  const labels = answer?.selected.flatMap(id => question.options.find(option => option.id === id)?.label ?? []) ?? []
+  const typed = filled(answer?.other)
+  // Typed text of a secret question stays masked once settled, as it was while typing.
+  const parts = typed === undefined ? labels : [...labels, question.secret === true ? 'Answer hidden' : question.kind === 'text' ? typed : `Other: ${typed}`]
   return parts.length === 0 ? 'No answer' : parts.join(', ')
 }
 
@@ -382,37 +357,39 @@ interface QuestionPanelProps {
   readonly previewIndex: number | undefined
   readonly promptId: string
   readonly onPreview: (index: number) => void
-  readonly onSingle: (value: string) => void
-  readonly onMany: (values: readonly string[]) => void
+  readonly onChoose: (values: readonly string[]) => void
   readonly onOther: (value: string) => void
   readonly onNote: (value: string) => void
 }
 
-function QuestionPanel({ question, draft, showHeader, stacked, isDisabled, isReadOnly, previewIndex, promptId, onPreview, onSingle, onMany, onOther, onNote }: QuestionPanelProps) {
+function QuestionPanel({ question, draft, showHeader, stacked, isDisabled, isReadOnly, previewIndex, promptId, onPreview, onChoose, onOther, onNote }: QuestionPanelProps) {
   const hasPreview = question.options.some(option => option.preview !== undefined)
   const selectedIndexes = draft.selected.map(id => question.options.findIndex(option => option.id === id)).filter(index => index >= 0)
   const fallbackIndex = selectedIndexes[0] ?? Math.max(0, question.options.findIndex(option => option.recommended === true))
   const preview = question.options[previewIndex ?? fallbackIndex]
-  const otherOpen = question.allowOther && draft.other !== undefined
+  // A text question's own field holds its answer, so only option questions open a separate Other field.
+  const otherOpen = question.kind !== 'text' && question.allowOther && draft.other !== undefined
+  const multi = usesCheckboxes(question)
+  const inputType = question.secret === true ? 'password' : 'text'
   const rows = question.options.map((option, index) => ({ option, index, value: optionValue(index) }))
-  const onPointerOver = (event: React.PointerEvent<HTMLElement>) => {
-    const index = Number((event.target as HTMLElement).closest<HTMLElement>('[data-option-index]')?.dataset['optionIndex'])
+  /** Hovering or focusing an option row previews it; the Other row has no preview. */
+  const previewRow = (event: React.SyntheticEvent<HTMLElement>) => {
+    const index = Number((event.target as HTMLElement).closest('label')?.querySelector<HTMLElement>('[data-option-index]')?.dataset['optionIndex'])
     if (Number.isInteger(index) && index < question.options.length) onPreview(index)
   }
   const rowClass = ({ isSelected, isFocusVisible }: { isSelected: boolean; isFocusVisible: boolean }) => stylex.props(styles.option, isSelected && styles.optionSelected, isFocusVisible && styles.focusRing, (isReadOnly || isDisabled) && styles.optionInert).className ?? ''
-  const content = (row: { option: OptionView; index: number }, isSelected: boolean) => <OptionContent option={row.option} index={row.index} isSelected={isSelected} multi={usesCheckboxes(question)} />
 
   const control = question.kind === 'text'
     ? <TextField aria-labelledby={promptId} value={draft.other ?? ''} onChange={onOther} isDisabled={isDisabled} isReadOnly={isReadOnly}>
-        <Input type={question.secret === true ? 'password' : 'text'} placeholder={question.placeholder ?? 'Type your answer'} {...stylex.props(styles.input)} />
+        <Input type={inputType} placeholder={question.placeholder ?? 'Type your answer'} {...stylex.props(styles.input)} />
       </TextField>
-    : usesCheckboxes(question)
-      ? <CheckboxGroup aria-labelledby={promptId} value={[...selectedIndexes.map(optionValue), ...(otherOpen ? [OTHER_VALUE] : [])]} onChange={onMany} isDisabled={isDisabled} isReadOnly={isReadOnly} {...stylex.props(styles.options)}>
-          {rows.map(row => <Checkbox key={row.option.id} value={row.value} className={rowClass}>{({ isSelected }) => content(row, isSelected)}</Checkbox>)}
+    : multi
+      ? <CheckboxGroup aria-labelledby={promptId} value={[...selectedIndexes.map(optionValue), ...(otherOpen ? [OTHER_VALUE] : [])]} onChange={onChoose} isDisabled={isDisabled} isReadOnly={isReadOnly} {...stylex.props(styles.options)}>
+          {rows.map(row => <Checkbox key={row.option.id} value={row.value} className={rowClass}>{({ isSelected }) => <OptionContent option={row.option} index={row.index} isSelected={isSelected} multi />}</Checkbox>)}
           {question.allowOther && <Checkbox value={OTHER_VALUE} className={rowClass}>{({ isSelected }) => <OtherContent index={question.options.length} isSelected={isSelected} multi />}</Checkbox>}
         </CheckboxGroup>
-      : <RadioGroup aria-labelledby={promptId} value={otherOpen ? OTHER_VALUE : selectedIndexes[0] === undefined ? null : optionValue(selectedIndexes[0])} onChange={onSingle} isDisabled={isDisabled} isReadOnly={isReadOnly} {...stylex.props(styles.options)}>
-          {rows.map(row => <Radio key={row.option.id} value={row.value} className={rowClass}>{({ isSelected }) => content(row, isSelected)}</Radio>)}
+      : <RadioGroup aria-labelledby={promptId} value={otherOpen ? OTHER_VALUE : selectedIndexes[0] === undefined ? null : optionValue(selectedIndexes[0])} onChange={value => onChoose([value])} isDisabled={isDisabled} isReadOnly={isReadOnly} {...stylex.props(styles.options)}>
+          {rows.map(row => <Radio key={row.option.id} value={row.value} className={rowClass}>{({ isSelected }) => <OptionContent option={row.option} index={row.index} isSelected={isSelected} multi={false} />}</Radio>)}
           {question.allowOther && <Radio value={OTHER_VALUE} className={rowClass}>{({ isSelected }) => <OtherContent index={question.options.length} isSelected={isSelected} multi={false} />}</Radio>}
         </RadioGroup>
 
@@ -421,13 +398,13 @@ function QuestionPanel({ question, draft, showHeader, stacked, isDisabled, isRea
       {showHeader && question.header !== undefined && <span {...stylex.props(styles.chip)}>{question.header}</span>}
       <span id={promptId} {...stylex.props(styles.prompt)}>{question.prompt}</span>
     </div>
-    {question.subject?._tag === 'markdown' && <div {...stylex.props(styles.subject)}><Markdown text={question.subject.text} /></div>}
+    {question.subject !== undefined && <div {...stylex.props(styles.subject)}><PreviewBody preview={question.subject} /></div>}
     <div {...stylex.props(styles.body, hasPreview && !stacked && styles.bodyBeside)}>
       <div {...stylex.props(styles.column)}>
-        <div data-question-stop="options" onPointerOver={onPointerOver}>{control}</div>
+        <div data-question-stop="options" onPointerOver={previewRow} onFocus={previewRow}>{control}</div>
         {otherOpen && <div data-question-stop="other" {...stylex.props(styles.otherField)}>
           <TextField aria-label={`Other answer: ${question.header ?? question.prompt}`} value={draft.other ?? ''} onChange={onOther} isDisabled={isDisabled} isReadOnly={isReadOnly}>
-            <Input placeholder={question.placeholder ?? 'Type your own answer'} {...stylex.props(styles.input)} />
+            <Input type={inputType} placeholder={question.placeholder ?? 'Type your own answer'} {...stylex.props(styles.input)} />
           </TextField>
         </div>}
       </div>

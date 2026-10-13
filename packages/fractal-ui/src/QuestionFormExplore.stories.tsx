@@ -85,6 +85,8 @@ function QuestionStory({ scheme, scenario: initialScenario, state: initialState,
 const meta = {
   title: 'Fractal UI/Explore/Question form',
   component: QuestionStory,
+  // The pickers keep their own state; keying on the args lets the Controls panel reset them.
+  render: args => <QuestionStory key={`${args.scenario}-${args.state}-${args.width}`} {...args} />,
   parameters: { layout: 'fullscreen' },
   args: { scheme: 'dark', scenario: 'S2', state: 'P', width: 'W1440', explore: false, onSubmitted: fn() },
   argTypes: {
@@ -102,15 +104,14 @@ const formIn = (root: HTMLElement) => {
   if (form === null) throw new Error('No question form rendered')
   return form
 }
-const laneIn = (root: HTMLElement) => within(root).getByTestId('question-lane')
 /** Native tooltips come from non-empty titles; React Aria's hidden inputs carry `title=""` to suppress them. */
-const nativeTitles = (root: Element) => root.querySelectorAll('[title]:not([title=""])').length
+const NATIVE_TITLE = '[title]:not([title=""])'
 /** Every surface: no native title tooltips and no placeholder "Unknown" copy. The detector is checked against planted titles first. */
 const assertHygiene = async (root: HTMLElement) => {
   const planted = document.createElement('div')
   planted.innerHTML = '<span title="planted"></span><input title="">'
-  await expect(nativeTitles(planted)).toBe(1)
-  await expect(nativeTitles(root)).toBe(0)
+  await expect(planted.querySelectorAll(NATIVE_TITLE)).toHaveLength(1)
+  await expect(root.querySelectorAll(NATIVE_TITLE)).toHaveLength(0)
   await expect(root.textContent ?? '').not.toMatch(/unknown/i)
 }
 type Rect = Pick<DOMRect, 'top' | 'left' | 'bottom' | 'right'>
@@ -124,7 +125,7 @@ const stripLayout = (rects: readonly Rect[]) => {
 const stacked = (form: HTMLElement) => form.getBoundingClientRect().width < geometryNumbers.questionStack
 /** Forces the lane to just below or exactly at the stacking threshold, then restores it. */
 const withLaneWidth = async (root: HTMLElement, narrow: boolean, check: (form: HTMLElement) => Promise<void>) => {
-  const lane = laneIn(root)
+  const lane = within(root).getByTestId('question-lane')
   const form = formIn(root)
   const before = form.dataset['stacked']
   lane.style.width = `${geometryNumbers.questionStack - (narrow ? 1 : 0)}px`
@@ -149,7 +150,6 @@ const assertPreviewPlacement = async (form: HTMLElement) => {
   await expect(beside).toBe(!stacked(form))
   await expect(below).toBe(stacked(form))
 }
-const previewId = (form: HTMLElement) => form.querySelector('[data-question-preview]')?.getAttribute('data-question-preview')
 const markers = (form: HTMLElement) => [...form.querySelectorAll('[data-question-tab-marker]')].map(marker => marker.getAttribute('data-question-tab-marker'))
 
 const oneQuestion: Story = {
@@ -165,7 +165,7 @@ const oneQuestion: Story = {
     await expect(within(form).getAllByText('Recommended')).toHaveLength(1)
     await expect(radios[0]).toHaveAccessibleName(/Recommended/)
     await waitFor(() => expect(radios[0]).toHaveFocus())
-    await expect(previewId(form)).toBe('embedded')
+    await expect(form.querySelector('[data-question-preview]')).toHaveAttribute('data-question-preview', 'embedded')
     await assertPreviewPlacement(form)
     await withLaneWidth(canvasElement, !stacked(form), assertPreviewPlacement)
 
@@ -180,7 +180,7 @@ const oneQuestion: Story = {
     await userEvent.keyboard('2')
     await waitFor(() => expect(radios[1]).toBeChecked())
     await expect(radios[1]).toHaveFocus()
-    await expect(previewId(form)).toBe('managed')
+    await expect(form.querySelector('[data-question-preview]')).toHaveAttribute('data-question-preview', 'managed')
     await userEvent.keyboard('{ArrowDown}')
     await waitFor(() => expect(radios[2]).toBeChecked())
     await expect(radios[1]).not.toBeChecked()
@@ -258,9 +258,14 @@ const fourTabbed: Story = {
 
     await userEvent.keyboard('{Tab}')
     await waitFor(() => expect(canvas.getByRole('tab', { name: 'Deploy' })).toHaveAttribute('aria-selected', 'true'))
-    await waitFor(() => expect(canvas.getAllByRole('radio')[0]).toHaveFocus())
-    await userEvent.keyboard('2')
-    await waitFor(() => expect(canvas.getAllByRole('radio')[1]).toBeChecked())
+    const deploy = form.querySelector<HTMLElement>('[data-question-panel="deploy"]')!
+    const host = within(deploy).getByRole('textbox', { name: 'Where should the sample deploy?' })
+    await waitFor(() => expect(host).toHaveFocus())
+    await userEvent.keyboard('Edge workers')
+    await expect(host).toHaveValue('Edge workers')
+    // Negative control: a text question's own field holds the answer; typing never opens a second Other field.
+    await expect(within(deploy).getAllByRole('textbox')).toHaveLength(1)
+    await expect(within(deploy).queryAllByRole('radio')).toHaveLength(0)
     await userEvent.keyboard('{Tab}')
     await waitFor(() => expect(canvas.getByRole('tab', { name: 'Review' })).toHaveAttribute('aria-selected', 'true'))
     await userEvent.keyboard('1')
@@ -278,11 +283,13 @@ const fourTabbed: Story = {
     await expect(args.onSubmitted).toHaveBeenCalledWith({
       storage: { selected: ['embedded'] },
       features: { selected: ['sign-in', 'export'] },
-      deploy: { selected: ['static'] },
+      deploy: { selected: [], other: 'Edge workers' },
       review: { selected: ['draft'], note: 'Ship behind a flag' },
     })
     await expect(form.querySelectorAll('[data-question-summary]')).toHaveLength(4)
     await expect(form.querySelector('[data-question-summary="features"]')).toHaveTextContent('Sign in, Export')
+    // A text answer reads as itself, not as an "Other:" choice.
+    await expect(form.querySelector('[data-question-summary="deploy"] dd')).toHaveTextContent(/^Edge workers$/)
     await expect(form.querySelector('[data-question-summary="review"]')).toHaveTextContent('Note: Ship behind a flag')
     await expect(canvas.queryAllByRole('tab')).toHaveLength(0)
     await assertHygiene(canvasElement)
@@ -316,6 +323,17 @@ const multiOtherNote: Story = {
     // Negative control: the typed 3 does not toggle the third option.
     await expect(boxes[2]).not.toBeChecked()
     await expect(boxes[4]).toBeChecked()
+    // Toggling Other off with its digit keeps focus on its row; toggling it back on recalls the typed text.
+    await userEvent.keyboard('{Shift>}{Tab}{/Shift}')
+    await expect(boxes[4]).toHaveFocus()
+    await userEvent.keyboard('5')
+    await waitFor(() => expect(boxes[4]).not.toBeChecked())
+    await expect(boxes[4]).toHaveFocus()
+    await expect(canvas.queryByRole('textbox', { name: /Other answer/ })).toBeNull()
+    await userEvent.keyboard('5')
+    const recalled = await canvas.findByRole('textbox', { name: /Other answer/ })
+    await waitFor(() => expect(recalled).toHaveFocus())
+    await expect(recalled).toHaveValue('Bundle size 3')
     await userEvent.keyboard('{Tab}')
     const note = canvas.getByRole('textbox', { name: 'Note' })
     await expect(note).toHaveFocus()
@@ -343,10 +361,14 @@ const expired: Story = {
     await expect(form.querySelector('[data-question-settled]')).toHaveTextContent('Expired; the agent continued with the automatic answers below.')
     await expect(form.querySelector('[data-question-summary="storage"]')).toHaveTextContent('Embedded database')
     await expect(form.querySelector('[data-question-summary="features"]')).toHaveTextContent('No answer')
-    // Negative control: an expired form has no answering controls and keyboard input cannot submit it.
+    // Negative control: an expired form has no answering controls, and keys pressed inside it cannot submit.
     await expect(canvas.queryAllByRole('radio')).toHaveLength(0)
     await expect(canvas.queryAllByRole('checkbox')).toHaveLength(0)
     await expect(canvas.queryByRole('button', { name: 'Submit' })).toBeNull()
+    const terminal = canvas.getByRole('button', { name: "Open the agent's terminal" })
+    terminal.focus()
+    await expect(form).toContainElement(terminal)
+    await expect(terminal).toHaveFocus()
     await userEvent.keyboard('1{Enter}')
     await expect(args.onSubmitted).not.toHaveBeenCalled()
   },

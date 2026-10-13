@@ -17,9 +17,10 @@ const features: QuestionView = {
   id: 'features', header: 'Features', prompt: 'Which features ship in the first release?', kind: 'multi', allowOther: false, allowNote: false,
   options: [{ id: 'sign-in', label: 'Sign in' }, { id: 'search', label: 'Search' }, { id: 'export', label: 'Export' }, { id: 'sharing', label: 'Sharing' }],
 }
+/** Free text with `allowOther`, as the app projects an ask that has no options. */
 const deploy: QuestionView = {
-  id: 'deploy', header: 'Deploy', prompt: 'Where should the sample deploy?', kind: 'single', allowOther: true, allowNote: false,
-  options: [{ id: 'container', label: 'Container host', description: 'Long-running server process' }, { id: 'static', label: 'Static host', description: 'Prebuilt pages only' }],
+  id: 'deploy', header: 'Deploy', prompt: 'Where should the sample deploy?', kind: 'text', allowOther: true, allowNote: false, placeholder: 'Describe the host',
+  options: [],
 }
 const review: QuestionView = {
   id: 'review', header: 'Review', prompt: 'How should the pull request open?', kind: 'confirm', allowOther: false, allowNote: true,
