@@ -148,6 +148,7 @@ mod limits;
 mod database_size;
 pub use database_size::DatabaseSize;
 mod person_work;
+mod reconcile_work_context;
 pub(crate) mod work_summaries_ivm;
 mod subagents;
 mod watches;
@@ -7952,7 +7953,7 @@ impl Store {
     /// timing and wake annotations. Those annotations scan immutable history and
     /// are intentionally too expensive for the daemon's inner control loop.
     pub fn work_for_reconcile(&self, actor: &str) -> Result<Vec<StepRunView>> {
-        let work = self.work_at_snapshot_internal(Some(actor), true, now_ms(), false)?;
+        let work = reconcile_work_context::read(self, actor, now_ms())?;
         // A step joins a seat's work when a generation creates it or another seat lets it go;
         // after that its changes are written on the step and its run.
         smallclaims::touched::note_read(|| format!("actor:{actor}"));
@@ -33169,6 +33170,17 @@ fn apply_effective_step_state(
             },
         )
         .optional()?;
+    apply_effective_step_state_with_owner(connection, view, snapshot_unix_ms, owner)
+}
+
+type EffectiveStepOwner = (String, String, String, String, String, String);
+
+fn apply_effective_step_state_with_owner(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    owner: Option<EffectiveStepOwner>,
+) -> rusqlite::Result<()> {
     let Some((
         run_status,
         run_phase,
