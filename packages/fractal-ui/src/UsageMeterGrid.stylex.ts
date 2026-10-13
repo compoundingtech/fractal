@@ -1,13 +1,13 @@
 import * as stylex from '@stylexjs/stylex'
-import { borderVars as border, surfaceVars as surface } from './assistant-ui/composition-tokens.stylex.ts'
+import { borderVars as border, spaceVars as space, surfaceVars as surface } from './assistant-ui/composition-tokens.stylex.ts'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
 
-/** Shared meter table geometry: 18px content + 2px padding on each side. */
+/** Shared meter table geometry: 18px content + 2px block padding; adjacent cells sit 8px apart. */
 export const usageMeterGridVars = stylex.defineVars({
   rowHeight: '22px',
   lineHeight: '18px',
   cellPaddingBlock: '2px',
-  cellPaddingInline: '3px',
+  cellPaddingInline: space.xs,
 })
 
 export const usageMeterGrid = stylex.create({

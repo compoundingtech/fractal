@@ -92,6 +92,7 @@ pub(super) mod search;
 pub(super) mod arrangements;
 pub(super) mod conversation_blocks;
 mod collection_windows;
+mod inventory;
 mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
@@ -137,6 +138,14 @@ struct CollectionSubscribe {
     subject: Option<String>,
     actor: Option<String>,
     status: Option<String>,
+    /// Usage period boundaries; an omitted end follows new usage through the current time.
+    since_ms: Option<u64>,
+    until_ms: Option<u64>,
+    /// Complete process coverage captured by an inventory read, before window truncation.
+    #[serde(skip)]
+    native_processes: Option<Arc<Mutex<Vec<u32>>>>,
+    #[serde(skip)]
+    inventory_deadline: Option<Arc<Mutex<Option<u128>>>>,
     /// A terminal subscription names the terminal, the incarnation `terminal.attach` fenced,
     /// and the single-use stream capability that attach returned.
     terminal: Option<String>,
@@ -244,6 +253,14 @@ fn collection_ignores(collection: &str, kind: &str) -> bool {
     // including otherwise graph-only glasses and arrangements.
     if matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked") {
         return false;
+    }
+    match collection {
+        "machines" if kind == "transport.observed" => return false,
+        "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
+        "clients" | "devices" => return !kind.starts_with("custom.client.pairing-"),
+        // Terminal declarations and imported session ownership
+        // use the same graph inputs as the existing windows. Keep their conservative coverage.
+        _ => {},
     }
     if collection == "glasses" { return !kind.starts_with("glass."); }
     if collection == "arrangements" {
@@ -382,9 +399,11 @@ async fn collection_items_with_windows(
     if !matches!(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary"
+            | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
     }
+    inventory::validate(request)?;
     if request.collection == "summary"
         && (request.actor.is_some() || request.status.is_some() || request.subject.is_some())
     {
@@ -451,11 +470,14 @@ async fn collection_items_with_windows(
             }
         }
         Some(person)
-    } else if matches!(request.collection.as_str(), "attention" | "summary") {
+    } else if matches!(request.collection.as_str(), "attention" | "summary" | "devices") {
         person_filter(session, request.person.as_deref())?
     } else {
         None
     };
+    if request.collection == "devices" && person.as_deref().is_none_or(|person| !person.starts_with("person/")) {
+        return Err(forbidden("device inventory requires an explicitly authenticated person"));
+    }
     let prepared = windows.as_ref().and_then(|windows| windows.prepare(state, current, request));
     let state = state.clone();
     let session = session.clone();
@@ -522,7 +544,7 @@ async fn collection_items_with_windows(
                             request.person.as_deref(),
                             false,
                         )?),
-                        "attention" | "summary" => person_filter(&current, request.person.as_deref())?,
+                        "attention" | "summary" | "devices" => person_filter(&current, request.person.as_deref())?,
                         _ => person.clone(),
                     };
                     Ok::<_, ApiError>((current, person))
@@ -592,6 +614,9 @@ async fn collection_items_with_windows(
                         "summary" => {
                             return Ok((summary::native(&state, &current, &request, &snapshot,
                                 now, windows.as_deref(), commits)?, false));
+                        }
+                        "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals" => {
+                            return inventory::items(&state, &current, &request, &snapshot);
                         }
                         "missions" => {
                             let mut ids =
@@ -749,6 +774,12 @@ fn collection_window_label(collection: &str) -> &'static str {
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
         "summary" => "stream collection/summary",
+        "clients" => "stream collection/clients",
+        "usage" => "stream collection/usage",
+        "machines" => "stream collection/machines",
+        "devices" => "stream collection/devices",
+        "sessions" => "stream collection/sessions",
+        "terminals" => "stream collection/terminals",
         _ => "stream collection/invalid",
     }
 }
@@ -820,6 +851,13 @@ async fn deliver_collection(
     };
     if request.collection == "summary" {
         summary::retain_timestamp(&mut items, &subscription.previous);
+    }
+    if request.collection == "usage" {
+        for row in &mut items {
+            if let Some(previous) = row["id"].as_str().and_then(|id| subscription.previous.get(id))
+                && row["revision"] == previous["revision"]
+            { row["updated_at"] = previous["updated_at"].clone(); }
+        }
     }
     let order = items
         .iter()
@@ -1496,8 +1534,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     let mut changed = state.event_notify.subscribe();
     let mut roster = state.store.subscribe_agent_roster();
     let mut views = state.store.subscribe_collection_views();
+    let mut presence_changes = super::client_presence::subscribe();
+    let mut native_watch: Option<inventory::NativeWatch> = None;
+    let mut native_watch_pending: Option<tokio::task::JoinHandle<Result<inventory::NativeWatch, ApiError>>> = None;
     let windows = collection_windows::Windows::attach(&state.store);
-    let mut window_revisions = [0; 8];
+    let mut window_revisions = [0; collection_windows::COLLECTIONS.len()];
     let mut subscriptions = BTreeMap::<String, CollectionSubscription>::new();
     let mut terminals = BTreeMap::<String, watch::Receiver<TerminalFrame>>::new();
     // When each terminal subscription began, until its first screen is sent.
@@ -1532,9 +1573,17 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     loop {
         // The subscriptions to read after this wake-up.
         let mut refresh = Vec::<String>::new();
+        if !subscriptions.values().any(|s| s.request.collection == "sessions") { native_watch = None; }
+        if native_watch_pending.is_some() {
+            reread_due.retain(|id| subscriptions.get(id).is_some_and(|s| s.request.collection != "sessions"));
+        }
         // A command already waiting goes first: under steady commits a commit wake is almost
         // always ready too, and a fair pick could keep rereading the held windows while a new
         // subscription waits. Otherwise every source gets a fair pick.
+        let now = client_now_ms();
+        let expirations = subscriptions.iter().filter(|(id, s)| s.delivered && s.reading.is_none() && !reread_due.contains(*id))
+            .filter_map(|(id, s)| inventory::next_expiry(s).map(|at| (id.clone(), at))).collect::<Vec<_>>();
+        let expiry = expirations.iter().map(|(_, at)| *at).min();
         let waiting = futures_util::FutureExt::now_or_never(socket.recv());
         let command_waiting = waiting.is_some();
         tokio::select! {
@@ -1552,7 +1601,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             { return; }
                             break 'command;
                         };
-                        let Ok(request) = serde_json::from_str::<CollectionSubscribe>(&payload) else {
+                        let Ok(mut request) = serde_json::from_str::<CollectionSubscribe>(&payload) else {
                             if !send_collection(&mut socket, json!({"kind":"error", "message":"invalid collection command"})).await { return; }
                             break 'command;
                         };
@@ -1570,6 +1619,23 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         if request.kind != "subscribe" || request.id.is_empty() || request.id.len() > 128 || subscriptions.len() + terminals.len() + conversations.0.len() >= COLLECTION_MAX_SUBSCRIPTIONS && !held {
                             if !send_collection(&mut socket, json!({"kind":"error", "id":request.id, "message":"invalid subscription or subscription limit exceeded"})).await { return; }
                             break 'command;
+                        }
+                        if inventory::is_inventory(&request.collection) {
+                            request.inventory_deadline = Some(Arc::new(Mutex::new(None)));
+                        }
+                        if request.collection == "sessions" && native_watch.is_none() && native_watch_pending.is_none()
+                            && let Some(home) = &state.native_session_home
+                        {
+                            let home = home.clone();
+                            // Installing recursive source watches may touch cold directories. It
+                            // runs independently, before the first session snapshot, while all
+                            // other subscription commands and frames continue to be served.
+                            native_watch_pending = Some(tokio::spawn(async move {
+                                blocking_store(move || inventory::NativeWatch::open(&home)).await
+                            }));
+                        }
+                        if request.collection == "sessions" && let Some(watch) = &native_watch {
+                            request.native_processes = Some(watch.processes_in_read.clone());
                         }
                         // What this client follows, for clients.list.
                         if let Some(presence) = &presence {
@@ -1648,6 +1714,22 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 if subscription.generation != generation { continue; }
                 subscription.reading = None;
                 if std::mem::take(&mut subscription.dirty) { refresh.push(id.clone()); }
+                if subscription.request.collection == "sessions"
+                    && let CollectionRead::Legacy(Ok(_)) = &result
+                    && let Some(watch) = &mut native_watch
+                {
+                    match watch.observe_processes() {
+                        Ok(true) => { reread_due.insert(id.clone()); }
+                        Ok(false) => {},
+                        Err(error) => {
+                            if !send_collection(&mut socket, json!({"kind":"error", "id":id, "retryable":false, "code":"internal", "message":error.to_string()})).await { return; }
+                            subscriptions.remove(&id);
+                            reread_due.remove(&id);
+                            first_frames.remove(&id);
+                            continue;
+                        }
+                    }
+                }
                 let first_span = first_frames.get(&id).map(|first| first.span.clone());
                 let refreshed = first_frame_work(first_span, async {
                     match result {
@@ -1747,6 +1829,59 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 }
                 refresh.extend(reread_due.iter().cloned());
             }
+            () = async {
+                let at = expiry.expect("held inventory expiry");
+                tokio::time::sleep(Duration::from_millis(at.saturating_sub(now).min(u64::MAX as u128) as u64)).await;
+            }, if !command_waiting && expiry.is_some() => {
+                let now = client_now_ms();
+                reread_due.extend(expirations.iter().filter(|(_, at)| *at <= now).map(|(id, _)| id.clone()));
+                if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
+                refresh.extend(reread_due.iter().cloned());
+            }
+            result = async { native_watch_pending.as_mut().expect("pending native watcher").await }, if !command_waiting && native_watch_pending.is_some() => {
+                native_watch_pending = None;
+                match result.unwrap_or_else(|error| Err(ApiError::internal(error))) {
+                    Ok(watch) => {
+                        for (id, subscription) in subscriptions.iter_mut().filter(|(_, s)| s.request.collection == "sessions") {
+                            subscription.request.native_processes = Some(watch.processes_in_read.clone());
+                            refresh.push(id.clone());
+                        }
+                        native_watch = Some(watch);
+                    }
+                    Err(error) => {
+                        let refused = subscriptions.iter().filter(|(_, s)| s.request.collection == "sessions").map(|(id, _)| id.clone()).collect::<Vec<_>>();
+                        for id in refused {
+                            if !send_collection(&mut socket, json!({"kind":"error", "id":id, "code":error.code, "message":error.message, "retryable":false})).await { return; }
+                            subscriptions.remove(&id);
+                            reread_due.remove(&id);
+                            first_frames.remove(&id);
+                        }
+                    }
+                }
+            }
+            result = async { native_watch.as_mut().expect("held watcher").changed().await }, if !command_waiting && native_watch.is_some() => {
+                if let Err(error) = result {
+                    let refused = subscriptions.iter().filter(|(_, s)| s.request.collection == "sessions").map(|(id, _)| id.clone()).collect::<Vec<_>>();
+                    for id in refused {
+                        if !send_collection(&mut socket, json!({"kind":"error", "id":id, "retryable":false, "code":"internal", "message":error.to_string()})).await { return; }
+                        subscriptions.remove(&id);
+                        reread_due.remove(&id);
+                        first_frames.remove(&id);
+                    }
+                    native_watch = None;
+                    continue;
+                }
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "sessions").map(|(id, _)| id.clone()));
+                if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
+                refresh.extend(reread_due.iter().cloned());
+            }
+            result = presence_changes.recv(), if !command_waiting => {
+                if result.as_ref().is_ok_and(|member| member != &state.node) { continue; }
+                if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "clients").map(|(id, _)| id.clone()));
+                if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
+                refresh.extend(reread_due.iter().cloned());
+            }
             result = roster.changed(), if !command_waiting => {
                 if result.is_err() { return; }
                 // A window read before this roster was published rereads it.
@@ -1775,7 +1910,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // overlays are rechecked on reads.
                 let paired = session.transport != "unix";
                 refresh.extend(subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
-                    && (paired || collection_follows_clock(&s.request.collection)))
+                    && (paired && !inventory::is_inventory(&s.request.collection) || collection_follows_clock(&s.request.collection)))
                     .map(|(id, _)| id.clone()));
             }
             _ = ping_clock.tick() => {
@@ -1820,7 +1955,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
         refresh.sort_unstable();
         refresh.dedup();
         // A permanently refused dirty window no longer counts toward held-window refreshes.
-        refresh.retain(|id| subscriptions.contains_key(id));
+        refresh.retain(|id| subscriptions.get(id).is_some_and(|s|
+            s.request.collection != "sessions" || native_watch_pending.is_none()));
         if refresh.is_empty() {
             continue;
         }
@@ -2045,35 +2181,8 @@ pub(super) async fn usage_period(
             "usage start must be before its end",
         )));
     }
-    let store = state.store.clone();
-    let (mut rows, agent_messages, limits) = blocking_store(move || {
-        let (rows, agent_messages) = store.usage_period_report(since_ms, until_ms)?;
-        Ok((
-            rows,
-            agent_messages,
-            store.account_limits()?,
-        ))
-    })
-    .await?;
-    for row in &mut rows {
-        if let Some(fields) = row.as_object_mut() {
-            fields.retain(|_, value| value.as_str() != Some(""));
-        }
-    }
-    // The shared account limits selection; what a harness did not report is left out.
-    let limits = limits
-        .into_iter()
-        .map(|limit| {
-            let mut value = serde_json::to_value(limit).unwrap_or_default();
-            if let Some(fields) = value.as_object_mut() {
-                fields.retain(|_, value| !value.is_null());
-            }
-            value
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(
-        json!({ "since_ms": since_ms, "until_ms": until_ms, "rows": rows, "limits": limits, "agent_messages": agent_messages }),
-    ))
+    let value = blocking_store(move || inventory::usage_value(&state.store, since_ms, until_ms)).await?;
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
@@ -2350,6 +2459,7 @@ pub(super) struct ClientSession {
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
     pub(super) pairing_grant: Option<String>,
+    grant_expires_at: Option<u128>,
     pub(super) transport: &'static str,
     pub(super) custom_forms: bool,
     pub(super) conversation_blocks: bool,
@@ -2363,6 +2473,7 @@ impl ClientSession {
             actor: actor.into(),
             authority_actor: authority_actor.into(),
             pairing_grant: None,
+            grant_expires_at: None,
             transport,
             custom_forms: true,
             conversation_blocks: false,
@@ -2370,7 +2481,19 @@ impl ClientSession {
         }
     }
 
-    fn local(person: Option<&str>) -> Result<Self, ApiError> {
+    #[cfg(test)]
+    pub(super) fn for_tests_scoped(
+        actor: &str,
+        authority_actor: &str,
+        scopes: &[&str],
+    ) -> Self {
+        Self {
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            ..Self::for_tests(actor, authority_actor, "unix")
+        }
+    }
+
+    pub(super) fn local(person: Option<&str>) -> Result<Self, ApiError> {
         let custom_forms = false;
         if person.is_some_and(|person| {
             !(person.starts_with("person/") && person.matches('/').count() == 1
@@ -2385,6 +2508,7 @@ impl ClientSession {
                 actor: "client/local/read-only".into(),
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
+            grant_expires_at: None,
                 transport: "unix",
                 custom_forms,
                 conversation_blocks: false,
@@ -2400,6 +2524,7 @@ impl ClientSession {
             actor: person.into(),
             authority_actor: person.into(),
             pairing_grant: None,
+            grant_expires_at: None,
             transport: "unix",
             custom_forms,
             conversation_blocks: false,
@@ -2412,6 +2537,7 @@ impl ClientSession {
             actor: "client/pairing/completion".into(),
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
+            grant_expires_at: None,
             transport: "fabric-loopback",
             custom_forms: false,
             conversation_blocks: false,
@@ -2457,6 +2583,7 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     // Attention rows say whether each is an alert and name its agent conversation; `alerts` names
     // the attention collection and routes, and the summary counts alerts.
     capabilities.push(json!({"id":"alerts", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"custom-subjects", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"owned-sets", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -2631,6 +2758,7 @@ fn paired_client_session(
         actor: actor.into(),
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
+        grant_expires_at: Some(expires_at),
         transport,
         custom_forms,
         conversation_blocks: false,
@@ -4843,7 +4971,9 @@ fn device_resources(
             _ => {}
         }
     }
-    let at = client_snapshot_time(snapshot);
+    // Pairing and revocation are fenced by the graph snapshot above. Expiration is
+    // live state: its clock must advance even when no claim advances that snapshot.
+    let at = client_now_ms();
     let mut resources = paired
         .into_iter()
         .map(|(device_id, (completed, revoked))| {
@@ -4892,6 +5022,15 @@ pub(super) async fn clients_list(
     Extension(session): Extension<ClientSession>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
+    let items = client_connection_items(&state, &snapshot)?;
+    Ok(Json(json!({
+        "kind": "client-connections",
+        "member": super::client_host_id(&state.node),
+        "items": items,
+    })))
+}
+
+fn client_connection_items(state: &AppState, snapshot: &ClientSnapshot) -> Result<Vec<Value>, ApiError> {
     let mut items = super::client_presence::list(&state.node, super::client_now_ms());
     // A paired phone acts as person/NAME/session/ID: name its device.
     let people = items
@@ -4902,7 +5041,7 @@ pub(super) async fn clients_list(
         .collect::<BTreeSet<_>>();
     let mut devices = BTreeMap::<String, (Value, Value)>::new();
     for person in people {
-        for device in device_resources(&state, &snapshot, &person)? {
+        for device in device_resources(state, snapshot, &person)? {
             if let Some(actor) = device["session_actor"].as_str() {
                 devices.insert(actor.to_owned(), (device["id"].clone(), device["name"].clone()));
             }
@@ -4914,11 +5053,7 @@ pub(super) async fn clients_list(
             item["device_name"] = name.clone();
         }
     }
-    Ok(Json(json!({
-        "kind": "client-connections",
-        "member": super::client_host_id(&state.node),
-        "items": items,
-    })))
+    Ok(items)
 }
 
 pub(super) async fn devices(
@@ -5159,13 +5294,12 @@ fn session_message_body(state: &AppState, claim: &ClaimRecord) -> Value {
     {
         body["tags"] = Value::Array(tags.clone());
     }
-    let attachments: Vec<crate::model::MessageAttachment> = fields
-        .get("attachments")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default();
+    let attachments = crate::message_body::split_attachments(fields.get("attachments")).0;
     if !attachments.is_empty() {
         body["attachments"] = attachments.iter().map(super::client_attachment).collect();
+    }
+    if let Some(long) = crate::message_body::split_attachments(fields.get("attachments")).1 {
+        body["body_bytes"] = long.size.into();
     }
     body
 }
@@ -6417,6 +6551,10 @@ fn timeline_first_page(
             continue;
         }
         if claim.subject == owner && claim.kind == "harness.diagnostic" {
+            // Protocol initialization is informational component evidence, not an error.
+            if fields.get("code").and_then(Value::as_str) == Some("claude-channel-initialized") {
+                continue;
+            }
             if !applies_to_incarnation(fields) {
                 continue;
             }
@@ -15988,6 +16126,72 @@ subscription "watch/source" {
     }
 
     #[tokio::test]
+    async fn a_long_message_sent_by_a_client_action_leaves_no_copy_in_the_operation_records() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let snapshot = new_client_snapshot(&state);
+        let body = "A pasted page of notes. ".repeat(256 * 1024 / 24);
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/long-send".into(),
+            action_type: "message.send".into(),
+            idempotency_key: "long-send-idempotency-key".into(),
+            fence: Fence {
+                snapshot_id: snapshot.id.clone(),
+                ..Default::default()
+            },
+            parameters: json!({"to":"agent/worker","content":body}),
+        };
+        let sent = action(
+            State(state.clone()),
+            Extension(snapshot.clone()),
+            Extension(session.clone()),
+            Json(request.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        let subject = sent["affected_ids"][0].as_str().unwrap().to_owned();
+        let message = state.store.message(&subject).unwrap().unwrap();
+        assert_eq!(message.body_bytes, Some(body.len() as u64));
+        assert!(message.content.len() < 1100);
+        // The operation and idempotency tables keep digests and answers, never the text.
+        let (idempotency, operations): (u64, u64) = state
+            .store
+            .readers
+            .get()
+            .query_row(
+                "SELECT (SELECT COALESCE(MAX(length(response)),0) FROM idempotency),
+                        (SELECT COALESCE(MAX(length(request_digest)),0) FROM operations)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(idempotency < 4096 && operations < 4096, "{idempotency} {operations}");
+        // A retry of the same send sends nothing more.
+        let again = action(
+            State(state.clone()),
+            Extension(new_client_snapshot(&state)),
+            Extension(session),
+            Json(request),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(again["affected_ids"], sent["affected_ids"]);
+        assert_eq!(
+            state
+                .store
+                .claims_for_kind_at("message.sent", None, true, 100)
+                .unwrap()
+                .claims
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn steady_actions_survive_churn_and_replay_with_fresh_fences_without_duplicates() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -19844,6 +20048,15 @@ mission "example/zero-run" state="ready" {
             "timeline-diagnostic",
         );
         append(
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("code".into(), json!("claude-channel-initialized")),
+                ("reason".into(), json!("informational initialization")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            "timeline-initialization",
+        );
+        append(
             "harness.usage",
             BTreeMap::from([
                 (
@@ -19940,6 +20153,8 @@ mission "example/zero-run" state="ready" {
                 .content,
             "do the work"
         );
+        assert!(!entries.iter().any(|entry| entry["body"]["code"] == "claude-channel-initialized"));
+        assert!(entries.iter().any(|entry| entry["body"]["code"] == "provider-warning"));
         let types = entries
             .iter()
             .filter_map(|entry| entry["type"].as_str())
@@ -21371,6 +21586,7 @@ mission "example/zero-run" state="ready" {
             actor: "person/alex/session/device-one".into(),
             authority_actor: "person/alex".into(),
             pairing_grant: None,
+            grant_expires_at: None,
             transport: "paired",
             custom_forms: false,
             conversation_blocks: false,

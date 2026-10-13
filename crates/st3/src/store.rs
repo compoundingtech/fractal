@@ -13,7 +13,6 @@ mod schedule_active_run_tests;
 mod glasses;
 pub(crate) mod mailbox_wakes;
 mod mailbox_changes;
-pub(crate) mod reconcile_changes;
 mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
@@ -1571,6 +1570,10 @@ fn subject_status_at_with_mode(
         }, None)));
     }
     let desired = desired_row_at(connection, subject, at_index)?;
+    #[cfg(test)]
+    if let Some(after_read) = STATUS_AFTER_DESIRED_READ.with(|slot| slot.borrow_mut().take()) {
+        after_read();
+    }
     let member = desired
         .as_ref()
         .and_then(|row| row.member.as_deref())
@@ -9689,7 +9692,15 @@ impl Store {
                 old_revision: current.as_ref().map(|row| row.revision.clone()),
                 new_revision: revision,
             });
-            if desired.kind == "stop" {
+            if let Some(action) = crate::suspension::publication_action(self, desired, false, || {
+                Ok(current.as_ref().and_then(|row| row.member.as_deref())
+                    .map(serde_json::from_str::<crate::model::MemberSpec>)
+                    .transpose()?)
+            })
+                .map_err(internal)?
+            {
+                actions.push(action);
+            } else if desired.kind == "stop" {
                 actions.push(PlannedAction {
                     subject: subject.clone(),
                     action: "stop".into(),
@@ -12279,6 +12290,27 @@ impl Store {
         include_history: bool,
         selected_names: Option<BTreeSet<String>>,
     ) -> Result<StatusResponse> {
+        // A request reader loan alone can see a commit between statements. Keep the
+        // selected declaration, runtime observation and conflict leaves in one snapshot.
+        self.read_snapshot(|_| {
+            self.status_at_view_for_names_in_snapshot(
+                selected,
+                selected_owner_run,
+                at_index,
+                include_history,
+                selected_names,
+            )
+        })
+    }
+
+    fn status_at_view_for_names_in_snapshot(
+        &self,
+        selected: Option<&str>,
+        selected_owner_run: Option<&str>,
+        at_index: Option<u64>,
+        include_history: bool,
+        selected_names: Option<BTreeSet<String>>,
+    ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let current = current_index(&connection)?;
         let store_index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
@@ -14805,16 +14837,24 @@ impl Store {
     }
 
     /// The selected desired revision of `subject`, then each predecessor that differs from it
-    /// only in presentation. The last entry is the revision that still defines the launch, so
-    /// launch records, restart budgets, and crash-loop parking follow a rename.
+    /// only in presentation. Launch records, restart budgets and crash-loop parking follow
+    /// labels; environment edits still get a fresh launch token and restart budget.
     pub fn launch_lineage(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
         launch_lineage_tx(&connection, subject)
     }
 
-    /// Presentation-only lineage of a recorded launch, even when it is no longer desired.
-    pub(crate) fn launch_lineage_from(&self, token: &str) -> Result<Vec<String>> {
-        launch_lineage_from_tx(&self.readers.get(), token.to_owned())
+    /// Suspension follows all non-launch edits, independently of process retry budgets.
+    pub(crate) fn suspension_lineage(&self, subject: &str) -> Result<Vec<String>> {
+        let connection = self.readers.get();
+        let Some(row) = current_desired_row(&connection, subject)? else {
+            return Ok(Vec::new());
+        };
+        desired_lineage_from_tx(&connection, row.claim_id, same_declared_launch)
+    }
+
+    pub(crate) fn suspension_lineage_from(&self, token: &str) -> Result<Vec<String>> {
+        desired_lineage_from_tx(&self.readers.get(), token.to_owned(), same_declared_launch)
     }
 
     /// Only seats whose durable resume requests name this host need transfer reconciliation.
@@ -21452,7 +21492,15 @@ fn launch_lineage_tx(connection: &Connection, subject: &str) -> Result<Vec<Strin
     launch_lineage_from_tx(connection, row.claim_id)
 }
 
-fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Result<Vec<String>> {
+fn launch_lineage_from_tx(connection: &Connection, current: String) -> Result<Vec<String>> {
+    desired_lineage_from_tx(connection, current, presentation_only_change)
+}
+
+fn desired_lineage_from_tx(
+    connection: &Connection,
+    mut current: String,
+    equivalent: fn(&Value, &Value) -> bool,
+) -> Result<Vec<String>> {
     let mut lineage = vec![current.clone()];
     while let Some(claim) = claim_by_id_tx(connection, &current)? {
         // A claim that merges concurrent revisions has one predecessor per fork; follow the
@@ -21465,7 +21513,7 @@ fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Resul
             if let Some(previous) = claim_by_id_tx(connection, predecessor)?
                 && previous.kind == "intent.desired"
                 && previous.subject == claim.subject
-                && presentation_only_change(&previous.body, &claim.body)
+                && equivalent(&previous.body, &claim.body)
             {
                 next = Some(previous.id);
                 break;
@@ -21480,7 +21528,7 @@ fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Resul
     Ok(lineage)
 }
 
-/// Two agent declarations that differ only in their human label share one launch.
+/// Preserve the existing launch-token boundary for restart budgets and crash-loop recovery.
 fn presentation_only_change(previous: &Value, next: &Value) -> bool {
     let parse = |body: &Value| {
         let mut desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
@@ -21489,6 +21537,18 @@ fn presentation_only_change(previous: &Value, next: &Value) -> bool {
         Some(desired)
     };
     matches!((parse(previous), parse(next)), (Some(previous), Some(next)) if previous == next)
+}
+
+/// Keep suspension under exactly the launch comparator used by preview and reconcile.
+/// Desired kind and subject are fences, even when their member launch happens to match.
+fn same_declared_launch(previous: &Value, next: &Value) -> bool {
+    let parse = |body: &Value| {
+        let desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
+        (desired.kind == "agent").then_some(())?;
+        Some((desired.subject, desired.member?))
+    };
+    matches!((parse(previous), parse(next)), (Some((previous_subject, previous)), Some((next_subject, next)))
+        if previous_subject == next_subject && next.launch_changes(&previous).is_empty())
 }
 
 /// The version of the rules that derive `operations` from claims. Every write and projection
@@ -22472,6 +22532,9 @@ fn message_view_tx(
             .unwrap_or_else(|| "requester".into()),
     );
     let to = normalize_message_party(&field("to").or_else(|| child("to")).unwrap_or_default());
+    // A replicated claim is another member's word: keep only references a file name can be
+    // built from, so a hostile hash never reaches a path or a URL.
+    let (attachments, body) = crate::message_body::split_attachments(actual.get("attachments"));
     Ok(MessageView {
         subject: subject.into(),
         from,
@@ -22505,23 +22568,10 @@ fn message_view_tx(
                     })
                     .unwrap_or_default()
             }),
-        // A replicated claim is another member's word: keep only references a file name can be
-        // built from, so a hostile hash never reaches a path or a URL.
-        attachments: actual
-            .get("attachments")
-            .cloned()
-            .and_then(|value| {
-                serde_json::from_value::<Vec<crate::model::MessageAttachment>>(value).ok()
-            })
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|attachment| {
-                crate::blobs::is_sha256(&attachment.sha256)
-                    && attachment.origin.starts_with("host/")
-                    && crate::blobs::MEDIA_TYPES.contains(&attachment.media_type.as_str())
-            })
-            .take(crate::blobs::MAX_ATTACHMENTS)
-            .collect(),
+        attachments,
+        body_ref: body.as_ref().map(|body| crate::message_body::reference(&body.sha256)),
+        body_bytes: body.as_ref().map(|body| body.size),
+        body_origin: body.map(|body| body.origin),
         created_index,
     })
 }
@@ -27536,6 +27586,7 @@ mission "garden" state="ready" {
 #[cfg(test)]
 thread_local! {
     pub(crate) static SUBJECT_REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STATUS_AFTER_DESIRED_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Steps whose queue, timing and wake a read enriched, so a test can see a read's work.
     pub(crate) static STEPS_ENRICHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -34340,6 +34391,11 @@ mod tests {
 
     const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
+    mod stopped_seat_declaration_controls {
+        use super::*;
+        include!("store/stopped_seat_declaration_controls.rs");
+    }
+
     #[test]
     fn an_agent_card_build_does_not_hold_other_read_snapshots_at_the_cache_lock() {
         let directory = tempfile::tempdir().unwrap();
@@ -34754,6 +34810,49 @@ agent "test/worker" { workspace "."; command "true"; name "Initial" }
         let cleared = store.desired_subject_with_writer("agent/test/worker").unwrap().unwrap().0;
         assert_eq!(crate::model::effective_agent_name("agent/test/worker", Some(&cleared.desired)), "test/worker");
         assert_eq!(cleared.member.unwrap().display_name, None);
+    }
+
+    #[test]
+    fn declared_launch_lineage_fences_subject_kind_and_launch_changes() {
+        let original = parse_intent(
+            r#"version 2
+    agent "garden/orchard" { command "true" }
+    "#,
+            "amber",
+        )
+        .unwrap()
+        .subjects
+        .remove("agent/garden/orchard")
+        .unwrap();
+        let previous = serde_json::to_value(&original).unwrap();
+        for edit in [r#"env { COLOR "blue"; }"#, r#"name "New label";"#] {
+            let next = parse_intent(
+                &format!("version 2\nagent \"garden/orchard\" {{ command \"true\"; {edit} }}"),
+                "amber",
+            )
+            .unwrap();
+            assert!(same_declared_launch(
+                &previous,
+                &serde_json::to_value(&next.subjects["agent/garden/orchard"]).unwrap()
+            ));
+        }
+        for field in ["subject", "kind", "launch"] {
+            let mut next = original.clone();
+            match field {
+                "subject" => next.subject = "agent/garden/meadow".into(),
+                "kind" => next.kind = "stop".into(),
+                "launch" => {
+                    next.member.as_mut().unwrap().launch =
+                        crate::model::LaunchSpec::Shell("false".into())
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                !same_declared_launch(&previous, &serde_json::to_value(&next).unwrap()),
+                "{field}"
+            );
+        }
+        assert!(!same_declared_launch(&previous, &json!({"kind":"agent"})));
     }
 
     #[test]

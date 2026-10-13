@@ -91,6 +91,9 @@ The host also states what it knows about the conversation itself. `availability`
 Both `Transcript` and `EmbraceThread` accept `onRetrySend?: (itemId: string) => void`. Failed-send Retry appears only when this callback is supplied; the host owns the transition to Pending and Sent. Keep the same item id throughout Failed→Pending→Sent to retain the row and its DOM identity. The dark/light `FailedRetry` stories exercise the callback and both transitions.
 `TranscriptTurn.prompt?: TextItem & { readonly role: 'user' }` is optional: truncated history or standing-seat output can begin mid-turn. An omitted prompt renders no prompt bubble; the host does not need to invent a message. `MidTurnHistory` covers a first promptless turn below the `HasOlder` boundary.
 Omit `onOpenTool?: (call: WorkLogCall) => void` for a read-only transcript: tool rows have no host navigation action; the raw disclosure still reveals recorded details in full. A turn with neither tool calls nor reasoning has no work summary. Initial loading shows **Loading conversation…**; synchronization copy uses user-facing loading and update wording rather than transport phase names.
+`WorkLogCall.rawInput?: string` carries the verbatim tool input; `workLogTurnFromItems` fills it with pretty-printed JSON, or the string itself when the input is a string, and omits it for empty input. Expanding a tool row shows intent, status and a compact error reason; the second **Show raw input/output** disclosure reveals exact raw input (`data-testid="tool-raw-input"`), never the row label or failure overlay. Raw input alone makes a row expandable, so a running call, a failed call without output, and a silent success can still show their input without an empty-output placeholder.
+The raw disclosure retains the readable command beside exact input: a subprocess diagnostic can reveal its unescaped command/script without replacing the observed input. Input-only calls never invent output or an empty-output placeholder.
+Tool headers omit absent-output placeholders. `LongCommandRow` checks each row against the rendered `geometryVars.toolRow` token, rejects both wrapping and equally oversized-row controls, then restores and rechecks. Silent-row plays reject a reinjected **No output** placeholder before restoring the production row.
 Failed sends carry `reason: { _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }`. Unknown host causes map to `Failed`, shown as **Couldn't send**. Reason tags stay in a data attribute; optional diagnostic `detail` stays behind the disclosure. Retry requires a callback and a `Failed`, `StaleFence`, or `SnapshotUnavailable` reason; rejection, permission and invalid-message failures never expose Retry.
 Agent-authored Markdown never loads images automatically. Each image defaults to an alt-text/host placeholder with a per-image **Load image** action; links use `target="_blank"` and `rel="noopener noreferrer"` without prefetch, and raw HTML is skipped. `Markdown`, `Transcript`, and `EmbraceThread` accept `resolveImage?: (src: string) => { _tag: 'Load'; src: string } | { _tag: 'Defer' }`. A host can explicitly allow its attachment URLs; no URL shape or origin is implicitly trusted. Loaded images suppress referrers, and `srcset`, raw HTML/CSS URLs and content-driven previews are not rendered. `Content network safety` stories exercise both transcript boundaries under request interception.
 Hosts whose CSP blocks remote images inline (for example `img-src 'self' data: blob:`) pass `onLoadImage?: (src: string) => void` alongside `resolveImage` on `Markdown`, `Transcript`, `EmbraceThread` and `EmbraceMarkdownPreview`. The placeholder action then reads **Open image · host** and calls the host with the source instead of loading it inline; the host opens it in a new tab with `noopener,noreferrer`. Nothing is fetched before the click, and with `onLoadImage` set nothing is fetched after it either (`*HostOpens*` stories). Without it, the inline load after consent is unchanged.
@@ -185,25 +188,92 @@ the caller's preferred unit. Mixed-unit subtotals remain separate.
 
 Drawer accounts use one 22px native table row: 18px inline content and 2px
 vertical padding. `src/UsageMeterGrid.stylex.ts` supplies schema-agnostic grid
-geometry shared with other meter tables; inset separators do not add row height.
-Name and provider share a truncated, titled line, percentages keep their micro
-bars inline, and amount/reset cells align to sticky headers. Variant meters stay
-inside the same row rather than growing the account into a card.
+geometry shared with other meter tables; adjacent cells sit 8px apart and inset
+separators do not add row height. Account text aligns left; reset, amount and
++N align right with tabular numerals, and usage readings share one right-aligned
+slot so their bars start on the same track. A supplied window column that holds
+only governing windows (already shown under Usage) is not rendered.
+Account identity takes the remaining table width; governing usage and reset have
+protected character-unit tracks. Secondary windows fold first, then amount,
+into the accessible all-evidence action. Its +N counts secondary windows only.
+Its accessible name includes that visible count and the full evidence description.
+The governing reset never folds or ellipsizes. The `quotaOverflowPolicy` constant
+is the single swap point for collapse/hide/truncate pending the overflow decision.
+Variant meters stay inside the same row rather than growing an account into a card.
+When the account's ` · provider` suffix does not fit whole, it folds into the
+account tooltip instead of being cut mid-word; the drawer re-measures on render,
+resize and font load. The density proof fails if an account button overflows
+while any secondary column is shown, or if a shown provider suffix is clipped.
+The shortcut footer stays on one line: at 18rem and below it shows a short
+legend, and the full sentence is in its tooltip.
+Unreported amounts and readings show `—`; their tooltips and accessible names say Unreported.
+The usage-meter table uses the same 22px rows and 8px gaps. From a 40rem
+container its window and reset tracks widen to fit a full reading and a reset
+with its count, and More shows its full header from 36rem. Below 40rem a cell
+shows a compact reading (percentage, the alert glyph for exhaustion, `—` for
+Unreported) and the row's caller-owned `compactReset` (≤4ch, for example `1h`
+or `—`), so neither reading nor reset is cut: the bar yields to its minimum
+first, then the window label and the account. The full reading and reset stay
+in the cell tooltip. The narrow meter stories assert at 240px that every reading
+and reset sits whole inside its cell and that reset ink keeps 8px from +N. Reset glyphs stay on the text line, reset and +N
+align right, and the open row keeps the hover wash with an accent underline so
+muted and warning ink stay at AA contrast.
+
+Neither table nor the Usage page uses native `title` attributes. A clipped or abbreviated value
+(account caption, compact meter, reset, amount, drawer window reading, status,
+shortcut footer, the drawer's Usage, `$ / tok` and +N column headers, the
+meter's narrow Δ header, and the Usage page's status line, unit note,
+small-multiple and drill labels, model/scope/accounts cells and cost-table
+labels) is a focusable trigger built from `FullValueTooltip`: a
+static `role="img"` element (the role React Aria requires of a non-interactive
+tooltip trigger) whose visible text is `aria-hidden` and whose name comes from
+a mounted `VisuallyHidden` copy of the full value. A React Aria tooltip with the
+same text opens on hover and on keyboard focus and is linked through
+`aria-describedby` while open. Account, sort and +N buttons use the same tooltip
+through `ValueTooltipTrigger`. Each meter-history bar is a roving-focus item
+(Arrow, Home, End) with its own tooltip. Each hover or focus shows exactly one
+tooltip; React Aria closes it when the pointer leaves, even if the trigger
+keeps focus. Drawer sort controls are content-sized flex items 8px apart; at
+18rem and below the inactive sort glyphs hide so the Gov, Cmp, Acct, Reset and
++N labels still fit, while the active direction stays an SVG glyph. The
+`NarrowFullValueTooltips` meter story, the Drawer S Priority stories and every
+quota story's refresh play assert that no non-empty `[title]` exists (React
+Aria's hidden form `<select>` carries an empty one), that the 200/240/320 sort
+controls keep 8px gaps, and that hover
+and then focus on a clipped value or abbreviated header each show one
+`[role=tooltip]` with the full text. Below 36rem only the meter's Δ trigger
+renders (the full More label is `display: none`), so the column is named once.
+
+The usage-meter Sort and +N buttons take their accessible names from their
+visible text plus hidden context ("Cycle usage Sort", "+1 more: show all
+windows and evidence for …"), so the visible label is always part of the name.
+`landmarkContext` appends page context to the monitor, detail, window and
+history region names when several monitors share one page.
 
 Every Drawer S/M/L and drawer-variant story proves that all 11 fictional accounts
 fit the stated height without scrolling and that each cell's x-offset matches its
-header within 1px. The browser runner repeats this proof and injects a 6px cell
-translation in each story; every misalignment control must fail the same proof.
+header within 1px. Actual visible text-fragment and SVG centres must occupy one
+line within the shared tolerance, even when the row's height is forcibly fixed.
+Priority stories mount the production drawer at 200, 240 and 320 widths; wrapped
+account text and a displaced exhaustion SVG must fail the same proof, then pass
+after restoration and real controlled refresh rerenders.
+The proof stays self-contained for the standalone runner's `page.evaluate`;
+its tolerance reference comes from the production drawer's StyleX token.
+Standalone navigation uses React Aria options and stable account-row identity.
 
 Every quota story also disables the real refresh action and proves that the
 controlled snapshot cannot change, restores the action, then asserts both
 snapshot transitions after React rerenders. Empty and matrix stories carry
-the same control. Strict static Storybook lifecycle checks run these stories
-at 440 and 1440 viewport widths in light and dark.
+the same control. Refresh plays simulate a failed collection, then return to the
+status their args name, so a story at rest shows its named state. Strict static
+Storybook lifecycle checks run these stories at 440 and 1440 viewport widths in
+light and dark.
 
-`src/quota-geometry.stylex.ts` holds the shared pixel geometry tokens; production
-surfaces and story frames use the same values. Sort and reset glyphs use the
-existing SVG icon family. Missing readings are explicitly unreported.
+`src/quota-geometry.stylex.ts` holds semantic geometry tokens; existing spacing
+and typography tokens are reused directly. Production surfaces and story frames
+use the same values. Sort, collapse and exhaustion glyphs use the existing SVG
+icon family. Missing readings and human-facing account states use Unreported;
+canonical IDs and state keys remain unchanged.
 
 Provider, plan and state filters use controlled React Aria Select/ListBox
 controls. Each change reports only that filter field; retained selections that
@@ -215,6 +285,11 @@ day cannot bypass the range's 95% USD coverage gate. The coverage story selects
 a low-coverage day, brushes to admitted days while retaining that controlled
 selection, rejects injected out-of-range USD evidence, and checks restoration
 after rerenders.
+
+Day-chart buttons are named by their day; the full per-series evidence is a
+mounted accessible description, and no native title doubles the custom hover
+readout. The brush story checks the name, the exact description, hover and
+focus readouts, and the pressed state.
 
 History uses the supplied calendar buckets, exposes exact measured values and
 unknown token classes, and marks the unfinished bucket. Cost compares rate-card

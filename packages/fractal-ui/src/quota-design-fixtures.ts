@@ -32,10 +32,10 @@ const accountOf = (id: string, label: string, provider: string, fraction: number
   ], usd: 14.6 + index * 9.12, tokens: 480000 + index * 175000, usdCoverage: index !== 4,
   ...(index % 3 === 0 ? { resetCount: index === 0 ? 0 : 3 } : {}),
   resetCredits: index % 3 === 0 ? [{ label: 'Reported available resets', value: index === 0 ? '0' : '3' }, ...(index === 0 ? [] : [{ label: 'Credit 1 expiry', value: '2030-05-02T12:00:00Z' }, { label: 'Undated or unsupplied slots', value: '2' }])] : [{ label: 'Available resets', value: 'Unreported' }],
-  facts: [{ label: 'Identity', value: id }, { label: 'Provider', value: provider }, { label: 'Plan', value: index % 3 === 0 ? 'Team' : 'Personal' }, { label: 'Value observed', value: '2030-04-30T11:59:00Z' }, { label: 'Latest collection', value: 'Determinate · 2030-04-30T12:00:00Z' }, { label: 'Source confidence', value: 'Observed' }],
+  facts: [{ label: 'Identity', value: label }, { label: 'Provider', value: provider }, { label: 'Plan', value: index % 3 === 0 ? 'Team' : 'Personal' }, { label: 'Value observed', value: '2030-04-30T11:59:00Z' }, { label: 'Latest collection', value: 'Determinate · 2030-04-30T12:00:00Z' }, { label: 'Source confidence', value: 'Observed' }],
 })
 export const quotaAccounts: readonly QuotaAccount[] = [
-  { ...accountOf('harbor', 'Harbor', 'Orbit', undefined, 0), windows: [windowOf('harbor-week', 'week', undefined, true, false, { exhausted: true, facts: [{ label: 'Exhaustion', value: 'Provider status · fraction unknown' }] })] },
+  { ...accountOf('harbor', 'Harbor', 'Orbit', undefined, 0), windows: [windowOf('harbor-week', 'week', undefined, true, false, { exhausted: true, facts: [{ label: 'Exhaustion', value: 'Provider status · fraction Unreported' }] })] },
   accountOf('north', 'North studio', 'Cedar', .83, 1),
   accountOf('delta', 'Delta lab', 'Cedar', .60, 2),
   accountOf('birch', 'Birch team', 'Orbit', .60, 3),
@@ -43,7 +43,7 @@ export const quotaAccounts: readonly QuotaAccount[] = [
   accountOf('lake', 'Lake studio', 'Orbit', .19, 5),
   { ...accountOf('elm', 'Elm sandbox', 'Cedar', .14, 6), state: 'stale', facts: [{ label: 'Retained evidence', value: 'Latest collection failed; value observed 2030-04-29T18:00:00Z' }] },
   accountOf('cove', 'Cove', 'Orbit', .08, 7),
-  { ...accountOf('unknown', 'Unreported seat', 'Cedar', undefined, 8), state: 'unknown', usd: undefined, tokens: undefined, usdCoverage: false, windows: [windowOf('unknown-week', 'week', undefined, true, false, { reported: false, resetAt: undefined, facts: [{ label: 'Observation', value: 'Declared but unreported' }] })] },
+  { ...accountOf('unknown', 'Unreported seat', 'Cedar', undefined, 8), state: 'unknown', usd: undefined, tokens: undefined, usdCoverage: false, windows: [windowOf('unknown-week', 'week', undefined, true, false, { reported: false, resetAt: undefined, facts: [{ label: 'Observation', value: 'Declared · Unreported' }] })] },
   accountOf('spruce', 'Spruce', 'Prism', .12, 9),
   accountOf('willow', 'Willow', 'Prism', .03, 10),
 ]

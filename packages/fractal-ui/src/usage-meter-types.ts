@@ -28,6 +28,8 @@ export interface UsageMeterRow {
   readonly governing: UsageMeterCell
   readonly comparison?: UsageMeterCell
   readonly reset: string
+  /** Caller-owned reset caption shown below 40rem (≤4ch, e.g. '1h', '—'), so the reset is never cut; `reset` stays in the tooltip and detail. */
+  readonly compactReset?: string
   /** Absolute reset evidence; omitted is unknown, including for ordering. */
   readonly resetAt?: string
   /** Present zero is a reported zero; absent is unreported. */
@@ -64,4 +66,6 @@ export interface UsageMeterTableProps {
   readonly onCloseDetail: () => void
   /** History for the selected row; omitted when the source has none. */
   readonly history?: UsageMeterHistory
+  /** Disambiguates landmark names when several monitors share one page; visible titles stay unchanged. */
+  readonly landmarkContext?: string
 }

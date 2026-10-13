@@ -1,6 +1,7 @@
 {
   "version": 1,
   "client_commands": [
+    {"command":"collections.inventory","tests":["crates/st3/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_follows_connect_disconnect_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period","crates/st3/src/api/client_v0/collection_refresh_tests.rs::machines_inventory_follows_runtime_transport_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_follows_pairing_revocation_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::terminals_inventory_follows_runtime_changes_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::sessions_inventory_follows_files_process_exit_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::inventory_subscriptions_refuse_invalid_filters_limits_and_authority","crates/st3/src/api/client_v0/collection_refresh_tests.rs::idle_inventory_windows_do_not_reread_across_the_old_client_intervals","crates/st3/src/api/client_v0/collection_refresh_tests.rs::inventory_pairing_expiry_ends_held_windows_without_a_clock_poll","crates/st3/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_expires_a_hidden_row_and_updates_has_more_at_its_deadline","crates/st3/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_expires_recent_requests_at_their_deadline"],"behavior":"Optional authorized bounded screen inventories deliver v0 snapshots and changes; reconnect reads current sources, device and recent-client membership expires at actual deadlines, and native sessions follow files and process exits. Phone inventory hooks use these authorized reads through screen-scoped subscriptions; Node fake-feed tests verify shared slots, period selection, refresh, reconnect, grace cleanup and 72-second idle without requests; native adapter event tests verify protocol heartbeat delivery."},
     {"command":"resources.list","tests":["crates/stui/src/ui/observed_resources.rs::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix","crates/stui/src/ui/glass.rs::sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing","crates/st3/src/api/client_v0.rs::resources_list_filters_latest_observations_and_fences_pages","crates/st3/src/api/client_v0.rs::resources_list_requires_projection_read_scope"],"behavior":"Existing optional bounded observation read; typed PR/repository/other catalog windows, canonical subjects, filing over Unix, missing rows retained, clicks only navigate, Enter only previews."},
     {"command":"observations.report","tests":["crates/st3/src/api/client_observations.rs::observation_paired_session_transport_reader_doctor_and_body_limits","crates/st3/src/api/client_observations.rs::observation_dedup_conflict_overlap_and_history_failure_have_no_partial_acceptance","crates/st3/src/api/client_observations.rs::observation_history_is_bounded_rotates_expires_and_survives_restart"],"behavior":"Paired-only local diagnostics; no graph mutation, snapshot fence, replicated ACK or durable receipt. Memory dedup/overlap survives identical retries only within bounded process retention; JSONL history persists independently."}
   ],
@@ -463,14 +464,6 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
-      "command": "st agents repos",
-      "description": "List repositories already used by a host's agents, from replicated graph evidence",
-      "tests": [
-        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
-      ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
-    },
-    {
       "command": "st agents new",
       "description": "Declare one new agent seat, start its harness, and wait until it is ready.",
       "tests": [
@@ -503,6 +496,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st agents repos",
+      "description": "List repositories already used by a host's agents, from replicated graph evidence",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st agents restart",
       "description": "Restart a top-level or mission seat, preserving its declaration; wait for a new incarnation",
       "tests": [
@@ -519,6 +520,14 @@
       "verification": "real CLI request/wait across restart; fixture runtime-owner acknowledgements"
     },
     {
+      "command": "st agents rollout",
+      "description": "Retry a published owned-seat cutover with fresh desired and incarnation fences.",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_owned_seat_rollout_captures_fences_and_survives_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st agents show",
       "description": "Show one exact agent, including its owner and operational annotation",
       "tests": [
@@ -528,25 +537,11 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
-      "command": "st agents workspace",
-      "description": "Print one seat's declared workspace directory on its owning host, even when stopped",
-      "tests": [
-        "crates/st3/tests/client_v0_cli.rs::agent_workspace_cli_and_client_read_the_same_declaration_even_after_retirement"
-      ],
-      "verification": "real CLI and generated Rust client over a private Unix socket; current and stopped declarations"
-    },
-    {
       "command": "st agents start",
       "description": "Start a durable seat, patching only explicitly supplied declaration fields. A stopped mission seat starts again on its run's own declaration",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_agent_and_shell_declarations_survive_restart"
       ],
-      "verification": "real CLI over private Unix socket; disk store reopened between actions"
-    },
-    {
-      "command": "st agents rollout",
-      "description": "Retry a published owned-seat cutover with fresh desired and incarnation fences.",
-      "tests": ["crates/st3/tests/action_coverage.rs::cli_owned_seat_rollout_captures_fences_and_survives_restart"],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
@@ -572,6 +567,14 @@
         "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st agents workspace",
+      "description": "Print one seat's declared workspace directory on its owning host, even when stopped",
+      "tests": [
+        "crates/st3/tests/client_v0_cli.rs::agent_workspace_cli_and_client_read_the_same_declaration_even_after_retirement"
+      ],
+      "verification": "real CLI and generated Rust client over a private Unix socket; current and stopped declarations"
     },
     {
       "command": "st apply",
@@ -818,6 +821,16 @@
         "crates/st3/tests/action_coverage.rs::cli_devices_and_native_import_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st conversations wait",
+      "description": "Wait up to a deadline for a reply from one sender, and print the reply or `no reply`",
+      "tests": [
+        "crates/st3/tests/message_wait.rs::a_wait_with_no_reply_returns_no_reply_at_the_deadline",
+        "crates/st3/tests/message_wait.rs::a_reply_returns_the_wait_early_and_is_marked_read",
+        "crates/st3/tests/message_wait.rs::after_counts_a_reply_that_beat_the_wait"
+      ],
+      "verification": "real CLI over private Unix socket; deadline, early return and read receipt"
     },
     {
       "command": "st devices",
@@ -2026,6 +2039,16 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st ui",
+      "description": "Open the terminal interface with spaces or classic layout; plain st opens it for humans on two terminals",
+      "tests": [
+        "crates/st3/src/main.rs::terminal_ui_arguments_and_help_match_the_documented_surface",
+        "crates/st3/tests/typed_keys.rs::shifted_keys_are_typed_as_a_keyboard_protocol_terminal_sends_them",
+        "crates/st3/tests/client_only.rs::daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member"
+      ],
+      "verification": "CLI parser and real st ui under a PTY, raw kitty keys and isolated paired-only members"
+    },
+    {
       "command": "st uninstall",
       "description": "Remove st3 from this machine: leave its fleet, then its services, state, and settings",
       "tests": [
@@ -2289,9 +2312,9 @@
     {
       "effect": "Attention",
       "tests": [
-        "crates/stui/src/main.rs::approving_a_gate_asked_again_acts_once_on_its_current_card",
+        "crates/stui/src/lib.rs::approving_a_gate_asked_again_acts_once_on_its_current_card",
         "crates/st3/tests/action_coverage.rs::human_review_actions_survive_stale_fences_and_restarts",
-        "crates/stui/src/main.rs::launch_review_uses_its_public_launch_and_selected_variant_after_restart"
+        "crates/stui/src/lib.rs::launch_review_uses_its_public_launch_and_selected_variant_after_restart"
       ],
       "verification": "live UI adapter plus daemon restart"
     },
@@ -2618,6 +2641,13 @@
         "crates/stui/src/ui/glass.rs::glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g"
       ],
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
+    },
+    {
+      "action": "ToggleTerminalFallback",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::terminal_fallback_defaults_on_and_the_palette_changes_it_locally"
+      ],
+      "verification": "device-local route preference; no daemon mutation, restart fence not applicable"
     },
     {
       "action": "Name",

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Quota day-chart buttons are named by their day and carry the full per-series evidence as a mounted accessible description. The native title that duplicated the custom hover readout is removed; the heatmap calendar, drawer and table titles are unchanged.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted or wire schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Day-chart button accessible names change from the full evidence sentence to the day label; the same sentence is now the accessible description. Selection, hover and focus readout behavior is unchanged." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

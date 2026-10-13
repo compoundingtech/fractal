@@ -2,9 +2,11 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
 import { Icon } from './assistant-ui/composition/Icons.tsx'
-import { Button, Label, ListBox, ListBoxItem, Radio, RadioGroup, Slider, SliderOutput, SliderThumb, SliderTrack, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
+import { Button, Label, ListBox, ListBoxItem, Radio, RadioGroup, Slider, SliderOutput, SliderThumb, SliderTrack, Tab, TabList, TabPanel, Tabs, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { QuotaAccount, QuotaEconomics, QuotaHistoryDay, QuotaHistoryValue, QuotaUnit, QuotaUsageProps, QuotaWindow } from './quota-design-types'
+import { quotaStateLabels } from './quota-design-copy.ts'
+import { FullValueTooltip } from './FullValueTooltip.tsx'
 
 /** USD is only shown when the in-range values carry at least this much USD coverage (TUI rule). */
 const usdCoverageGate = 0.95
@@ -35,7 +37,7 @@ const addTally = (left: Tally, right: Tally): Tally => ({ sum: left.sum + right.
 const tallyText = (tally: Tally, format: (value: number) => string): string =>
   tally.known === 0 && tally.unknown === 0 ? 'No rows'
     : tally.known === 0 ? 'Unreported'
-      : tally.unknown > 0 ? `${format(tally.sum)} + ${tally.unknown} unknown`
+      : tally.unknown > 0 ? `${format(tally.sum)} + ${tally.unknown} Unreported`
         : format(tally.sum)
 
 const amountOf = (value: QuotaHistoryValue, unit: QuotaUnit): number | undefined => unit === 'usd' ? value.usd : value.tokens
@@ -94,8 +96,8 @@ const fractionTone = (fraction: number | undefined, exhausted: boolean): 'normal
   exhausted || (fraction !== undefined && fraction >= 0.8) ? 'danger' : fraction !== undefined && fraction >= 0.6 ? 'warning' : 'normal'
 const windowReading = (window: QuotaWindow): string =>
   window.fraction !== undefined ? `${percent.format(window.fraction)}${window.exhausted ? ' · exhausted' : ''}`
-    : window.exhausted ? 'Exhausted · no fraction reported'
-      : window.reported ? 'Fraction unknown' : 'Not reported'
+    : window.exhausted ? 'Exhausted · fraction Unreported'
+      : 'Unreported'
 
 const isDetailTab = (key: React.Key): key is DetailTab => detailTabs.some(tab => tab.id === key)
 
@@ -125,6 +127,7 @@ const StackedChart = ({ cells, series, unit, height, label, selectedDay, onDay, 
   const patternId = `quota-hatch-${React.useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
   const max = scaleOf(cells, series)
   const width = Math.max(1, cells.length) * slotUnits
+  const dayDescriptionId = React.useId()
   return <div {...stylex.props(styles.chart, height === 'main' ? styles.chartMain : styles.chartSmall)}>
     <svg aria-hidden="true" viewBox={`0 0 ${width} ${chartUnits}`} preserveAspectRatio="none" {...stylex.props(styles.svg)}>
       <defs><pattern id={patternId} width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1" height="3" {...stylex.props(styles.hatchInk)} /></pattern></defs>
@@ -154,8 +157,9 @@ const StackedChart = ({ cells, series, unit, height, label, selectedDay, onDay, 
       {cells.map(cell => {
         const description = describeDay(cell, series, unit)
         const selected = cell.day.id === selectedDay
-        return <Button key={cell.day.id} aria-label={description} aria-pressed={selected} data-quota-day={cell.day.id} data-partial={cell.day.partial || undefined} onPress={() => onDay(selected ? undefined : cell.day.id)} onHoverStart={() => onHover(cell.day.id)} onFocus={() => onHover(cell.day.id)} onBlur={() => onHover(undefined)} {...stylex.props(styles.dayButton, selected && styles.dayButtonSelected)}>
-          <span {...stylex.props(styles.titleCarrier)} title={description} />
+        const describedBy = `${dayDescriptionId}-${cell.day.id}`
+        return <Button key={cell.day.id} aria-label={cell.day.label} aria-describedby={describedBy} aria-pressed={selected} data-quota-day={cell.day.id} data-partial={cell.day.partial || undefined} onPress={() => onDay(selected ? undefined : cell.day.id)} onHoverStart={() => onHover(cell.day.id)} onFocus={() => onHover(cell.day.id)} onBlur={() => onHover(undefined)} {...stylex.props(styles.dayButton, selected && styles.dayButtonSelected)}>
+          <VisuallyHidden elementType="span"><span id={describedBy}>{description}</span></VisuallyHidden>
         </Button>
       })}
     </div>
@@ -237,7 +241,7 @@ const SmallMultiples = ({ cells, series, unit, selectedDay, onDay, onHover }: { 
       const only = [item]
       const total = cells.reduce((tally, cell) => addTally(tally, cell.bySeries.get(item.key) ?? emptyTally), emptyTally)
       return <li key={item.key} data-quota-series={item.key} {...stylex.props(styles.multiple)}>
-        <div {...stylex.props(styles.multipleHead)}><Swatch tone={item.tone} /><span {...stylex.props(styles.truncate)} title={item.label}>{item.label}</span><span {...stylex.props(styles.figure)}>{tallyText(total, format)}</span></div>
+        <div {...stylex.props(styles.multipleHead)}><Swatch tone={item.tone} /><FullValueTooltip full={item.label} style={styles.truncate}>{item.label}</FullValueTooltip><span {...stylex.props(styles.figure)}>{tallyText(total, format)}</span></div>
         <StackedChart cells={cells} series={only} unit={unit} height="small" label={`${item.label} days`} selectedDay={selectedDay} onDay={onDay} onHover={onHover} />
         <span {...stylex.props(styles.scaleNote)}>Own scale · peak {formatCompact(unit, scaleOf(cells, only))}</span>
       </li>
@@ -266,7 +270,7 @@ const Heatmap = ({ cells, series, unit, selectedDay, onDay, onHover, landmarkCon
           {total.known === 0 && total.unknown > 0 ? <span aria-hidden="true" {...stylex.props(styles.heatFill, styles.heatUnknown)} />
             : total.sum === 0 ? <span aria-hidden="true" {...stylex.props(styles.heatFill, styles.heatZero)} />
               : <span aria-hidden="true" {...stylex.props(styles.heatFill, styles.heatKnown, heatLevels[Math.max(0, level)])} />}
-          <span aria-hidden="true" title={description} {...stylex.props(styles.heatLabel)}>{cell.day.label}</span>
+          <span aria-hidden="true" {...stylex.props(styles.heatLabel)}>{cell.day.label}</span>
         </Button>
       })}
     </div>
@@ -279,7 +283,7 @@ const Heatmap = ({ cells, series, unit, selectedDay, onDay, onHover, landmarkCon
           const total = totalOf(selected, series)
           const share = total.sum === 0 ? 0 : tally.sum / total.sum
           return [<li key={item.key} {...stylex.props(styles.drillItem)}>
-            <span {...stylex.props(styles.truncate)} title={item.label}>{item.label}</span>
+            <FullValueTooltip full={item.label} style={styles.truncate}>{item.label}</FullValueTooltip>
             <span aria-hidden="true" {...stylex.props(styles.drillTrack)}>{tally.known > 0 && <span {...stylex.props(styles.drillFill, toneBackground[item.tone], styles.share(`${share * 100}%`))} />}</span>
             <span {...stylex.props(styles.figure)}>{tallyText(tally, formatExact(unit))}</span>
           </li>]
@@ -313,7 +317,7 @@ const Breakdown = ({ days, scopeDays, accounts, unit, selected, rangeLabel, land
   const rows = buildBreakdown(scopeDays, accounts, unit, tokenLabels)
   const format = formatExact(unit)
   const count = (value: number) => countExact.format(value)
-  const coverageText = (tally: Tally) => tally.known === 0 ? 'Unreported' : `${percent.format(tally.sum / tally.known)}${tally.unknown > 0 ? ` + ${tally.unknown} unknown` : ''}`
+  const coverageText = (tally: Tally) => tally.known === 0 ? 'Unreported' : `${percent.format(tally.sum / tally.known)}${tally.unknown > 0 ? ` + ${tally.unknown} Unreported` : ''}`
   const titleId = React.useId()
   return <section aria-label={`${landmarkContext} by model and scope`} data-quota-breakdown={selected?.id ?? 'range'} {...stylex.props(styles.card)}>
     <header {...stylex.props(styles.cardHead)}>
@@ -331,9 +335,9 @@ const Breakdown = ({ days, scopeDays, accounts, unit, selected, rangeLabel, land
         </tr></thead>
         <tbody>
           {rows.map(row => <tr key={row.key} data-quota-breakdown-row={row.key}>
-            <th scope="row" title={row.model} {...stylex.props(styles.td, styles.rowHead)}>{row.model}</th>
-            <td title={row.scope} {...stylex.props(styles.td)}>{row.scope}</td>
-            <td title={row.accounts.join(', ')} {...stylex.props(styles.td)}>{row.accounts.join(', ')}</td>
+            <th scope="row" {...stylex.props(styles.td, styles.rowHead)}><FullValueTooltip full={row.model} style={styles.block}>{row.model}</FullValueTooltip></th>
+            <td {...stylex.props(styles.td)}><FullValueTooltip full={row.scope} style={styles.block}>{row.scope}</FullValueTooltip></td>
+            <td {...stylex.props(styles.td)}><FullValueTooltip full={row.accounts.join(', ')} style={styles.block}>{row.accounts.join(', ')}</FullValueTooltip></td>
             <td {...stylex.props(styles.td, styles.numeric)}>{tallyText(row.value, format)}</td>
             <td {...stylex.props(styles.td, styles.numeric)}>{coverageText(row.coverage)}</td>
             {tokenLabels.map(label => <td key={label} {...stylex.props(styles.td, styles.numeric)}>{tallyText(row.tokenTypes.get(label) ?? emptyTally, count)}</td>)}
@@ -377,7 +381,7 @@ const AccountPanel = ({ account }: { readonly account: QuotaAccount }) => <div {
   <dl aria-label="Account summary" {...stylex.props(styles.facts)}>
     <dt {...stylex.props(styles.factLabel)}>Provider</dt><dd {...stylex.props(styles.factValue)}>{account.provider}</dd>
     <dt {...stylex.props(styles.factLabel)}>Plan</dt><dd {...stylex.props(styles.factValue)}>{account.plan}</dd>
-    <dt {...stylex.props(styles.factLabel)}>State</dt><dd {...stylex.props(styles.factValue)}>{account.state}</dd>
+    <dt {...stylex.props(styles.factLabel)}>State</dt><dd {...stylex.props(styles.factValue)}>{quotaStateLabels[account.state]}</dd>
     <dt {...stylex.props(styles.factLabel)}>USD</dt><dd {...stylex.props(styles.factValue)}>{account.usdCoverage ? formatUsdExact(account.usd) : `${formatUsdExact(account.usd)} · coverage below 95%`}</dd>
     <dt {...stylex.props(styles.factLabel)}>Tokens</dt><dd {...stylex.props(styles.factValue)}>{account.tokens === undefined ? 'Unreported' : tokensExact.format(account.tokens)}</dd>
     <dt {...stylex.props(styles.factLabel)}>Resets used</dt><dd {...stylex.props(styles.factValue)}>{account.resetCount === undefined ? 'Unreported' : countExact.format(account.resetCount)}</dd>
@@ -423,7 +427,7 @@ const CostOverview = ({ economics, accounts, landmarkContext }: { readonly econo
           const account = accounts.find(candidate => candidate.id === item.accountId)
           const limit = account?.windows.find(window => window.id === item.limitId)?.label ?? item.limitId
           return <tr key={item.id} data-quota-economics={item.id}>
-            <th scope="row" {...stylex.props(styles.td, styles.rowHead)}><span {...stylex.props(styles.block)} title={item.label}>{item.label}</span><span {...stylex.props(styles.block, styles.muted)} title={`${account?.label ?? item.accountId} · ${limit}`}>{account?.label ?? item.accountId} · {limit}</span></th>
+            <th scope="row" {...stylex.props(styles.td, styles.rowHead)}><FullValueTooltip full={item.label} style={styles.block}>{item.label}</FullValueTooltip><FullValueTooltip full={`${account?.label ?? item.accountId} · ${limit}`} style={[styles.block, styles.muted]}>{account?.label ?? item.accountId} · {limit}</FullValueTooltip></th>
             <td {...stylex.props(styles.td, styles.numeric)}>{formatUsd(item.usageValue)}</td>
             <td {...stylex.props(styles.td, styles.numeric)}><span {...stylex.props(styles.block)}>{formatUsd(item.price)}</span><span {...stylex.props(styles.block, styles.muted)}>{item.basis === 'invoiced' ? 'Invoice' : 'List price'}</span></td>
             <td {...stylex.props(styles.td, styles.numeric)}>{formatUsd(item.ledgerValue)}</td>
@@ -480,9 +484,9 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
     <header {...stylex.props(styles.header)}>
       {onBack !== undefined && <Button onPress={onBack} {...stylex.props(styles.button)}><Icon name="chevrons-left" size={12} />Back</Button>}
       <h1 {...stylex.props(styles.pageTitle)}>Usage</h1>
-      <p role={statusAlert ? 'alert' : 'status'} title={quotaStatus.text} data-quota-status-kind={quotaStatus.kind} {...stylex.props(styles.status, (quotaStatus.kind === 'stale' || quotaStatus.kind === 'unpublished' || quotaStatus.kind === 'loading') && styles.statusWarn, statusAlert && styles.statusDanger)}>
+      <p role={statusAlert ? 'alert' : 'status'} data-quota-status-kind={quotaStatus.kind} {...stylex.props(styles.status, (quotaStatus.kind === 'stale' || quotaStatus.kind === 'unpublished' || quotaStatus.kind === 'loading') && styles.statusWarn, statusAlert && styles.statusDanger)}>
         <span aria-hidden="true" {...stylex.props(styles.statusDot)} />
-        <span {...stylex.props(styles.truncate)}>{quotaStatus.text}</span>
+        <FullValueTooltip full={quotaStatus.text} style={styles.truncate}>{quotaStatus.text}</FullValueTooltip>
       </p>
       <div role="toolbar" aria-label="Usage view" {...stylex.props(styles.toolbar)}>
         <RadioGroup value={stackBy} orientation="horizontal" onChange={value => { if (value === 'account' || value === 'model') onStackBy(value) }} {...stylex.props(styles.segmented)}>
@@ -493,7 +497,7 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
         <Button aria-label="Toggle unit: $ / tokens" aria-describedby={ids.unitNote} aria-keyshortcuts="u" onPress={toggleUnit} {...stylex.props(styles.button, styles.unitButton)}>
           <span aria-hidden="true" {...stylex.props(unit === 'usd' ? styles.unitOn : styles.unitOff)}>$</span><span aria-hidden="true" {...stylex.props(styles.muted)}>/</span><span aria-hidden="true" {...stylex.props(unit === 'tokens' ? styles.unitOn : styles.unitOff)}>tokens</span>
         </Button>
-        <span id={ids.unitNote} title={unitNote} data-quota-unit-fallback={unit !== effectiveUnit || undefined} {...stylex.props(styles.unitNote, unit !== effectiveUnit && styles.unitFallback)}>{unitNote}</span>
+        <span id={ids.unitNote} data-quota-unit-fallback={unit !== effectiveUnit || undefined} {...stylex.props(styles.unitNote, unit !== effectiveUnit && styles.unitFallback)}><FullValueTooltip full={unitNote} style={styles.block}>{unitNote}</FullValueTooltip></span>
       </div>
     </header>
     <div {...stylex.props(styles.grid)}>
@@ -523,7 +527,7 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
             if (typeof id === 'string') onAccount(id)
           }} renderEmptyState={() => <span {...stylex.props(styles.muted)}>No accounts supplied.</span>} {...stylex.props(styles.accountList)}>
             {accounts.map(account => <ListBoxItem key={account.id} id={account.id} textValue={account.label} data-quota-account={account.id} {...stylex.props(styles.accountItem, account.id === detailAccount?.id && styles.accountItemSelected)}>
-              <span {...stylex.props(styles.truncate)}>{account.label}</span><span {...stylex.props(styles.accountMeta)}>{account.provider} · {account.state}</span>
+              <span {...stylex.props(styles.truncate)}>{account.label}</span><span {...stylex.props(styles.accountMeta)}>{account.provider} · {quotaStateLabels[account.state]}</span>
             </ListBoxItem>)}
           </ListBox>
           <Tabs selectedKey={detailTab} onSelectionChange={key => { if (isDetailTab(key)) onDetailTab(key) }}>
@@ -543,22 +547,22 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
 
 const styles = stylex.create({
   root: { containerType: 'inline-size', display: 'flex', flexDirection: 'column', gap: space.lg, minWidth: 0, padding: space.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: type.fontSans, fontSize: type.uiSize, lineHeight: type.uiLeading },
-  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: space.lg, minBlockSize: quotaGeometry.px32 },
+  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: space.lg, minBlockSize: quotaGeometry.usageHeaderMinimumHeight },
   pageTitle: { margin: 0, fontSize: type.headingSize, lineHeight: type.headingLeading, fontWeight: type.weightSemibold },
-  status: { display: 'flex', alignItems: 'center', gap: space.sm, margin: 0, inlineSize: quotaGeometry.px320, maxInlineSize: '100%', blockSize: quotaGeometry.px24, paddingInline: space.md, borderRadius: radius.full, border: quotaGeometry.hair, color: ink.fgMuted, fontSize: type.metaSize },
+  status: { display: 'flex', alignItems: 'center', gap: space.sm, margin: 0, inlineSize: quotaGeometry.usageStatusWidth, maxInlineSize: '100%', blockSize: quotaGeometry.usageStatusHeight, paddingInline: space.md, borderRadius: radius.full, border: quotaGeometry.hair, color: ink.fgMuted, fontSize: type.metaSize },
   statusWarn: { color: status.attention },
   statusDanger: { color: status.dangerFg },
-  statusDot: { flexShrink: 0, inlineSize: quotaGeometry.px6, blockSize: quotaGeometry.px6, borderRadius: radius.full, backgroundColor: 'currentColor' },
+  statusDot: { flexShrink: 0, inlineSize: quotaGeometry.statusDotSize, blockSize: quotaGeometry.statusDotSize, borderRadius: radius.full, backgroundColor: 'currentColor' },
   toolbar: { display: 'flex', alignItems: 'center', gap: space.lg, marginInlineStart: 'auto', flexWrap: 'wrap' },
   segmented: { display: 'flex', alignItems: 'center', gap: space.xs },
   controlLabel: { color: ink.fgMuted, fontSize: type.metaSize, marginInlineEnd: space.xs },
-  segment: { display: 'inline-flex', alignItems: 'center', blockSize: quotaGeometry.px28, paddingInline: space.md, borderRadius: radius.control, border: quotaGeometry.strongHair, color: ink.fgMuted, backgroundColor: surface.transparent, cursor: 'pointer', fontSize: type.metaSize, ':hover': { backgroundColor: surface.rowHover }, ':is([data-selected])': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
-  button: { display: 'inline-flex', alignItems: 'center', gap: space.xs, blockSize: quotaGeometry.px28, paddingInline: space.md, borderRadius: radius.control, border: quotaGeometry.strongHair, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', fontFamily: type.fontSans, fontSize: type.metaSize, ':hover': { backgroundColor: surface.rowHover }, ':is([data-disabled])': { cursor: 'not-allowed', opacity: 0.5 }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
-  unitButton: { inlineSize: quotaGeometry.px96, justifyContent: 'center', fontVariantNumeric: 'tabular-nums' },
+  segment: { display: 'inline-flex', alignItems: 'center', blockSize: quotaGeometry.usageControlHeight, paddingInline: space.md, borderRadius: radius.control, border: quotaGeometry.strongHair, color: ink.fgMuted, backgroundColor: surface.transparent, cursor: 'pointer', fontSize: type.metaSize, ':hover': { backgroundColor: surface.rowHover }, ':is([data-selected])': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.focusOffset } },
+  button: { display: 'inline-flex', alignItems: 'center', gap: space.xs, blockSize: quotaGeometry.usageControlHeight, paddingInline: space.md, borderRadius: radius.control, border: quotaGeometry.strongHair, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', fontFamily: type.fontSans, fontSize: type.metaSize, ':hover': { backgroundColor: surface.rowHover }, ':is([data-disabled])': { cursor: 'not-allowed', opacity: 0.5 }, ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.focusOffset } },
+  unitButton: { inlineSize: quotaGeometry.unitControlWidth, justifyContent: 'center', fontVariantNumeric: 'tabular-nums' },
   unitFallback: { color: status.attention },
   unitOn: { color: ink.fg, fontWeight: type.weightSemibold },
   unitOff: { color: ink.fgMuted },
-  unitNote: { inlineSize: quotaGeometry.px260, color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  unitNote: { inlineSize: quotaGeometry.unitNoteWidth, color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   grid: { display: 'grid', gap: space.lg, gridTemplateColumns: { default: 'minmax(0, 1fr)', '@container (min-width: 72rem)': quotaGeometry.workspaceColumns }, alignItems: 'start' },
   mainColumn: { display: 'flex', flexDirection: 'column', gap: space.lg, minWidth: 0 },
   sideColumn: { display: 'flex', flexDirection: 'column', gap: space.lg, minWidth: 0 },
@@ -571,30 +575,29 @@ const styles = stylex.create({
   truncate: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   block: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   figure: { marginInlineStart: 'auto', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', color: ink.fg },
-  emptyChart: { display: 'grid', placeItems: 'center', blockSize: quotaGeometry.px220, margin: 0, color: ink.fgMuted, border: quotaGeometry.dashedStrongHair, borderRadius: radius.md },
-  legend: { display: 'flex', flexWrap: 'wrap', gap: `${space.xs} ${space.lg}`, margin: 0, padding: 0, listStyle: 'none', minBlockSize: quotaGeometry.px20, fontSize: type.metaSize, color: ink.fgSoft },
-  legendItem: { display: 'flex', alignItems: 'center', gap: space.xs, maxInlineSize: quotaGeometry.px200 },
-  swatch: { flexShrink: 0, inlineSize: quotaGeometry.px8, blockSize: quotaGeometry.px8, borderRadius: quotaGeometry.px2 },
+  emptyChart: { display: 'grid', placeItems: 'center', blockSize: quotaGeometry.mainChartHeight, margin: 0, color: ink.fgMuted, border: quotaGeometry.dashedStrongHair, borderRadius: radius.md },
+  legend: { display: 'flex', flexWrap: 'wrap', gap: `${space.xs} ${space.lg}`, margin: 0, padding: 0, listStyle: 'none', minBlockSize: quotaGeometry.legendHeight, fontSize: type.metaSize, color: ink.fgSoft },
+  legendItem: { display: 'flex', alignItems: 'center', gap: space.xs, maxInlineSize: quotaGeometry.legendItemMaximumWidth },
+  swatch: { flexShrink: 0, inlineSize: quotaGeometry.legendSwatchSize, blockSize: quotaGeometry.legendSwatchSize, borderRadius: quotaGeometry.legendSwatchRadius },
   chart: { position: 'relative', inlineSize: '100%' },
-  chartMain: { blockSize: quotaGeometry.px220 },
-  chartSmall: { blockSize: quotaGeometry.px72 },
+  chartMain: { blockSize: quotaGeometry.mainChartHeight },
+  chartSmall: { blockSize: quotaGeometry.smallChartHeight },
   svg: { position: 'absolute', inset: 0, inlineSize: '100%', blockSize: '100%', overflow: 'visible' },
-  baseline: { stroke: border.borderStrong, strokeWidth: quotaGeometry.px1 },
+  baseline: { stroke: border.borderStrong, strokeWidth: quotaGeometry.chartStrokeWidth },
   hatchInk: { fill: ink.fgMuted },
-  unknownBar: { stroke: ink.fgMuted, strokeWidth: quotaGeometry.px1 },
+  unknownBar: { stroke: ink.fgMuted, strokeWidth: quotaGeometry.chartStrokeWidth },
   zeroTick: { fill: ink.fgSoft },
   emptyTick: { fill: border.borderStrong },
   partialBar: { opacity: 0.55 },
   dimmedBar: { opacity: 0.35 },
-  partialOutline: { fill: 'none', stroke: ink.fgSoft, strokeWidth: quotaGeometry.px1, strokeDasharray: '3 2' },
+  partialOutline: { fill: 'none', stroke: ink.fgSoft, strokeWidth: quotaGeometry.chartStrokeWidth, strokeDasharray: '3 2' },
   dayButtons: { position: 'absolute', inset: 0, display: 'flex' },
-  dayButton: { flexBasis: 0, flexGrow: 1, minWidth: 0, padding: 0, border: 'none', borderRadius: radius.keyboard, backgroundColor: surface.transparent, cursor: 'pointer', ':hover': { backgroundColor: surface.washSubtle }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.pxNegative2 } },
+  dayButton: { flexBasis: 0, flexGrow: 1, minWidth: 0, padding: 0, border: 'none', borderRadius: radius.keyboard, backgroundColor: surface.transparent, cursor: 'pointer', ':hover': { backgroundColor: surface.washSubtle }, ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.insetFocusOffset } },
   dayButtonSelected: { boxShadow: quotaGeometry.selectedUnderline, backgroundColor: surface.washSubtle },
-  titleCarrier: { display: 'block', inlineSize: '100%', blockSize: '100%' },
-  axis: { display: 'flex', justifyContent: 'space-between', gap: space.md, blockSize: quotaGeometry.px16, color: ink.fgMuted, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
+  axis: { display: 'flex', justifyContent: 'space-between', gap: space.md, blockSize: quotaGeometry.chartAxisHeight, color: ink.fgMuted, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
   partialLegend: { color: ink.fgSoft },
   partialBadge: { display: 'inline-flex', alignItems: 'center', marginInlineStart: space.sm, paddingInline: space.xs, borderRadius: radius.keyboard, border: quotaGeometry.dashedMutedHair, color: ink.fgSoft, fontSize: type.denseSize, fontWeight: type.weightRegular, whiteSpace: 'nowrap' },
-  readout: { display: 'flex', flexDirection: 'column', gap: space.xs, blockSize: quotaGeometry.px76, overflowY: 'auto', padding: space.sm, borderRadius: radius.md, backgroundColor: surface.washSubtle, fontSize: type.metaSize, ':focus-visible': { outline: quotaGeometry.focusOutline, outlineOffset: quotaGeometry.px1 } },
+  readout: { display: 'flex', flexDirection: 'column', gap: space.xs, blockSize: quotaGeometry.dayReadoutHeight, overflowY: 'auto', padding: space.sm, borderRadius: radius.md, backgroundColor: surface.washSubtle, fontSize: type.metaSize, ':focus-visible': { outline: quotaGeometry.focusOutline, outlineOffset: quotaGeometry.focusOffset } },
   readoutHead: { display: 'flex', alignItems: 'center', gap: space.xs, fontWeight: type.weightMedium },
   readoutList: { display: 'grid', gridTemplateColumns: quotaGeometry.multipleColumns, gap: `0 ${space.lg}`, margin: 0, padding: 0, listStyle: 'none' },
   readoutItem: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0, color: ink.fgSoft },
@@ -603,61 +606,61 @@ const styles = stylex.create({
   rangeLabel: { color: ink.fgMuted },
   rangeOutput: { color: ink.fgSoft, fontVariantNumeric: 'tabular-nums' },
   track: { position: 'relative', inlineSize: '100%' },
-  trackStrip: { blockSize: quotaGeometry.px44, borderRadius: radius.sm, backgroundColor: surface.washSubtle },
-  trackRail: { blockSize: quotaGeometry.px20 },
+  trackStrip: { blockSize: quotaGeometry.rangeStripHeight, borderRadius: radius.sm, backgroundColor: surface.washSubtle },
+  trackRail: { blockSize: quotaGeometry.rangeRailHeight },
   stripBar: { fill: ink.fgMuted },
   stripUnknown: { fill: border.borderStrong },
   brush: { position: 'absolute', pointerEvents: 'none', backgroundColor: surface.washSubtle, borderInline: quotaGeometry.accentHair },
   brushStrip: { insetBlock: 0 },
-  brushRail: { insetBlockStart: quotaGeometry.px8, blockSize: quotaGeometry.px4, backgroundColor: accent.primary },
+  brushRail: { insetBlockStart: quotaGeometry.rangeRailInset, blockSize: quotaGeometry.rangeRailThickness, backgroundColor: accent.primary },
   brushSpan: (left: string, width: string) => ({ insetInlineStart: left, inlineSize: width }),
-  thumb: { insetBlockStart: 0, inlineSize: quotaGeometry.px12, borderRadius: radius.keyboard, border: quotaGeometry.accentHair, backgroundColor: surface.raised, cursor: 'ew-resize', ':is([data-dragging])': { backgroundColor: accent.primary }, ':is([data-focus-visible])': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px2 } },
-  thumbStrip: { blockSize: quotaGeometry.px44 },
-  thumbRail: { blockSize: quotaGeometry.px20 },
+  thumb: { insetBlockStart: 0, inlineSize: quotaGeometry.rangeThumbWidth, borderRadius: radius.keyboard, border: quotaGeometry.accentHair, backgroundColor: surface.raised, cursor: 'ew-resize', ':is([data-dragging])': { backgroundColor: accent.primary }, ':is([data-focus-visible])': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.focusRingOffset } },
+  thumbStrip: { blockSize: quotaGeometry.rangeStripHeight },
+  thumbRail: { blockSize: quotaGeometry.rangeRailHeight },
   clearDay: { alignSelf: 'flex-start' },
   multiples: { display: 'grid', gridTemplateColumns: { default: 'repeat(2, minmax(0, 1fr))', '@container (min-width: 72rem)': 'repeat(3, minmax(0, 1fr))' }, gap: space.md, margin: 0, padding: 0, listStyle: 'none' },
   multiple: { display: 'flex', flexDirection: 'column', gap: space.xs, minWidth: 0, padding: space.sm, borderRadius: radius.md, border: quotaGeometry.hair },
   multipleHead: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0, fontSize: type.metaSize },
   scaleNote: { color: ink.fgMuted, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
   heatmapWrap: { display: 'grid', gap: space.lg, gridTemplateColumns: { default: 'minmax(0, 1fr)', '@container (min-width: 56rem)': 'minmax(0, 1fr) minmax(0, 1fr)' }, alignItems: 'start' },
-  heatmap: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gridAutoRows: quotaGeometry.px40, gap: space.xs },
-  weekday: { alignSelf: 'end', color: ink.fgMuted, fontSize: type.denseSize, blockSize: quotaGeometry.px16 },
+  heatmap: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gridAutoRows: quotaGeometry.heatmapRowHeight, gap: space.xs },
+  weekday: { alignSelf: 'end', color: ink.fgMuted, fontSize: type.denseSize, blockSize: quotaGeometry.weekdayLabelHeight },
   cellAt: (row: number, column: number) => ({ gridRowStart: String(row), gridColumnStart: String(column) }),
-  heatCell: { position: 'relative', padding: 0, overflow: 'hidden', border: quotaGeometry.hair, borderRadius: radius.sm, backgroundColor: surface.canvas, cursor: 'pointer', ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
+  heatCell: { position: 'relative', padding: 0, overflow: 'hidden', border: quotaGeometry.hair, borderRadius: radius.sm, backgroundColor: surface.canvas, cursor: 'pointer', ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.focusOffset } },
   heatPartial: { borderStyle: 'dashed', borderColor: ink.fgMuted },
   heatFill: { position: 'absolute', inset: 0 },
   heatKnown: { backgroundColor: accent.primary },
   heatZero: { backgroundColor: surface.transparent, boxShadow: quotaGeometry.heatZeroShadow },
   heatUnknown: { backgroundImage: quotaGeometry.unreportedHeatPattern },
   heatLabel: { position: 'absolute', insetInlineStart: space.xs, insetBlockStart: space.xs2, color: ink.fg, backgroundColor: surface.canvas, paddingInline: space.xs2, borderRadius: radius.keyboard, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
-  drilldown: { display: 'flex', flexDirection: 'column', gap: space.sm, minBlockSize: quotaGeometry.px160 },
+  drilldown: { display: 'flex', flexDirection: 'column', gap: space.sm, minBlockSize: quotaGeometry.drilldownMinimumHeight },
   drillList: { display: 'flex', flexDirection: 'column', gap: space.xs, margin: 0, padding: 0, listStyle: 'none' },
   drillItem: { display: 'grid', gridTemplateColumns: quotaGeometry.drillColumns, alignItems: 'center', gap: space.sm, fontSize: type.metaSize, color: ink.fgSoft },
-  drillTrack: { blockSize: quotaGeometry.px6, borderRadius: radius.full, backgroundColor: surface.washSubtle, overflow: 'hidden' },
+  drillTrack: { blockSize: quotaGeometry.drillMeterHeight, borderRadius: radius.full, backgroundColor: surface.washSubtle, overflow: 'hidden' },
   drillFill: { display: 'block', blockSize: '100%' },
   share: (width: string) => ({ inlineSize: width }),
-  tableScroll: { overflowX: 'auto', scrollbarGutter: 'stable', ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
+  tableScroll: { overflowX: 'auto', scrollbarGutter: 'stable', ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.focusOffset } },
   table: { inlineSize: '100%', minInlineSize: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: type.metaSize, fontVariantNumeric: 'tabular-nums' },
-  colModel: { inlineSize: quotaGeometry.px180 },
-  costIdentity: { inlineSize: quotaGeometry.px120 },
-  costAmount: { inlineSize: quotaGeometry.px88 },
-  colScope: { inlineSize: quotaGeometry.px96 },
-  colAccounts: { inlineSize: quotaGeometry.px160 },
-  colValue: { inlineSize: quotaGeometry.px128 },
-  colCoverage: { inlineSize: quotaGeometry.px112 },
-  colCount: { inlineSize: quotaGeometry.px96 },
-  colDay: { inlineSize: quotaGeometry.px180 },
-  th: { blockSize: quotaGeometry.px28, paddingInline: space.sm, textAlign: 'start', fontWeight: type.weightRegular, color: ink.fgMuted, borderBottom: quotaGeometry.strongHair, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  td: { blockSize: quotaGeometry.px32, paddingInline: space.sm, borderBottom: quotaGeometry.hair, color: ink.fgSoft, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  colModel: { inlineSize: quotaGeometry.modelColumnWidth },
+  costIdentity: { inlineSize: quotaGeometry.costIdentityWidth },
+  costAmount: { inlineSize: quotaGeometry.costAmountWidth },
+  colScope: { inlineSize: quotaGeometry.scopeColumnWidth },
+  colAccounts: { inlineSize: quotaGeometry.accountsColumnWidth },
+  colValue: { inlineSize: quotaGeometry.valueColumnWidth },
+  colCoverage: { inlineSize: quotaGeometry.coverageColumnWidth },
+  colCount: { inlineSize: quotaGeometry.countColumnWidth },
+  colDay: { inlineSize: quotaGeometry.dayColumnWidth },
+  th: { blockSize: quotaGeometry.dataHeaderHeight, paddingInline: space.sm, textAlign: 'start', fontWeight: type.weightRegular, color: ink.fgMuted, borderBottom: quotaGeometry.strongHair, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  td: { blockSize: quotaGeometry.dataRowHeight, paddingInline: space.sm, borderBottom: quotaGeometry.hair, color: ink.fgSoft, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   rowHead: { textAlign: 'start', fontWeight: type.weightRegular, color: ink.fg },
   numeric: { textAlign: 'end' },
-  accountList: { display: 'flex', flexDirection: 'column', gap: space.xs2, maxBlockSize: quotaGeometry.px168, overflowY: 'auto', scrollbarGutter: 'stable' },
-  accountItem: { display: 'flex', alignItems: 'center', gap: space.sm, blockSize: quotaGeometry.px32, paddingInline: space.sm, borderRadius: radius.sm, cursor: 'pointer', color: ink.fgSoft, backgroundColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.pxNegative2 } },
+  accountList: { display: 'flex', flexDirection: 'column', gap: space.xs2, maxBlockSize: quotaGeometry.accountListMaximumHeight, overflowY: 'auto', scrollbarGutter: 'stable' },
+  accountItem: { display: 'flex', alignItems: 'center', gap: space.sm, blockSize: quotaGeometry.accountRowHeight, paddingInline: space.sm, borderRadius: radius.sm, cursor: 'pointer', color: ink.fgSoft, backgroundColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.insetFocusOffset } },
   accountItemSelected: { backgroundColor: surface.rowActive, color: ink.fg },
   accountMeta: { marginInlineStart: 'auto', color: ink.fgSoft, fontSize: type.denseSize, whiteSpace: 'nowrap' },
   tabList: { display: 'flex', gap: space.xs, borderBottom: quotaGeometry.strongHair },
-  tab: { paddingBlock: space.sm, paddingInline: space.md, cursor: 'pointer', color: ink.fgMuted, boxShadow: 'none', fontSize: type.metaSize, fontWeight: type.weightMedium, ':hover': { color: ink.fgSoft }, ':is([data-selected])': { color: ink.fg, boxShadow: quotaGeometry.selectedUnderline }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.pxNegative2 } },
-  tabPanel: { minBlockSize: quotaGeometry.px280, paddingBlockStart: space.md, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.pxNegative2 } },
+  tab: { paddingBlock: space.sm, paddingInline: space.md, cursor: 'pointer', color: ink.fgMuted, boxShadow: 'none', fontSize: type.metaSize, fontWeight: type.weightMedium, ':hover': { color: ink.fgSoft }, ':is([data-selected])': { color: ink.fg, boxShadow: quotaGeometry.selectedUnderline }, ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.insetFocusOffset } },
+  tabPanel: { minBlockSize: quotaGeometry.tabPanelMinimumHeight, paddingBlockStart: space.md, ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.insetFocusOffset } },
   panelStack: { display: 'flex', flexDirection: 'column', gap: space.xs },
   windowList: { display: 'flex', flexDirection: 'column', gap: space.md, margin: 0, padding: 0, listStyle: 'none' },
   window: { display: 'flex', flexDirection: 'column', gap: space.xs, paddingBlockEnd: space.md, borderBottom: quotaGeometry.hair },
@@ -666,7 +669,7 @@ const styles = stylex.create({
   tag: { paddingInline: space.xs, borderRadius: radius.keyboard, border: quotaGeometry.strongHair, color: ink.fgMuted, fontSize: type.denseSize },
   warningText: { color: status.attention },
   dangerText: { color: status.dangerFg },
-  meter: { display: 'block', blockSize: quotaGeometry.px4, borderRadius: radius.full, backgroundColor: surface.washSubtle, overflow: 'hidden' },
+  meter: { display: 'block', blockSize: quotaGeometry.windowMeterHeight, borderRadius: radius.full, backgroundColor: surface.washSubtle, overflow: 'hidden' },
   meterFill: { display: 'block', blockSize: '100%', backgroundColor: accent.primary },
   warningFill: { backgroundColor: status.attention },
   dangerFill: { backgroundColor: status.danger },

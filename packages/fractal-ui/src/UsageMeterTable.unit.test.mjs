@@ -55,8 +55,12 @@ test('headers expose every column and aria-sort follows the controlled sort prop
   const view = await mount()
   try {
     const headers = [...view.container.querySelectorAll('[role=columnheader]')]
-    const named = header => { const copy = header.cloneNode(true); copy.querySelectorAll('[aria-hidden=true]').forEach(node => node.remove()); return copy.textContent }
+    // Container queries do not run here; the narrow-label trigger only renders below 36rem, where the wide label is display:none.
+    const named = header => { const copy = header.cloneNode(true); copy.querySelectorAll('[aria-hidden=true], [data-usage-meter-narrow-header]').forEach(node => node.remove()); return copy.textContent }
     assert.deepEqual(headers.map(named), ['Account', 'Window', 'Reset', 'Next', 'More'])
+    const narrowMore = headers[4].querySelector('[data-usage-meter-narrow-header="more"]')
+    assert.equal(narrowMore.tabIndex, 0)
+    assert.equal(document.getElementById(narrowMore.getAttribute('aria-labelledby')).textContent, 'More', 'the short Δ header names its tooltip trigger with the full label')
     assert.equal(headers[1].getAttribute('aria-sort'), 'descending')
     assert.ok(headers[1].querySelector('svg'), 'descending sort uses the shared SVG glyph')
     assert.equal(headers[2].getAttribute('aria-sort'), 'none')
@@ -87,9 +91,10 @@ test('meters keep unknown bar-free, exhaustion text, reported zero resets and st
     const staleBar = gamma.querySelector('[data-usage-meter-tone=ok] [data-usage-meter-bar]')
     const freshBar = alpha.querySelector('[data-usage-meter-tone=ok] [data-usage-meter-bar]')
     assert.notEqual(staleBar.className, freshBar.className, 'stale bars carry the dim style')
-    const counts = [...alpha.querySelectorAll('button span')].map(span => span.textContent)
+    const counts = [...alpha.querySelectorAll('[data-usage-meter-more-count]')].map(span => span.textContent)
     assert.deepEqual(counts, ['+1', '+2'], 'narrow +N folds the comparison into omitted windows')
-    assert.deepEqual([...beta.querySelectorAll('button span')].map(span => span.textContent), ['+0', '+0'])
+    assert.deepEqual([...beta.querySelectorAll('[data-usage-meter-more-count]')].map(span => span.textContent), ['+0', '+0'])
+    assert.match(alpha.querySelector('[data-usage-meter-more]').textContent, /more: show all windows and evidence for Alpha desk$/)
   } finally { await view.dispose() }
 })
 
@@ -99,8 +104,8 @@ test('narrow evidence keeps the complete window, exhaustion bar and reported res
   try {
     const row = rowOf(view.container, supplied.id)
     const meter = row.querySelector('[data-usage-meter-tone="exhausted"]')
-    assert.equal(meter.firstElementChild.textContent, 'Mon')
-    assert.equal(meter.lastElementChild.lastElementChild.textContent, '100%!')
+    assert.equal(meter.querySelector('[data-usage-meter-window]').textContent, 'Mon')
+    assert.equal(meter.querySelector('[data-usage-meter-reading]').textContent, '100%!')
     assert.ok(meter.querySelector('[data-usage-meter-bar]'))
     assert.equal(row.querySelector('[aria-label="0 reported resets"]').textContent, '0')
     assert.ok(view.container.querySelector('[aria-sort="descending"] svg'))
@@ -146,7 +151,9 @@ test('s cycles sort only inside the focused monitor and never from editable targ
       await press(editable, 's'); editable.remove()
     }
     assert.equal(view.calls.cycle, 1, 'editable targets keep typing')
-    const sortButton = view.container.querySelector('button[aria-label="Cycle usage sort"]')
+    const sortButton = view.container.querySelector('[data-usage-meter-cycle-sort]')
+    assert.equal(sortButton.textContent, 'Cycle usage Sort s', 'visible Sort leads the hidden verb; the kbd hint is aria-hidden')
+    assert.equal(sortButton.getAttribute('aria-label'), null, 'the name comes from content, so it contains the visible label')
     sortButton.focus(); await press(sortButton, 's')
     assert.equal(view.calls.cycle, 2, 'focused descendants of the monitor still cycle')
   } finally { outside.remove(); await view.dispose() }
@@ -210,7 +217,8 @@ test('hosted toolbar appears once in the shared header and keeps its scoped shor
   try {
     assert.equal(view.container.querySelector(':scope > section > header'), null)
     assert.equal(header.querySelectorAll('[data-usage-meter-status]').length, 1)
-    assert.equal(header.querySelector('[role=status]').textContent, 'Updated now')
+    const statusValue = header.querySelector('[role=status] [data-full-value-trigger]')
+    assert.equal(document.getElementById(statusValue.getAttribute('aria-labelledby')).textContent, 'Updated now', 'the status names its tooltip trigger once')
     const sortButton = header.querySelector('button')
     await act(async () => sortButton.focus())
     await press(sortButton, 's')
@@ -220,20 +228,27 @@ test('hosted toolbar appears once in the shared header and keeps its scoped shor
   } finally { await view.dispose(); header.remove() }
 })
 
-test('dense rows keep one titled account/provider caption and preserve meter/reset evidence', async () => {
+test('dense rows keep one account/provider caption with a focusable full-value disclosure and preserve meter/reset evidence', async () => {
   const view = await mount()
   try {
     const caption = rowOf(view.container, 'row-a').querySelector('[data-usage-meter-account]')
     assert.equal(caption.firstElementChild.textContent, 'plan one')
-    assert.equal(caption.title, 'Alpha desk · plan one')
+    assert.equal(caption.firstElementChild.getAttribute('aria-hidden'), 'true')
+    assert.equal(caption.tabIndex, 0)
+    assert.equal(caption.querySelector('[data-usage-meter-full-value]').textContent, 'Alpha desk · plan one')
+    assert.equal(view.container.querySelector('[title]'), null, 'no native title doubles the tooltip')
     assert.equal(rowOf(view.container, 'row-a').querySelectorAll('[data-usage-meter-account]').length, 1)
     assert.deepEqual([...view.container.querySelectorAll('[data-usage-meter-column]')].map(header => header.dataset.usageMeterColumn), ['account', 'governing', 'reset', 'comparison', 'more'])
     assert.ok(rowOf(view.container, 'row-a').textContent.includes('64%'))
     assert.ok(rowOf(view.container, 'row-a').querySelector('[aria-label="0 reported resets"] svg'))
-    assert.ok(rowOf(view.container, 'row-c').querySelector('[data-usage-meter-account]').title.includes('Stale'))
+    assert.ok(rowOf(view.container, 'row-c').querySelector('[data-usage-meter-account] [data-usage-meter-full-value]').textContent.includes('Stale'))
+    const meter = rowOf(view.container, 'row-a').querySelector('[data-usage-meter-tone]')
+    assert.equal(meter.tabIndex, 0)
+    assert.equal(meter.querySelector('[data-usage-meter-full-value]').textContent, '5h · 64%')
+    assert.equal(meter.getAttribute('aria-labelledby'), meter.querySelector('[data-usage-meter-full-value]').id)
     await view.render({ rows: [{ ...rows[0], note: 'Conflicting source evidence' }] })
     const marked = rowOf(view.container, 'row-a').querySelector('[data-usage-meter-account]')
-    assert.ok(marked.title.includes('Conflicting source evidence'))
+    assert.ok(marked.querySelector('[data-usage-meter-full-value]').textContent.includes('Conflicting source evidence'))
     assert.equal(marked.querySelector('[aria-label]').getAttribute('aria-label'), 'Conflicting source evidence')
   } finally { await view.dispose() }
 })
@@ -246,24 +261,27 @@ test('caller-owned compact captions preserve account names and canonical detail'
     const compact = [...view.container.querySelectorAll('[data-usage-meter-identity="compact"]')]
     assert.deepEqual(compact.map(node => node.textContent), ['sp/shared-workspace-north', 'sp/shared-workspace-south'])
     assert.equal(new Set(compact.map(node => node.textContent)).size, 2)
-    assert.ok(rowOf(view.container, north.id).querySelector('[data-usage-meter-account]').title.includes(north.identity))
+    assert.ok(rowOf(view.container, north.id).querySelector('[data-usage-meter-account] [data-usage-meter-full-value]').textContent.includes(north.identity))
     await view.render({ selectedId: north.id })
     assert.ok(view.container.querySelector('[data-usage-meter-detail]').textContent.includes(north.identity))
   } finally { await view.dispose() }
 })
 
 test('narrow usage meter captions, headings and reset evidence have complete accessible disclosures', async () => {
-  const supplied = { ...rows[0], identity: 'example-provider/shared-workspace-distinguishing-suffix', compactIdentity: { prefix: 'ep/', account: 'shared-workspace-distinguishing-suffix' }, resetAt: '2030-05-03T12:00:00Z' }
+  const supplied = { ...rows[0], identity: 'example-provider/shared-workspace-distinguishing-suffix', compactIdentity: { prefix: 'ep/', account: 'shared-workspace-distinguishing-suffix' }, resetAt: '2030-05-03T12:00:00Z', compactReset: '1h' }
   const view = await mount({ rows: [supplied] })
   try {
-    assert.deepEqual([...view.container.querySelectorAll('[data-usage-meter-column] [title]')].map(label => label.title), ['Account', 'Window', 'Reset', 'Next', 'More'])
+    assert.equal(view.container.querySelector('[title]'), null)
     const cells = rowOf(view.container, supplied.id).querySelectorAll('[role="rowheader"], [role="gridcell"]')
     const account = cells[0].firstElementChild, reset = cells[2].firstElementChild
-    assert.ok(account.title.includes(supplied.identity))
-    assert.equal(account.querySelector('[data-usage-meter-full-value]').textContent, account.title)
-    assert.ok(reset.title.includes(supplied.resetAt))
-    assert.ok(reset.title.includes('0 reported resets'))
-    assert.equal(reset.querySelector('[data-usage-meter-full-value]').textContent, reset.title)
+    assert.equal(account.tabIndex, 0)
+    assert.ok(account.querySelector('[data-usage-meter-full-value]').textContent.includes(supplied.identity))
+    assert.equal(reset.tabIndex, 0)
+    const resetFull = reset.querySelector('[data-usage-meter-full-value]').textContent
+    assert.ok(resetFull.includes(supplied.resetAt))
+    assert.ok(resetFull.includes('0 reported resets'))
+    assert.equal(reset.firstElementChild.getAttribute('aria-hidden'), 'true')
+    assert.deepEqual([...reset.querySelectorAll('[data-usage-meter-reset-reading]')].map(span => span.textContent), ['in 1h', '1h'], 'the compact reset swaps in below 40rem; the full reset stays in the tooltip')
   } finally { await view.dispose() }
 })
 
@@ -286,25 +304,32 @@ test('quota drawer exposes exact cost/token and reset values with a missing-disc
     await render('usd')
     const drawer = container.querySelector('[data-quota-drawer]')
     assertQuotaDrawerDisclosure(drawer)
-    assert.ok(drawer.querySelector('[data-quota-cell="account"] button [title]').title.includes(supplied.label))
-    let amount = drawer.querySelector('[data-quota-cell="amount"] > [title]')
-    assert.equal(amount.title, '123.456 USD')
-    assert.equal(amount.querySelector('[data-quota-full-value]').textContent, amount.title)
-    assert.equal(amount.querySelector('[aria-hidden="true"]').textContent, '$123.46')
-    const reset = drawer.querySelector('[data-quota-cell="reset"] > [title]')
-    assert.ok(reset.title.includes('2030-05-03T12:00:00Z'))
-    assert.ok(reset.title.includes('0 reported resets'))
-    const title = amount.title, full = amount.querySelector('[data-quota-full-value]')
-    amount.title = ''; full.textContent = ''
+    const accountButton = drawer.querySelector('[data-quota-cell="account"] button')
+    assert.ok(accountButton.getAttribute('aria-label').includes(supplied.label))
+    assert.equal(drawer.querySelector('[title]:not([title=""])'), null, 'no native title doubles the tooltip')
+    const fullOf = column => container.querySelector(`[data-quota-cell="${column}"] > [data-full-value-trigger] [data-quota-full-value]`)
+    let amount = fullOf('amount')
+    assert.equal(amount.textContent, '123.456 USD')
+    assert.equal(amount.closest('[data-full-value-trigger]').querySelector('[aria-hidden="true"]').textContent, '$123.46')
+    const reset = fullOf('reset').textContent
+    assert.ok(reset.includes('2030-05-03T12:00:00Z'))
+    assert.ok(reset.includes('0 reported resets'))
+    const more = drawer.querySelector('[data-quota-more]')
+    assert.equal(more.getAttribute('aria-label'), null, 'Visible +N contributes directly to the accessible name')
+    assert.ok(more.textContent.includes('+0'))
+    assert.ok(more.querySelector('[data-quota-more-description]').textContent.includes('amount and reset evidence'))
+    const text = amount.textContent
+    amount.textContent = ''
     assert.throws(() => assertQuotaDrawerDisclosure(drawer), /full-value disclosure/)
-    amount.title = title; full.textContent = title
+    amount.textContent = text
     assertQuotaDrawerDisclosure(drawer)
     await render('tokens')
-    amount = container.querySelector('[data-quota-cell="amount"] > [title]')
-    assert.equal(amount.title, '1234567 tokens')
+    amount = fullOf('amount')
+    assert.equal(amount.textContent, '1234567 tokens')
+    amount = amount.closest('[data-full-value-trigger]')
     assert.match(amount.querySelector('[aria-hidden="true"]').textContent, /1\.2M/)
     await render('usd', [{ ...supplied, usd: undefined, tokens: undefined, usdCoverage: false }])
-    assert.equal(container.querySelector('[data-quota-cell="amount"] > [title]').title, 'Tokens unreported')
+    assert.equal(fullOf('amount').textContent, 'Tokens Unreported')
     assert.equal(events.length, 0, 'Reading disclosure values does not trigger an account action')
   } finally { await act(async () => root.unmount()); container.remove() }
 })
