@@ -18,15 +18,15 @@
     "detail": "No additional runtime or client protocol change. New operation-provenance generation records from the start-operation upgrade remain unreadable by older exec runtimes."
   },
   "downtime": {
-    "status": "none",
-    "detail": "Documentation requires no restart or additional deployment interruption."
+    "status": "changed",
+    "detail": "The ordinary roll remains forward-only with an online SQLite snapshot and the separately classified normal restart. A requested swap-back cut requires a separately accepted per-member maintenance window that stops all owned runtimes and the daemon; it is not a routine pre-roll step."
   },
   "manual": {
     "status": "changed",
-    "detail": "Before swapping back after the start-operation upgrade, verify producer/runtime closure, preserve generation records and restore compatible pre-upgrade runtime state with the database and binary. New operation-provenance exec records are unreadable by older runtime binaries, so restoring SQLite alone is insufficient."
+    "detail": "Before swapping back, establish exact producer/runtime closure, quiesce the daemon and all listed writers, and capture SQLite plus only the explicitly inventoried exec/PTY generation and hashed scope records using the documented Python 3.9-compatible recipe. Preserve per-member roots privately; do not scan or copy runtime trees. The approved limitation is that unproven old PTY closure has no release command in this slice."
   },
   "recovery": {
     "status": "changed",
-    "detail": "Restore runtime generation records consistently with the pre-upgrade database and binary after verified retirement. Preserve upgraded runtime records for investigation. If exact closure or consistent restored runtime state cannot be established, roll forward."
+    "detail": "Restore the matching pre-upgrade database, binary and explicitly captured generation/scope files together while quiesced; preserve the upgraded cut first. Missing preimages or unproved closure require roll-forward. Storage upgrades are rolled separately. Resolved ledger rows remain in claims.sqlite3 forever; the documented offline payload and disk measurements track admission-dependent growth."
   }
 }

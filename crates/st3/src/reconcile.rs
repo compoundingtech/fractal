@@ -5860,8 +5860,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let selected_token = self.store.selected_desired_token(&subject.subject)?;
         if selected_token.is_some() {
-            let selected = self.store.desired_subjects_named(std::slice::from_ref(&subject.subject))?;
-            if !selected.iter().any(|current| current.desired == subject.desired && current.kind == subject.kind) {
+            let selected = self
+                .store
+                .desired_subjects_named(std::slice::from_ref(&subject.subject))?;
+            if !selected
+                .iter()
+                .any(|current| current.desired == subject.desired && current.kind == subject.kind)
+            {
                 return Ok(false);
             }
         } else if !subject.desired.is_null() {
@@ -5966,9 +5971,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         self.bind_account(subject, member, &mut launch_member)?;
         if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
-            let operation = self.store.rollout(&subject.subject)?.context("rollout disappeared before account selection")?;
-            anyhow::ensure!(operation.id == *id && operation.native_account.as_deref() == launch_member.environment.get("ST3_ACCOUNT").map(String::as_str),
-                "strict rollout cannot carry a conversation between native login accounts");
+            let operation = self
+                .store
+                .rollout(&subject.subject)?
+                .context("rollout disappeared before account selection")?;
+            anyhow::ensure!(
+                operation.id == *id
+                    && operation.native_account.as_deref()
+                        == launch_member
+                            .environment
+                            .get("ST3_ACCOUNT")
+                            .map(String::as_str),
+                "strict rollout cannot carry a conversation between native login accounts"
+            );
         }
         for variable in [
             crate::rollout::OPERATION_ENV,
@@ -5998,9 +6013,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             .environment
             .remove(crate::suspension::CONTINUE_PATH_ENV);
         let selector_scope = crate::native_resume::selection_scope(member);
-        launch_member.environment.remove(crate::suspension::SELECTOR_SCOPE_ENV);
+        launch_member
+            .environment
+            .remove(crate::suspension::SELECTOR_SCOPE_ENV);
         if let Some(scope) = &selector_scope {
-            launch_member.environment.insert(crate::suspension::SELECTOR_SCOPE_ENV.into(), scope.clone());
+            launch_member
+                .environment
+                .insert(crate::suspension::SELECTOR_SCOPE_ENV.into(), scope.clone());
         }
         let continued = if subject.kind == "agent"
             && !member
@@ -6012,7 +6031,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &self.store,
                 &subject.subject,
                 harness,
-                launch_member.environment.get("ST3_ACCOUNT").map(String::as_str),
+                launch_member
+                    .environment
+                    .get("ST3_ACCOUNT")
+                    .map(String::as_str),
                 selector_scope.as_deref(),
             )?
         } else {
@@ -6094,7 +6116,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let desired_token = self.launch_token(&subject.subject)?;
         let guard = || -> Result<()> {
             self.store.owned_desired_guard(subject)?;
-            if member.environment.contains_key(crate::suspension::RESUME_ENV) {
+            if member
+                .environment
+                .contains_key(crate::suspension::RESUME_ENV)
+            {
                 anyhow::ensure!(
                     self.launch_token(&subject.subject)? == desired_token,
                     "the suspended launch changed before resume"
@@ -6102,7 +6127,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             if let Some(request) = request {
                 anyhow::ensure!(
-                    self.store.selected_desired_token(&subject.subject)?.as_deref()
+                    self.store
+                        .selected_desired_token(&subject.subject)?
+                        .as_deref()
                         == request.body.pointer("/evidence/0").and_then(Value::as_str),
                     "the explicit restart declaration changed before launch"
                 );
@@ -6117,27 +6144,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             Ok(())
         };
-        if let Some(request) = request {
-            // Persist before the side effect. An interrupted attempt is never launched twice,
-            // including when the owner daemon loses its in-memory state between passes.
-            guard()?;
-            let (_, appended) = self.store.append_claim_outcome(&ClaimInput {
-                subject: subject.subject.clone(),
-                kind: "runtime.action.requested".into(),
-                // Actor-bound control receipts survive checkpoint trimming.
-                actor: request.actor.clone(),
-                fields: BTreeMap::from([
-                    ("action".into(), Value::String("start".into())),
-                    ("reason".into(), Value::String(reason.into())),
-                ]),
-                evidence: vec![request.id.clone()],
-                expected_subject: None,
-                idempotency_key: Some(format!("agent-restart-attempt:{}", request.id)),
-            })?;
-            if !appended {
-                return Ok(false);
-            }
-        }
+        // Admission writes the requester control attempt and physical request
+        // together, only after its writer validates this captured declaration.
+        guard()?;
         self.dispatch_start(start_jobs::PreparedStart {
             subject: subject.clone(),
             member: member.clone(),
@@ -6148,16 +6157,36 @@ impl<R: RuntimeControl> Reconciler<R> {
             selected_token,
             placement_evidence,
             start_request: String::new(),
-            expected_incarnation: self.store.latest_actual_value(&subject.subject)?
-                .and_then(|actual| actual.pointer("/fields/incarnation_id").and_then(Value::as_str).map(str::to_owned)),
-            resume_operation: if member.environment.contains_key(crate::suspension::RESUME_ENV) {
+            start_request_receipt: None,
+            control_request: None,
+            control_request_receipt: None,
+            expected_incarnation: self.store.latest_actual_value(&subject.subject)?.and_then(
+                |actual| {
+                    actual
+                        .pointer("/fields/incarnation_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                },
+            ),
+            resume_operation: if member
+                .environment
+                .contains_key(crate::suspension::RESUME_ENV)
+            {
                 crate::suspension::current(&self.store, &subject.subject)?
-                    .filter(|s| s.phase == "restoring").map(|s| s.operation_id)
-            } else { None },
+                    .filter(|s| s.phase == "restoring")
+                    .map(|s| s.operation_id)
+            } else {
+                None
+            },
         })
     }
 
-    fn finish_start(&self, operation_id: &str, prepared: &start_jobs::PreparedStart, result: Result<Option<String>>) -> Result<start_jobs::StartCompletion> {
+    fn finish_start(
+        &self,
+        operation_id: &str,
+        prepared: &start_jobs::PreparedStart,
+        result: Result<Option<String>>,
+    ) -> Result<start_jobs::StartCompletion> {
         let subject = &prepared.subject;
         let member = &prepared.member;
         let desired_token = prepared.desired_token.clone();
@@ -6181,26 +6210,40 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: Some(format!("start-failed:{operation_id}")),
             };
             let observed = ClaimInput {
-                subject: subject.subject.clone(), kind: "runtime.observed".into(), actor: None,
-                fields: member_fields(member, "absent", None, false), evidence: Vec::new(),
-                expected_subject: None, idempotency_key: Some(format!("start-absent:{operation_id}")),
+                subject: subject.subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: member_fields(member, "absent", None, false),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("start-absent:{operation_id}")),
             };
-            if !self.store.apply_runtime_start_result(operation_id, &[failed, observed])? { return Ok(start_jobs::StartCompletion::Superseded); }
-            return Ok(start_jobs::StartCompletion::Applied(Some(format!("start member runtime: {error:#}"))));
+            if !self
+                .store
+                .apply_runtime_start_result(operation_id, &[failed, observed])?
+            {
+                return Ok(start_jobs::StartCompletion::Superseded);
+            }
+            return Ok(start_jobs::StartCompletion::Applied(Some(format!(
+                "start member runtime: {error:#}"
+            ))));
         }
         let incarnation = result?;
         let mut fields = BTreeMap::from([
             ("action".into(), Value::String("start".into())),
             ("operation".into(), Value::String(operation)),
             ("desired_token".into(), Value::String(desired_token)),
-            ("runtime_id".into(), Value::String(member.runtime_id.clone())),
+            (
+                "runtime_id".into(),
+                Value::String(member.runtime_id.clone()),
+            ),
             ("reason".into(), Value::String(reason.into())),
         ]);
         if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
             fields.insert("rollout_operation".into(), serde_json::json!(operation));
         }
-        if let Some(incarnation) = incarnation {
-            fields.insert("incarnation_id".into(), Value::String(incarnation));
+        if let Some(incarnation) = &incarnation {
+            fields.insert("incarnation_id".into(), Value::String(incarnation.clone()));
         }
         let succeeded = ClaimInput {
             subject: subject.subject.clone(),
@@ -6212,11 +6255,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
         let observed = ClaimInput {
-            subject: subject.subject.clone(), kind: "runtime.observed".into(), actor: None,
-            fields: member_fields(member, "starting", None, false), evidence: placement_evidence,
-            expected_subject: None, idempotency_key: Some(format!("start-observed:{operation_id}")),
+            subject: subject.subject.clone(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: member_fields(member, "starting", incarnation.as_deref(), false),
+            evidence: placement_evidence,
+            expected_subject: None,
+            idempotency_key: Some(format!("start-observed:{operation_id}")),
         };
-        if !self.store.apply_runtime_start_result(operation_id, &[succeeded, observed])? { return Ok(start_jobs::StartCompletion::Superseded); }
+        if !self
+            .store
+            .apply_runtime_start_result(operation_id, &[succeeded, observed])?
+        {
+            return Ok(start_jobs::StartCompletion::Superseded);
+        }
         self.signal_changed();
         Ok(start_jobs::StartCompletion::Applied(None))
     }
@@ -7690,7 +7742,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             return Ok(());
         }
-        let record = self.store.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: None,
@@ -7698,7 +7750,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             evidence,
             expected_subject: None,
             idempotency_key: None,
-        })?;
+        };
+        let record = if kind == "runtime.observed" {
+            let Some(record) = self.store.append_reconciled_runtime_observation(&input)? else {
+                // The worker's durable result superseded this physical capture.
+                // Wake a fresh pass instead of publishing the prior incarnation.
+                self.start_changed(subject);
+                return Ok(());
+            };
+            record
+        } else {
+            self.store.append_claim(&input)?
+        };
         if crate::store::local_observation_position(&record).is_some() {
             // Only this node reads a local observation, and it cannot advance a mission.
             self.event_notify

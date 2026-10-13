@@ -22,6 +22,12 @@ CREATE TABLE IF NOT EXISTS local_runtime_starts (
     receipted INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS local_runtime_starts_subject ON local_runtime_starts(subject,id DESC);
+CREATE INDEX IF NOT EXISTS local_runtime_starts_subject_request
+ON local_runtime_starts(subject,CAST(json_extract(body,'$.start_request_position') AS INTEGER) DESC);
+CREATE INDEX IF NOT EXISTS local_runtime_starts_verified_subject_request
+ON local_runtime_starts(subject,CAST(json_extract(body,'$.start_request_position') AS INTEGER) DESC)
+WHERE json_extract(result,'$.verification') IN ('operation-incarnation','operation-ended','operation-retired')
+ AND json_type(result,'$.incarnation')='text';
 CREATE INDEX IF NOT EXISTS local_runtime_starts_pending ON local_runtime_starts(id)
 WHERE finished=0 OR applied=0 OR (revoked_by IS NOT NULL AND cleanup_verified=0)
  OR (json_extract(result,'$.error') IS NOT NULL AND cleanup_verified=0);
@@ -150,7 +156,186 @@ fn release_evidence(tx: &Transaction<'_>, operation: &str) -> rusqlite::Result<(
     Ok(())
 }
 
+fn retained_runtime_start_request(
+    connection: &Connection,
+    origin: &str,
+    id: &str,
+) -> Result<Option<ClaimRecord>> {
+    if id.starts_with(LOCAL_OBSERVATION_ID_PREFIX) {
+        let Some(position) = id.strip_prefix(&format!("{LOCAL_OBSERVATION_ID_PREFIX}{origin}/"))
+        else {
+            return Ok(None);
+        };
+        let Ok(position) = position.parse::<i64>() else {
+            return Ok(None);
+        };
+        connection.query_row(
+            "SELECT id,after_store_index,subject,kind,actor,body,observed_at_unix_ms FROM local_observations WHERE id=?1",
+            [position], |row| local_observation_from_row(origin, row),
+        ).optional().map_err(Into::into)
+    } else {
+        connection.prepare_cached(&format!("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE id=?1 AND {UNREPAIRED_CLAIM}"))?
+            .query_row([id], claim_from_row).optional().map_err(Into::into)
+    }
+}
+
+fn same_runtime_start_request(actual: &ClaimRecord, expected: &ClaimRecord) -> bool {
+    actual.id == expected.id
+        && actual.subject == expected.subject
+        && actual.kind == expected.kind
+        && actual.origin == expected.origin
+        && actual.actor == expected.actor
+        && actual.body == expected.body
+}
+
+fn runtime_start_requests_retained(
+    connection: &Connection,
+    origin: &str,
+    body: &Value,
+) -> Result<bool> {
+    for (id, snapshot) in [
+        ("start_request", "start_request_receipt"),
+        ("control_request", "control_request_receipt"),
+    ] {
+        if id == "control_request" && body[id].is_null() && body[snapshot].is_null() {
+            continue;
+        }
+        if body[snapshot].is_null() {
+            return Ok(false);
+        }
+        let expected: ClaimRecord = serde_json::from_value(body[snapshot].clone())?;
+        if body[id].as_str() != Some(expected.id.as_str())
+            || !retained_runtime_start_request(connection, origin, &expected.id)?
+                .is_some_and(|actual| same_runtime_start_request(&actual, &expected))
+        {
+            return Ok(false);
+        }
+    }
+    if !body["request"].is_null() {
+        let expected: ClaimRecord = serde_json::from_value(body["request"].clone())?;
+        if !retained_runtime_start_request(connection, origin, &expected.id)?
+            .is_some_and(|actual| same_runtime_start_request(&actual, &expected))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn bind_runtime_start_result(operation: &RuntimeStartOperation, origin: &str, result: &mut Value) {
+    result["operation_id"] = Value::from(operation.id.clone());
+    result["subject"] = Value::from(operation.subject.clone());
+    result["owner"] = Value::from(operation.owner.clone());
+    result["origin"] = Value::from(origin);
+    result["runtime_id"] = operation.body["member"]["runtime_id"].clone();
+    result["terminal"] = operation.body["member"]["terminal"].clone();
+    result["runtime_kind"] = Value::from(if result["terminal"] == true {
+        "pty"
+    } else {
+        "exec"
+    });
+    for key in [
+        "selected_token",
+        "desired_token",
+        "expected_incarnation",
+        "start_request",
+        "control_request",
+    ] {
+        result[key] = operation.body[key].clone();
+    }
+}
+
+fn retain_runtime_start_closure(
+    operation: &RuntimeStartOperation,
+    origin: &str,
+    result: &mut Value,
+    witness: Value,
+) -> Result<()> {
+    bind_runtime_start_result(operation, origin, result);
+    let proof = json!({"version":1,"operation_id":operation.id,"subject":operation.subject,
+        "owner":operation.owner,"origin":origin,"runtime_id":result["runtime_id"],
+        "terminal":result["terminal"],"runtime_kind":result["runtime_kind"],
+        "selected_token":result["selected_token"],"desired_token":result["desired_token"],
+        "expected_incarnation":result["expected_incarnation"],"incarnation":result["incarnation"],
+        "verification":result["verification"],"start_request":result["start_request"],
+        "start_request_receipt":operation.body["start_request_receipt"],"start_request_position":operation.body["start_request_position"],
+        "control_request":result["control_request"],"control_request_receipt":operation.body["control_request_receipt"],
+        "requester_restart":operation.body["request"],"witness":witness});
+    result["closure_proof_id"] = Value::from(format!("start-proof/{}", canonical_hash(&proof)?));
+    result["closure_proof"] = proof;
+    Ok(())
+}
+
+fn closed_runtime_start_result(
+    operation: &RuntimeStartOperation,
+    origin: &str,
+    result: &mut Value,
+) -> Result<()> {
+    bind_runtime_start_result(operation, origin, result);
+    if result["error"].is_string() && result["producer_closed"] == true {
+        result["verification"] = Value::from("producer-closed");
+        result["phase"] = Value::from("failed");
+        let kind = result["closure_kind"]
+            .as_str()
+            .unwrap_or("positive-producer-proof")
+            .to_owned();
+        retain_runtime_start_closure(operation, origin, result, json!({"kind":kind}))?;
+    }
+    Ok(())
+}
+
 impl Store {
+    /// A late physical snapshot cannot turn the prior target into a replacement
+    /// for a newly verified launch. Admission order comes from the exact local
+    /// request position, never UUID creation time or claim publication time.
+    pub(crate) fn append_reconciled_runtime_observation(
+        &self,
+        input: &ClaimInput,
+    ) -> Result<Option<ClaimRecord>> {
+        anyhow::ensure!(
+            input.kind == "runtime.observed" && input.actor.is_none(),
+            "expected owner runtime observation"
+        );
+        let admission = |connection: &Connection| -> Result<(), St3Error> {
+            let latest: Option<RuntimeStartOperation> = connection.query_row(
+                "SELECT * FROM local_runtime_starts WHERE subject=?1
+                 AND json_extract(result,'$.verification') IN ('operation-incarnation','operation-ended','operation-retired')
+                 AND json_type(result,'$.incarnation')='text'
+                 ORDER BY CAST(json_extract(body,'$.start_request_position') AS INTEGER) DESC LIMIT 1",
+                [&input.subject], read).optional().map_err(internal)?;
+            if let Some(operation) = latest
+                && let Some(result) = &operation.result
+                && let Some(actual) = result["incarnation"].as_str()
+            {
+                let observed = input.fields.get("incarnation_id").and_then(Value::as_str);
+                let prior = operation.body["expected_incarnation"].as_str();
+                if observed != Some(actual) && (observed.is_none() || observed == prior) {
+                    return Err(St3Error::new(
+                        "stale-runtime-observation",
+                        "physical snapshot precedes the verified start incarnation",
+                    ));
+                }
+            }
+            Ok(())
+        };
+        match append_claim_with_commit_context(
+            &self.graph,
+            input,
+            None,
+            None,
+            None,
+            None,
+            ClaimCommitContext {
+                admission: Some(&admission),
+                ..Default::default()
+            },
+        ) {
+            Ok((record, _)) => Ok(Some(record)),
+            Err(error) if error.code == "stale-runtime-observation" => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Revocation, declaration selection and all launch receipts linearize in one short
     /// writer transaction. A stale completion cannot leave a success/starting receipt.
     pub(crate) fn apply_runtime_start_result(
@@ -181,6 +366,22 @@ impl Store {
                 }) {
                     return Ok(false);
                 }
+                if !runtime_start_requests_retained(tx, self.origin(), &operation.body)? {
+                    if operation.result.as_ref().is_some_and(|result| {
+                        result["producer_closed"] == true
+                            && result["verification"] == "producer-closed"
+                            && result["closure_proof_id"].is_string()
+                    }) {
+                        // Positive no-effect proof survives repair/retraction. Do not
+                        // manufacture receipts citing evidence that no longer exists.
+                        tx.execute(
+                            "UPDATE local_runtime_starts SET receipted=1 WHERE id=?1",
+                            [id],
+                        )?;
+                        return Ok(true);
+                    }
+                    return Ok(false);
+                }
                 let selected =
                     current_desired_row_tx(tx, &operation.subject)?.map(|row| row.claim_id);
                 let expected = operation.body["selected_token"].as_str().map(str::to_owned);
@@ -193,6 +394,16 @@ impl Store {
                     .context("finished start has no result")?;
                 for input in inputs {
                     if input.subject != operation.subject {
+                        return Ok(false);
+                    }
+                    if input.kind == "runtime.observed"
+                        && result["verification"] == "operation-incarnation"
+                        && (input.fields.get("incarnation_id") != Some(&result["incarnation"])
+                            || input.fields.get("runtime_id")
+                                != Some(&operation.body["member"]["runtime_id"])
+                            || input.fields.get("terminal")
+                                != Some(&operation.body["member"]["terminal"]))
+                    {
                         return Ok(false);
                     }
                     if input
@@ -240,6 +451,7 @@ impl Store {
                 if operation.receipted {
                     return Ok(true);
                 }
+                let mut observation_receipt = None;
                 let receipts = inputs
                     .iter()
                     .map(|input| -> Result<String> {
@@ -288,9 +500,55 @@ impl Store {
                             if !input.evidence.iter().any(|evidence| evidence == request) {
                                 input.evidence.push(request.into());
                             }
+                            if let Some(control) = operation.body["control_request"].as_str()
+                                && !input.evidence.iter().any(|evidence| evidence == control)
+                            {
+                                input.evidence.push(control.into());
+                            }
                             validate_local_observation(&input)?;
                         }
                         let claim = if input.kind == "runtime.observed" {
+                            // Reconciliation can observe a published child while its
+                            // launcher is still returning. A delayed completion must
+                            // not regress that exact runtime from running to starting.
+                            let current: Option<String> = tx
+                                .query_row(
+                                    &format!(
+                                        "{} LIMIT 1",
+                                        newest_claims_of_kind_query(
+                                            "claims.id",
+                                            "runtime.observed"
+                                        )
+                                    ),
+                                    params![input.subject, i64::MAX],
+                                    |row| row.get(0),
+                                )
+                                .optional()?;
+                            let current = current
+                                .map(|id| claim_by_id_tx(tx, &id))
+                                .transpose()?
+                                .flatten();
+                            if input
+                                .fields
+                                .get("status")
+                                .is_some_and(|status| status == "starting")
+                                && let Some(current) = current.filter(|current| {
+                                    current.origin == self.origin()
+                                        && current.body.pointer("/fields/incarnation_id")
+                                            == Some(&result["incarnation"])
+                                        && current.body.pointer("/fields/runtime_id")
+                                            == Some(&operation.body["member"]["runtime_id"])
+                                        && current
+                                            .body
+                                            .pointer("/fields/status")
+                                            .is_some_and(|status| status != "starting")
+                                })
+                            {
+                                let key = canonical::claim_key(tx, &current.id)?;
+                                observation_receipt = Some(json!({"receipt":current,
+                                    "canonical_sortable_key":canonical::sortable_key(&key)}));
+                                return Ok(current.id);
+                            }
                             let mut predecessors = latest_claim_id_tx(tx, &input.subject)?
                                 .into_iter()
                                 .collect::<Vec<_>>();
@@ -320,12 +578,29 @@ impl Store {
                         } else {
                             insert_local_observation_tx(tx, self.origin(), &input, now_ms())?.0
                         };
+                        if claim.kind == "runtime.observed"
+                            && result["verification"] == "operation-incarnation"
+                        {
+                            anyhow::ensure!(
+                                claim.body.pointer("/fields/incarnation_id")
+                                    == Some(&result["incarnation"]),
+                                "start observation must bind the verified actual incarnation"
+                            );
+                            let key = canonical::claim_key(tx, &claim.id)?;
+                            observation_receipt = Some(json!({
+                                "receipt": claim,
+                                "canonical_sortable_key": canonical::sortable_key(&key),
+                            }));
+                        }
                         pin_evidence(tx, id, self.origin(), &claim.id)?;
                         Ok(claim.id)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let mut result = operation.result.context("finished start has no result")?;
                 result["result_receipts"] = serde_json::to_value(receipts)?;
+                if let Some(observation) = observation_receipt {
+                    result["runtime_observation"] = observation;
+                }
                 tx.execute(
                     "UPDATE local_runtime_starts SET receipted=1,result=?2 WHERE id=?1",
                     params![id, serde_json::to_string(&result)?],
@@ -380,20 +655,101 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Point-read the exact admitted request snapshot at the physical boundary.
+    /// Trim pins do not authorize launching after a repair or source retraction.
+    pub(crate) fn runtime_start_request_retained(&self, expected: &ClaimRecord) -> Result<bool> {
+        let connection = self.readers.get();
+        let actual = retained_runtime_start_request(&connection, self.origin(), &expected.id)?;
+        Ok(actual.is_some_and(|actual| same_runtime_start_request(&actual, expected)))
+    }
+
     pub fn admit_runtime_start(
         &self,
         operation: &mut RuntimeStartOperation,
         limit: usize,
     ) -> Result<RuntimeStartAdmission> {
+        if let Some(actor) = operation
+            .body
+            .pointer("/request/actor")
+            .and_then(Value::as_str)
+        {
+            self.graph.ensure_principal_key(actor)?;
+        }
         self.connection.batched(|tx| -> Result<RuntimeStartAdmission> {
-            let selected = current_desired_row_tx(tx, &operation.subject)?.map(|row| row.claim_id);
-            if selected.as_deref() != operation.body["selected_token"].as_str() {
+            let selected = current_desired_row_tx(tx, &operation.subject)?;
+            if selected.as_ref().map(|row| row.claim_id.as_str()) != operation.body["selected_token"].as_str() {
                 return Ok(RuntimeStartAdmission::Superseded);
             }
+            // Retraction and restoration can select the same token again. Bind
+            // the prepared declaration to this same writer snapshot, not an
+            // earlier body read whose token happened to survive an ABA change.
+            let prepared = &operation.body["subject"];
+            let matches = prepared["subject"].as_str() == Some(operation.subject.as_str())
+                && match selected.as_ref() {
+                    Some(row) => prepared["kind"].as_str() == Some(row.kind.as_str())
+                        && prepared["desired"] == serde_json::from_str::<Value>(&row.body)?,
+                    None => prepared["desired"].is_null(),
+                };
+            if !matches {
+                return Ok(RuntimeStartAdmission::Superseded);
+            }
+            let selected = selected.map(|row| row.claim_id);
             let busy: bool = tx.query_row(
                 &format!("SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND ({PENDING}))"),
                 [&operation.subject], |row| row.get(0))?;
             if busy { return Ok(RuntimeStartAdmission::SeatBusy); }
+            if !operation.body["request"].is_null() {
+                let request: ClaimRecord = serde_json::from_value(operation.body["request"].clone())?;
+                let original = retained_runtime_start_request(tx, self.origin(), &request.id)?;
+                if !original.is_some_and(|original| original.subject == request.subject
+                    && original.kind == request.kind && original.actor == request.actor
+                    && original.origin == request.origin && original.body == request.body)
+                    || request.subject != operation.subject || request.kind != "runtime.action.requested"
+                    || request.body.pointer("/fields/action").and_then(Value::as_str) != Some("restart")
+                    || request.body.pointer("/evidence/0").and_then(Value::as_str)
+                        != selected.as_deref() {
+                    return Ok(RuntimeStartAdmission::Superseded);
+                }
+                let key = format!("agent-restart-attempt:{}", request.id);
+                let mut fields = BTreeMap::from([
+                    ("action".into(), Value::from("start")),
+                    ("reason".into(), operation.body["reason"].clone()),
+                    ("operation".into(), Value::from(operation.id.clone())),
+                    ("desired_token".into(), operation.body["desired_token"].clone()),
+                    ("runtime_id".into(), operation.body["member"]["runtime_id"].clone()),
+                    ("terminal".into(), operation.body["member"]["terminal"].clone()),
+                ]);
+                if let Some(incarnation) = operation.body["expected_incarnation"].as_str() {
+                    fields.insert("incarnation_id".into(), Value::from(incarnation));
+                }
+                let control = ClaimInput { subject: operation.subject.clone(), kind: "runtime.action.requested".into(),
+                    actor: request.actor.clone(), fields, evidence: vec![request.id.clone()],
+                    expected_subject: None, idempotency_key: Some(key.clone()) };
+                let control = if request.actor.is_none() {
+                    let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_observations WHERE dedupe_key=?1)",
+                        [local_observation_dedupe_key(&control.kind, &key)], |row| row.get(0))?;
+                    if duplicate { return Ok(RuntimeStartAdmission::SeatBusy); }
+                    validate_local_observation(&control)?;
+                    insert_local_observation_tx(tx, self.origin(), &control, now_ms())?.0
+                } else {
+                    let (key, digest) = claim_operation(&control)?.context("control attempt needs idempotency")?;
+                    if operation_tx(tx, &key)?.is_some() || !smallclaims::store::checkpoint::checkpointed_operation(tx, &key)?.is_empty() {
+                        return Ok(RuntimeStartAdmission::SeatBusy);
+                    }
+                    let body = json!({"fields":control.fields,"evidence":control.evidence,
+                        "_operation":{"id":key,"request_digest":digest}});
+                    let mut predecessors = latest_claim_id_tx(tx, &operation.subject)?.into_iter().collect::<Vec<_>>();
+                    predecessors.push(request.id.clone());
+                    predecessors.sort(); predecessors.dedup();
+                    let claim = append_claim_tx(tx, self.origin(), &operation.subject, &control.kind,
+                        control.actor.as_deref(), &body, &predecessors, None)?;
+                    register_operation_tx(tx, &claim)?;
+                    claim
+                };
+                operation.body["control_request"] = Value::from(control.id.clone());
+                operation.body["control_request_receipt"] = serde_json::to_value(&control)?;
+                pin_evidence(tx, &operation.id, self.origin(), &control.id)?;
+            }
             let mut fields = BTreeMap::from([
                 ("action".into(), Value::from("start")),
                 ("operation".into(), Value::from(operation.id.clone())),
@@ -408,11 +764,13 @@ impl Store {
                 fields.insert("incarnation_id".into(), Value::from(incarnation));
             }
             let request = ClaimInput { subject: operation.subject.clone(), kind: "runtime.action.requested".into(), actor: None,
-                fields, evidence: selected.into_iter().collect(), expected_subject: None,
+                fields, evidence: selected.into_iter().chain(operation.body["control_request"].as_str().map(str::to_owned)).collect(), expected_subject: None,
                 idempotency_key: Some(format!("start-request:{}", operation.id)) };
             validate_local_observation(&request)?;
             let (request, _) = insert_local_observation_tx(tx, self.origin(), &request, now_ms())?;
-            operation.body["start_request"] = Value::from(request.id);
+            operation.body["start_request"] = Value::from(request.id.clone());
+            operation.body["start_request_receipt"] = serde_json::to_value(&request)?;
+            operation.body["start_request_position"] = json!(local_observation_position(&request).context("physical request needs its original local position")?);
             let body = serde_json::to_string(&operation.body)?;
             tx.execute("INSERT INTO local_runtime_starts(id,subject,owner,body) VALUES (?1,?2,?3,?4)",
                 params![operation.id, operation.subject, operation.owner, body])?;
@@ -439,7 +797,7 @@ impl Store {
             .readers
             .get()
             .query_row(
-                "SELECT * FROM local_runtime_starts WHERE subject=?1 ORDER BY id DESC LIMIT 1",
+                "SELECT * FROM local_runtime_starts WHERE subject=?1 ORDER BY CAST(json_extract(body,'$.start_request_position') AS INTEGER) DESC LIMIT 1",
                 [subject],
                 read,
             )
@@ -494,13 +852,109 @@ impl Store {
     }
 
     pub fn finish_runtime_start(&self, id: &str, result: &Value) -> Result<()> {
-        let result = serde_json::to_string(result)?;
-        self.connection.batched(|tx| tx.execute(
-            "UPDATE local_runtime_starts SET finished=1,result=?2,
-             cleanup_verified=CASE WHEN json_extract(?2,'$.error') IS NOT NULL AND json_extract(?2,'$.producer_closed')=1 THEN 1 ELSE cleanup_verified END
-             WHERE id=?1 AND finished=0", params![id, result]))
+        self.connection.batched(|tx| -> Result<()> {
+            let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+            if operation.finished { return Ok(()); }
+            let mut result = result.clone();
+            closed_runtime_start_result(&operation, self.origin(), &mut result)?;
+            tx.execute("UPDATE local_runtime_starts SET finished=1,result=?2,
+                cleanup_verified=CASE WHEN json_extract(?2,'$.error') IS NOT NULL AND json_extract(?2,'$.producer_closed')=1 THEN 1 ELSE cleanup_verified END
+                WHERE id=?1 AND finished=0", params![id, serde_json::to_string(&result)?])?;
+            Ok(())
+        }).map_err(|error| anyhow::anyhow!("{error}"))??;
+        Ok(())
+    }
+
+    /// Revocation alone cannot close a dispatched worker. Decide this under the
+    /// same writer that dispatch uses, before retaining never-dispatched proof.
+    pub(crate) fn cancel_undispatched_runtime_start(&self, id: &str) -> Result<bool> {
+        self.connection.batched(|tx| -> Result<bool> {
+            let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+            if operation.dispatched || operation.finished || operation.revoked_by.is_none() { return Ok(false); }
+            let mut result = json!({"error":"start was revoked before dispatch","producer_closed":true,"closure_kind":"never-dispatched"});
+            closed_runtime_start_result(&operation, self.origin(), &mut result)?;
+            tx.execute("UPDATE local_runtime_starts SET finished=1,cleanup_verified=1,result=?2 WHERE id=?1",
+                params![id, serde_json::to_string(&result)?])?;
+            Ok(true)
+        }).map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
+    /// Called only after a positive exact-operation producer closure check.
+    pub(crate) fn retain_runtime_start_producer_closed(&self, id: &str) -> Result<()> {
+        self.connection
+            .batched(|tx| -> Result<()> {
+                let operation =
+                    tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+                anyhow::ensure!(
+                    operation.finished && operation.revoked_by.is_some(),
+                    "closure needs a returned revoked operation"
+                );
+                let mut result = operation
+                    .result
+                    .clone()
+                    .context("closed operation has no result")?;
+                if result["error"].is_null() {
+                    result["error"] =
+                        Value::from("revoked producer closed without a verified launch");
+                }
+                result["producer_closed"] = Value::from(true);
+                closed_runtime_start_result(&operation, self.origin(), &mut result)?;
+                tx.execute(
+                    "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+                    params![id, serde_json::to_string(&result)?],
+                )?;
+                release_evidence(tx, id)?;
+                Ok(())
+            })
             .map_err(|error| anyhow::anyhow!("{error}"))??;
         Ok(())
+    }
+
+    /// An exact physical ending witness is retained separately from launch success.
+    pub(crate) fn retain_runtime_start_ended(
+        &self,
+        id: &str,
+        incarnation: &str,
+        status: &str,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            !incarnation.is_empty() && matches!(status, "exited" | "stopped" | "vanished"),
+            "invalid runtime ending witness"
+        );
+        self.connection
+            .batched(|tx| -> Result<bool> {
+                let operation =
+                    tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+                if !operation.finished || operation.revoked_by.is_none() {
+                    return Ok(false);
+                }
+                let mut result = operation
+                    .result
+                    .clone()
+                    .context("ended operation has no launch result")?;
+                if result["incarnation"]
+                    .as_str()
+                    .is_some_and(|previous| previous != incarnation)
+                {
+                    return Ok(false);
+                }
+                result["incarnation"] = Value::from(incarnation);
+                result["verification"] = Value::from("operation-ended");
+                result["phase"] = Value::from("ended");
+                retain_runtime_start_closure(
+                    &operation,
+                    self.origin(),
+                    &mut result,
+                    json!({"kind":"exact-runtime-ended","status":status,"incarnation":incarnation}),
+                )?;
+                tx.execute(
+                    "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+                    params![id, serde_json::to_string(&result)?],
+                )?;
+                release_evidence(tx, id)?;
+                Ok(true)
+            })
+            .map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
     pub(crate) fn verify_runtime_start(&self, id: &str, incarnation: &str) -> Result<bool> {
@@ -515,30 +969,35 @@ impl Store {
     }
 
     pub(crate) fn close_unverified_runtime_start(&self, id: &str) -> Result<bool> {
-        self.connection.batched(|tx| -> Result<bool> {
-            Ok(tx.execute(
-                "UPDATE local_runtime_starts SET cleanup_verified=1, result=json_set(result,
-                    '$.error','producer closed without a verified launch',
-                    '$.producer_closed',json('true'),'$.verification','producer-closed','$.phase','failed')
-                 WHERE id=?1 AND finished=1 AND applied=0 AND receipted=0
-                    AND revoked_by IS NULL AND json_extract(result,'$.error') IS NULL",
-                [id])? == 1)
-        }).map_err(|error| anyhow::anyhow!("{error}"))?
-    }
-
-    pub fn runtime_start_applied(&self, id: &str) -> Result<()> {
         self.connection
-            .batched(|tx| {
+            .batched(|tx| -> Result<bool> {
+                let operation =
+                    tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+                if !operation.finished
+                    || operation.applied
+                    || operation.receipted
+                    || operation.revoked_by.is_some()
+                    || operation
+                        .result
+                        .as_ref()
+                        .is_none_or(|result| !result["error"].is_null())
+                {
+                    return Ok(false);
+                }
+                let mut result = operation
+                    .result
+                    .clone()
+                    .context("closed operation has no result")?;
+                result["error"] = Value::from("producer closed without a verified launch");
+                result["producer_closed"] = Value::from(true);
+                closed_runtime_start_result(&operation, self.origin(), &mut result)?;
                 tx.execute(
-                    "UPDATE local_runtime_starts SET applied=1 WHERE id=?1 AND finished=1
-                        AND (revoked_by IS NOT NULL OR json_extract(result,'$.error') IS NOT NULL
-                            OR json_extract(result,'$.verification')='operation-incarnation')",
-                    [id],
+                    "UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+                    params![id, serde_json::to_string(&result)?],
                 )?;
-                release_evidence(tx, id)
+                Ok(true)
             })
-            .map_err(|error| anyhow::anyhow!("{error}"))??;
-        Ok(())
+            .map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
     /// Commit a positive, exact-incarnation physical retirement receipt and its
@@ -571,6 +1030,8 @@ impl Store {
                 || requested.body["fields"]["operation"].as_str().is_some_and(|bound| bound != id) {
                 return Ok(false);
             }
+            let mut evidence = vec![request.into(), operation.body["start_request"].as_str().context("retirement has no launch request")?.into()];
+            if let Some(control) = operation.body["control_request"].as_str() { evidence.push(control.into()); }
             let mut input = ClaimInput {
                 subject: operation.subject.clone(), kind: "runtime.action.succeeded".into(), actor: None,
                 fields: BTreeMap::from([
@@ -581,20 +1042,26 @@ impl Store {
                     ("incarnation_id".into(), Value::from(incarnation)),
                     ("operation_status".into(), Value::from("retired")),
                 ]),
-                evidence: vec![request.into(), operation.body["start_request"].as_str().context("retirement has no launch request")?.into()],
+                evidence,
                 expected_subject: None, idempotency_key: Some(format!("start-retirement:{id}:{incarnation}")),
             };
             if let Some(token) = operation.body["desired_token"].as_str() {
                 input.fields.insert("desired_token".into(), Value::from(token));
             }
             validate_local_observation(&input)?;
-            let receipt = insert_local_observation_tx(tx, self.origin(), &input, now_ms())?.0;
-            let mut result = operation.result.context("retired operation has no launch result")?;
+            let receipt = if runtime_start_requests_retained(tx, self.origin(), &operation.body)? {
+                Some(insert_local_observation_tx(tx, self.origin(), &input, now_ms())?.0)
+            } else { None };
+            let mut result = operation.result.clone().context("retired operation has no launch result")?;
             result["incarnation"] = Value::from(incarnation);
             result["verification"] = Value::from("operation-retired");
             result["phase"] = Value::from("retired");
             result["retirement_request"] = Value::from(request);
-            result["retirement_result"] = Value::from(receipt.id);
+            result["retirement_result"] = serde_json::json!(receipt.map(|receipt| receipt.id));
+            let witness = json!({"kind":"verified-native-retirement","incarnation":incarnation,
+                "retirement_request":request,"retirement_request_receipt":requested,
+                "retirement_result":result["retirement_result"]});
+            retain_runtime_start_closure(&operation, self.origin(), &mut result, witness)?;
             tx.execute("UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
                 params![id, serde_json::to_string(&result)?])?;
             release_evidence(tx, id)?;
@@ -635,7 +1102,7 @@ mod tests {
             id: id.into(),
             subject: subject.into(),
             owner: "owner".into(),
-            body: serde_json::json!({"selected_token": token, "desired_token":"desired-test", "member":{"runtime_id":subject,"terminal":true}}),
+            body: serde_json::json!({"subject":{"subject":subject,"kind":"agent","desired":null},"selected_token": token, "desired_token":"desired-test", "member":{"runtime_id":subject,"terminal":true}}),
             revoked_by: None,
             finished: false,
             result: None,
@@ -775,6 +1242,292 @@ mod tests {
     }
 
     #[test]
+    fn requester_attempt_and_physical_request_commit_together_after_declaration_cas() {
+        for changed in [false, true] {
+            let store = Store::open_memory("node").unwrap();
+            let subject = "agent/example/worker";
+            publish(
+                &store,
+                "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+                "restart-declaration",
+            );
+            let token = store.selected_desired_token(subject).unwrap();
+            let mut start = operation("restart-bound", subject, token.clone());
+            start.body["subject"] = serde_json::to_value(
+                store
+                    .desired_subjects_named(&[subject.into()])
+                    .unwrap()
+                    .remove(0),
+            )
+            .unwrap();
+            let request = store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "runtime.action.requested".into(),
+                    actor: Some("person/example".into()),
+                    fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+                    evidence: token.into_iter().collect(),
+                    expected_subject: None,
+                    idempotency_key: Some("restart-request".into()),
+                })
+                .unwrap();
+            start.body["request"] = serde_json::to_value(&request).unwrap();
+            if changed {
+                publish(
+                    &store,
+                    "version 2\nstop \"agent/example/worker\"",
+                    "restart-superseded",
+                );
+            }
+            let admitted = store.admit_runtime_start(&mut start, 2).unwrap();
+            if changed {
+                assert_eq!(admitted, RuntimeStartAdmission::Superseded);
+                assert!(
+                    store
+                        .observations_for(subject, "runtime.action.requested")
+                        .unwrap()
+                        .is_empty()
+                );
+                assert_eq!(
+                    store
+                        .claims_for(subject, Some("runtime.action.requested"))
+                        .unwrap()
+                        .len(),
+                    1
+                );
+                assert!(store.pending_runtime_starts().unwrap().is_empty());
+                continue;
+            }
+            assert_eq!(admitted, RuntimeStartAdmission::Admitted);
+            let control: ClaimRecord =
+                serde_json::from_value(start.body["control_request_receipt"].clone()).unwrap();
+            assert_eq!(control.actor, request.actor);
+            assert_eq!(control.body["fields"]["operation"], start.id);
+            assert_eq!(control.body["evidence"], json!([request.id]));
+            assert!(control.operation_id.is_some());
+            store.finish_runtime_start(&start.id,&json!({"incarnation":"new-incarnation", "verification":"operation-incarnation"})).unwrap();
+            assert!(
+                store
+                    .apply_runtime_start_result(&start.id, &[receipt(subject)])
+                    .unwrap()
+            );
+            let completed = store
+                .observations_for(subject, "runtime.action.succeeded")
+                .unwrap()
+                .remove(0);
+            assert!(
+                completed.body["evidence"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&start.body["start_request"])
+            );
+            assert!(
+                completed.body["evidence"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&start.body["control_request"])
+            );
+            assert!(store.runtime_start_request_retained(&control).unwrap());
+            store
+                .connection
+                .batched(|tx| -> Result<()> {
+                    tx.execute(
+                        "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+                        [&control.id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap()
+                .unwrap();
+            assert!(
+                !store.runtime_start_request_retained(&control).unwrap(),
+                "unchanged repaired body must not grant launch"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_preserves_running_incarnation_and_retains_its_canonical_observation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.db");
+        let store = Store::open(&path, "node").unwrap();
+        let subject = "agent/example/worker";
+        let mut start = operation("operation-observed", subject, None);
+        store.admit_runtime_start(&mut start, 2).unwrap();
+        store.finish_runtime_start(&start.id, &json!({"incarnation":"actual-incarnation", "verification":"operation-incarnation"})).unwrap();
+        let observed = |status: &str, incarnation: &str| ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), Value::from(status)),
+                ("runtime_id".into(), Value::from(subject)),
+                ("terminal".into(), Value::from(true)),
+                ("incarnation_id".into(), Value::from(incarnation)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("observed:{status}:{incarnation}")),
+        };
+        store
+            .append_claim(&observed("stopped", "prior-incarnation"))
+            .unwrap();
+        let running = store
+            .append_claim(&observed("running", "actual-incarnation"))
+            .unwrap();
+        let key = canonical::sortable_key(
+            &canonical::claim_key(&store.readers.get(), &running.id).unwrap(),
+        );
+        assert!(
+            store
+                .apply_runtime_start_result(
+                    &start.id,
+                    &[receipt(subject), observed("starting", "actual-incarnation")]
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .latest_claim(subject, Some("runtime.observed"))
+                .unwrap()
+                .unwrap()
+                .id,
+            running.id
+        );
+        store.runtime_start_applied(&start.id).unwrap();
+        store
+            .connection
+            .batched(|tx| -> Result<()> {
+                tx.execute("DELETE FROM claims WHERE id=?1", [&running.id])?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path, "node").unwrap();
+        let result: String = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT result FROM local_runtime_starts WHERE id=?1",
+                [&start.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            result["runtime_observation"]["receipt"],
+            serde_json::to_value(running).unwrap()
+        );
+        assert_eq!(
+            result["runtime_observation"]["canonical_sortable_key"],
+            serde_json::to_value(key).unwrap()
+        );
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn cancellation_proof_requires_undispatched_admission_and_survives_trim_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.db");
+        let store = Store::open(&path, "node").unwrap();
+        let mut dispatched = operation("dispatched", "agent/example/live", None);
+        store.admit_runtime_start(&mut dispatched, 1).unwrap();
+        assert!(store.dispatch_runtime_start(&dispatched.id, 1).unwrap());
+        let mut queued = operation("queued", "agent/example/queued", None);
+        assert_eq!(
+            store.admit_runtime_start(&mut queued, 1).unwrap(),
+            RuntimeStartAdmission::CapacityBusy
+        );
+        store
+            .revoke_runtime_start(&queued.id, "cancel-queued")
+            .unwrap();
+        assert!(store.cancel_undispatched_runtime_start(&queued.id).unwrap());
+        store.runtime_start_applied(&queued.id).unwrap();
+        store
+            .revoke_runtime_start(&dispatched.id, "cancel-dispatched")
+            .unwrap();
+        assert!(
+            !store
+                .cancel_undispatched_runtime_start(&dispatched.id)
+                .unwrap()
+        );
+        assert!(
+            store
+                .runtime_start_for(&dispatched.subject)
+                .unwrap()
+                .is_some()
+        );
+        store.trim_local_observations(now_ms() + 1, 1, 0).unwrap();
+        drop(store);
+        let store = Store::open(&path, "node").unwrap();
+        let result: String = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT result FROM local_runtime_starts WHERE id='queued'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        let proof = &result["closure_proof"];
+        assert_eq!(proof["verification"], "producer-closed");
+        assert_eq!(proof["witness"]["kind"], "never-dispatched");
+        assert_eq!(
+            proof["start_request_receipt"]["id"],
+            queued.body["start_request"]
+        );
+        assert_eq!(
+            result["closure_proof_id"],
+            format!("start-proof/{}", canonical_hash(proof).unwrap())
+        );
+        assert!(store.runtime_start_for(&queued.subject).unwrap().is_none());
+    }
+
+    #[test]
+    fn already_ended_cleanup_retains_an_exact_incarnation_witness() {
+        let store = Store::open_memory("node").unwrap();
+        let mut start = operation("ended", "agent/example/worker", None);
+        start.body["expected_incarnation"] = Value::from("prior-incarnation");
+        store.admit_runtime_start(&mut start, 2).unwrap();
+        store.finish_runtime_start(&start.id, &json!({"incarnation":"actual-incarnation", "verification":"operation-incarnation"})).unwrap();
+        store
+            .revoke_runtime_start(&start.id, "cancel-ended")
+            .unwrap();
+        store.runtime_start_applied(&start.id).unwrap();
+        assert!(
+            !store
+                .retain_runtime_start_ended(&start.id, "foreign-incarnation", "exited")
+                .unwrap()
+        );
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (1, 1));
+        assert!(
+            store
+                .retain_runtime_start_ended(&start.id, "actual-incarnation", "exited")
+                .unwrap()
+        );
+        let result: String = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT result FROM local_runtime_starts WHERE id=?1",
+                [&start.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["closure_proof"]["verification"], "operation-ended");
+        assert_eq!(result["closure_proof"]["incarnation"], "actual-incarnation");
+        assert_eq!(
+            result["closure_proof"]["expected_incarnation"],
+            "prior-incarnation"
+        );
+        assert_eq!(result["closure_proof"]["witness"]["status"], "exited");
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+    }
+
+    #[test]
     fn verified_start_receipts_bind_writer_proof_and_refuse_conflicting_inputs() {
         let store = Store::open_memory("node").unwrap();
         let subject = "agent/example/worker";
@@ -898,7 +1651,15 @@ mod tests {
             "initial",
         );
         let token = store.selected_desired_token(subject).unwrap();
-        let first = operation("one", subject, token.clone());
+        let desired = serde_json::to_value(
+            store
+                .desired_subjects_named(&[subject.into()])
+                .unwrap()
+                .remove(0),
+        )
+        .unwrap();
+        let mut first = operation("one", subject, token.clone());
+        first.body["subject"] = desired.clone();
         assert_eq!(
             store.admit_runtime_start(&mut first.clone(), 2).unwrap(),
             RuntimeStartAdmission::Admitted
@@ -923,7 +1684,8 @@ mod tests {
         );
         store.runtime_start_applied("one").unwrap();
         store.runtime_start_cleanup_verified("one").unwrap();
-        let second = operation("two", subject, token.clone());
+        let mut second = operation("two", subject, token.clone());
+        second.body["subject"] = desired;
         assert_eq!(
             store.admit_runtime_start(&mut second.clone(), 2).unwrap(),
             RuntimeStartAdmission::Admitted
@@ -1183,6 +1945,13 @@ mod tests {
         let subject = "agent/example/worker";
         let token = store.selected_desired_token(subject).unwrap();
         let mut start = operation("modern-operation", subject, token);
+        start.body["subject"] = serde_json::to_value(
+            store
+                .desired_subjects_named(&[subject.into()])
+                .unwrap()
+                .remove(0),
+        )
+        .unwrap();
         assert_eq!(
             store.admit_runtime_start(&mut start, 2).unwrap(),
             RuntimeStartAdmission::Admitted

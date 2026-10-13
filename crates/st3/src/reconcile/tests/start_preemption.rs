@@ -185,7 +185,7 @@ impl Drop for ReleaseOnDrop {
     }
 }
 
-async fn workers_done(reconciler: &Arc<Reconciler<BarrierRuntime>>) {
+async fn workers_done<R: RuntimeControl>(reconciler: &Arc<Reconciler<R>>) {
     let live = reconciler.start_jobs.live.clone();
     tokio::time::timeout(
         Duration::from_secs(30),
@@ -265,6 +265,177 @@ fn launch(reconciler: &Reconciler<BarrierRuntime>, subject: &str) -> bool {
             None,
         )
         .unwrap()
+}
+
+#[test]
+fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.db");
+    let store = Arc::new(Store::open(&path, "node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let reconciler = Reconciler::new(
+        store.clone(),
+        runtime.clone(),
+        "node".into(),
+        Arc::new(Notify::new()),
+    );
+    let subject = "exec/example/worker";
+    apply_source(
+        &store,
+        "version 2\nexec \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+        "aba-a",
+    );
+    let stale = store
+        .desired_subjects_named(&[subject.into()])
+        .unwrap()
+        .remove(0);
+    let projection = rusqlite::Connection::open(&path).unwrap();
+    // Save genuine selected rows. Retraction selects A between the separate
+    // token/body reads; restoration selects the identical B token at admission.
+    projection
+        .execute(
+            "CREATE TEMP TABLE aba_a AS SELECT * FROM desired WHERE subject=?1",
+            [subject],
+        )
+        .unwrap();
+    apply_source(
+        &store,
+        "version 2\nexec \"example/worker\" { workspace \"/tmp\"; command \"false\" }",
+        "aba-b",
+    );
+    let token = store.selected_desired_token(subject).unwrap();
+    projection
+        .execute(
+            "CREATE TEMP TABLE aba_b AS SELECT * FROM desired WHERE subject=?1",
+            [subject],
+        )
+        .unwrap();
+    projection.execute_batch("BEGIN; DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_a; COMMIT;").unwrap();
+    let after_retraction = store
+        .desired_subjects_named(&[subject.into()])
+        .unwrap()
+        .remove(0);
+    assert_eq!(after_retraction.kind, stale.kind);
+    assert_eq!(after_retraction.desired, stale.desired);
+    projection.execute_batch("BEGIN; DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_b; COMMIT;").unwrap();
+    assert_eq!(store.selected_desired_token(subject).unwrap(), token);
+    let member = stale.member.as_ref().unwrap().clone();
+    let prepared = start_jobs::PreparedStart {
+        subject: stale,
+        launch_member: member.clone(),
+        member,
+        reason: "retract/restore regression".into(),
+        request: None,
+        desired_token: "stale-a".into(),
+        selected_token: token,
+        placement_evidence: Vec::new(),
+        start_request: String::new(),
+        start_request_receipt: None,
+        control_request: None,
+        control_request_receipt: None,
+        expected_incarnation: None,
+        resume_operation: None,
+    };
+    assert!(!reconciler.dispatch_start(prepared).unwrap());
+    assert!(
+        store
+            .observations_for(subject, "runtime.action.requested")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.pending_runtime_starts().unwrap().is_empty());
+    assert!(runtime.starts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() {
+    let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, true);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+        "paused-old-snapshot",
+    );
+    let desired = store
+        .desired_subjects_named(&["agent/example/worker".into()])
+        .unwrap()
+        .remove(0);
+    let member = desired.member.as_ref().unwrap();
+    let old = RuntimeObservation {
+        runtime_id: member.runtime_id.clone(),
+        terminal: true,
+        status: "stopped".into(),
+        incarnation_id: Some("prior-incarnation".into()),
+        exit_code: None,
+    };
+    runtime.inner.ptys.lock().unwrap().push(old.clone());
+    store
+        .append_claim(&ClaimInput {
+            subject: desired.subject.clone(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: member_fields(member, "stopped", Some("prior-incarnation"), false),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    // Capture the old physical generation, then pause its publication until the
+    // replacement worker and its owner completion have both finished.
+    let captured = runtime.snapshot_ptys().unwrap().remove(0);
+    runtime.inner.ptys.lock().unwrap().clear();
+    assert!(launch(&reconciler, &desired.subject));
+    tokio::time::timeout(Duration::from_secs(30), entered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+    reconciler.reconcile_start_jobs().unwrap();
+    let completed = store
+        .latest_claim(&desired.subject, Some("runtime.observed"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        completed.body["fields"]["incarnation_id"],
+        "blocked-start-incarnation"
+    );
+    reconciler
+        .record_member(&desired, &captured, false)
+        .unwrap();
+    assert_eq!(
+        store
+            .latest_claim(&desired.subject, Some("runtime.observed"))
+            .unwrap()
+            .unwrap()
+            .id,
+        completed.id
+    );
+    reconciler
+        .record_once(
+            &desired.subject,
+            "runtime.observed",
+            member_fields(member, "absent", None, false),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .latest_claim(&desired.subject, Some("runtime.observed"))
+            .unwrap()
+            .unwrap()
+            .id,
+        completed.id
+    );
+    let fresh = runtime.snapshot_ptys().unwrap().remove(0);
+    reconciler.record_member(&desired, &fresh, false).unwrap();
+    let current = store
+        .latest_claim(&desired.subject, Some("runtime.observed"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.body["fields"]["status"], "running");
+    assert_eq!(
+        current.body["fields"]["incarnation_id"],
+        "blocked-start-incarnation"
+    );
 }
 
 #[tokio::test]
@@ -807,6 +978,125 @@ async fn accepted_but_unverified_starts_retain_admission_until_exact_verificatio
     }
 }
 
+#[tokio::test]
+async fn missing_or_repaired_original_request_prevents_real_native_start() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    for change in ["deleted", "changed"] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.db"), "node").unwrap());
+        let runtime = Arc::new(NativeRuntime::new(
+            root.path(),
+            None,
+            Path::new("unused-pty"),
+        ));
+        let reconciler = Arc::new(Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        ));
+        let marker = root.path().join("launched");
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nexec \"example/guarded\" {{ workspace {:?}; argv \"/bin/sh\" \"-c\" {:?}; }}",
+                root.path().display().to_string(),
+                format!("touch {:?}", marker)
+            ),
+            "guarded-native",
+        );
+        let desired = store
+            .desired_subjects_named(&["exec/example/guarded".into()])
+            .unwrap()
+            .remove(0);
+        let mut member = desired.member.as_ref().unwrap().clone();
+        let id = uuid::Uuid::now_v7().to_string();
+        member
+            .tags
+            .insert(start_jobs::OPERATION_TAG.into(), id.clone());
+        member
+            .environment
+            .insert(start_jobs::OPERATION_ENV.into(), id.clone());
+        let prepared = start_jobs::PreparedStart {
+            subject: desired.clone(),
+            launch_member: member.clone(),
+            member,
+            reason: "request retention regression".into(),
+            request: None,
+            desired_token: reconciler.launch_token(&desired.subject).unwrap(),
+            selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+            placement_evidence: Vec::new(),
+            start_request: String::new(),
+            start_request_receipt: None,
+            control_request: None,
+            control_request_receipt: None,
+            expected_incarnation: None,
+            resume_operation: None,
+        };
+        let mut operation = crate::store::RuntimeStartOperation {
+            id: id.clone(),
+            subject: desired.subject.clone(),
+            owner: "test-owner".into(),
+            body: serde_json::to_value(prepared).unwrap(),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        store.admit_runtime_start(&mut operation, 2).unwrap();
+        let request: crate::model::ClaimRecord =
+            serde_json::from_value(operation.body["start_request_receipt"].clone()).unwrap();
+        assert!(store.runtime_start_request_retained(&request).unwrap());
+        let connection = rusqlite::Connection::open(root.path().join("claims.db")).unwrap();
+        let local_id: i64 = request.id.rsplit('/').next().unwrap().parse().unwrap();
+        if change == "deleted" {
+            connection
+                .execute("DELETE FROM local_observations WHERE id=?1", [local_id])
+                .unwrap();
+        } else {
+            connection.execute("UPDATE local_observations SET body=json_set(body,'$.fields.runtime_id','foreign-runtime') WHERE id=?1", [local_id]).unwrap();
+        }
+        assert!(!store.runtime_start_request_retained(&request).unwrap());
+        reconciler.start_queued_job(&operation).unwrap();
+        workers_done(&reconciler).await;
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(!marker.exists(), "{change} request reached native creation");
+        assert!(
+            runtime
+                .observe_exec(&desired.member.as_ref().unwrap().runtime_id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
+        let result: String = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT result FROM local_runtime_starts WHERE id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["closure_proof"]["verification"], "producer-closed");
+        assert_eq!(
+            result["closure_proof"]["start_request_receipt"]["id"],
+            request.id
+        );
+        assert!(
+            store
+                .observations_for(&desired.subject, "runtime.action.succeeded")
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
 #[test]
 fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_seat() {
     if crate::test_support::supervise_test() {
@@ -841,6 +1131,9 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
                 selected_token: store.selected_desired_token(&desired.subject).unwrap(),
                 placement_evidence: Vec::new(),
                 start_request: String::new(),
+                start_request_receipt: None,
+                control_request: None,
+                control_request_receipt: None,
                 expected_incarnation: None,
                 resume_operation: None,
             })
@@ -929,6 +1222,17 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             observation.incarnation_id.as_deref()
         );
         assert_eq!(completed.body["fields"]["terminal"], false);
+        let payload: (u64,u64,u64) = store.readers.get().query_row(
+            "SELECT length(CAST(body AS BLOB)),length(CAST(result AS BLOB)),                length(CAST(json_extract(result,'$.runtime_observation') AS BLOB))              FROM local_runtime_starts WHERE id=?1",
+            [completed.body["fields"]["operation"].as_str().unwrap()],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        eprintln!(
+            "native exec fixture ledger bytes: prepared={}, result={}, retained runtime observation={}; total={}",
+            payload.0,
+            payload.1,
+            payload.2,
+            payload.0 + payload.1
+        );
         runtime
             .kill(
                 &observation.runtime_id,
@@ -1161,6 +1465,9 @@ exit 1
             selected_token: self.store.selected_desired_token(&self.desired.subject)?,
             placement_evidence: Vec::new(),
             start_request: String::new(),
+            start_request_receipt: None,
+            control_request: None,
+            control_request_receipt: None,
             expected_incarnation: None,
             resume_operation: None,
         })

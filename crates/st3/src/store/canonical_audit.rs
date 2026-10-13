@@ -67,6 +67,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "coordination_sends",
         "local_coordination_backfill",
         "local_observations",
+        "local_runtime_starts",
+        "local_runtime_start_evidence",
         "local_blobs",
         "local_blob_uploads",
         "local_subscription_mission_deferrals",

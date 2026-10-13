@@ -5,7 +5,7 @@ This file is generated from `st3-schema`.
 Schema: `st3.v1`
 Digest: `8557d6faef36d92821aa027f3c0271879f815f5096cf8a1ecc2dd0068a4e021e`
 Storage version: `19`
-Storage digest: `6e5e98899e5622b1e1f912828915cc484b944b3ca197a231348b2e39f7b72a78`
+Storage digest: `24580ab6af4c2da25c778adddc79afd1c93bdec649a151a3ca6625e499f4a10c`
 
 ## Subject families
 
@@ -281,6 +281,8 @@ Upgrade requires the normal process restart, not a history migration; its restar
 Storage version 19 adds the owner-local `local_runtime_starts` ledger and its admission/pending indexes transactionally. It retains immutable prepared input, original declaration and operation identity, dispatch/result status, revocation and verified cleanup. The ledger does not replicate or enter graph digests, checkpoints or claim backups. Unresolved operations are never trimmed. Existing request receipts precede dispatch and revocation; completion receipts commit only while their original declaration remains selected and the operation remains unrevoked.
 
 In the same installation transaction, `meta` captures `publication-operation-format-shared-cut` from `MAX(claims.store_index)` and `publication-operation-format-local-cut` from `MAX(local_observations.id)`, using zero for an empty table and `INSERT OR IGNORE`. These are two indexed maxima before the first operation-bound request, not history scans. Reopen, graph replay and view forgetting preserve both immutable cuts. A store with existing operation rows but a missing cut is refused rather than capturing a later boundary; preserve that store and its original boundary evidence for forward recovery. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary.
+
+Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. Reconcile observation admission refuses a stale prior or absent incarnation after an exact verified launch, even if that old physical snapshot would have a newer publication timestamp.
 
 Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
 

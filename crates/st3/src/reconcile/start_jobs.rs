@@ -34,8 +34,37 @@ pub(super) struct PreparedStart {
     pub selected_token: Option<String>,
     pub placement_evidence: Vec<String>,
     pub start_request: String,
+    #[serde(default)]
+    pub start_request_receipt: Option<crate::model::ClaimRecord>,
+    #[serde(default)]
+    pub control_request: Option<String>,
+    #[serde(default)]
+    pub control_request_receipt: Option<crate::model::ClaimRecord>,
     pub expected_incarnation: Option<String>,
     pub resume_operation: Option<String>,
+}
+
+impl PreparedStart {
+    fn requests_retained(&self, store: &Store) -> Result<bool> {
+        let Some(original) = &self.start_request_receipt else {
+            return Ok(false);
+        };
+        if original.id != self.start_request || !store.runtime_start_request_retained(original)? {
+            return Ok(false);
+        }
+        match (&self.control_request, &self.control_request_receipt) {
+            (Some(id), Some(control))
+                if control.id == *id && store.runtime_start_request_retained(control)? => {}
+            (None, None) => {}
+            _ => return Ok(false),
+        }
+        if let Some(request) = &self.request
+            && !store.runtime_start_request_retained(request)?
+        {
+            return Ok(false);
+        }
+        Ok(true)
+    }
 }
 
 pub(super) enum StartCompletion {
@@ -137,6 +166,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 store.owned_desired_guard(&prepared.subject)?;
                 anyhow::ensure!(store.selected_desired_token(&subject)? == prepared.selected_token,
                     "declaration changed before launch");
+                anyhow::ensure!(prepared.requests_retained(&store)?,
+                    "an original start request is no longer retained unchanged");
                 if let Some(rollout) = prepared.member.environment.get(crate::rollout::OPERATION_ENV) {
                     anyhow::ensure!(store.rollout(&subject)?.is_some_and(|o| o.id == *rollout && o.phase == "starting"),
                         "rollout changed before launch");
@@ -173,6 +204,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             Err(error) => (false, Some(format!("{error:#}"))),
                         }};
                     serde_json::json!({"error": format!("{error:#}"), "producer_closed": closed,
+                        "closure_kind": if !backend_entered { "before-backend" } else if rejected { "native-rejection" } else { "positive-producer-proof" },
                         "verification": if closed { "producer-closed" } else { "producer-open-unverified" },
                         "verification_error": verification_error})
                 },
@@ -188,6 +220,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             result["runtime_id"] = Value::from(prepared.member.runtime_id);
             result["terminal"] = Value::from(prepared.member.terminal);
             result["start_request"] = Value::from(prepared.start_request);
+            result["control_request"] = serde_json::json!(prepared.control_request);
             if let Err(error) = store.finish_runtime_start(&id, &result) {
                 eprintln!("st3: failed to persist runtime start completion {id}: {error:#}");
             }
@@ -242,8 +275,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.store
             .revoke_runtime_start(&operation.id, &request.id)?;
         if !operation.dispatched {
-            self.store.finish_runtime_start(&operation.id, &serde_json::json!({"error": "start was revoked before dispatch", "producer_closed": true}))?;
-            self.store.runtime_start_cleanup_verified(&operation.id)?;
+            self.store
+                .cancel_undispatched_runtime_start(&operation.id)?;
         }
         self.start_changed(subject);
         Ok(())
@@ -263,7 +296,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
         let current =
             self.store.selected_desired_token(&operation.subject)? == prepared.selected_token;
-        if !current {
+        if !current || !prepared.requests_retained(&self.store)? {
             self.revoke_start(&operation.subject)?;
             operation.revoked_by = Some("superseded".into());
         }
@@ -351,7 +384,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 let completed = self.finish_start(&operation.id, &prepared, outcome)?;
                 if let StartCompletion::Applied(Some(error)) = &completed {
-                    if let Some(request) = &prepared.request {
+                    if let Some(request) = &prepared.request
+                        && self.store.runtime_start_request_retained(request)?
+                    {
                         self.record_requested_restart_failure(
                             &prepared.subject,
                             &prepared.member,
@@ -413,6 +448,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         if self.store.selected_desired_token(&operation.subject)?
                             != prepared.selected_token
                             && let Some(request) = &prepared.request
+                            && self.store.runtime_start_request_retained(request)?
                         {
                             self.record_requested_restart_failure(
                                 &prepared.subject,
@@ -423,7 +459,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                 }
-            } else if !current && let Some(request) = &prepared.request {
+            } else if !current
+                && let Some(request) = &prepared.request
+                && self.store.runtime_start_request_retained(request)?
+            {
                 // Revocation suppresses the stale physical result, but the original explicit
                 // restart still needs its administrative result. The request's declaration
                 // fence keeps this failure from parking the replacement declaration.
@@ -478,7 +517,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .runtime
                         .start_operation_closed(&prepared.launch_member)?)
             {
-                self.store.runtime_start_cleanup_verified(&operation.id)?;
+                self.store
+                    .retain_runtime_start_producer_closed(&operation.id)?;
                 self.start_changed(&operation.subject);
             } else if operation.finished {
                 self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
@@ -528,7 +568,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             {
                 return Ok(());
             }
-            self.store.runtime_start_cleanup_verified(&operation.id)?;
+            self.store.retain_runtime_start_ended(
+                &operation.id,
+                incarnation,
+                &observation.status,
+            )?;
             self.start_changed(&operation.subject);
             return Ok(());
         }
