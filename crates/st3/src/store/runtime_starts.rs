@@ -1000,6 +1000,21 @@ impl Store {
             .map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
+    pub fn runtime_start_applied(&self, id: &str) -> Result<()> {
+        self.connection
+            .batched(|tx| {
+                tx.execute(
+                    "UPDATE local_runtime_starts SET applied=1 WHERE id=?1 AND finished=1
+                        AND (revoked_by IS NOT NULL OR json_extract(result,'$.error') IS NOT NULL
+                            OR json_extract(result,'$.verification')='operation-incarnation')",
+                    [id],
+                )?;
+                release_evidence(tx, id)
+            })
+            .map_err(|error| anyhow::anyhow!("{error}"))??;
+        Ok(())
+    }
+
     /// Commit a positive, exact-incarnation physical retirement receipt and its
     /// ledger proof together. This is never called for a signal-only stop.
     pub(crate) fn apply_runtime_start_retirement(

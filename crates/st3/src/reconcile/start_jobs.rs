@@ -132,7 +132,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.signal_changed();
     }
 
-    fn start_queued_job(&self, operation: &RuntimeStartOperation) -> Result<()> {
+    pub(super) fn start_queued_job(&self, operation: &RuntimeStartOperation) -> Result<()> {
         if operation.dispatched || operation.finished || operation.revoked_by.is_some() {
             return Ok(());
         }
