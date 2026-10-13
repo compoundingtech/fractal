@@ -24,6 +24,30 @@ pub struct Facts {
     pub mission_name: Option<String>,
 }
 
+/// Claim selection is a runtime fact, not an authorization decision.
+#[derive(Clone, Copy, Debug)]
+pub enum ClaimPurpose<'a> {
+    Idle,
+    Bound(&'a StepRunView),
+    Ambiguous,
+}
+
+impl<'a> ClaimPurpose<'a> {
+    #[must_use]
+    pub fn lease(self) -> Option<&'a StepRunView> {
+        match self {
+            Self::Bound(lease) => Some(lease),
+            Self::Idle | Self::Ambiguous => None,
+        }
+    }
+}
+
+fn idle_purpose() -> Result<AgentTraceRuntimeV1Why> {
+    Ok(AgentTraceRuntimeV1Why::Variant1(AgentTraceRuntimeV1WhyVariant1 {
+        r#_tag: "idle".to_owned().try_into()?,
+    }))
+}
+
 /// Try to serialize lifecycle read/modify/write transactions without waiting.
 ///
 /// # Errors
@@ -46,7 +70,9 @@ fn now_ms() -> Result<u128> {
 ///
 /// # Errors
 /// Rejects non-model facts that the authoritative schema cannot represent and invalid lease references.
-pub fn build(facts: &Facts, lease: Option<&StepRunView>) -> Result<Runtime> {
+pub fn build(facts: &Facts, purpose: ClaimPurpose<'_>) -> Result<Runtime> {
+    let (why, issuance) = purpose_context(&facts.agent, &facts.incarnation, purpose,
+        facts.mission_name.as_deref(), now_ms()?)?;
     let mut runtime = Runtime {
         r#type: "agent-trace-runtime/v1".to_owned().try_into()?,
         who: AgentTraceRuntimeV1Who {
@@ -56,7 +82,7 @@ pub fn build(facts: &Facts, lease: Option<&StepRunView>) -> Result<Runtime> {
             persona: None,
             supervisor: None,
         },
-        why: None,
+        why,
         how: AgentTraceRuntimeV1How {
             harness: AgentTraceRuntimeV1HowHarness {
                 tool: facts.harness_tool.clone().try_into()?,
@@ -67,7 +93,7 @@ pub fn build(facts: &Facts, lease: Option<&StepRunView>) -> Result<Runtime> {
             runtime_profile: None,
             skills_manifest: None,
             invocation_id: None,
-            issuance: None,
+            issuance,
         },
         r#where: AgentTraceRuntimeV1Where {
             session: facts.session.clone().map(TryInto::try_into).transpose()?,
@@ -78,7 +104,6 @@ pub fn build(facts: &Facts, lease: Option<&StepRunView>) -> Result<Runtime> {
     if let Some(route) = &facts.model_route {
         update_model(&mut runtime, route, facts.model_effort.as_deref());
     }
-    update_lease(&mut runtime, &facts.agent, &facts.incarnation, lease, facts.mission_name.as_deref(), now_ms()?)?;
     Ok(runtime)
 }
 
@@ -91,49 +116,48 @@ pub fn update_lease(
     runtime: &mut Runtime,
     actor: &str,
     incarnation: &str,
-    lease: Option<&StepRunView>,
+    purpose: ClaimPurpose<'_>,
     mission_name: Option<&str>,
     now_ms: u128,
 ) -> Result<()> {
     ensure!(runtime.who.agent.as_str() == actor, "trace belongs to another agent");
-    let lease = lease.filter(|step| {
+    let (why, issuance) = purpose_context(actor, incarnation, purpose, mission_name, now_ms)?;
+    runtime.why = why;
+    runtime.how.issuance = issuance;
+    Ok(())
+}
+
+fn purpose_context(
+    actor: &str,
+    incarnation: &str,
+    purpose: ClaimPurpose<'_>,
+    mission_name: Option<&str>,
+    now_ms: u128,
+) -> Result<(AgentTraceRuntimeV1Why, Option<AgentTraceRuntimeV1HowIssuance>)> {
+    if matches!(purpose, ClaimPurpose::Ambiguous) {
+        return Ok((AgentTraceRuntimeV1Why::Variant2(AgentTraceRuntimeV1WhyVariant2 {
+            r#_tag: "ambiguous".to_owned().try_into()?,
+        }), None));
+    }
+    let lease = purpose.lease().filter(|step| {
         matches!(step.status.as_str(), "claimed" | "working" | "verifying" | "blocked")
             && step.claimant.as_deref() == Some(actor)
             && step.claim_incarnation.as_deref() == Some(incarnation)
             && step.claim_expires_at_unix_ms.is_some_and(|expires| expires > now_ms)
     });
     let Some(step) = lease else {
-        runtime.why = None;
-        runtime.how.issuance = None;
-        return Ok(());
+        return Ok((idle_purpose()?, None));
     };
     let mission_run = &step.run;
     let step_run = step.generation.strip_prefix("run-generation/").context("lease has no step generation reference")?;
-    let references = (|| -> Result<_> {
-        Ok((
-            AgentTraceRuntimeV1WhyMissionRun::try_from(mission_run.to_owned())?,
-            AgentTraceRuntimeV1WhyStepRun::try_from(step_run.to_owned())?,
-            AgentTraceRuntimeV1HowIssuanceVariant0StepRun::try_from(step.subject.clone())?,
-        ))
-    })();
-    let (mission_run, step_run, issued_step_run) = match references {
-        Ok(references) => references,
-        Err(error) => {
-            tracing::warn!(
-                event = "agent_trace_lease_unrepresentable",
-                subject = %step.subject, run = %step.run, generation = %step.generation,
-                %error, "runtime authority cannot represent lease references"
-            );
-            runtime.why = None;
-            runtime.how.issuance = None;
-            return Ok(());
-        }
-    };
-    let mission = AgentTraceRuntimeV1WhyMission {
+    let mission_run = AgentTraceRuntimeV1WhyVariant0MissionRun::try_from(mission_run.to_owned())?;
+    let step_run = AgentTraceRuntimeV1WhyVariant0StepRun::try_from(step_run.to_owned())?;
+    let issued_step_run = AgentTraceRuntimeV1HowIssuanceVariant0StepRun::try_from(step.subject.clone())?;
+    let mission = AgentTraceRuntimeV1WhyVariant0Mission {
         name: mission_name.context("claimed lease requires its mission name")?.to_owned().try_into()?,
         run: Some(mission_run),
     };
-    let why_step = AgentTraceRuntimeV1WhyStep {
+    let why_step = AgentTraceRuntimeV1WhyVariant0Step {
         name: step.step.clone().try_into()?,
         run: Some(step_run),
     };
@@ -141,9 +165,11 @@ pub fn update_lease(
         r#_tag: "st-issued".to_owned().try_into()?,
         step_run: issued_step_run,
     });
-    runtime.why = Some(AgentTraceRuntimeV1Why { mission: Some(mission), step: Some(why_step) });
-    runtime.how.issuance = Some(issuance);
-    Ok(())
+    Ok((AgentTraceRuntimeV1Why::Variant0(AgentTraceRuntimeV1WhyVariant0 {
+        r#_tag: "bound".to_owned().try_into()?,
+        mission,
+        step: why_step,
+    }), Some(issuance)))
 }
 
 /// Decode with the authoritative schema, preserving every launch and model fact.
@@ -154,12 +180,12 @@ pub fn refresh(
     path: &Path,
     actor: &str,
     incarnation: &str,
-    lease: Option<&StepRunView>,
+    purpose: ClaimPurpose<'_>,
     mission_name: Option<&str>,
 ) -> Result<Runtime> {
     let _lock = lock(path)?;
     let mut runtime: Runtime = serde_json::from_slice(&std::fs::read(path)?)?;
-    update_lease(&mut runtime, actor, incarnation, lease, mission_name, now_ms()?)?;
+    update_lease(&mut runtime, actor, incarnation, purpose, mission_name, now_ms()?)?;
     write_atomic(path, &runtime)?;
     Ok(runtime)
 }
@@ -246,21 +272,34 @@ mod tests {
     }
 
     #[test]
-    fn idle_omits_why_issuance_and_unknown_model() {
+    fn idle_names_no_claim_and_omits_issuance_and_unknown_model() {
         let mut facts = facts();
         facts.model_route = None;
-        let value = serde_json::to_value(build(&facts, None).unwrap()).unwrap();
-        assert!(value.get("why").is_none());
+        let runtime = build(&facts, ClaimPurpose::Idle).unwrap();
+        let value = serde_json::to_value(&runtime).unwrap();
+        assert_eq!(value["why"], json!({"_tag": "idle"}));
         assert!(value["how"].get("issuance").is_none());
         assert!(value["how"].get("model").is_none());
+        assert_eq!(serde_json::from_value::<Runtime>(value).unwrap(), runtime);
     }
 
     #[test]
     fn claimed_lease_maps_actual_references() {
-        let value = serde_json::to_value(build(&facts(), Some(&lease())).unwrap()).unwrap();
+        let value = serde_json::to_value(build(&facts(), ClaimPurpose::Bound(&lease())).unwrap()).unwrap();
+        assert_eq!(value["why"]["_tag"], "bound");
         assert_eq!(value["why"]["mission"], json!({"name":"example-mission", "run":format!("mission-run/example/repo/example-mission/{MISSION}")}));
         assert_eq!(value["why"]["step"], json!({"name":"work", "run":GENERATION}));
         assert_eq!(value["how"]["issuance"], json!({"_tag":"st-issued", "step_run":format!("step-run/{GENERATION}/work")}));
+    }
+
+    #[test]
+    fn purpose_is_required_and_untagged_bound_context_is_rejected() {
+        let mut value = serde_json::to_value(
+            build(&facts(), ClaimPurpose::Bound(&lease())).unwrap()).unwrap();
+        value["why"].as_object_mut().unwrap().remove("_tag");
+        assert!(serde_json::from_value::<Runtime>(value.clone()).is_err());
+        value.as_object_mut().unwrap().remove("why");
+        assert!(serde_json::from_value::<Runtime>(value).is_err());
     }
 
     #[test]
@@ -274,9 +313,9 @@ mod tests {
                 2 => step.claim_incarnation = Some("execution-previous".into()),
                 _ => step.status = "completed".into(),
             }
-            let mut runtime = build(&facts, None).unwrap();
-            update_lease(&mut runtime, &facts.agent, &facts.incarnation, Some(&step), Some("example-mission"), 10).unwrap();
-            assert!(runtime.why.is_none());
+            let mut runtime = build(&facts, ClaimPurpose::Idle).unwrap();
+            update_lease(&mut runtime, &facts.agent, &facts.incarnation, ClaimPurpose::Bound(&step), Some("example-mission"), 10).unwrap();
+            assert!(matches!(runtime.why, AgentTraceRuntimeV1Why::Variant1(_)));
             assert!(runtime.how.issuance.is_none());
         }
     }
@@ -286,18 +325,27 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.json");
         let facts = facts();
-        let initial = build(&facts, None).unwrap();
+        let initial = build(&facts, ClaimPurpose::Idle).unwrap();
         write_atomic(&path, &initial).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let decoded: Runtime = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(decoded, initial);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let claimed = refresh(&path, &facts.agent, &facts.incarnation, Some(&lease()), Some("example-mission")).unwrap();
-        assert!(claimed.why.is_some());
+        let claimed = refresh(&path, &facts.agent, &facts.incarnation, ClaimPurpose::Bound(&lease()), Some("example-mission")).unwrap();
+        assert!(matches!(claimed.why, AgentTraceRuntimeV1Why::Variant0(_)));
         assert_eq!(claimed.how.model, initial.how.model);
         assert_eq!(claimed.how.harness, initial.how.harness);
         assert_eq!(claimed.r#where, initial.r#where);
-        let completed = refresh(&path, &facts.agent, &facts.incarnation, None, None).unwrap();
+        let ambiguous = refresh(&path, &facts.agent, &facts.incarnation, ClaimPurpose::Ambiguous, None).unwrap();
+        let value = serde_json::to_value(&ambiguous).unwrap();
+        assert_eq!(value["why"], json!({"_tag": "ambiguous"}));
+        assert!(value["how"].get("issuance").is_none());
+        assert_eq!(serde_json::from_slice::<Runtime>(&std::fs::read(&path).unwrap()).unwrap(), ambiguous);
+        assert_eq!(ambiguous.how.model, initial.how.model);
+        assert_eq!(ambiguous.how.harness, initial.how.harness);
+        assert_eq!(ambiguous.who, initial.who);
+        assert_eq!(ambiguous.r#where, initial.r#where);
+        let completed = refresh(&path, &facts.agent, &facts.incarnation, ClaimPurpose::Idle, None).unwrap();
         assert_eq!(completed, initial);
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let files: std::collections::BTreeSet<_> = std::fs::read_dir(root.path())
@@ -312,7 +360,7 @@ mod tests {
         step.run = format!("mission-run/work/{MISSION}");
         step.generation = format!("run-generation/work-{GENERATION}");
         step.subject = format!("step-run/work-{GENERATION}/work");
-        let runtime = build(&facts, Some(&step)).unwrap();
+        let runtime = build(&facts, ClaimPurpose::Bound(&step)).unwrap();
         let value = serde_json::to_value(&runtime).unwrap();
         assert_eq!(value["why"]["mission"]["run"], step.run);
         assert_eq!(value["why"]["step"]["run"], format!("work-{GENERATION}"));
@@ -322,21 +370,19 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_lease_omits_purpose_instead_of_fabricating_references() {
+    fn unrepresentable_lease_rejects_publication_instead_of_inventing_purpose() {
         let mut step = lease();
         step.generation = "run-generation/not a generation".into();
-        let runtime = build(&facts(), Some(&step)).unwrap();
-        assert!(runtime.why.is_none());
-        assert!(runtime.how.issuance.is_none());
+        assert!(build(&facts(), ClaimPurpose::Bound(&step)).is_err());
     }
 
     #[test]
     fn refresh_rejects_foreign_agent_without_replacing_file() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.json");
-        let initial = build(&facts(), None).unwrap();
+        let initial = build(&facts(), ClaimPurpose::Idle).unwrap();
         write_atomic(&path, &initial).unwrap();
-        assert!(refresh(&path, "agent/other", "execution-one", Some(&lease()), Some("example-mission")).is_err());
+        assert!(refresh(&path, "agent/other", "execution-one", ClaimPurpose::Bound(&lease()), Some("example-mission")).is_err());
         let decoded: Runtime = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(decoded, initial);
     }
@@ -350,20 +396,20 @@ mod tests {
         ] {
             let mut facts = facts();
             facts.agent = subject.into();
-            let mut runtime = build(&facts, None).unwrap();
+            let mut runtime = build(&facts, ClaimPurpose::Idle).unwrap();
             assert_eq!(runtime.who.agent.as_str(), expected);
             assert_eq!(runtime.who.principal.as_str(), "person/example");
             assert!(runtime.who.actor.is_none());
             let mut step = lease();
             step.claimant = Some(subject.into());
-            update_lease(&mut runtime, subject, &facts.incarnation, Some(&step), Some("example-mission"), 10).unwrap();
+            update_lease(&mut runtime, subject, &facts.incarnation, ClaimPurpose::Bound(&step), Some("example-mission"), 10).unwrap();
             assert!(runtime.how.issuance.is_some());
         }
     }
 
     #[test]
     fn model_update_preserves_lease_and_launch_facts() {
-        let mut runtime = build(&facts(), Some(&lease())).unwrap();
+        let mut runtime = build(&facts(), ClaimPurpose::Bound(&lease())).unwrap();
         let initial = runtime.clone();
         update_model(&mut runtime, "anthropic/claude-sonnet-4", None);
         assert_eq!(runtime.why, initial.why);
@@ -378,7 +424,7 @@ mod tests {
 
     #[test]
     fn unrepresentable_model_build_omits_model_and_preserves_launch_and_lease() {
-        let initial = build(&facts(), Some(&lease())).unwrap();
+        let initial = build(&facts(), ClaimPurpose::Bound(&lease())).unwrap();
         for (route, effort) in [
             ("provider/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789", None),
             ("invalid provider/model", None),
@@ -388,7 +434,7 @@ mod tests {
             let mut facts = facts();
             facts.model_route = Some(route.into());
             facts.model_effort = effort.map(str::to_owned);
-            let runtime = build(&facts, Some(&lease())).unwrap();
+            let runtime = build(&facts, ClaimPurpose::Bound(&lease())).unwrap();
             let mut expected = initial.clone();
             expected.how.model = None;
             assert_eq!(runtime, expected, "{route} {effort:?}");
@@ -400,7 +446,7 @@ mod tests {
 
     #[test]
     fn unrepresentable_model_update_clears_stale_model_and_preserves_other_facts() {
-        let initial = build(&facts(), Some(&lease())).unwrap();
+        let initial = build(&facts(), ClaimPurpose::Bound(&lease())).unwrap();
         for (route, effort) in [
             ("provider/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789", None),
             ("invalid provider/model", None),
@@ -427,7 +473,7 @@ mod tests {
         ] {
             let mut facts = facts();
             facts.model_route = Some(route.into());
-            let mut runtime = build(&facts, Some(&lease())).unwrap();
+            let mut runtime = build(&facts, ClaimPurpose::Bound(&lease())).unwrap();
             assert_eq!(runtime.how.model.as_ref().unwrap().route.as_str(), route);
             update_model(&mut runtime, route, None);
             let model = runtime.how.model.as_ref().unwrap();
@@ -443,7 +489,7 @@ mod tests {
     fn unrepresentable_seat_identity_rejects_build() {
         let mut facts = facts();
         facts.agent = "agent/demo.invalid seat".into();
-        let error = build(&facts, None).unwrap_err();
+        let error = build(&facts, ClaimPurpose::Idle).unwrap_err();
         assert!(error.to_string().contains("AgentTraceRuntimeV1WhoAgent"));
     }
 
@@ -465,7 +511,7 @@ mod tests {
     fn invalid_typed_refresh_keeps_predecessor_bytes() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.json");
-        let mut value = serde_json::to_value(build(&facts(), None).unwrap()).unwrap();
+        let mut value = serde_json::to_value(build(&facts(), ClaimPurpose::Idle).unwrap()).unwrap();
         value["how"]["model"]["route"] = json!("unknown");
         let bytes = serde_json::to_vec(&value).unwrap();
         std::fs::write(&path, &bytes).unwrap();

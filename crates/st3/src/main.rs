@@ -16615,15 +16615,15 @@ fn trace_lease<'a>(
     work: &'a [StepRunView],
     subject: &str,
     incarnation: &str,
-) -> (Option<&'a StepRunView>, Option<String>) {
+) -> (st3::agent_trace::ClaimPurpose<'a>, Option<String>) {
     let now = u128::from(st_drivers::message::now_ms());
     let mut held = work.iter().filter(|step| {
         work_claim_is_held_by(step, subject)
             && step.claim_incarnation.as_deref() == Some(incarnation)
             && step.claim_expires_at_unix_ms.is_some_and(|expires| expires > now)
     });
-    let Some(lease) = held.next() else { return (None, None) };
-    let Some(second) = held.next() else { return (Some(lease), None) };
+    let Some(lease) = held.next() else { return (st3::agent_trace::ClaimPurpose::Idle, None) };
+    let Some(second) = held.next() else { return (st3::agent_trace::ClaimPurpose::Bound(lease), None) };
     // Only ambiguity allocates a diagnostic; the common idle/single-lease paths do not.
     let subjects: Vec<&str> = std::iter::once(lease).chain(std::iter::once(second))
         .chain(held).map(|step| step.subject.as_str()).collect();
@@ -16632,7 +16632,7 @@ fn trace_lease<'a>(
         "claim_count": subjects.len(),
         "subjects": subjects,
     }).to_string();
-    (None, Some(diagnostic))
+    (st3::agent_trace::ClaimPurpose::Ambiguous, Some(diagnostic))
 }
 
 async fn lock_agent_trace(path: &Path) -> Result<std::fs::File> {
@@ -16715,14 +16715,14 @@ async fn try_initialize_agent_trace(
     };
     let work: Vec<StepRunView> = client
         .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
-    let (lease, diagnostic) = trace_lease(&work, subject, incarnation);
+    let (purpose, diagnostic) = trace_lease(&work, subject, incarnation);
     if let Some(diagnostic) = diagnostic {
         write_driver_log(subject, &diagnostic)?;
     }
-    let mission_name = trace_mission_name(client, lease).await?;
+    let mission_name = trace_mission_name(client, purpose.lease()).await?;
     let facts = trace_launch_facts(client, subject, Some(driver), incarnation, argv,
         principal, mission_name).await?;
-    issuer::write_atomic(path, &issuer::build(&facts, lease)?)
+    issuer::write_atomic(path, &issuer::build(&facts, purpose)?)
 }
 
 async fn trace_launch_facts(
@@ -16822,22 +16822,22 @@ async fn try_refresh_agent_trace(
     if raw.is_none() && incarnation.is_empty() {
         return Ok(());
     }
-    let (lease, diagnostic) = trace_lease(&work, subject, incarnation);
+    let (purpose, diagnostic) = trace_lease(&work, subject, incarnation);
     if let Some(diagnostic) = diagnostic {
         write_driver_log(subject, &diagnostic)?;
     }
-    let mission_name = trace_mission_name(client, lease).await?;
+    let mission_name = trace_mission_name(client, purpose.lease()).await?;
     let mut runtime = if let Some(raw) = raw.as_ref() {
         let mut runtime: issuer::Runtime = serde_json::from_slice(raw)?;
         issuer::update_principal(&mut runtime, principal)?;
-        issuer::update_lease(&mut runtime, subject, incarnation, lease, mission_name.as_deref(),
+        issuer::update_lease(&mut runtime, subject, incarnation, purpose, mission_name.as_deref(),
             u128::from(st_drivers::message::now_ms()))?;
         runtime
     } else {
         // A verified accountable root may become available after the provider launch.
         let facts = trace_launch_facts(client, subject, None, incarnation, &[],
             principal, mission_name).await?;
-        issuer::build(&facts, lease)?
+        issuer::build(&facts, purpose)?
     };
     if let Some(observed) = observed
         && let Some(model) = observed.model.as_deref()
@@ -26315,15 +26315,19 @@ mod tests {
         predecessor.subject = "step-run/old/build".into();
         predecessor.claim_incarnation = Some("worker:old".into());
         work.push(predecessor);
-        let (lease, diagnostic) = trace_lease(&work, "agent/worker", "worker:1");
-        assert!(lease.is_none(), "ambiguity must not select an arbitrary lease");
+        let (purpose, diagnostic) = trace_lease(&work, "agent/worker", "worker:1");
+        assert!(matches!(purpose, st3::agent_trace::ClaimPurpose::Ambiguous),
+            "ambiguity must not select an arbitrary lease");
         let diagnostic: Value = serde_json::from_str(&diagnostic.unwrap()).unwrap();
         assert_eq!(diagnostic, json!({
             "type": "agent_trace_purpose_ambiguous", "claim_count": 3, "subjects": subjects,
         }));
-        let (lease, diagnostic) = trace_lease(&work[..1], "agent/worker", "worker:1");
-        assert_eq!(lease.unwrap().subject, subjects[0]);
+        let (purpose, diagnostic) = trace_lease(&work[..1], "agent/worker", "worker:1");
+        assert_eq!(purpose.lease().unwrap().subject, subjects[0]);
         assert!(diagnostic.is_none(), "a unique purpose needs no warning");
+        let (purpose, diagnostic) = trace_lease(&[], "agent/worker", "worker:1");
+        assert!(matches!(purpose, st3::agent_trace::ClaimPurpose::Idle));
+        assert!(diagnostic.is_none(), "an idle seat needs no warning");
     }
 
     #[test]

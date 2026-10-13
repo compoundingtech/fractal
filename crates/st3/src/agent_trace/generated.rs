@@ -1,5 +1,5 @@
-// Generated; do not edit. Inputs: src/schema.ts, src/bindings.ts, src/projection.ts, src/generator.ts, src/registry.ts, ../schema-registry/src/primitives.ts, ../schema-registry/rust/Cargo.toml, ../schema-registry/rust/src/lib.rs, ../schema-registry/rust/src/numbers.rs, ../schema-registry/rust/src/runtime.rs, ../schema-registry/rust/src/bin/schema-registry-rust.rs, rust/Cargo.lock, package.json, ../../.oxfmtrc.json.
-// Regenerate: pnpm run generate; sha256=7a73b89e61756bf5cc1afaa1e1e5c08956d1c9fda39028d2855628f7b272904c
+// Generated; do not edit. Inputs: agent-trace-runtime/v1 JSON Schema without $comment, ../schema-registry/rust/Cargo.toml, ../schema-registry/rust/src/lib.rs, ../schema-registry/rust/src/numbers.rs, ../schema-registry/rust/src/runtime.rs, ../schema-registry/rust/src/bin/schema-registry-rust.rs.
+// Regenerate: pnpm run generate; sha256=d36fd2f56a9c31aa0cdad9c042af2f8280f250986b636055169d16c70f7e5411
 pub mod __schema_registry_runtime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error { Invalid(String) }
@@ -302,97 +302,130 @@ pub r#supervisor: Option<AgentTraceRuntimeV1WhoSupervisor>,
 }
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(transparent)]
-pub struct AgentTraceRuntimeV1WhyMissionName(String);
-impl AgentTraceRuntimeV1WhyMissionName { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
+pub struct AgentTraceRuntimeV1WhyVariant0Tag(String);
+impl AgentTraceRuntimeV1WhyVariant0Tag { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionName: minLength".into())); }
-if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionName: pattern".into())); }
-if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionName: pattern".into())); }
+if !["bound"].contains(&value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0Tag: enum".into())); }
 Ok(()) } }
-impl TryFrom<String> for AgentTraceRuntimeV1WhyMissionName { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
-impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyMissionName { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
+impl TryFrom<String> for AgentTraceRuntimeV1WhyVariant0Tag { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
+impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyVariant0Tag { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(transparent)]
-pub struct AgentTraceRuntimeV1WhyMissionRun(String);
-impl AgentTraceRuntimeV1WhyMissionRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
+pub struct AgentTraceRuntimeV1WhyVariant0MissionName(String);
+impl AgentTraceRuntimeV1WhyVariant0MissionName { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:[0-9a-f]{32}|mission-run\\/[A-Za-z0-9][A-Za-z0-9._@-]*(?:\\/(?:[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.\\.[A-Za-z0-9._@-]*|\\.))*)$").expect("schema pattern"));
-if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: minLength".into())); }
-if value.len() > 524 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: x-maxUtf8ByteLength".into())); }
-if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: pattern".into())); }
-if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: pattern".into())); }
-if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: pattern".into())); }
+if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0MissionName: minLength".into())); }
+if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0MissionName: pattern".into())); }
+if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0MissionName: pattern".into())); }
 Ok(()) } }
-impl TryFrom<String> for AgentTraceRuntimeV1WhyMissionRun { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
-impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyMissionRun { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
+impl TryFrom<String> for AgentTraceRuntimeV1WhyVariant0MissionName { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
+impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyVariant0MissionName { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(transparent)]
+pub struct AgentTraceRuntimeV1WhyVariant0MissionRun(String);
+impl AgentTraceRuntimeV1WhyVariant0MissionRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
+pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+// LIVE-MIGRATION BRIDGE arn:lmig:dotfiles:2026-10-13-agent-trace-mission-run-shape — DELETE at contraction — https://app.notion.com/p/Agent-Trace-mission-run-shape-3f8e3d41f4a381f6906cefeadeb7526e
+let migration_active = true;
+if migration_active { return regex::Regex::new("^(?:[0-9a-f]{32}|mission-run\\/[A-Za-z0-9][A-Za-z0-9._@-]*(?:\\/(?:[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.\\.[A-Za-z0-9._@-]*|\\.))*)$").expect("schema pattern"); }
+// LIVE-MIGRATION END arn:lmig:dotfiles:2026-10-13-agent-trace-mission-run-shape
+regex::Regex::new("^mission-run\\/[A-Za-z0-9][A-Za-z0-9._@-]*(?:\\/(?:[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.\\.[A-Za-z0-9._@-]*|\\.))*$").expect("schema pattern")
+});
+if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0MissionRun: minLength".into())); }
+if value.len() > 524 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0MissionRun: x-maxUtf8ByteLength".into())); }
+if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0MissionRun: pattern".into())); }
+if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0MissionRun: pattern".into())); }
+if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0MissionRun: pattern".into())); }
+Ok(()) } }
+impl TryFrom<String> for AgentTraceRuntimeV1WhyVariant0MissionRun { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
+impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyVariant0MissionRun { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentTraceRuntimeV1WhyMission {
-pub r#name: AgentTraceRuntimeV1WhyMissionName,
+pub struct AgentTraceRuntimeV1WhyVariant0Mission {
+pub r#name: AgentTraceRuntimeV1WhyVariant0MissionName,
 #[serde(default, deserialize_with = "self::__schema_registry_runtime::deserialize_optional", skip_serializing_if = "Option::is_none")]
-pub r#run: Option<AgentTraceRuntimeV1WhyMissionRun>,
+pub r#run: Option<AgentTraceRuntimeV1WhyVariant0MissionRun>,
 }
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(transparent)]
-pub struct AgentTraceRuntimeV1WhyStepName(String);
-impl AgentTraceRuntimeV1WhyStepName { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
+pub struct AgentTraceRuntimeV1WhyVariant0StepName(String);
+impl AgentTraceRuntimeV1WhyVariant0StepName { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepName: minLength".into())); }
-if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepName: pattern".into())); }
-if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepName: pattern".into())); }
+if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0StepName: minLength".into())); }
+if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0StepName: pattern".into())); }
+if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0StepName: pattern".into())); }
 Ok(()) } }
-impl TryFrom<String> for AgentTraceRuntimeV1WhyStepName { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
-impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyStepName { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
+impl TryFrom<String> for AgentTraceRuntimeV1WhyVariant0StepName { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
+impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyVariant0StepName { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(transparent)]
-pub struct AgentTraceRuntimeV1WhyStepRun(String);
-impl AgentTraceRuntimeV1WhyStepRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
+pub struct AgentTraceRuntimeV1WhyVariant0StepRun(String);
+impl AgentTraceRuntimeV1WhyVariant0StepRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
 static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^[A-Za-z0-9][A-Za-z0-9._@-]{0,511}$").expect("schema pattern"));
-if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: minLength".into())); }
-if value.len() > 512 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: x-maxUtf8ByteLength".into())); }
-if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: pattern".into())); }
-if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: pattern".into())); }
-if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: pattern".into())); }
+if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0StepRun: minLength".into())); }
+if value.len() > 512 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0StepRun: x-maxUtf8ByteLength".into())); }
+if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0StepRun: pattern".into())); }
+if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0StepRun: pattern".into())); }
+if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant0StepRun: pattern".into())); }
 Ok(()) } }
-impl TryFrom<String> for AgentTraceRuntimeV1WhyStepRun { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
-impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyStepRun { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
+impl TryFrom<String> for AgentTraceRuntimeV1WhyVariant0StepRun { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
+impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyVariant0StepRun { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentTraceRuntimeV1WhyStep {
-pub r#name: AgentTraceRuntimeV1WhyStepName,
+pub struct AgentTraceRuntimeV1WhyVariant0Step {
+pub r#name: AgentTraceRuntimeV1WhyVariant0StepName,
 #[serde(default, deserialize_with = "self::__schema_registry_runtime::deserialize_optional", skip_serializing_if = "Option::is_none")]
-pub r#run: Option<AgentTraceRuntimeV1WhyStepRun>,
+pub r#run: Option<AgentTraceRuntimeV1WhyVariant0StepRun>,
 }
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(try_from = "RawAgentTraceRuntimeV1Why")]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentTraceRuntimeV1Why {
-#[serde(default, deserialize_with = "self::__schema_registry_runtime::deserialize_optional", skip_serializing_if = "Option::is_none")]
-pub r#mission: Option<AgentTraceRuntimeV1WhyMission>,
-#[serde(default, deserialize_with = "self::__schema_registry_runtime::deserialize_optional", skip_serializing_if = "Option::is_none")]
-pub r#step: Option<AgentTraceRuntimeV1WhyStep>,
+pub struct AgentTraceRuntimeV1WhyVariant0 {
+pub r#_tag: AgentTraceRuntimeV1WhyVariant0Tag,
+pub r#mission: AgentTraceRuntimeV1WhyVariant0Mission,
+pub r#step: AgentTraceRuntimeV1WhyVariant0Step,
 }
-#[derive(serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(transparent)]
+pub struct AgentTraceRuntimeV1WhyVariant1Tag(String);
+impl AgentTraceRuntimeV1WhyVariant1Tag { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
+pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
+if !["idle"].contains(&value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant1Tag: enum".into())); }
+Ok(()) } }
+impl TryFrom<String> for AgentTraceRuntimeV1WhyVariant1Tag { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
+impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyVariant1Tag { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawAgentTraceRuntimeV1Why {
-#[serde(default, deserialize_with = "self::__schema_registry_runtime::deserialize_optional")]
-r#mission: Option<AgentTraceRuntimeV1WhyMission>,
-#[serde(default, deserialize_with = "self::__schema_registry_runtime::deserialize_optional")]
-r#step: Option<AgentTraceRuntimeV1WhyStep>,
+pub struct AgentTraceRuntimeV1WhyVariant1 {
+pub r#_tag: AgentTraceRuntimeV1WhyVariant1Tag,
 }
-impl TryFrom<RawAgentTraceRuntimeV1Why> for AgentTraceRuntimeV1Why { type Error = self::__schema_registry_runtime::Error; fn try_from(raw: RawAgentTraceRuntimeV1Why) -> Result<Self, Self::Error> {
-let count = [raw.r#mission.is_some(),raw.r#step.is_some(),].into_iter().filter(|present| *present).count(); if count < 1 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1Why requires context".into())); }
-Ok(Self {
-r#mission: raw.r#mission,
-r#step: raw.r#step,
-}) } }
-impl serde::Serialize for AgentTraceRuntimeV1Why { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-let count = [false,self.r#mission.is_some(),self.r#step.is_some(),].into_iter().filter(|present| *present).count(); if count < 1 { return Err(serde::ser::Error::custom("AgentTraceRuntimeV1Why: minProperties")); }
-let mut state = serializer.serialize_struct("AgentTraceRuntimeV1Why", count)?;
-if let Some(value) = &self.r#mission { serde::ser::SerializeStruct::serialize_field(&mut state, "mission", value)?; }
-if let Some(value) = &self.r#step { serde::ser::SerializeStruct::serialize_field(&mut state, "step", value)?; }
-serde::ser::SerializeStruct::end(state) } }
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(transparent)]
+pub struct AgentTraceRuntimeV1WhyVariant2Tag(String);
+impl AgentTraceRuntimeV1WhyVariant2Tag { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
+pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
+if !["ambiguous"].contains(&value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyVariant2Tag: enum".into())); }
+Ok(()) } }
+impl TryFrom<String> for AgentTraceRuntimeV1WhyVariant2Tag { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
+impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyVariant2Tag { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTraceRuntimeV1WhyVariant2 {
+pub r#_tag: AgentTraceRuntimeV1WhyVariant2Tag,
+}
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(untagged)]
+pub enum AgentTraceRuntimeV1Why {
+Variant0(AgentTraceRuntimeV1WhyVariant0),
+Variant1(AgentTraceRuntimeV1WhyVariant1),
+Variant2(AgentTraceRuntimeV1WhyVariant2),
+}
+impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1Why { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <serde_json::Value as serde::Deserialize>::deserialize(d)?;
+if let Ok(branch) = <AgentTraceRuntimeV1WhyVariant0 as serde::Deserialize>::deserialize(&value) { return Ok(Self::Variant0(branch)); }
+if let Ok(branch) = <AgentTraceRuntimeV1WhyVariant1 as serde::Deserialize>::deserialize(&value) { return Ok(Self::Variant1(branch)); }
+if let Ok(branch) = <AgentTraceRuntimeV1WhyVariant2 as serde::Deserialize>::deserialize(&value) { return Ok(Self::Variant2(branch)); }
+Err(serde::de::Error::custom("AgentTraceRuntimeV1Why: no union branch matched")) } }
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(transparent)]
 pub struct AgentTraceRuntimeV1HowHarnessTool(String);
@@ -628,8 +661,7 @@ pub r#worktree: Option<AgentTraceRuntimeV1WhereWorktree>,
 pub struct AgentTraceRuntimeV1 {
 pub r#type: AgentTraceRuntimeV1Type,
 pub r#who: AgentTraceRuntimeV1Who,
-#[serde(default, deserialize_with = "self::__schema_registry_runtime::deserialize_optional", skip_serializing_if = "Option::is_none")]
-pub r#why: Option<AgentTraceRuntimeV1Why>,
+pub r#why: AgentTraceRuntimeV1Why,
 pub r#how: AgentTraceRuntimeV1How,
 pub r#where: AgentTraceRuntimeV1Where,
 }

@@ -188,7 +188,8 @@ agent "garden/worker" {{
     assert_eq!(launch_trace.who.agent.as_str(), subject);
     assert_eq!(launch_trace.who.principal.as_str(), "person/avery");
     assert!(launch_trace.who.actor.is_none());
-    assert!(launch_trace.why.is_none());
+    assert_eq!(serde_json::to_value(&launch_trace.why).unwrap(),
+        serde_json::json!({"_tag": "idle"}));
     assert!(launch_trace.how.issuance.is_none());
     assert!(launch_trace.how.model.is_none(), "launch must not invent an unknown model");
     let runtime_path = drivers

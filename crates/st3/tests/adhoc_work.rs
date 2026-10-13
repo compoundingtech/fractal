@@ -282,7 +282,7 @@ mission "trace-check" state="ready" {
         host: Some("example".into()),
         worktree: None,
         mission_name: None,
-    }, None).unwrap();
+    }, issuer::ClaimPurpose::Idle).unwrap();
     if broken_trace {
         std::fs::create_dir(&path).unwrap();
     } else {
@@ -321,6 +321,7 @@ mission "trace-check" state="ready" {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let value = serde_json::to_value(&runtime).unwrap();
         if action == "claim" {
+            assert_eq!(value["why"]["_tag"], "bound");
             assert_eq!(value["how"]["issuance"]["_tag"], "st-issued");
             assert_eq!(value["how"]["issuance"]["step_run"], step);
             assert_eq!(value["why"]["mission"]["run"], run);
@@ -329,7 +330,8 @@ mission "trace-check" state="ready" {
             assert!(value["why"]["mission"]["name"].is_string());
             assert!(value["why"]["step"]["name"].is_string());
         } else {
-            assert!(runtime.why.is_none(), "completion must not retain mission or step");
+            assert_eq!(value["why"], json!({"_tag": "idle"}),
+                "completion must not retain mission or step");
             assert!(runtime.how.issuance.is_none(), "completion must not retain a lease");
         }
     }
