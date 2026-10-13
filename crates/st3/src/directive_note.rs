@@ -1,3 +1,5 @@
+use st3::cli_println as println;
+
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand};
 use serde::Deserialize;

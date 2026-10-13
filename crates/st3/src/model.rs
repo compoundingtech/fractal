@@ -472,6 +472,10 @@ pub struct LoopStopSpec {
     pub plateau_rounds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeated_failure: Option<u32>,
+    /// Stop when this many rounds in a row end with the same metrics and the same exit gate
+    /// results, so nothing a round did changed what the loop can see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
 }
