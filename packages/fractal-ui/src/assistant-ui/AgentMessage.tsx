@@ -1,8 +1,9 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Disclosure, DisclosurePanel, VisuallyHidden } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel, Focusable, VisuallyHidden } from 'react-aria-components'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import { Icon, type IconName } from './composition/Icons'
+import { Tooltip } from './composition/Controls'
 import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 
 export type AgentMessageVia =
@@ -90,7 +91,7 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
   return <MessageFrame variant={variant} frameStyles={frameStyles} label={variant._tag === 'Outgoing' ? `Message to ${to ?? ''}` : `Message from ${from}`} subject={subject} header={<>
     {headerGlyph?._tag !== 'Hidden' ? <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name={headerGlyph?._tag === 'Icon' ? headerGlyph.name : variant._tag === 'Human' ? 'person' : 'message'} scale="status" /></span> : null}
     <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span><strong {...stylex.props(styles.sender)}>{counterpart !== undefined ? <AgentIdHierarchy id={counterpart} /> : null}</strong>{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta)}> → <AgentIdHierarchy id={to} /></span> : null}{via !== undefined ? <span {...stylex.props(styles.meta)}> · <span>{({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span></span> : null}</span>
-    {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <span {...stylex.props(styles.meta)} title={`Reply to ${replyTo}`}><Icon name="arrow-left" scale="status" /></span> : null}
+    {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <Tooltip label={`Reply to ${replyTo}`}><Focusable><span role="img" tabIndex={0} aria-label={`Reply to ${replyTo}`} data-reply-marker {...stylex.props(styles.meta, styles.replyMarker)}><Icon name="arrow-left" scale="status" /></span></Focusable></Tooltip> : null}
     {delivery?._tag === 'BroadcastCopy' ? <span {...stylex.props(styles.chip)}>broadcast · {delivery.recipients} seats</span> : arrivedWhileWorking ? <span {...stylex.props(styles.chip)}>arrived while working</span> : null}
     {headerMeta !== undefined ? headerMeta : onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : id !== undefined && onCopyId !== undefined ? <Button aria-label={`Copy id`} {...stylex.props(styles.headerAction, styles.copy)} onPress={() => onCopyId(id)}><Icon name="copy" scale="status" /></Button> : null}
     {id !== undefined && (onCopyId === undefined || onCopy !== undefined) ? <span {...stylex.props(styles.visuallyHidden)}>message/<AgentIdHierarchy id={id} /></span> : null}
@@ -128,6 +129,8 @@ export interface OutgoingMessageRowProps {
   readonly defaultExpanded?: boolean
 }
 
+const SendTimeTooltip = ({ at, children }: { readonly at: string | undefined; readonly children: React.ReactNode }) => at === undefined ? children : <Tooltip label={at}>{children}</Tooltip>
+
 /** One send is one quiet work-log block, including broadcasts; receipts stay per recipient. */
 export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject, onCopy, defaultExpanded = false }: OutgoingMessageRowProps) => {
   const firstLine = message.slice(0, 200).split('\n', 1)[0] ?? ''
@@ -135,7 +138,7 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
   const target = delivery._tag === 'Broadcast' ? recipientCount !== undefined ? `${recipientCount} seats` : 'Broadcast' : recipients[0]?.id
   const receiptCount = recipients.filter(recipient => recipient.receipt !== undefined).length
   const normalizedSubject = subject?.replace(/^(?:re:\s*)+/i, 'Re: ')
-  // No native titles: the send time is the trigger's description, the full first line is already in its name, and failed receipts describe their reason.
+  // No native titles: the send time is the trigger's kit tooltip (hover and keyboard focus) and its description, the full first line is already in its name, and failed receipts describe their reason.
   const atId = React.useId()
   const receiptId = React.useId()
   return <Disclosure defaultExpanded={defaultExpanded}>
@@ -143,7 +146,7 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
       <header data-message-header {...stylex.props(styles.workHeader)}>
         {at !== undefined ? <VisuallyHidden elementType="span"><span id={atId}>{at}</span></VisuallyHidden> : null}
         <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name="message" scale="status" /></span>
-        <Button slot="trigger" aria-label={`To ${target ?? ''} · ${firstLine}`} aria-describedby={at !== undefined ? atId : undefined} {...stylex.props(styles.trigger)}>
+        <SendTimeTooltip at={at}><Button slot="trigger" aria-label={`To ${target ?? ''} · ${firstLine}`} aria-describedby={at !== undefined ? atId : undefined} {...stylex.props(styles.trigger)}>
           <span {...stylex.props(styles.rowTitle)}>
           <span {...stylex.props(styles.meta)}>To </span>
           {target !== undefined ? <strong {...stylex.props(styles.sender)}>{delivery._tag === 'Broadcast' ? target : <AgentIdHierarchy id={target} />}</strong> : null}
@@ -151,7 +154,7 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
           <span {...stylex.props(styles.excerpt)}>{firstLine}</span>
           </span>
           <span data-message-disclosure aria-hidden="true" {...stylex.props(styles.disclosureGlyph)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span>
-        </Button>
+        </Button></SendTimeTooltip>
         <span {...stylex.props(styles.rowMetadata)}>
           {receiptCount > 0 ? <span {...stylex.props(styles.meta)}>{receiptCount} {receiptCount === 1 ? 'receipt' : 'receipts'}</span> : null}
           {onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : null}
@@ -161,7 +164,7 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
         <div data-opened-body {...stylex.props(styles.openedBody)}>
           {normalizedSubject !== undefined ? <h2 data-message-subject {...stylex.props(styles.openedSubject)}>{normalizedSubject}</h2> : null}
           <div data-message-content {...stylex.props(styles.messageBody)} tabIndex={message.length > 4000 ? 0 : undefined} role="region" aria-label="Outgoing message body"><MessageBody text={message} /></div>
-          <div {...stylex.props(styles.controls)}>{recipients.map(recipient => <span key={recipient.id} role={recipient.receipt?._tag === 'Failed' ? 'note' : undefined} tabIndex={recipient.receipt?._tag === 'Failed' ? 0 : undefined} aria-label={recipient.receipt?._tag === 'Failed' ? `${recipient.id} · failed · ${recipient.receipt.reason}` : undefined} aria-describedby={recipient.receipt?._tag === 'Failed' ? `${receiptId}-${recipient.id}` : undefined} {...stylex.props(styles.receipt, recipient.receipt?._tag === 'Failed' && styles.danger)}>
+          <div {...stylex.props(styles.controls)}>{recipients.map(recipient => <span key={recipient.id} role={recipient.receipt?._tag === 'Failed' ? 'note' : undefined} tabIndex={recipient.receipt?._tag === 'Failed' ? 0 : undefined} aria-label={recipient.receipt?._tag === 'Failed' ? `${recipient.id} · failed` : undefined} aria-describedby={recipient.receipt?._tag === 'Failed' ? `${receiptId}-${recipient.id}` : undefined} {...stylex.props(styles.receipt, recipient.receipt?._tag === 'Failed' && styles.danger)}>
             <AgentIdHierarchy id={recipient.id} />{recipient.receipt !== undefined ? ` · ${recipient.receipt._tag.toLowerCase()}` : ''}{recipient.receipt?._tag === 'Failed' ? <VisuallyHidden elementType="span"><span id={`${receiptId}-${recipient.id}`}>{recipient.receipt.reason}</span></VisuallyHidden> : null}
           </span>)}</div>
           {recipients.flatMap(recipient => recipient.receipt?._tag === 'Failed' ? [<p key={recipient.id} {...stylex.props(styles.danger)}>{recipient.id}: {recipient.receipt.reason}</p>] : [])}
@@ -196,6 +199,7 @@ const styles = stylex.create({
   subject: { margin: 0, marginTop: s.xs, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   button: { padding: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   headerAction: { flex: '0 1 auto', minWidth: 0, height: g.icon, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fgSoft, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  replyMarker: { flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
   copy: { pointerEvents: 'auto', opacity: { default: 0, ':hover': 1, ':focus-visible': 1 }, flex: '0 0 auto', width: g.icon },
   trigger: { gridColumn: '2 / 5', gridRow: 1, height: g.toolRow, minWidth: 0, display: 'grid', gridTemplateColumns: 'subgrid', alignItems: 'center', gap: s.sm, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   excerpt: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },

@@ -122,7 +122,42 @@ export const Reply: Story = { args: { replyTo: 'Parent.Question', subject: 'Rele
   await userEvent.click(canvas.getByRole('button', { name: /Parent.*Question/ }))
   await expect(args.onOpenReply).toHaveBeenCalledWith('Parent.Question')
   await expect(args.onCopyId).not.toHaveBeenCalled()
+  // With onOpenReply the visible button is the reply path; no icon-only marker and no native title.
+  await expect(canvas.queryByRole('img', { name: 'Reply to Parent.Question' })).toBeNull()
+  await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
 } }
+const openTooltips = () => [...document.querySelectorAll<HTMLElement>('[role="tooltip"]')].map(tooltip => tooltip.textContent)
+/** The kit hover card is the visible path for a fact that used to be a native title: exactly one card on hover and on keyboard focus. */
+const assertKitTooltip = async (target: HTMLElement, label: string) => {
+  await userEvent.hover(target)
+  await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
+  await userEvent.unhover(target)
+  await waitFor(() => expect(openTooltips()).toEqual([]), { timeout: 3_000 })
+  await userEvent.keyboard('{Shift}')
+  target.focus()
+  await expect(target).toHaveFocus()
+  await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
+  target.blur()
+  await waitFor(() => expect(openTooltips()).toEqual([]), { timeout: 3_000 })
+}
+export const ReplyMarker: Story = { args: { replyTo: 'Parent.Question', subject: 'Release review', onOpenReply: undefined }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const marker = canvas.getByRole('img', { name: 'Reply to Parent.Question' })
+  await expect(canvas.queryByRole('button', { name: /Reply to/ })).toBeNull()
+  const noTitles = async () => expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
+  await noTitles()
+  marker.setAttribute('title', 'injected')
+  try { await expect(noTitles()).rejects.toThrow() } finally { marker.removeAttribute('title') }
+  await noTitles()
+  await assertKitTooltip(marker, 'Reply to Parent.Question')
+  await noTitles()
+} }
+export const ReplyLight440: Story = { ...Reply, parameters: { scheme: 'light', width: 440 } }
+export const ReplyDark1440: Story = { ...Reply, parameters: { scheme: 'dark', width: 1440 } }
+export const ReplyLight1440: Story = { ...Reply, parameters: { scheme: 'light', width: 1440 } }
+export const ReplyMarkerLight440: Story = { ...ReplyMarker, parameters: { scheme: 'light', width: 440 } }
+export const ReplyMarkerDark1440: Story = { ...ReplyMarker, parameters: { scheme: 'dark', width: 1440 } }
+export const ReplyMarkerLight1440: Story = { ...ReplyMarker, parameters: { scheme: 'light', width: 1440 } }
 export const FromParent: Story = { args: { from: 'Parent', to: 'Parent.Child', via: { _tag: 'FromParent' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getByText('from parent')).toBeVisible()
@@ -180,6 +215,9 @@ export const OutgoingSingle: Story = { render: () => <OutgoingMessageRow {...out
   await expect(trigger).toHaveAccessibleName('To Review · Please review the release report.')
   await expect(trigger).toHaveAccessibleDescription(outgoingMessage.at!)
   await expect(canvasElement.contains(document.getElementById(trigger.getAttribute('aria-describedby')!))).toBe(true)
+  // The send time stays visible: the kit hover card on hover and on keyboard focus, with the same text as the description.
+  await assertKitTooltip(trigger, outgoingMessage.at!)
+  await expect(trigger).toHaveAccessibleDescription(outgoingMessage.at!)
   await expect(canvas.queryByText('The patch keeps the existing protocol and updates the examples.')).toBeNull()
   await userEvent.click(trigger)
   await expect(trigger).toHaveAttribute('aria-expanded', 'true')
@@ -214,9 +252,11 @@ export const OutgoingFailed: Story = { render: () => <OutgoingMessageRow {...out
   const canvas = within(canvasElement)
   await expect(canvas.queryByText('Review: Recipient retired before delivery')).toBeNull()
   await userEvent.click(canvas.getByRole('button', { name: /Please review the release report/ }))
-  const receipt = canvasElement.querySelector<HTMLElement>('[aria-label="Review · failed · Recipient retired before delivery"]')!
+  const receipt = canvasElement.querySelector<HTMLElement>('[aria-label="Review · failed"]')!
   receipt.focus()
   await expect(receipt).toHaveFocus()
+  // Named once, described once: the reason is not repeated in the name.
+  await expect(receipt).toHaveAccessibleName('Review · failed')
   // The failure reason is the receipt's exact description, not a native title.
   const noTitles = async () => expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
   await noTitles()
