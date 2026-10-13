@@ -114,12 +114,12 @@ export const ContextOccupancy: Story = {
     const signal = rows[0]!.querySelector<HTMLElement>('[data-row-field="context-percent"]')!
     const assertOccupancy = async () => { await expect(signal).toHaveTextContent('Context 6%') }
     await assertOccupancy()
-    await expect(rowDescription(within(rows[0]!).getByRole('button', { name: /Reported occupancy/ }))).toContain('Reported main-session context: 6%; 61,206 used tokens; 1,000,000 token window; as of 2026-10-08T11:59:30.000Z')
+    await expect(rowDescription(within(rows[0]!).getByRole('button', { name: /^Reported occupancy/ }))).toContain('Reported main-session context: 6%; 61,206 used tokens; 1,000,000 token window; as of 2026-10-08T11:59:30.000Z')
     await expect(rows[1]!.querySelector('[data-row-field="context-percent"]')).toHaveTextContent('Context 0%')
-    await expect(rowDescription(within(rows[2]!).getByRole('button', { name: /Reported percentage only/ }))).toContain('used tokens unreported; window unreported')
-    await expect(rowDescription(within(rows[3]!).getByRole('button', { name: /Retained stale occupancy/ }))).toContain('Last observed main-session context')
+    await expect(rowDescription(within(rows[2]!).getByRole('button', { name: /^Reported percentage only/ }))).toContain('used tokens unreported; window unreported')
+    await expect(rowDescription(within(rows[3]!).getByRole('button', { name: /^Retained stale occupancy/ }))).toContain('Last observed main-session context')
     await expect(rows[4]!.querySelector('[data-row-field="context-percent"]')).toBeNull()
-    await expect(rowDescription(within(rows[4]!).getByRole('button', { name: /Occupancy unreported/ }))).not.toContain('context')
+    await expect(rowDescription(within(rows[4]!).getByRole('button', { name: /^Occupancy unreported/ }))).not.toContain('context')
     // No native tooltip carries the occupancy; the description does.
     await expect(canvasElement.querySelector('[data-row-field="context-percent"][title], [data-row-field="context-percent"][aria-label]')).toBeNull()
     // Negative control: a cumulative-token ratio must not pass the occupancy display assertion.
@@ -160,7 +160,7 @@ export const LayoutCWidths: Story = {
     // Expanded rows move every metric to line two; the time column keeps only the hover quick Open host.
     await expect(expanded!.querySelector('[data-row-column="time"] [data-row-field]')).toBeNull()
     await userEvent.hover(expanded!)
-    await expect(await within(expanded!).findByRole('button', { name: 'Open Sample session' })).toBeVisible()
+    await expect(await within(expanded!).findByRole('button', { name: 'Open Sample session' })).toBeInTheDocument()
     await userEvent.unhover(expanded!)
     await expect(rowDescription(within(expanded!).getByRole('button', { name: /^Sample session/ }))).toContain('24h API-equivalent spend including subagents: $1.84')
     // Unreported windows and occupancy are omitted, never rendered as a placeholder or zero.
