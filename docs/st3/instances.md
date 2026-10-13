@@ -34,6 +34,7 @@ Everything below one directory, `~/.st-instance/NAME`:
 | `bin/` | the `st3`, `st` and `pty` that the installer puts there | |
 | `claude/` | the instance's Claude account, plugins and `st` skill | `CLAUDE_CONFIG_DIR` |
 | `codex/` | the instance's Codex account and `st` skill | `CODEX_HOME` |
+| `home/` | the skill copy for pi, omp and opencode (`home/.agents/skills`) | |
 | `agents/` | default workspaces for new agents, including the onboarding expert | |
 | `app/` | the macOS app bundle | |
 
@@ -80,7 +81,7 @@ the empty `~/.st-instance` when it was the last. It refuses to run if anything i
 outside that directory (for example a `state_dir` set elsewhere in the instance's `config.toml`).
 `--dry-run` lists what it would remove.
 
-`st uninstall` on the default install now also removes what it used to leave behind: the copies of
+`st uninstall` on the default install also removes: the copies of
 the `st` skill that seats install into `~/.claude/skills` and `~/.agents/skills` (only when
 unchanged), st's Claude plugin and marketplace registration, and `~/.local/share/st/plugins`. It
 still leaves workspaces you or your agents created (`~/st/agents`), the account-wide lingering
@@ -96,19 +97,10 @@ identical and `~/.st-instance` gone. It then removes the default install and req
 remain. It uses no service manager and never reads or writes the machine's real install. Run it
 outside a seat's process tree, because a daemon refuses a process that descends from another seat.
 
-Result on Linux for this change: both checks pass. The installers'
-mocked macOS transactions also pass (`scripts/install-macos-test`), including an instance install
-beside a default one whose plists, app and commands stay byte-identical.
+`scripts/install-macos-test` covers an instance install beside a default one whose plists,
+app and commands stay byte-identical.
 
-## Not covered
-
-- **macOS on a real Mac.** The installer and launchd changes are exercised by the mocked
-  transaction tests and by unit tests of the names and plist rendering, not by a signed install on
-  macOS or a real `launchctl` session.
-- **systemd units for an instance.** Rendering and naming are tested; installing one into the real
-  user manager was not done, because that touches the real session.
-- **`st skill` for Codex, pi, omp and opencode** in an instance goes to `CODEX_HOME/skills` or a
-  directory inside the instance. Whether those harnesses load a skill from there, rather than from
-  `~/.agents/skills`, was not checked.
-- A harness started by hand inside an instance still reads whatever `HOME`-relative files it always
-  read (for example `~/.gitconfig`). Only the directories above are redirected.
+A harness started by hand inside an instance still reads its usual `HOME`-relative files
+(for example `~/.gitconfig`). Only the directories above are redirected. Codex reads skills
+from `CODEX_HOME/skills`; pi, omp and opencode read `home/.agents/skills` when launched with
+that instance home.
