@@ -66,6 +66,20 @@ st conversations ls person/ada
 
 `send` and `reply` safely recognize a retry with the same content. If a send times out, check its status or retry it; do not assume it failed. An agent's answer belongs in the conversation where you asked it.
 
+Claude's native permission, question and review dialogs hold new Smalltalk channel
+notifications outside the harness. Mail remains durable and releases in mailbox
+order once that prompt is answered or dismissed; a later session cannot inherit
+the previous session's hold or answer. Native transcript receipt recovery still
+runs for mail already offered, so this hold does not erase delivery/read proof or
+replay uncertain handoffs. An unavailable or stale observation keeps new offers
+held until current evidence returns.
+
+A permission hook's answer-poll timeout does **not** mean the dialog timed out:
+Claude can still be waiting for a terminal answer after that hook stops polling.
+The hold remains while that dialog is open. A native timeout that closes the prompt
+releases it when Claude reports the resolution or the terminal shows its input
+box again; an ended session leaves its mail for its successor.
+
 Attach an existing PNG, JPEG, GIF, or WebP image (up to four, at most 10 MiB each):
 
 ```sh

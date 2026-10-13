@@ -269,7 +269,11 @@ pub async fn run(
                         }
                     }
                     for message in &tracked {
-                        let Some(envelope) = content.get(&message.subject) else { continue; };
+                        // An unprepared live FIFO head must not be overtaken.
+                        let Some(envelope) = content.get(&message.subject) else {
+                            if live.contains(&message.subject) && !state.attempted.contains(&message.subject) { break; }
+                            continue;
+                        };
                         if state.attempted.contains(&message.subject) {
                             let since = unconfirmed_since.entry(message.subject.clone()).or_insert_with(Instant::now);
                             if !state.confirmed.contains(&message.subject) && message.status != "delivered" && since.elapsed() >= Duration::from_secs(30) {
@@ -280,6 +284,9 @@ pub async fn run(
                             continue;
                         }
                         if !live.contains(&message.subject) { continue; }
+                        // Hold only new offers: proof lookup and receipt publication
+                        // must keep running while Claude waits on a person.
+                        if notifications_held(client, subject, agent_dir, &wrapper).await { break; }
                         // Persist the handoff before stdout. A broken pipe cannot authorize
                         // repeating an uncertain notification. Restart first checks native proof.
                         state.attempted.insert(message.subject.clone());
@@ -343,6 +350,64 @@ pub async fn run(
             },
         }
     }
+}
+
+async fn notifications_held(client: &Client, subject: &str, agent_dir: &Path, wrapper: &str) -> bool {
+    let observed = st_drivers::harness_state::read(
+        &st_drivers::harness_state::harness_state_path(agent_dir),
+        None,
+    );
+    let Some(observed) = observed.as_ref() else { return true; };
+    if !current_notification_observation(observed, wrapper) { return true; }
+    if observed.blocked_on != st_drivers::harness_state::BlockedOn::Human {
+        return observed.blocked_on != st_drivers::harness_state::BlockedOn::None;
+    }
+    if !matches!(observed.ask,
+        st_drivers::harness_state::Ask::Permission
+            | st_drivers::harness_state::Ask::Question
+            | st_drivers::harness_state::Ask::Review)
+    {
+        return true;
+    }
+    let Some((ownership, transition)) = observed.ownership_sequence.zip(observed.transition_sequence) else {
+        return true;
+    };
+    // Esc/No can end a prompt without a hook event. Its episode-specific
+    // daemon release, not the still-blocked driver file, is authoritative.
+    // Lookup failure holds only new mail, never durable receipt recovery.
+    let path = format!(
+        "/v1/harness-prompts/state?agent={}&ownership={ownership}&transition={transition}",
+        urlencoding::encode(subject)
+    );
+    let prompt = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.get::<crate::store::NativePromptState>(&path),
+    ).await;
+    if !matches!(prompt, Ok(Ok(crate::store::NativePromptState::Gone | crate::store::NativePromptState::Answered { .. }))) {
+        return true;
+    }
+    // An answer to the previous prompt cannot release a new prompt that opened
+    // while the daemon lookup was in flight.
+    let latest = st_drivers::harness_state::read(
+        &st_drivers::harness_state::harness_state_path(agent_dir),
+        None,
+    );
+    !latest.as_ref().is_some_and(|latest| {
+        current_notification_observation(latest, wrapper)
+            && latest.ownership_sequence == observed.ownership_sequence
+            && latest.transition_sequence == observed.transition_sequence
+    })
+}
+
+fn current_notification_observation(observed: &st_drivers::harness_state::Observed, wrapper: &str) -> bool {
+    !wrapper.is_empty()
+        && observed.evidence_incarnation.as_deref() == Some(wrapper)
+        && observed.harness.as_deref() == Some("claude")
+        && matches!(observed.state,
+            st_drivers::harness_state::Activity::Ready
+                | st_drivers::harness_state::Activity::Idle
+                | st_drivers::harness_state::Activity::Active
+                | st_drivers::harness_state::Activity::Child)
 }
 
 async fn announce_initialization(client: &Client, input: &ClaimInput) -> Result<ClaimRecord> {
@@ -687,6 +752,59 @@ fn request(line: &str, initialized: &mut bool) -> Result<Option<Value>> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[tokio::test]
+    async fn claude_new_notification_gate_uses_current_prompt_resolution_and_fails_closed() {
+        use axum::{Json, Router, routing::get};
+        use crate::store::NativePromptState;
+
+        let (prompt, response) = tokio::sync::watch::channel(NativePromptState::Open);
+        let app = Router::new().route("/v1/harness-prompts/state", get(move || {
+            let response = response.clone();
+            async move { Json(response.borrow().clone()) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(crate::client::Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let dir = tempfile::tempdir().unwrap();
+        let path = st_drivers::harness_state::harness_state_path(dir.path());
+        let now = st_drivers::message::now_ms();
+        let record = |ask: &str, blocked: &str, incarnation: &str, written: u64| json!({
+            "schema":"st.harness-state.v1", "agent":"worker", "harness":"claude",
+            "state":"active", "blockedOn":blocked, "inputBuffer":"unknown", "ask":ask,
+            "incarnation":incarnation, "seq":7, "transitions":11,
+            "sinceMs":now, "writtenAtMs":written
+        });
+        assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await);
+        for ask in ["permission", "question", "review"] {
+            std::fs::write(&path, serde_json::to_vec(&record(ask, "human", "current", now)).unwrap()).unwrap();
+            prompt.send_replace(NativePromptState::Open);
+            assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
+            for resolved in [
+                NativePromptState::Answered { answer: "allow".into() },
+                NativePromptState::Answered { answer: "deny".into() },
+                NativePromptState::Gone,
+            ] {
+                prompt.send_replace(resolved);
+                assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
+            }
+        }
+        for ask in ["none", "future-ask"] {
+            std::fs::write(&path, serde_json::to_vec(&record(ask, "human", "current", now)).unwrap()).unwrap();
+            assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
+        }
+        std::fs::write(&path, serde_json::to_vec(&record("none", "none", "current", now)).unwrap()).unwrap();
+        assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await);
+        assert!(notifications_held(&client, "agent/worker", dir.path(), "replacement").await);
+        std::fs::write(&path, serde_json::to_vec(&record("none", "none", "replacement", now)).unwrap()).unwrap();
+        assert!(!notifications_held(&client, "agent/worker", dir.path(), "replacement").await);
+        std::fs::write(&path, serde_json::to_vec(&record("question", "human", "replacement", 0)).unwrap()).unwrap();
+        assert!(notifications_held(&client, "agent/worker", dir.path(), "replacement").await);
+        std::fs::write(&path, serde_json::to_vec(&record("permission", "human", "replacement", now)).unwrap()).unwrap();
+        let unavailable = Client::unix(&dir.path().join("absent-daemon.sock"));
+        assert!(notifications_held(&unavailable, "agent/worker", dir.path(), "replacement").await);
+        server.abort();
+    }
 
     #[test]
     fn claude_channel_retry_backoff_caps_at_thirty_seconds() {

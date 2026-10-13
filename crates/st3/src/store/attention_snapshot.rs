@@ -1483,6 +1483,85 @@ fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Op
         .flatten())
 }
 
+/// Fold the native prompt's terminal-only release into the shared harness view.
+/// Driver heartbeats can restate the old blocked file after Esc/No; their
+/// unchanged episode must not resurrect a resolved hold in sender status/cards.
+pub(super) fn resolve_native_harness_at(
+    connection: &Connection,
+    subject: &str,
+    index: u64,
+    view: &mut crate::model::CurrentHarnessView,
+) -> Result<()> {
+    if view.driver.as_deref() != Some("claude")
+        || view.blocked_on.as_deref() != Some("human")
+        || !matches!(view.ask.as_deref(), Some("permission" | "question" | "review"))
+    {
+        return Ok(());
+    }
+    let Some(claim) = claim_by_id_tx(connection, &view.claim)? else { return Ok(()); };
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    let Some((ownership, transition)) = fields["ownership_sequence"].as_u64()
+        .zip(fields["transition_sequence"].as_u64()) else { return Ok(()); };
+    if let Some((state, at)) = native_prompt_sequence_resolution(connection, subject, ownership, transition, index)? {
+        view.state = if matches!(state, NativePromptState::Answered { ref answer } if answer == "allow") {
+            "working"
+        } else {
+            "idle"
+        }.into();
+        view.blocked_on = None;
+        view.ask = None;
+        view.reason = None;
+        view.since_unix_ms = at;
+        view.observed_at_unix_ms = view.observed_at_unix_ms.max(at);
+    }
+    Ok(())
+}
+
+/// An episode's release stays durable even after more than sixteen heartbeats.
+/// Ownership/transition sequences identify that exact driver episode, so older
+/// answers cannot release a successor prompt, even with the same tool/reason.
+fn native_prompt_sequence_resolution(
+    connection: &Connection,
+    subject: &str,
+    ownership: u64,
+    transition: u64,
+    index: u64,
+) -> Result<Option<(NativePromptState, u128)>> {
+    let mut observations = connection.prepare_cached(&canonical_sql(
+        "SELECT claims.id FROM claims INDEXED BY claims_harness_episode_index
+         JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND claims.kind='harness.observed'
+           AND claims.store_index<=?2
+           AND json_extract(claims.body,'$.fields.ownership_sequence')=?3
+           AND json_extract(claims.body,'$.fields.transition_sequence')=?4
+         ORDER BY CANONICAL_DESC(claims)",
+    ))?;
+    let mut resolutions = connection.prepare_cached(&canonical_sql(
+        "SELECT json_extract(body, '$.fields.status'), accepted_at_unix_ms
+         FROM claims INDEXED BY claims_operation_index
+         WHERE json_extract(body, '$._operation.id') IS NOT NULL
+           AND json_extract(body, '$._operation.id') IN (?1,?2)
+           AND store_index<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+    ))?;
+    for claim in observations.query_map(params![subject, index, ownership, transition], |row| row.get::<_, String>(0))? {
+        smallclaims::read_budget::check()?;
+        let claim = claim?;
+        let gone = native_prompt_gone_operation(&claim);
+        let answer = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&claim));
+        let resolved: Option<(Option<String>, String)> = resolutions
+            .query_row(params![gone, answer, index], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        if let Some((answer, at)) = resolved {
+            let state = match answer {
+                Some(answer) if matches!(answer.as_str(), "allow" | "deny") => NativePromptState::Answered { answer },
+                _ => NativePromptState::Gone,
+            };
+            return Ok(Some((state, at.parse()?)));
+        }
+    }
+    Ok(None)
+}
+
 /// What a waiting prompt hook needs to know: whether the seat's prompt is still open, answered
 /// (and how), or gone.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1543,27 +1622,46 @@ impl Store {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let own = recent.iter().position(|(_, body)| {
+        let own = recent.iter().rposition(|(_, body)| {
             serde_json::from_str::<Value>(body).is_ok_and(|body| {
                 let fields = body.get("fields").unwrap_or(&body);
                 fields["ownership_sequence"] == ownership && fields["transition_sequence"] == transition
             })
         });
         let Some(own) = own else {
-            // Not published yet, or long gone: only the first can be answered, so keep waiting.
-            return Ok(if recent.len() == 16 {
+            // A full history window does not prove a just-written prompt is gone:
+            // the driver file can precede publication of its daemon observation.
+            // Only a later ownership/transition sequence proves it was superseded.
+            let superseded = recent.iter().any(|(_, body)| {
+                serde_json::from_str::<Value>(body).is_ok_and(|body| {
+                    let fields = body.get("fields").unwrap_or(&body);
+                    fields["ownership_sequence"].as_u64()
+                        .zip(fields["transition_sequence"].as_u64())
+                        .is_some_and(|sequence| sequence > (ownership, transition))
+                })
+            });
+            return Ok(if superseded {
                 NativePromptState::Gone
             } else {
                 NativePromptState::Open
             });
         };
-        // Claude and Codex show one prompt at a time: while every observation since the waiter's
-        // own still waits on that permission, it is the same prompt, and an answer to any of them
-        // is the waiter's. Anything else in between means the prompt is gone.
+        // A delivery channel also waits on questions and reviews, even though only
+        // permission prompts can be answered through st. Do not confuse a later
+        // prompt (or runtime) with a restatement of the waiting episode.
+        let own_body: Value = serde_json::from_str(&recent[own].1)?;
+        let own_fields = own_body.get("fields").unwrap_or(&own_body);
         let mut chain = Vec::new();
         for (claim, body) in &recent[..=own] {
             let body: Value = serde_json::from_str(body)?;
-            if !answerable(body.get("fields").unwrap_or(&body)) {
+            let fields = body.get("fields").unwrap_or(&body);
+            if fields["blocked_on"] != "human"
+                || !matches!(fields["ask"].as_str(), Some("permission" | "question" | "review"))
+                || fields["incarnation_id"] != own_fields["incarnation_id"]
+                || fields["ask"] != own_fields["ask"]
+                || fields["reason"] != own_fields["reason"]
+                || matches!(fields["state"].as_str(), Some("ended" | "indeterminate"))
+            {
                 return Ok(NativePromptState::Gone);
             }
             chain.push(claim.clone());
@@ -1584,7 +1682,8 @@ impl Store {
                 return Ok(NativePromptState::Answered { answer });
             }
         }
-        Ok(NativePromptState::Open)
+        Ok(native_prompt_sequence_resolution(&connection, seat, ownership, transition, i64::MAX as u64)?
+            .map_or(NativePromptState::Open, |(state, _)| state))
     }
 
     /// Record `actor`'s answer to the native prompt `episode` (the observation that opened it) of
