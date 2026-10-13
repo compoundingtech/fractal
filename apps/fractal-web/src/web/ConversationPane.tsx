@@ -24,6 +24,7 @@ export const ConversationPane = ({
   onOpenTool,
   ux,
   visible = true,
+  showHeader = true,
   interest: shellInterest,
 }: {
   readonly agentRef: string
@@ -32,6 +33,7 @@ export const ConversationPane = ({
   /** Host-owned detail surface for a tool call opened from the transcript. */
   readonly onOpenTool: (call: WorkLogCall) => void
   readonly ux?: UxTelemetry
+  readonly showHeader?: boolean
   /** A retained hidden pane keeps its DOM but releases visible follow demand (setVisible false). */
   readonly visible?: boolean
   /** Already acquired by the shell before this module loaded; standalone panes acquire their own. */
@@ -84,13 +86,14 @@ export const ConversationPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} feed={feed} state={state} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} showHeader={showHeader} onOpenTool={onOpenTool} feed={feed} state={state} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, feed, state }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, showHeader, onOpenTool, feed, state }: {
   readonly agentRef: string
   readonly agentName: string
+  readonly showHeader: boolean
   readonly onOpenTool: (call: WorkLogCall) => void
   readonly feed: Feed<ConversationPage>
   readonly state: ConversationTranscriptState
@@ -115,6 +118,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       turns={state._tag === 'Observed' ? state.turns : []}
       scrollToBottomKey={feed._tag === 'Observed' ? feed.value.lastSendId : undefined}
       title={agentName}
+      showHeader={showHeader}
       sync={transcriptSyncStatus(observation, feed, now)}
       now={now}
       observedAt={transcriptObservedAt(observation, now)}

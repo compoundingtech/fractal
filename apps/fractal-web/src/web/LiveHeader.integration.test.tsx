@@ -6,6 +6,7 @@ import { Agent, AgentQueue, ResourceObservation, decodeUnknownSync } from '@smal
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { expect as expectAccessible } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, unavailable, type Feed } from '../data/source.ts'
@@ -15,6 +16,7 @@ import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@st3/sdk/effect'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { createConversationTranscript } from './conversationTranscript.ts'
+import workspaceThreadHeaderSource from './WorkspaceThreadHeader.tsx?raw'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
@@ -56,6 +58,30 @@ beforeEach(async () => {
 afterEach(async () => { await act(async () => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals() })
 
 describe('live header parity', () => {
+  it('opts into the kit status-beside-title layout', () => {
+    expect(workspaceThreadHeaderSource).toContain('<ThreadHeader {...props} layout="status-beside-title" />')
+  })
+  it('keeps synchronization described without a native tooltip over header disclosures', async () => {
+    const header = host.querySelector<HTMLElement>('[role="group"][aria-label="Conversation header"]')!
+    expect(header.getAttribute('role')).toBe('group')
+    expect(header.hasAttribute('title')).toBe(false)
+    expect(header.hasAttribute('aria-description')).toBe(false)
+    const descriptionId = header.getAttribute('aria-describedby')!
+    const description = document.getElementById(descriptionId)!
+    expect(description.textContent).toBe('Conversation synchronization pending')
+    expect(description.hidden).toBe(false)
+    await expectAccessible(header).toHaveAccessibleDescription('Conversation synchronization pending')
+    for (const name of ['Conversation menu', 'Resources']) {
+      const trigger = button(name)!
+      for (let ancestor: HTMLElement | null = trigger; ancestor !== null; ancestor = ancestor.parentElement) {
+        expect(ancestor.hasAttribute('title')).toBe(false)
+      }
+      await click(name)
+      await expectAccessible(header).toHaveAccessibleDescription('Conversation synchronization pending')
+      if (name === 'Conversation menu') await click(name)
+      else await click('Close resources')
+    }
+  })
   it('renders named Resources and Conversation controls in the owning header', async () => {
     const header = host.querySelector('[data-testid="thread-header"]')!
     const names = [...header.querySelectorAll('button')].map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())
