@@ -133,7 +133,8 @@ const assertKitTooltip = async (target: HTMLElement, label: string) => {
   await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
   await userEvent.unhover(target)
   await waitFor(() => expect(openTooltips()).toEqual([]), { timeout: 3_000 })
-  await userEvent.keyboard('{Shift}')
+  // Shift is not a modality key in React Aria; Escape switches focus-visible modality to keyboard so focus opens the card.
+  await userEvent.keyboard('{Escape}')
   target.focus()
   await expect(target).toHaveFocus()
   await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
