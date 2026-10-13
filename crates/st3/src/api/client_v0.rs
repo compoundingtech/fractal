@@ -13031,6 +13031,7 @@ mission "queue-parity" state="ready" {
     async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        let mut recorded = crate::api::roster_stage_recorded().subscribe();
         let subject = "agent/fresh-pause";
         let append = |fields: Value| {
             state.store.append_claim(&ClaimInput {
@@ -13103,10 +13104,16 @@ mission "queue-parity" state="ready" {
         assert_eq!(page.items[0]["harness_state"], "idle");
         assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the healthy attempt");
         // The fresh read's wait and page, and the refresher's folds, land in their stage rows.
-        let stages = crate::api::request_latency_snapshot().into_iter()
+        let stages = || crate::api::request_latency_snapshot().into_iter()
             .filter(|row| row["scope"] == "agents-roster")
             .filter_map(|row| row["stage"].as_str().map(str::to_owned))
             .collect::<BTreeSet<_>>();
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| {
+            let stages = stages();
+            ["fresh-wait", "fresh-page"].iter().all(|stage| stages.contains(*stage))
+                && (stages.contains("refresh") || stages.contains("refresh-cold"))
+        })).await.expect("the completed roster stages are recorded").unwrap();
+        let stages = stages();
         for stage in ["fresh-wait", "fresh-page"] {
             assert!(stages.contains(stage), "{stage} recorded: {stages:?}");
         }
@@ -13118,6 +13125,7 @@ mission "queue-parity" state="ready" {
     async fn forgotten_agent_roster_is_refolded_before_any_read_asks() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        let mut recorded = crate::api::roster_stage_recorded().subscribe();
         state.store.append_claim(&ClaimInput {
             subject: "agent/forgotten".into(), kind: "runtime.observed".into(), actor: None,
             fields: serde_json::from_value(json!({"status":"running",
@@ -13134,6 +13142,9 @@ mission "queue-parity" state="ready" {
             .await.expect("the refresher publishes the roster as it starts").unwrap();
         let plain = || client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default()));
+        let cold_folds = || crate::api::request_latency_snapshot().into_iter()
+            .find(|row| row["scope"] == "agents-roster" && row["stage"] == "refresh-cold")
+            .map_or(0, |row| row["count"].as_u64().unwrap());
 
         // A chunked replication projection, a trim or a repair forgets every kept reduction,
         // the published roster with them. Where no agents list was read lately, the roster
@@ -13144,19 +13155,18 @@ mission "queue-parity" state="ready" {
                 .await.is_err(),
             "a forget on a node nobody reads must not refold the roster",
         );
+        let before = cold_folds();
         assert!(plain().await.is_err(), "the first read after that finds no roster yet");
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete.clone()))
+        // Settle this fold's timing before taking the next baseline: publication wakes first.
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| complete(&0) && cold_folds() > before))
             .await.expect("the read's request republishes the roster").unwrap();
 
         // Once agents are being read, the refresher folds it again on its own: no read asks,
         // so none finds the roster missing and waits for a fold from the log.
-        let cold_folds = || crate::api::request_latency_snapshot().into_iter()
-            .find(|row| row["scope"] == "agents-roster" && row["stage"] == "refresh-cold")
-            .map_or(0, |row| row["count"].as_u64().unwrap());
         let before = cold_folds();
         state.store.forget_current_views();
         assert!(state.store.published_agent_roster(state.store.index().unwrap(), false).is_none());
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete))
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| complete(&0) && cold_folds() > before))
             .await.expect("the refresher republishes a forgotten roster unasked").unwrap();
         assert!(cold_folds() > before, "the refold from the log lands in the refresh-cold row");
         let (Extension(_), Json(page)) = plain().await.expect("a plain read after the refold finds a roster");
