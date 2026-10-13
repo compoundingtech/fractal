@@ -4,6 +4,7 @@ import { Button as AriaButton } from 'react-aria-components'
 import { accentVars as accent, textVars as text, spaceVars as s, geometryVars as g, typeVars as t } from '../composition-tokens.stylex'
 import { Markdown } from './Markdown'
 import { Icon } from './Icons'
+import { Spinner } from './Spinner'
 
 /** Muted reasoning disclosure: collapsed by default, streaming-aware, prose rendered through the shared Markdown seam. */
 export function ThinkingEntry({ text: value, streaming = false }: { text: string; streaming?: boolean }) {
@@ -11,7 +12,7 @@ export function ThinkingEntry({ text: value, streaming = false }: { text: string
   const contentId = React.useId()
   return <div data-testid="thinking-entry" data-streaming={streaming} {...stylex.props(styles.thinking)}>
     <AriaButton aria-expanded={open} aria-controls={contentId} onPress={() => setOpen(value => !value)} {...stylex.props(styles.thinkingControl)}>
-      <Icon name={streaming ? 'spinner' : open ? 'chevron-down' : 'chevron-right'} spinning={streaming} /><span>Thinking</span>
+      {streaming ? <Spinner /> : <Icon name={open ? 'chevron-down' : 'chevron-right'} />}<span>Thinking</span>
     </AriaButton>
     {open ? <div id={contentId}><Markdown text={value} streaming={streaming} /></div> : null}
   </div>

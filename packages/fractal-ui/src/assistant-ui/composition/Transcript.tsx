@@ -15,6 +15,7 @@ import { HighlightedSource, Markdown, MarkdownImagePolicy, type MarkdownImageOpe
 import { ThinkingEntry } from './ThinkingEntry'
 import { SendFailure, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
 import { Icon } from './Icons'
+import { Spinner } from './Spinner'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
 
@@ -176,7 +177,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
   const started = Date.parse(startedAt ?? '')
   const duration = Number.isFinite(started) && started <= now ? formatWorkDuration(now - started) || '<1s' : ''
   const waiting = state._tag === 'WaitingForAnswer'
-  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><Icon name="spinner" scale="status" spinning={!waiting} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{waiting ? `Waiting for your answer${duration === '' ? '' : ` · ${duration}`}` : `Working${duration === '' ? '' : ` for ${duration}`}`}</span></div>
+  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}>{waiting ? <Icon name="clock" scale="status" /> : <Spinner scale="status" />}<span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{waiting ? `Waiting for your answer${duration === '' ? '' : ` · ${duration}`}` : `Working${duration === '' ? '' : ` for ${duration}`}`}</span></div>
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined

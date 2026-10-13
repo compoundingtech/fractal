@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, waitFor, within } from 'storybook/test'
-import { Icon } from './Icons'
+import { Spinner } from './Spinner'
 import { ThreadHeader } from './Shell'
 import { LiveActivity } from './Transcript'
 import { SidebarAgentRow } from '../sidebar/SidebarAgentRow'
@@ -35,7 +35,7 @@ const sizes = [12, 14, 16] as const
 function Spinners({ scheme }: { readonly scheme: Scheme }) {
   return <main data-spinner-root data-scheme={scheme} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.root)}>
     <section aria-label="Sizes" data-context="sizes" {...stylex.props(styles.sizes)}>
-      {sizes.map(size => <span key={size} data-size={size} {...stylex.props(styles.size)}><Icon name="spinner" size={size} spinning /><span>{size}px · Working</span></span>)}
+      {sizes.map(size => <span key={size} data-size={size} {...stylex.props(styles.size)}><Spinner size={size} /><span>{size}px · Working</span></span>)}
     </section>
     <section aria-label="Sidebar agent row" data-context="sidebar" {...stylex.props(styles.sidebar)}>
       <SidebarAgentRow item={working} now={now} active />
