@@ -98,7 +98,7 @@ tar -xzf "$archive"
 cat "${archive%.tar.gz}/BUILD.json"
 ```
 
-`BUILD.json` records the exact source commit. Release tags are labels; compare source revisions and build metadata when checking an upgrade. For Nix installations, use the same pinned source on all machines and your normal profile or Home Manager update procedure; see [installation](getting-started.md#1-install).
+`BUILD.json` records the exact source commit. Release tags are labels; compare source revisions and build metadata when checking an upgrade. For Nix installations, use the same pinned source on all machines and your normal profile or Home Manager update procedure; see [installation](getting-started.md#1-download-and-open-st).
 
 `st --version` names the source revision and whether the build came from Nix or local source.
 `st --version --json` returns a stable `machine_version` without needing a daemon.
@@ -141,7 +141,7 @@ full replay trigger. Backups and restart windows must accommodate the release's 
 
 Check that local delivery becomes `current`, and read an `outdated` or `stale` reason before deciding a seat needs a restart.
 
-After all members are upgraded and caught up, compare replication digests as [two machines](two-machines.md#check-what-arrived) describes. Mixed builds can exchange signed history while an older member has claims waiting for an upgrade; that does not prove equal projections. Check a real conversation and its message receipt too:
+After all members are upgraded and caught up, compare replication digests as [two machines](two-machines.md#check-what-arrived) describes. Mixed builds can exchange signed history while an older member has claims waiting for an upgrade; that does not prove equal projections. Check a real conversation and its message receipt too. The example uses the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat); substitute your own existing seat when upgrading:
 
 ```sh
 probe_message=$(st conversations send agent/garden/worker --from person/ada \

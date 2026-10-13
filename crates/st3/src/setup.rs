@@ -236,6 +236,13 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     // Validate every answer before writing, including the persisted machine identity.
     merge_config(&path, &config)?;
     say!("Saved {}", path.display());
+    let work_root = config.work_root()?;
+    std::fs::create_dir_all(&work_root)
+        .with_context(|| format!("create the work folder {}", work_root.display()))?;
+    say!(
+        "Work folder: {}. Agents work in folders inside it, so none of them has to look through your home folder.",
+        work_root.display()
+    );
     if let Some(kib) = crate::read_cache::override_kib() {
         say!("Read cache: {kib} KiB per reader.");
     }
@@ -467,7 +474,7 @@ fn print_expert_summary(config: &Config, harness: &str) -> Result<()> {
         .context("setup needs a person")?;
     println!(
         "Created: the agent agent/st/expert ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/expert --as {person}",
-        crate::onboarding::workspace()?.display()
+        crate::onboarding::workspace(config)?.display()
     );
     Ok(())
 }
