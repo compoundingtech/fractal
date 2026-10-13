@@ -6,7 +6,8 @@ const targets = new WeakMap<Element, Set<HTMLElement | SVGElement>>()
  * Observing the rotating glyph itself makes Chromium recompute intersections every frame.
  * Without IntersectionObserver (server render, jsdom) the animation simply keeps running.
  */
-export function pauseOffscreen(element: HTMLElement | SVGElement): (() => void) | undefined {
+export function pauseOffscreen(element: HTMLElement | SVGElement | null): (() => void) | undefined {
+  if (element === null) return undefined
   const box = element.parentElement
   if (typeof IntersectionObserver === 'undefined' || box === null) return undefined
   observer ??= new IntersectionObserver(entries => {

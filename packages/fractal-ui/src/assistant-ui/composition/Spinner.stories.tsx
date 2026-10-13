@@ -111,10 +111,10 @@ function assertBaselines(root: HTMLElement) {
       for (const animation of animations) animation.currentTime = 1000 * fraction
       expect(textEdges(context)).toEqual(live)
     }
-    const glyphs = spinnersIn(context)
-    for (const glyph of glyphs) glyph.style.display = 'none'
+    const boxes = spinnersIn(context).map(glyph => glyph.parentElement!)
+    for (const box of boxes) box.style.display = 'none'
     const without = textEdges(context)
-    for (const glyph of glyphs) glyph.style.removeProperty('display')
+    for (const box of boxes) box.style.removeProperty('display')
     expect(without).toEqual(live)
   }
 }
