@@ -1413,22 +1413,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.event_notify
                     .send_modify(|generation| *generation = generation.saturating_add(1));
                 quiet_pass_started = (!changed).then_some(started);
-                if !changed {
+                if !changed || pass == 63 {
+                    crate::reconcile_telemetry::record_wake_passes(pass + 1, wake_cause);
                     #[cfg(test)]
                     if let Some(hook) = &self.background_wake_hook {
                         hook(pass + 1);
+                    }
+                    if changed {
+                        self.notify.notify_one();
                     }
                     break;
                 }
-                if pass == 63 {
-                    #[cfg(test)]
-                    if let Some(hook) = &self.background_wake_hook {
-                        hook(pass + 1);
-                    }
-                    self.notify.notify_one();
-                } else {
-                    tokio::task::yield_now().await;
-                }
+                tokio::task::yield_now().await;
             }
         }
     }
