@@ -181,7 +181,7 @@ const DevBarContent = ({
       <div {...stylex.props(styles.row)}>
         <Button
           {...stylex.props(styles.trigger)}
-          aria-label="Expand developer transport details"
+          aria-label="wf developer transport details"
           aria-expanded={expanded}
           aria-controls="wf-devbar-details"
           onPress={() => setPinned(!pinned)}
