@@ -2,8 +2,8 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { Button, useDragAndDrop, type Key } from 'react-aria-components'
-import { SidebarTree, type SidebarTreeItem } from './SidebarTree'
+import { Button, Dialog, DialogTrigger, Modal, ModalOverlay, useDragAndDrop, type Key } from 'react-aria-components'
+import { SidebarTree, type SidebarTreeHandle, type SidebarTreeItem } from './SidebarTree'
 import { sidebarTreeStoryVars as sizes } from './sidebar-tree-story-tokens.stylex'
 import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 
@@ -17,7 +17,8 @@ const expanded = new Set<Key>(['origin', 'studio', 'drafts', 'destination'])
 const onExpandedChange = (_keys: Set<Key>) => {}
 const renderRow = (item: Item) => <div {...stylex.props(styles.row)}><Button slot="drag" aria-label={`Drag ${item.textValue}`} {...stylex.props(styles.drag)}><svg aria-hidden viewBox="0 0 16 16" width="100%" height="100%" fill="currentColor"><circle cx="8" cy="4" r="1" /><circle cx="8" cy="8" r="1" /><circle cx="8" cy="12" r="1" /></svg></Button><span {...stylex.props(styles.name)}>{item.textValue}</span></div>
 
-function FilingTree({ deep = false }: { readonly deep?: boolean }) {
+function FilingTree({ deep = false, reveal, landmark = true }: { readonly deep?: boolean; readonly reveal?: Key; readonly landmark?: boolean }) {
+  const tree = React.useRef<SidebarTreeHandle>(null)
   const [items, setItems] = React.useState(() => makeFixture(deep))
   const [enabled, setEnabled] = React.useState(true)
   const [parent, setParent] = React.useState('origin')
@@ -47,9 +48,25 @@ function FilingTree({ deep = false }: { readonly deep?: boolean }) {
       setParent(String(destination.id))
     },
   })
-  return <main data-testid="filing-tree" data-parent-key={parent} {...stylex.props(styles.root)}>
+  // Reveal on mount, as the app reveals its selected agent when the sidebar opens.
+  React.useLayoutEffect(() => { if (reveal !== undefined) tree.current?.reveal(reveal) }, [reveal])
+  const Root = landmark ? 'main' : 'div'
+  return <Root data-testid="filing-tree" data-parent-key={parent} {...stylex.props(styles.root)}>
     <div {...stylex.props(styles.toolbar)}><Button onPress={() => setEnabled(value => !value)}>{enabled ? 'Disable filing' : 'Enable filing'}</Button><Button onPress={() => { setItems(makeFixture(deep)); setParent('origin') }}>Reset filing</Button><output aria-label="Filed parent">{parent}</output></div>
-    <div {...stylex.props(styles.viewport)}><SidebarTree aria-label="Filing folders" items={items} expandedKeys={expanded} onExpandedChange={onExpandedChange} dragAndDropHooks={dragAndDropHooks} renderRow={renderRow} /></div>
+    <div {...stylex.props(styles.viewport)}><SidebarTree ref={tree} aria-label="Filing folders" items={items} expandedKeys={expanded} onExpandedChange={onExpandedChange} dragAndDropHooks={dragAndDropHooks} renderRow={renderRow} /></div>
+  </Root>
+}
+/** The narrow app drawer: a RAC Modal Dialog, whose ButtonContext offers only the `close` slot. */
+function FilingDrawer() {
+  return <main {...stylex.props(styles.shell)}>
+    <DialogTrigger>
+      <Button>Expand sidebar</Button>
+      <ModalOverlay isDismissable {...stylex.props(styles.overlay)}>
+        <Modal {...stylex.props(styles.drawer)}>
+          <Dialog aria-label="Agent navigation" {...stylex.props(styles.dialog)}><FilingTree deep reveal="bucket-60" landmark={false} /></Dialog>
+        </Modal>
+      </ModalOverlay>
+    </DialogTrigger>
   </main>
 }
 const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'Host-owned RAC drag hooks and drag-slot content on the production SidebarTree. Pinned visuals are pointer-transparent during any drag session, including external drags with no local dragstart; drop targets and autoscroll belong to the real tree. Local-drag plays disable filing, prove the same move check rejects, restore it, and perform a real RAC move; the external play first proves the pinned copy owns the band outside a drag session.' } } } } satisfies Meta
@@ -254,6 +271,18 @@ export const ExternalDragOverPinnedBand: Story = { render: () => <FilingTree dee
   target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: x, clientY: y }))
   await waitFor(() => assertFiled(root, key), settled)
 } }
+// Pinned and measured copies render host rows outside RAC's TreeItem. Inside the drawer's Dialog they
+// must still resolve the row's `drag` slot instead of the Dialog's `close`-only slots.
+export const DrawerRevealAt440: Story = { render: () => <FilingDrawer />, play: async ({ canvasElement }) => {
+  await userEvent.click(within(canvasElement).getByRole('button', { name: 'Expand sidebar' }))
+  const dialog = await within(document.body).findByRole('dialog', { name: 'Agent navigation' }, settled)
+  const root = within(dialog).getByTestId('filing-tree')
+  await waitFor(() => expect(row(root, 'bucket-60')).not.toBeNull(), settled)
+  await expect(within(row(root, 'bucket-60')).getByRole('button', { name: 'Drag Bucket 61' })).toBeVisible()
+  const stack = root.querySelector<HTMLElement>('[data-sidebar-pinned-stack]')!
+  await waitFor(() => expect(stack.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0), settled)
+  for (const copy of stack.querySelectorAll<HTMLElement>('[data-pinned-key]')) await expect(copy.querySelector('[inert] button[aria-label^="Drag "]')).not.toBeNull()
+} }
 const styles = stylex.create({
   root: { width: sizes.small, color: ink.fg, backgroundColor: surface.sidebar, fontFamily: t.fontSans, fontSize: t.metaSize },
   toolbar: { display: 'flex', flexWrap: 'wrap', gap: s.sm, padding: s.sm },
@@ -261,4 +290,8 @@ const styles = stylex.create({
   row: { height: sizes.row, display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0 },
   drag: { width: g.controlSm, height: g.controlSm, padding: 0, flexShrink: 0, color: ink.fgMuted, backgroundColor: 'transparent', borderWidth: 0 },
   name: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 },
+  shell: { width: sizes.small, padding: s.sm, color: ink.fg, backgroundColor: surface.sidebar, fontFamily: t.fontSans, fontSize: t.metaSize },
+  overlay: { position: 'fixed', inset: 0, zIndex: 30, backgroundColor: surface.scrim },
+  drawer: { position: 'fixed', top: 0, bottom: 0, insetInlineStart: 0, width: sizes.small, maxWidth: '100vw', backgroundColor: surface.sidebar },
+  dialog: { height: '100%', outline: 'none' },
 })
