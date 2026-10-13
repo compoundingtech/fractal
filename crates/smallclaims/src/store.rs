@@ -7639,6 +7639,8 @@ impl Store {
                                 differing_tables: Vec::new(),
                                 projection_comparison_waiting: false,
                                 projection_comparison_waiting_reason: None,
+                                projection_graphs_equal: None,
+                                projection_compared_at_unix_ms: None,
                                 sync: None,
                                 last_failure_at_unix_ms: None,
                             },
@@ -7662,6 +7664,8 @@ impl Store {
                         differing_tables: Vec::new(),
                         projection_comparison_waiting: false,
                         projection_comparison_waiting_reason: None,
+                        projection_graphs_equal: None,
+                        projection_compared_at_unix_ms: None,
                         sync: None,
                         last_failure_at_unix_ms: None,
                     },
@@ -7799,6 +7803,16 @@ impl Store {
                 None
             };
             status.projection_comparison_waiting = reason.is_some();
+            if !status.projection_digests.is_empty() && reason.is_none() {
+                let compared = if inventory_aligned {
+                    Some((status.differing_tables.is_empty(), now))
+                } else {
+                    held.as_ref()
+                        .map(|held| (held.differing_tables.is_empty(), held.at_unix_ms))
+                };
+                status.projection_graphs_equal = compared.map(|(equal, _)| equal);
+                status.projection_compared_at_unix_ms = compared.map(|(_, at)| at);
+            }
             status.projection_comparison_waiting_reason = reason;
             peers.push(status);
         }
@@ -8807,6 +8821,8 @@ mod aligned_comparison_tests {
         target.age_aligned_comparison("alder", 10 * 60 * 1000);
         let view = status(&target);
         assert!(view.peers[0].projection_comparison_waiting);
+        assert_eq!(view.peers[0].projection_graphs_equal, None);
+        assert_eq!(view.peers[0].projection_compared_at_unix_ms, None);
         assert!(view.peers[0].differing_tables.is_empty());
         assert!(
             view.peers[0]

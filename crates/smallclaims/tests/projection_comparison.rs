@@ -128,4 +128,41 @@ fn a_comparison_made_at_an_aligned_exchange_survives_envelopes_that_arrive_after
     );
     assert_eq!(peer.differing_tables, vec!["documents"]);
     assert_eq!(peer.projection_comparison_waiting_reason, None);
+    assert_eq!(peer.projection_graphs_equal, Some(false));
+    assert!(peer.projection_compared_at_unix_ms.is_some());
+}
+#[test]
+fn an_equal_comparison_stays_equal_while_the_inventory_moves_on() {
+    let source = node("alder");
+    let target = node("birch");
+    let other = node("cedar");
+    let summary = source.export_replication_summary(FLEET).unwrap();
+    target
+        .receive_replication_exchange("alder", FLEET, &summary)
+        .unwrap();
+    let before = status(&target).peers[0].clone();
+    assert!(!before.projection_comparison_waiting);
+    assert_eq!(before.projection_graphs_equal, Some(true));
+    other
+        .append_claim(&ClaimInput {
+            subject: "note/sample".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let from_other = other
+        .export_replication_exchange(FLEET, &ReplicationInventory::default())
+        .unwrap();
+    target
+        .receive_replication_exchange("cedar", FLEET, &from_other)
+        .unwrap();
+    let after = status(&target).peers[0].clone();
+    assert!(!after.projection_comparison_waiting, "{after:?}");
+    assert_eq!(after.projection_graphs_equal, Some(true));
+    assert!(after.differing_tables.is_empty());
+    assert!(after.projection_compared_at_unix_ms.is_some());
 }

@@ -465,6 +465,14 @@ pub struct ReplicationPeerStatus {
     /// Why the comparison is premature, in words; absent when it is not waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_comparison_waiting_reason: Option<String>,
+    /// What the reported comparison found: whether every comparable projection was equal.
+    /// Absent while waiting and for a peer that sends no projection digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_graphs_equal: Option<bool>,
+    /// When the exchange that made that comparison happened. A comparison held from an
+    /// earlier aligned exchange is older than the latest exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_compared_at_unix_ms: Option<u128>,
     /// How far apart the two envelope sets were at the last exchange that measured them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<ReplicationPeerSync>,
