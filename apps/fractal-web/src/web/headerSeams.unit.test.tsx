@@ -29,12 +29,12 @@ const header = {
 const agent: Agent = { ref: 'agent/fixture/readonly', terminal: '', name: 'Reported name', lifecycle: unknown, host: 'Reported host', connected: true, activity: 'idle', status: 'idle', usage: unknown, checkout: unknown, workspace: unknown, startedAt: unknown, endedAt: unknown, blockedOn: unknown, ask: unknown, lastActivityAt: unknown }
 
 describe('pending question kit semantics', () => {
-  it('keeps read-only pending questions attention-marked and offers full pinned prompt disclosure', () => {
+  it('keeps read-only pending questions attention-marked and adds the pinned disclosure only after a measured overflow', () => {
     const request = { ...questionScenarios.multi, answerable: false }
     const pinned = renderToStaticMarkup(createElement(QuestionForm, { request, variant: 'pinned', now: viewedAt }))
     expect(pinned).toContain('data-question-attention="true"')
-    expect(pinned).toContain('data-question-prompt-disclosure')
-    expect(pinned).toContain('Show full question')
+    // No layout has run, so nothing is known to overflow; the browser stories cover measured overflow and resize.
+    expect(pinned).not.toContain('data-question-prompt-disclosure')
     const card = renderToStaticMarkup(createElement(QuestionForm, { request, variant: 'transcript', now: viewedAt }))
     expect(card).not.toContain('Show full question')
     const answered = renderToStaticMarkup(createElement(QuestionForm, { request: { ...request, state: { _tag: 'cancelled', reason: 'Withdrawn', at: request.askedAt } }, variant: 'pinned', now: viewedAt }))
@@ -59,8 +59,9 @@ describe('resource card seam', () => {
 describe('thread header seam', () => {
   it('shows the attention signal only for a native pending question and removes status titles', () => {
     const pending = renderToStaticMarkup(createElement(ThreadHeader, { ...header, status: 'waiting', needsMe: true }))
-    expect(pending).toContain('aria-label="Needs your attention"')
-    expect(pending).toContain('>!</span>')
+    expect(pending).toMatch(/role="img" aria-label="Needs your attention" data-header-signal="needs-me"><svg/)
+    expect(pending).toContain('role="group" aria-label="Agent status" data-header-signal="status"')
+    expect(pending).not.toContain('>!<')
     expect(pending).not.toMatch(/<span title=/)
     const waiting = renderToStaticMarkup(createElement(ThreadHeader, { ...header, status: 'waiting' }))
     expect(waiting).not.toContain('Needs your attention')
