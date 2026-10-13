@@ -169,11 +169,30 @@ fn quiet_ready_passes_do_not_enqueue_duplicate_local_receipts() {
         .batches
         .1
         .load(std::sync::atomic::Ordering::Relaxed);
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     for pass in 0..100 {
         reconciler
             .reconcile_driver_readiness(&desired, &member, &observed, now + pass)
             .unwrap();
     }
+    let passes = scope.finish();
+    // Measure the exact new per-ready-seat lookup separately from the existing
+    // harness/attention work. Thread-local accounting excludes parallel tests.
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    for _ in 0..100 {
+        assert!(
+            store
+                .local_observation_for_key(&desired.subject, "runtime.action.succeeded", &key)
+                .unwrap()
+                .is_some()
+        );
+    }
+    let lookup = scope.finish();
+    println!("ready-seat cost: passes=100 full={passes:?} added_lookup={lookup:?}");
+    assert_eq!(lookup.statements, 100);
+    assert_eq!(lookup.fullscan_steps, 0);
+    assert_eq!(lookup.sorts, 0);
+    assert_eq!(lookup.autoindex_rows, 0);
     assert_eq!(
         store
             .connection

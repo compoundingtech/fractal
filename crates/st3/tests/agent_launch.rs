@@ -585,7 +585,7 @@ async fn early_exit_cli(code: i32, structured: bool, attach: bool) {
         .unwrap();
     drive.abort();
     server.abort();
-    assert_eq!(output.status.code(), Some(code), "{output:?}");
+    assert_eq!(output.status.code(), Some(code.max(1)), "{output:?}");
     assert!(
         started.elapsed() < Duration::from_secs(4),
         "exit was not prompt: {:?}",
@@ -634,7 +634,7 @@ async fn agents_new_returns_nonzero_exit_and_both_streams_before_readiness() {
     early_exit_cli(23, false, true).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn agents_new_preserves_zero_exit_and_machine_readable_failure() {
+async fn agents_new_fails_creation_while_preserving_zero_child_exit_in_json() {
     early_exit_cli(0, true, false).await;
 }
 

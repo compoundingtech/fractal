@@ -4759,6 +4759,7 @@ enum CompletionShell {
 #[derive(Debug)]
 struct AgentLaunchExit {
     code: u8,
+    child_code: Option<i64>,
     reason: String,
 }
 impl std::fmt::Display for AgentLaunchExit {
@@ -14072,7 +14073,7 @@ async fn run_agent_new(
             };
             if json_output {
                 print_value(
-                    &json!({"subject":subject, "host_id":format!("host/{host}"), "workspace":workspace, "stages":stages, "error":{"reason":error.to_string(), "exit_code":error.downcast_ref::<AgentLaunchExit>().map(|exit| exit.code)}}),
+                    &json!({"subject":subject, "host_id":format!("host/{host}"), "workspace":workspace, "stages":stages, "error":{"reason":error.to_string(), "exit_code":error.downcast_ref::<AgentLaunchExit>().and_then(|exit| exit.child_code)}}),
                     true,
                 )?;
             } else {
@@ -14274,7 +14275,8 @@ fn agent_launch_exit(subject: &str, status: &st3::agent_launch::LaunchStatus) ->
         .map(|tail| format!("\nStartup output (combined stdout/stderr):\n{tail}"))
         .unwrap_or_default();
     AgentLaunchExit {
-        code: status.exit_code.unwrap_or(2).clamp(0, 255) as u8,
+        code: status.exit_code.unwrap_or(2).clamp(1, 255) as u8,
+        child_code: status.exit_code,
         reason: format!(
             "`{subject}` on {}: {} (incarnation {}, exit code {}){tail}",
             status.host,
