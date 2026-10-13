@@ -45,7 +45,7 @@ fn sealed_view_cache_invalidates_on_claim_id_update() {
     let connection = Connection::open_in_memory().unwrap();
     connection.execute_batch(SCHEMA).unwrap();
     connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-    connection.execute_batch(&fleet_generation_schema()).unwrap();
+    initialize_fleet_generation(&connection).unwrap();
     {
         let reader = store.readers.get();
         for table in ["meta", "batches", "claims", "replica_envelopes", "replica_envelope_signatures"] {
@@ -208,7 +208,8 @@ fn sealed_view_cache_reopen_migrates_old_narrow_generation_triggers() {
         // Recreate the previous trigger surface on a populated real database. Keep
         // its INSERT/DELETE, signature, and anchor triggers rather than erasing it.
         writer.execute_batch(&format!(
-            "DROP TRIGGER fleet_generation_claim_update;
+            "UPDATE fleet_generation SET trigger_version=0 WHERE id=1;
+             DROP TRIGGER fleet_generation_claim_update;
              DROP TRIGGER fleet_generation_envelope_update;
              DROP TRIGGER IF EXISTS fleet_generation_batch_insert;
              DROP TRIGGER IF EXISTS fleet_generation_batch_delete;

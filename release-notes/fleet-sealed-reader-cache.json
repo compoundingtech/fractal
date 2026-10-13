@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Normal store open installs complete fleet-generation triggers for claim, batch, envelope, signature, and anchor fold inputs, replacing older narrow update triggers. Adds the covering claims_batch_kind index for bounded trigger predicates. No schema-version change, claim rewrite, or persistent view cache; older builds retain the additive index and triggers."
+    "detail": "Adds fleet_generation.trigger_version and atomically installs complete claim, batch, envelope, signature, and anchor triggers only when that version changes, advancing the generation in the same transaction. Current-version opens do no fleet trigger DDL. Adds the covering claims_batch_kind index for bounded trigger predicates. No core schema-version change, claim rewrite, or persistent view cache; older builds retain the additive index and triggers."
   },
   "rules": {
     "status": "none",
@@ -18,8 +18,8 @@
     "detail": "Fleet status and membership JSON retain their existing fields and sealed-reader semantics; sharing the view does not change client or peer protocols."
   },
   "downtime": {
-    "status": "unknown",
-    "detail": "Normal daemon restart. First open builds claims_batch_kind over existing claims before serving requests; startup duration and index size were not measured."
+    "status": "changed",
+    "detail": "First open builds claims_batch_kind before serving requests. On a synthetic production-core schema with 2,000,000 claims in 20,000 batches, 256-byte JSON bodies and WAL/FULL defaults, CREATE INDEX plus commit/checkpoint took 3.150 seconds and left 229,084,392 physical WAL bytes before close. This exceeds the 100 ms writer target and measures only index creation, not full startup or a live-store forecast. Current-version trigger installation does no DDL; subsequent opens reuse the index."
   },
   "manual": {
     "status": "none",

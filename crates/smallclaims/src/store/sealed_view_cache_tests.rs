@@ -9,6 +9,8 @@ use std::time::Duration;
 
 mod mutation_tests;
 mod lifecycle_tests;
+mod migration_tests;
+mod index_cost_tests;
 
 fn configure(store: &Store, history: usize) -> String {
     store.bind_fleet("sealed-cache-test").unwrap();
