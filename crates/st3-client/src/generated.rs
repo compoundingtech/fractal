@@ -10,23 +10,6 @@ pub const API_VERSION: &str = "st3.client.v0";
 pub const ERROR_VERSION: &str = "st3.client.error.v0";
 pub const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
 
-/// Current advisory text, never an approval, grant, assignment or answer to an ask.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DirectiveNote {
-    pub person: String,
-    pub author: String,
-    pub time: String,
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    pub revision: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DirectiveNotes {
-    pub notes: Vec<DirectiveNote>,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Envelope<T> {
     pub api_version: String,
@@ -103,9 +86,6 @@ pub enum ErrorCode {
     BlobQuotaExceeded,
     BlobNotFound,
     BlobExpired,
-    MessageTooLarge,
-    MessageStoreFull,
-    LongMessageSignatureUnsupported,
     ResponseBudgetExceeded,
     ContentNotText,
     Internal,
@@ -137,10 +117,8 @@ pub struct Limits {
     pub max_event_items: usize,
     pub max_response_bytes: usize,
     pub max_wait_ms: u64,
-    /// The longest message body, in UTF-8 bytes, this daemon takes now. Absent on older daemons,
-    /// which take 4096.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_message_bytes: Option<usize>,
+    pub max_assistant_response_bytes: Option<usize>,
+    pub default_assistant_response_bytes: Option<usize>,
     pub max_glass_body_bytes: Option<usize>,
     pub max_glasses: Option<usize>,
     pub max_glass_depth: Option<usize>,
@@ -418,22 +396,6 @@ pub struct DocumentContent {
     pub bytes: Vec<u8>,
 }
 
-/// The whole text of a message, of which a long message's `content` is only the start. It is
-/// asked of the machine that sent the message; see `complete`.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct MessageBody {
-    pub message: String,
-    pub bytes: u64,
-    pub text: String,
-    /// False when the owner could not be reached: `text` is then the preview and a note.
-    #[serde(default = "complete_default")]
-    pub complete: bool,
-}
-
-fn complete_default() -> bool {
-    true
-}
-
 /// The clients connected to one member now and those seen in the last few minutes, newest first.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ClientConnections {
@@ -649,8 +611,6 @@ pub struct AgentWorkspace {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentDeclaration {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accountable: Option<String>,
     pub id: String,
     pub revision: String,
     pub tree: Value,
@@ -686,12 +646,6 @@ pub struct Message {
     pub tags: Vec<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
-    /// With `body_bytes`: `content` is only the start of a longer message, kept as a blob.
-    /// Read the whole text with `Client::message_body_get`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body_bytes: Option<u64>,
 }
 
 /// A file a message carries. The bytes stay on `origin`; read them with `Client::blob`.
@@ -1108,9 +1062,6 @@ pub struct Work {
     pub readiness_epoch: u64,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
-    /// Submitting incarnation for this attempt; missing or null means unknown.
-    #[serde(default)]
-    pub submitted_incarnation: Option<String>,
     #[serde(default)]
     pub agentless: bool,
     #[serde(default)]
@@ -1717,41 +1668,6 @@ pub struct SummaryMachines {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct ConnectedClient {
-    #[serde(flatten)]
-    pub header: ResourceHeader,
-    /// The session acting: `person/NAME`, `person/NAME/session/ID` for a paired device, or an agent.
-    pub actor: String,
-    /// The person or agent whose authority the session uses.
-    pub person: String,
-    /// The client's own `x-st3-client` name and build; absent when it sent none.
-    #[serde(default)]
-    pub client: Option<String>,
-    #[serde(default)]
-    pub device_id: Option<String>,
-    #[serde(default)]
-    pub device_name: Option<String>,
-    pub member: String,
-    /// `local`, `gateway` (a paired device over Tailscale or Fabric) or `tailscale`.
-    pub via: String,
-    /// An open stream right now.
-    pub connected: bool,
-    pub streams: u64,
-    pub since: String,
-    pub last_seen: String,
-    /// Windows, `conversation:ID` and `terminal:ID` it follows.
-    #[serde(default)]
-    pub follows: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct Usage {
-    #[serde(flatten)]
-    pub header: ResourceHeader,
-    pub value: UsagePeriod,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Summary {
     #[serde(flatten)]
     pub header: ResourceHeader,
@@ -1778,8 +1694,6 @@ pub struct SummaryAgentsAsOf {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Resource {
-    ConnectedClient(ConnectedClient),
-    Usage(Usage),
     Summary(Summary),
     Attention(Attention),
     Message(Message),
@@ -1811,8 +1725,6 @@ pub enum Resource {
 
 /// The resource kinds this client models; any other kind reads as [`Resource::Unknown`].
 pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
-    "connected-client",
-    "usage",
     "summary",
     "attention",
     "message",
@@ -1878,8 +1790,6 @@ impl<'de> Deserialize<'de> for UnknownResource {
 impl Resource {
     pub fn header(&self) -> &ResourceHeader {
         match self {
-            Self::ConnectedClient(v) => &v.header,
-            Self::Usage(v) => &v.header,
             Self::Summary(v) => &v.header,
             Self::Attention(v) => &v.header,
             Self::Message(v) => &v.header,
@@ -2129,9 +2039,6 @@ pub struct TimelineMessageBody {
     pub attachments: Vec<Attachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
-    /// With a long message: the length of the whole text, of which the content entry is the start.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body_bytes: Option<u64>,
     /// Who signed a message a person wrote, and whether it checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<MessageProvenance>,

@@ -714,6 +714,7 @@ export type Capabilities = {
   grant_kind?: "person" | "assistant";
   kind: "capabilities";
   limits: {
+  default_assistant_response_bytes?: number;
   max_arrangement_body_bytes?: number;
   max_arrangement_folders?: number;
   max_arrangement_key_bytes?: number;
@@ -722,6 +723,7 @@ export type Capabilities = {
   max_arrangement_placements?: number;
   max_arrangement_resource_bytes?: number;
   max_arrangements?: number;
+  max_assistant_response_bytes?: number;
   max_event_items: number;
   max_glass_body_bytes?: number;
   max_glass_depth?: number;
