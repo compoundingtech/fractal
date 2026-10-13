@@ -1047,10 +1047,10 @@ fn render_launchd_program_plist(
         .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
         .collect::<String>();
     let mut environment = crate::instance::service_environment();
-    if label == service_label() {
-        if let Some(kib) = spec.read_cache_kib {
-            environment.push(("SMALLCLAIMS_READ_CACHE_KIB".to_owned(), kib.to_string()));
-        }
+    if label == service_label()
+        && let Some(kib) = spec.read_cache_kib
+    {
+        environment.push(("SMALLCLAIMS_READ_CACHE_KIB".to_owned(), kib.to_string()));
     }
     let instance_environment = plist_environment(&environment);
     let stdout = spec.config.state_dir.join("logs").join(stdout_name);
