@@ -5278,6 +5278,7 @@ impl Store {
                 "workspace": request.workspace,
                 "requester": requester,
                 "inputs": inputs,
+                "gate_agent": variables.get("ST_GATE_AGENT"),
                 "mode": mode,
                 "timeout_ms": mission.timeout_ms,
                 "deadline_at_unix_ms": deadline_at_unix_ms,
@@ -5307,6 +5308,7 @@ impl Store {
                 "run": subject,
                 "revision": mission.revision,
                 "status": "running",
+                "gate_agent": variables.get("ST_GATE_AGENT"),
                 "reason": "initial mission run"
             }}),
             &[],
@@ -7230,6 +7232,7 @@ impl Store {
                 "predecessor": predecessor_subject,
                 "status": "running",
                 "reason": reason,
+                "gate_agent": mission_gate_agent(&current),
                 "compatible_steps": compatible
             }}),
             &[],
@@ -9622,6 +9625,100 @@ impl Store {
             .map_err(anyhow::Error::msg)?
     }
 
+    /// Drain a legacy round gate before moving its selectors to the durable identity. A live
+    /// claimant keeps its completion authority until it releases or finishes the work.
+    /// `false` means the caller must defer new gate materialization and retry reconciliation.
+    pub(crate) fn prepare_round_gate_identity(&self, run: &MissionRunView) -> Result<bool> {
+        let Some(gate) = mission_gate_agent(run) else {
+            return Ok(true);
+        };
+        let previous = format!("agent/{}/gate", run.id);
+        smallclaims::touched::note_read(|| previous.clone());
+        smallclaims::touched::note_read(|| gate.clone());
+        smallclaims::touched::note_read(|| run.subject.clone());
+        for step in &run.steps {
+            smallclaims::touched::note_read(|| step.subject.clone());
+        }
+        self.connection
+            .batched(|transaction| -> Result<bool> {
+                validate_round_gate_owner_tx(transaction, &gate, &run.subject)?;
+                let claimed: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM step_runs WHERE run_id=?1
+                     AND lease_owner=?2 AND status NOT IN ('completed','failed','cancelled'))",
+                    params![run.id, previous], |row| row.get(0),
+                )?;
+                if claimed {
+                    return Ok(false);
+                }
+                let current = current_desired_row_tx(transaction, &previous)?;
+                let actual = latest_actual(transaction, &previous)?;
+                let pending = runtime_starts::pending_for_subject_tx(transaction, &previous)?;
+                let stopped = actual.as_ref().is_some_and(gate_actual_is_stopped);
+                if current.as_ref().is_some_and(|row| row.kind != "stop")
+                    || actual.is_some() && !stopped
+                    || pending
+                {
+                    let stop = DesiredSubject {
+                        accountable: None,
+                        subject: previous.clone(),
+                        kind: "stop".into(),
+                        desired: json!({"stop": previous}),
+                        member: None,
+                        owner_run: Some(run.subject.clone()),
+                        owner_generation: Some(run.generation.clone()),
+                        owner_step: None,
+                    };
+                    if current.as_ref().is_none_or(|row| row.kind != "stop") {
+                        let predecessors = intent_leaves_tx(transaction, &previous)?;
+                        let claim = append_claim_tx(
+                            transaction, &self.origin, &previous, "intent.desired",
+                            Some("daemon/runtime"), &serde_json::to_value(&stop)?,
+                            &predecessors, None,
+                        )?;
+                        transaction.execute(
+                            "INSERT INTO desired(subject,kind,revision,claim_id,body,member,owner_run,owner_generation,owner_step)
+                             VALUES (?1,'stop',?2,?3,?4,NULL,?5,?6,NULL)
+                             ON CONFLICT(subject) DO UPDATE SET kind='stop',revision=excluded.revision,
+                             claim_id=excluded.claim_id,body=excluded.body,member=NULL,
+                             owner_run=excluded.owner_run,owner_generation=excluded.owner_generation",
+                            params![previous, desired_revision(&stop), claim.id,
+                                canonical_json_text(&stop.desired)?, run.subject, run.generation],
+                        )?;
+                    }
+                    return Ok(false);
+                }
+                // A durable stop with no observation is not evidence of process absence.
+                if current.is_some() && !stopped {
+                    return Ok(false);
+                }
+                let mut statement = transaction.prepare(
+                    "SELECT subject,assignee,available_to FROM step_runs WHERE run_id=?1",
+                )?;
+                let rows = statement.query_map([&run.id], |row| Ok((
+                    row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                )))?.collect::<Result<Vec<_>, _>>()?;
+                drop(statement);
+                for (subject, assignee, available) in rows {
+                    let available: Vec<String> = serde_json::from_str(&available)?;
+                    if assignee.as_deref() != Some(previous.as_str())
+                        && !available.iter().any(|agent| agent == &previous)
+                    {
+                        continue;
+                    }
+                    let claim = append_claim_tx(
+                        transaction, &self.origin, &subject, "step-run.state",
+                        Some("daemon/runtime"),
+                        &json!({"fields":{"gate_agent":gate,"previous_gate_agent":previous}}),
+                        &[], None,
+                    )?;
+                    project_mission_run_update(transaction, &claim).map_err(anyhow::Error::new)?;
+                }
+                Ok(true)
+            })
+            .map_err(anyhow::Error::msg)?
+    }
+
     pub fn apply_internal(
         &self,
         intent: &NormalizedIntent,
@@ -10287,6 +10384,19 @@ impl Store {
                 let intent = owned_plan.as_ref().map_or(intent, |p| &p.intent);
                 let expected = owned_plan.as_ref().map_or(expected, |p| &p.preview.expected_subjects);
                 for desired in intent.subjects.values() {
+                    if matches!(desired.kind.as_str(), "agent" | "stop")
+                        && desired.subject.ends_with("/gate")
+                        && let Some(owner) = desired.owner_run.as_deref()
+                    {
+                        let run_id = owner.strip_prefix("mission-run/").unwrap_or(owner);
+                        if !desired.subject.starts_with(&format!("agent/{run_id}/"))
+                            && let Some(run) = mission_run_header_tx(transaction, run_id)
+                                .optional().map_err(internal)?
+                            && mission_gate_agent(&run).as_deref() == Some(desired.subject.as_str())
+                        {
+                            validate_round_gate_owner_tx(transaction, &desired.subject, owner)?;
+                        }
+                    }
                     crate::terminal_binding::validate_declaration(desired, actor)?;
                     st3_schema::accountable::validate_claim(&desired.subject, "intent.desired",
                         &serde_json::to_value(desired).map_err(internal)?, actor)
@@ -18983,6 +19093,7 @@ fn create_declared_mission_run_tx(
             "workspace": creation.workspace,
             "requester": creation.requester,
             "inputs": inputs,
+            "gate_agent": variables.get("ST_GATE_AGENT"),
             "mode": creation.mode,
             "timeout_ms": mission.timeout_ms,
             "deadline_at_unix_ms": deadline_at_unix_ms,
@@ -19018,6 +19129,7 @@ fn create_declared_mission_run_tx(
             "run": declaration.subject,
             "revision": mission.revision,
             "status": "running",
+            "gate_agent": variables.get("ST_GATE_AGENT"),
             "reason": "initial mission run"
         }}),
         &[],
@@ -19522,6 +19634,7 @@ fn adopt_declared_mission_revision_tx(
             "predecessor": predecessor_subject,
             "status": "running",
             "reason": operation.reason,
+            "gate_agent": mission_gate_agent(&current),
             "compatible_steps": compatible,
         }}),
         &[],
@@ -30748,7 +30861,8 @@ fn project_mission_run_created(
         )
         .map_err(internal)?;
     let view = mission_run_view_tx(transaction, run_id).map_err(internal)?;
-    let variables = mission_run_variables(&view, revision);
+    let mut variables = mission_run_variables(&view, revision);
+    retain_gate_identity_replay_context(&mut variables, fields)?;
     let mut steps = Vec::new();
     flatten_steps(&mission, default_selector, &[], &mut steps);
     for (step, selector, constraints) in steps {
@@ -30909,6 +31023,39 @@ fn project_mission_run_update(
         return Ok(());
     }
     if !claim.subject.starts_with("step-run/") {
+        return Ok(());
+    }
+    if claim.kind == "step-run.state"
+        && let (Some(gate), Some(previous)) = (
+            fields.get("gate_agent").and_then(Value::as_str),
+            fields.get("previous_gate_agent").and_then(Value::as_str),
+        )
+    {
+        let run_id: String = transaction.query_row(
+            "SELECT run_id FROM step_runs WHERE subject=?1", [&claim.subject],
+            |row| row.get(0),
+        ).map_err(internal)?;
+        let run = mission_run_header_tx(transaction, &run_id).map_err(internal)?;
+        if mission_gate_agent(&run).as_deref() != Some(gate)
+            || previous != format!("agent/{run_id}/gate")
+        {
+            return Err(St3Error::new("invalid-gate-identity", "gate migration does not match its round"));
+        }
+        let available: String = transaction.query_row(
+            "SELECT available_to FROM step_runs WHERE subject=?1", [&claim.subject],
+            |row| row.get(0),
+        ).map_err(internal)?;
+        let mut available: Vec<String> = serde_json::from_str(&available).map_err(internal)?;
+        for agent in &mut available {
+            if agent == previous {
+                *agent = gate.to_owned();
+            }
+        }
+        transaction.execute(
+            "UPDATE step_runs SET assignee=CASE WHEN assignee=?2 THEN ?3 ELSE assignee END,
+             available_to=?4 WHERE subject=?1",
+            params![claim.subject, previous, gate, serde_json::to_string(&available).map_err(internal)?],
+        ).map_err(internal)?;
         return Ok(());
     }
     let owner_is_terminal = step_owner_is_terminal_tx(transaction, &claim.subject)?;
@@ -31259,6 +31406,7 @@ fn project_run_generation_created(
         current.after.as_deref(),
     )?;
     let mut variables = mission_run_variables(&current, revision);
+    retain_gate_identity_replay_context(&mut variables, fields)?;
     variables.insert("ST_RUN_GENERATION".into(), generation_id.to_owned());
     let compatible = fields
         .get("compatible_steps")
@@ -32180,6 +32328,133 @@ pub(crate) fn mission_run_variables(
     variables
 }
 
+/// The round-local gate's durable subject. Root mission agents retain run-scoped identities.
+pub(crate) fn mission_gate_agent(run: &MissionRunView) -> Option<String> {
+    let round = &run.inputs.get(crate::mission::LOOP_ROUND_INPUT)?.value;
+    round_gate_agent(&run.mission, round)
+}
+
+/// Retained creation claims without a naming marker must recreate their legacy selectors.
+/// The later migration claim is what moves those selectors, after the old claimant drains.
+fn retain_gate_identity_replay_context(
+    variables: &mut BTreeMap<String, String>,
+    fields: &Value,
+) -> Result<(), St3Error> {
+    let Some(recorded) = fields.get("gate_agent").and_then(Value::as_str) else {
+        variables.remove("ST_GATE_AGENT");
+        return Ok(());
+    };
+    if variables.get("ST_GATE_AGENT").map(String::as_str) != Some(recorded) {
+        return Err(St3Error::new(
+            "invalid-gate-identity",
+            "recorded gate identity does not match its round context",
+        ));
+    }
+    Ok(())
+}
+
+
+fn round_gate_agent(mission: &str, round: &str) -> Option<String> {
+    let embedded = mission
+        .strip_prefix("mission/")
+        .unwrap_or(mission)
+        .strip_prefix("__st3/")?;
+    let (parent, branch) = embedded.rsplit_once("/loop/")?;
+    let loop_id = branch.strip_suffix("/round")?;
+    if parent.is_empty() || loop_id.is_empty() || loop_id.contains('/') {
+        return None;
+    }
+    let round = round.parse::<u32>().ok().filter(|round| *round > 0)?;
+    Some(format!("agent/{parent}/r{round}/gate"))
+}
+
+fn gate_actual_is_stopped(actual: &Value) -> bool {
+    let fields = actual.get("fields").unwrap_or(actual);
+    matches!(
+        fields.get("status").and_then(Value::as_str),
+        Some("stopped" | "absent" | "exited" | "vanished")
+    )
+}
+
+fn gate_owner_is_terminal_tx(transaction: &Transaction<'_>, owner: Option<&str>) -> Result<bool> {
+    let Some(owner) = owner else {
+        return Ok(true);
+    };
+    smallclaims::touched::note_read(|| owner.to_owned());
+    let run_id = owner.strip_prefix("mission-run/").unwrap_or(owner);
+    Ok(mission_run_header_tx(transaction, run_id).optional()?.is_some_and(|run| {
+        is_terminal_run_state(&run.status) || run.phase == "terminal"
+    }))
+}
+
+/// Checked while holding the writer transaction: same-owner retries are allowed, but another
+/// run cannot take an occupied public gate name, including one still using the legacy subject.
+fn validate_round_gate_owner_tx(
+    transaction: &Transaction<'_>,
+    gate: &str,
+    owner: &str,
+) -> Result<(), St3Error> {
+    smallclaims::touched::note_read(|| gate.to_owned());
+    let pending = runtime_starts::pending_for_subject_tx(transaction, gate).map_err(internal)?;
+    let current = current_desired_row_tx(transaction, gate).map_err(internal)?;
+    if let Some(current_owner) = current.as_ref().and_then(|row| row.owner_run.as_deref()) {
+        smallclaims::touched::note_read(|| current_owner.to_owned());
+    }
+    if pending && current.as_ref().and_then(|row| row.owner_run.as_deref()) != Some(owner) {
+        return Err(St3Error::new(
+            "round-gate-identity-collision",
+            format!("gate `{gate}` has an unresolved launch from another owner"),
+        ));
+    }
+    if let Some(current) = current
+        && current.owner_run.as_deref() != Some(owner)
+        && !(current.kind == "stop"
+            && gate_owner_is_terminal_tx(transaction, current.owner_run.as_deref()).map_err(internal)?
+            && !pending
+            && latest_actual(transaction, gate).map_err(internal)?
+                .as_ref().is_some_and(gate_actual_is_stopped))
+    {
+        return Err(St3Error::new(
+            "round-gate-identity-collision",
+            format!("gate `{gate}` belongs to another owner"),
+        ));
+    }
+    let mut statement = transaction.prepare(
+        "SELECT subject,owner_run,kind FROM desired WHERE owner_run IS NOT NULL
+         AND owner_run<>?1 AND (kind='agent' OR kind='stop') AND subject LIKE 'agent/%/gate'",
+    ).map_err(internal)?;
+    let others = statement.query_map([owner], |row| Ok((
+        row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+    ))).map_err(internal)?.collect::<Result<Vec<_>, _>>().map_err(internal)?;
+    drop(statement);
+    for (subject, other_owner, kind) in others {
+        let other_id = other_owner.strip_prefix("mission-run/").unwrap_or(&other_owner);
+        if subject != format!("agent/{other_id}/gate") {
+            continue;
+        }
+        smallclaims::touched::note_read(|| subject.clone());
+        smallclaims::touched::note_read(|| other_owner.clone());
+        let Some(run) = mission_run_header_tx(transaction, other_id).optional().map_err(internal)? else {
+            continue;
+        };
+        if mission_gate_agent(&run).as_deref() != Some(gate) {
+            continue;
+        }
+        if kind != "stop"
+            || !(is_terminal_run_state(&run.status) || run.phase == "terminal")
+            || runtime_starts::pending_for_subject_tx(transaction, &subject).map_err(internal)?
+            || !latest_actual(transaction, &subject).map_err(internal)?
+                .as_ref().is_some_and(gate_actual_is_stopped)
+        {
+            return Err(St3Error::new(
+                "round-gate-identity-collision",
+                format!("gate `{gate}` is occupied by `{other_owner}`"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn extend_loop_variables(
     variables: &mut BTreeMap<String, String>,
     inputs: &BTreeMap<String, MissionRunInput>,
@@ -32187,6 +32462,12 @@ fn extend_loop_variables(
     if let Some(round) = inputs.get(crate::mission::LOOP_ROUND_INPUT) {
         variables.insert("ST_LOOP_ROUND".into(), round.value.clone());
         variables.insert("loop.round".into(), round.value.clone());
+        if let Some(gate) = variables
+            .get("ST_MISSION")
+            .and_then(|mission| round_gate_agent(mission, &round.value))
+        {
+            variables.insert("ST_GATE_AGENT".into(), gate);
+        }
     }
     if let Some(feedback) = inputs.get(crate::mission::LOOP_FEEDBACK_INPUT) {
         variables.insert("ST_LOOP_FEEDBACK".into(), feedback.value.clone());
@@ -38738,6 +39019,298 @@ mission "root" state="ready" {
             .unwrap_err();
 
         assert_eq!(error.code, "internal-mission");
+    }
+
+    fn round_gate_identity_fixture() -> (Store, MissionRunView, MissionSpec) {
+        let store = Store::open_memory("node").unwrap();
+        let source = r#"version 2
+agent "external/reviewer" { workspace "."; command "true" }
+mission "dotfiles/ui-design/layout" state="ready" {
+  goal "Refine the layout."
+  concurrent-runs max=10
+  agent "gate" { workspace "."; command "true" }
+  loop "refine" {
+    max-rounds 3
+    round {
+      completion { when "all-steps-exhausted" }
+      agent "gate" {
+        name "Gate"
+        workspace "."
+        command "true"
+        exec "audit" { command "true"; restart "never" }
+      }
+      agent "builder" { workspace "."; command "true"; under "gate" }
+      step "build" { assigned-to "agent/${ST_MISSION_RUN}/builder" }
+      step "inspect" { assigned-to "agent/${ST_MISSION_RUN}/gate" }
+      step "optional" { available-to "agent/${ST_MISSION_RUN}/gate"; available-to "agent/external/reviewer" }
+      step "stop" { agentless; stop "${ST_GATE_AGENT}" }
+    }
+  }
+}"#;
+        let parsed = crate::graph::parse_intent(source, "node").unwrap();
+        let round = (*parsed.missions["dotfiles/ui-design/layout"].steps["refine"]
+            .loop_spec.as_ref().unwrap().round).clone();
+        publish_mission(&store, source, "publish-round-gate-identity");
+        let parent = store.create_mission_run(&MissionRunRequest {
+            mission: "dotfiles/ui-design/layout".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::new(),
+            idempotency_key: "round-gate-parent".into(),
+        }).unwrap();
+        (store, parent, round)
+    }
+
+    fn identity_round(
+        store: &Store,
+        parent: &MissionRunView,
+        mission: &MissionSpec,
+        round: u32,
+        key: &str,
+    ) -> MissionRunView {
+        let step = parent.steps.iter().find(|step| step.step == "refine").unwrap();
+        store.create_child_mission_run(&MissionRunRequest {
+            mission: mission.id.clone(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::from([
+                (crate::mission::LOOP_ROUND_INPUT.into(), round.to_string()),
+                (crate::mission::LOOP_FEEDBACK_INPUT.into(), String::new()),
+                (crate::mission::LOOP_ITEM_INPUT.into(), "{}".into()),
+                (crate::mission::CANDIDATE_INDEX_INPUT.into(), String::new()),
+            ]),
+            idempotency_key: key.into(),
+        }, parent, &step.subject, None).unwrap()
+    }
+
+    fn identity_declarations(run: &MissionRunView, mission: &MissionSpec) -> NormalizedIntent {
+        let variables = mission_run_variables(run, &mission.revision);
+        let source = crate::mission::interpolate_kdl(
+            mission.declarations_kdl.as_ref().unwrap(), &variables,
+        ).unwrap();
+        let mut intent = crate::graph::parse_execution_intent_for_run(&source, "node", run).unwrap();
+        for desired in intent.subjects.values_mut() {
+            desired.owner_generation = Some(run.generation.clone());
+        }
+        intent
+    }
+
+    fn identity_observation(store: &Store, subject: &str, status: &str) {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!(status)),
+                ("incarnation_id".into(), json!("identity-test-incarnation")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+
+    #[test]
+    fn round_gate_subject_display_selectors_and_ownership_are_mission_round_scoped() {
+        let (store, parent, mission) = round_gate_identity_fixture();
+        let run = identity_round(&store, &parent, &mission, 1, "identity-round-one");
+        let gate = "agent/dotfiles/ui-design/layout/r1/gate";
+        let builder = format!("agent/{}/builder", run.id);
+        let intent = identity_declarations(&run, &mission);
+        assert!(!intent.subjects.contains_key(&format!("agent/{}/gate", run.id)));
+        assert!(intent.subjects.contains_key(&builder));
+        let desired = &intent.subjects[gate];
+        assert_eq!(desired.owner_run.as_deref(), Some(run.subject.as_str()));
+        let member = desired.member.as_ref().unwrap();
+        assert_eq!(member.display_name.as_deref(), Some("dotfiles/ui-design/layout/r1/gate"));
+        assert_eq!(member.tags["st3.subject"], gate);
+        let legacy = crate::graph::parse_execution_intent(
+            mission.declarations_kdl.as_ref().unwrap(), "node", &run.id,
+        ).unwrap();
+        assert_eq!(member.runtime_id, legacy.subjects[&format!("agent/{}/gate", run.id)]
+            .member.as_ref().unwrap().runtime_id);
+        assert!(intent.subjects[&builder].desired.to_string().contains(gate));
+        let audit = format!("exec/{}/gate/audit", run.id);
+        assert_eq!(intent.subjects[&audit].member.as_ref().unwrap().tags["st3.agent"], gate);
+        assert_eq!(intent.subjects[&audit].member.as_ref().unwrap().tags["st3.subject"], audit);
+        assert_eq!(run.steps.iter().find(|step| step.step == "inspect").unwrap()
+            .assigned_to.as_deref(), Some(gate));
+        assert!(run.steps.iter().find(|step| step.step == "optional").unwrap()
+            .available_to.iter().any(|agent| agent == gate));
+        for owner in &mission.revision_owners {
+            if owner.ends_with("/gate") {
+                assert_eq!(crate::mission::interpolate(owner, &mission_run_variables(&run, &mission.revision))
+                    .unwrap(), gate);
+            }
+        }
+        let stop_source = crate::mission::interpolate_kdl(
+            mission.steps["stop"].declarations_kdl.as_ref().unwrap(),
+            &mission_run_variables(&run, &mission.revision),
+        ).unwrap();
+        let stop = crate::graph::parse_execution_intent_for_run(&stop_source, "node", &run).unwrap();
+        assert_eq!(stop.subjects[gate].kind, "stop");
+        let root = crate::graph::parse_execution_intent_for_run(
+            "version 2\nagent \"gate\" { command \"true\"; workspace \".\" }\n",
+            "node", &parent,
+        ).unwrap();
+        assert!(root.subjects.contains_key(&format!("agent/{}/gate", parent.id)));
+        let next = identity_round(&store, &parent, &mission, 2, "identity-round-two");
+        assert_eq!(mission_gate_agent(&next).as_deref(), Some("agent/dotfiles/ui-design/layout/r2/gate"));
+        assert!(identity_declarations(&next, &mission).subjects
+            .contains_key("agent/dotfiles/ui-design/layout/r2/gate"));
+    }
+
+    #[test]
+    fn round_gate_identity_retries_keep_owner_and_concurrent_runs_cannot_overwrite_it() {
+        let (store, parent, mission) = round_gate_identity_fixture();
+        let first = identity_round(&store, &parent, &mission, 1, "identity-owner-one");
+        let second = identity_round(&store, &parent, &mission, 1, "identity-owner-two");
+        let intent = identity_declarations(&first, &mission);
+        assert!(store.prepare_round_gate_identity(&first).unwrap());
+        store.apply_internal(&intent, "identity-first").unwrap();
+        assert!(!store.apply_internal(&intent, "identity-retry").unwrap().changed);
+        let error = store.apply_internal(&identity_declarations(&second, &mission), "identity-collision")
+            .unwrap_err();
+        assert_eq!(error.code, "round-gate-identity-collision");
+        let competing_stop = crate::graph::parse_execution_intent_for_run(
+            "version 2\nstop \"agent/dotfiles/ui-design/layout/r1/gate\"\n", "node", &second,
+        ).unwrap();
+        assert_eq!(store.apply_internal(&competing_stop, "identity-competing-stop")
+            .unwrap_err().code, "round-gate-identity-collision");
+        assert!(store.prepare_round_gate_identity(&second).unwrap_err().to_string()
+            .contains("round-gate-identity-collision"));
+        let selected = store.desired_subjects_for_owner_run(&first.subject).unwrap();
+        assert!(selected.iter().any(|desired| desired.subject == "agent/dotfiles/ui-design/layout/r1/gate"));
+        assert!(store.desired_subjects_for_owner_run(&second.subject).unwrap().is_empty());
+        let next = identity_round(&store, &parent, &mission, 2, "identity-owner-next-round");
+        store.apply_internal(&identity_declarations(&next, &mission), "identity-independent-round").unwrap();
+        let gate = "agent/dotfiles/ui-design/layout/r1/gate";
+        let mut stopped = crate::graph::parse_execution_intent_for_run(
+            &format!("version 2\nstop \"{gate}\"\n"), "node", &first,
+        ).unwrap();
+        stopped.subjects.get_mut(gate).unwrap().owner_generation = Some(first.generation.clone());
+        store.apply_internal(&stopped, "identity-stop-first").unwrap();
+        identity_observation(&store, gate, "stopped");
+        // Process absence alone does not release the public identity while its owner is active.
+        assert_eq!(store.apply_internal(
+            &identity_declarations(&second, &mission), "identity-active-owner-stopped",
+        ).unwrap_err().code, "round-gate-identity-collision");
+        store.set_mission_run_state(&first.id, "completed", "terminal", None).unwrap();
+        store.apply_internal(&identity_declarations(&second, &mission), "identity-terminal-owner-reuse")
+            .unwrap();
+        assert!(store.desired_subjects_for_owner_run(&second.subject).unwrap().iter()
+            .any(|desired| desired.subject == gate));
+    }
+
+    #[test]
+    fn legacy_gate_ownership_also_fences_competing_round_materialization() {
+        let (store, parent, mission) = round_gate_identity_fixture();
+        let legacy_owner = identity_round(&store, &parent, &mission, 1, "identity-legacy-owner");
+        let competitor = identity_round(&store, &parent, &mission, 1, "identity-legacy-competitor");
+        let mut legacy = crate::graph::parse_execution_intent(
+            "version 2\nagent \"gate\" { command \"true\"; workspace \".\" }\n",
+            "node", &legacy_owner.id,
+        ).unwrap();
+        for desired in legacy.subjects.values_mut() {
+            desired.owner_generation = Some(legacy_owner.generation.clone());
+        }
+        store.apply_internal(&legacy, "identity-existing-legacy-owner").unwrap();
+        assert_eq!(store.apply_internal(
+            &identity_declarations(&competitor, &mission), "identity-legacy-collision",
+        ).unwrap_err().code, "round-gate-identity-collision");
+        assert!(store.prepare_round_gate_identity(&competitor).unwrap_err().to_string()
+            .contains("round-gate-identity-collision"));
+    }
+
+    #[test]
+    fn legacy_round_gate_identity_drains_claims_waits_for_stop_and_replays_selector_cutover() {
+        let (store, parent, mission) = round_gate_identity_fixture();
+        let run = identity_round(&store, &parent, &mission, 1, "identity-legacy-round");
+        let previous = format!("agent/{}/gate", run.id);
+        let gate = "agent/dotfiles/ui-design/layout/r1/gate";
+        let mut legacy = crate::graph::parse_execution_intent(
+            "version 2\nagent \"gate\" { command \"true\"; workspace \".\" }\n",
+            "node", &run.id,
+        ).unwrap();
+        legacy.subjects.get_mut(&previous).unwrap().owner_generation = Some(run.generation.clone());
+        store.apply_internal(&legacy, "identity-legacy-seat").unwrap();
+        identity_observation(&store, &previous, "running");
+        let inspect = run.steps.iter().find(|step| step.step == "inspect").unwrap();
+        let optional = run.steps.iter().find(|step| step.step == "optional").unwrap();
+        // Remove the new marker to model retained pre-cutover creation claims. Replay must
+        // retain their old selectors until the later migration event, not strand a claimant.
+        store.connection.write().execute(
+            "UPDATE claims SET body=json_remove(body,'$.fields.gate_agent')
+             WHERE (subject=?1 AND kind='mission-run.created')
+                OR (subject=?2 AND kind='run-generation.created')",
+            params![run.subject, run.generation],
+        ).unwrap();
+        store.rebuild_claim_projections().unwrap();
+        assert_eq!(store.step_run(&inspect.subject).unwrap().unwrap()
+            .assigned_to.as_deref(), Some(previous.as_str()));
+        assert!(store.step_run(&optional.subject).unwrap().unwrap()
+            .available_to.iter().any(|agent| agent == &previous));
+        store.set_step_state(&inspect.subject, "ready", None).unwrap();
+        let mut work = WorkRequest {
+            wait_ms: None,
+            actor: Some(previous.clone()),
+            incarnation: Some("identity-test-incarnation".into()),
+            summary: None,
+            reason: None,
+            evidence: Vec::new(),
+            idempotency_key: "identity-legacy-claim".into(),
+        };
+        store.work_action(&inspect.subject, "claim", &work).unwrap();
+        store.rebuild_claim_projections().unwrap();
+        assert_eq!(store.step_run(&inspect.subject).unwrap().unwrap()
+            .assigned_to.as_deref(), Some(previous.as_str()));
+        assert!(!store.prepare_round_gate_identity(&run).unwrap());
+        assert!(store.desired_subjects_for_owner_run(&run.subject).unwrap().iter()
+            .any(|desired| desired.subject == previous && desired.kind == "agent"));
+        work.idempotency_key = "identity-legacy-release".into();
+        assert_eq!(store.work_action(&inspect.subject, "release", &work).unwrap().status, "ready");
+        assert!(!store.prepare_round_gate_identity(&run).unwrap());
+        assert!(store.desired_subjects_for_owner_run(&run.subject).unwrap().iter()
+            .any(|desired| desired.subject == previous && desired.kind == "stop"));
+        assert!(!store.prepare_round_gate_identity(&run).unwrap());
+        identity_observation(&store, &previous, "stopped");
+        store.connection.write().execute(
+            "INSERT INTO local_runtime_starts(id,subject,owner,body) VALUES ('legacy-identity-start',?1,?2,'{}')",
+            params![previous, run.subject],
+        ).unwrap();
+        let (ready, reads) = smallclaims::touched::record(|| store.prepare_round_gate_identity(&run).unwrap());
+        assert!(!ready, "a stopped observation cannot fence a still-unresolved launch producer");
+        assert!(reads.contains(&previous));
+        assert!(reads.contains(gate));
+        assert!(reads.contains(&run.subject));
+        assert!(reads.contains(&inspect.subject));
+        assert!(reads.contains(&format!("local-runtime-start:{previous}")));
+        assert!(reads.contains(&format!("local-runtime-start:{gate}")));
+        store.connection.write().execute(
+            "UPDATE local_runtime_starts SET finished=1,applied=1,cleanup_verified=1 WHERE id='legacy-identity-start'",
+            [],
+        ).unwrap();
+        assert!(store.prepare_round_gate_identity(&run).unwrap());
+        let migrated = store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(migrated.steps.iter().find(|step| step.step == "inspect").unwrap()
+            .assigned_to.as_deref(), Some(gate));
+        assert!(migrated.steps.iter().find(|step| step.step == "optional").unwrap()
+            .available_to.iter().any(|agent| agent == gate));
+        assert!(store.claims_for(&inspect.subject, Some("step-run.state")).unwrap().iter()
+            .any(|claim| claim.body["fields"]["gate_agent"] == gate));
+        store.rebuild_claim_projections().unwrap();
+        let replayed = store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(replayed.steps.iter().find(|step| step.step == "inspect").unwrap()
+            .assigned_to.as_deref(), Some(gate));
+        assert!(store.prepare_round_gate_identity(&replayed).unwrap());
+        store.apply_internal(&identity_declarations(&replayed, &mission), "identity-migrated-seat").unwrap();
+        let selected = store.desired_subjects_for_owner_run(&run.subject).unwrap();
+        assert!(selected.iter().any(|desired| desired.subject == previous && desired.kind == "stop"));
+        assert!(selected.iter().any(|desired| desired.subject == gate && desired.kind == "agent"));
     }
 
     #[test]

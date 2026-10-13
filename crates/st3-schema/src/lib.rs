@@ -2655,6 +2655,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("requester", reference()),
             ("mode", string()),
             ("inputs", object()),
+            ("gate_agent", reference_to(&["agent"])),
             ("timeout_ms", integer()),
             ("deadline_at_unix_ms", integer()),
             ("parent_step_run", reference()),
@@ -2727,6 +2728,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("predecessor", reference()),
             ("reason", string()),
             ("compatible_steps", array()),
+            ("gate_agent", reference_to(&["agent"])),
         ],
         "run-generation.state" | "run-generation.superseded" => &[
             ("status", string()),
@@ -2740,6 +2742,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
             ("readiness_epoch", integer()),
             ("attempt", integer()),
+            ("gate_agent", reference_to(&["agent"])),
+            ("previous_gate_agent", reference_to(&["agent"])),
         ],
         "step-run.retried" => &[
             ("status", string()),

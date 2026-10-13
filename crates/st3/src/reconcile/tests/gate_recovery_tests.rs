@@ -2,6 +2,16 @@
 use super::*;
 
 fn fixture(restart: &str) -> (Arc<Store>, Arc<FakeRuntime>, DesiredSubject) {
+    fixture_with_launch(restart, true)
+}
+
+fn fixture_with_launch(restart: &str, launch: bool) -> (Arc<Store>, Arc<FakeRuntime>, DesiredSubject) {
+    let preparation = if launch { "" } else {
+        "step \"prepare\" { assigned-to \"agent/unavailable\"; goal \"Wait for preparation.\" }"
+    };
+    let dependencies = if launch { "" } else {
+        "depends-on { step \"prepare\" completed };"
+    };
     let store = Arc::new(Store::open_memory("node").unwrap());
     apply_source(
         &store,
@@ -12,7 +22,8 @@ mission "dotfiles/ui-design/recovery" state="ready" {{
     max-rounds 1
     round {{
       agent "gate" {{ harness "codex" {{}}; restart "{restart}" }}
-      step "judge" {{ assigned-to "gate"; goal "Judge this round." }}
+      {preparation}
+      step "judge" {{ {dependencies} assigned-to "gate"; goal "Judge this round." }}
     }}
   }}
 }}
@@ -37,6 +48,10 @@ mission "dotfiles/ui-design/recovery" state="ready" {{
         if let Some(gate) = store.desired_subjects().unwrap().into_iter()
             .find(|subject| store.is_loop_gate(subject).unwrap())
         {
+            if !launch {
+                assert!(runtime.starts.lock().unwrap().is_empty());
+                return (store, runtime, gate);
+            }
             let owner = store.mission_run(gate.owner_run.as_deref().unwrap()).unwrap().unwrap();
             let judge = owner.steps.iter().find(|step| step.step == "judge").unwrap();
             store.set_step_state(&judge.subject, "ready", None).unwrap();
@@ -260,5 +275,43 @@ fn an_explicit_restart_recovers_a_missing_gate_once_and_clears_its_fault() {
     );
     for _ in 0..3 { restarted.reconcile_once().unwrap(); }
     assert_eq!(runtime.starts.lock().unwrap().len(), 1);
+    assert!(store.member_reconcile_fault(&gate.subject, None).unwrap().is_none());
+}
+
+#[test]
+fn a_starting_round_gate_without_launch_lineage_or_ready_work_reports_instead_of_waiting_forever() {
+    let (store, _, gate) = fixture_with_launch("never", false);
+    assert!(!Reconciler::new(
+        store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+    ).member_was_launched_for_selected_desired(&gate.subject).unwrap());
+    assert!(store.loop_gate_ready_at(&gate).unwrap().is_none());
+    store.append_claim(&ClaimInput {
+        subject: gate.subject.clone(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: member_fields(gate.member.as_ref().unwrap(), "starting", Some("crashed-without-receipt"), false),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("gate-recovery-no-lineage".into()),
+    }).unwrap();
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    for _ in 0..3 { restarted.reconcile_once().unwrap(); }
+    assert_eq!(status(&store, &gate), "vanished");
+    assert!(diagnostic(&store, &gate));
+    let fault = store.member_reconcile_fault(&gate.subject, None).unwrap().unwrap();
+    assert!(fault.contains("no ready work authorizes a replacement"));
+    assert!(runtime.starts.lock().unwrap().is_empty());
+    // Ready work for the selected revision now permits the ordinary revision-change launch.
+    let owner = store.mission_run(gate.owner_run.as_deref().unwrap()).unwrap().unwrap();
+    let prepare = owner.steps.iter().find(|step| step.step == "prepare").unwrap();
+    let judge = owner.steps.iter().find(|step| step.step == "judge").unwrap();
+    store.set_step_state(&prepare.subject, "completed", None).unwrap();
+    store.set_step_state(&judge.subject, "ready", None).unwrap();
+    restarted.reconcile_once().unwrap();
+    assert_eq!(runtime.starts.lock().unwrap().len(), 1);
+    assert_eq!(status(&store, &gate), "starting");
     assert!(store.member_reconcile_fault(&gate.subject, None).unwrap().is_none());
 }

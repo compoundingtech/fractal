@@ -475,6 +475,28 @@ The embedded mission revision is immutable. A client cannot start it directly. T
 
 An agent declared inside `round` belongs to that child run. st removes it when the child run ends.
 
+The round-local agent whose identity is `gate` has the durable subject
+`agent/<parent-mission-path>/r<N>/gate`, and displays `<parent-mission-path>/r<N>/gate`.
+For example, round 2 of `dotfiles/ui-design/layout` uses
+`agent/dotfiles/ui-design/layout/r2/gate`, not the embedded mission's
+`__st3/.../loop/refine/round` path or the child's opaque run ID. `${ST_GATE_AGENT}`
+names that full subject in round selectors, stops, and ownership references. A retained
+`agent/${ST_MISSION_RUN}/gate` selector resolves to the same durable subject.
+Other round-local agents, and agents outside the round, keep their existing identities.
+The child run and generation still own the gate, and its process runtime ID stays run-scoped.
+
+Same-owner retries reuse the gate identity. Two concurrent child runs that would claim
+the same mission path and round number cannot overwrite each other's gate: publication
+refuses the competing owner with `round-gate-identity-collision`. Different round numbers
+have distinct names. Reuse by another run requires the prior owner to be terminal and its
+durable stop to have an observed stopped or absent runtime; an unknown runtime is not free.
+
+At an upgrade, a legacy hash-owned gate with claimed work first drains that work, preserving
+the claimant's completion authority. st then records its stop and waits for process absence
+before recording the selector cutover and materializing the new subject. The selector
+cutover is durable `step-run.state` history and survives replay; no legacy subject alias is
+published and no second gate process starts while the old one is still live.
+
 An agent declared outside the loop belongs to the root run. A round can address it with `ST_ROOT_MISSION_RUN_ID`.
 
 `until` contains repeated gates. All exit gates must pass.
@@ -1374,6 +1396,7 @@ st supplies these exact context names:
 | `ST_GATE` | Gate name in a running gate context. |
 | `ST3_SUBJECT` | Full subject of the current runtime member. |
 | `ST_AGENT` | Full owning agent subject. It is absent for agentless runtimes. |
+| `ST_GATE_AGENT` | Full durable round-local gate subject (`agent/<parent-mission-path>/r<N>/gate`). Present only in round child missions. |
 | `ST3_BIN` | Absolute path of `STATE_DIR/current/st3`, a link the daemon points at the st executable it runs; see [seat deploys](seat-deploys.md). |
 | `ST_LOOP_ROUND` | Current loop round. It is present in loop child missions. |
 | `ST_LOOP_FEEDBACK` | Exact prior feedback document, or an empty value. |

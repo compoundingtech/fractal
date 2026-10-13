@@ -182,6 +182,7 @@ fn proof_variables(mission: &MissionSpec) -> BTreeMap<String, String> {
         "ST_RUN_GENERATION",
         "ST_ROOT_MISSION_RUN",
         "ST_ROOT_MISSION_RUN_ID",
+        "ST_GATE_AGENT",
         "PATH",
     ];
     crate::graph::runtime_proof_variables(mission)

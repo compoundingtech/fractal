@@ -3078,6 +3078,44 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         &subject.subject,
                                     )?
                                 {
+                                    // A restored starting projection may have no retained launch
+                                    // receipt. Report its missing runtime before revision admission:
+                                    // a dormant gate is not authorized to launch a replacement.
+                                    if prior.as_ref().is_some_and(|actual| {
+                                        matches!(
+                                            actual_field(actual, "status").and_then(Value::as_str),
+                                            Some("starting" | "vanished")
+                                        )
+                                    }) && self.is_loop_gate(subject)?
+                                    {
+                                        let incarnation = prior.as_ref()
+                                            .and_then(|actual| actual_field(actual, "incarnation_id"))
+                                            .and_then(Value::as_str);
+                                        self.record_once(
+                                            &subject.subject,
+                                            "runtime.observed",
+                                            member_fields(member, "vanished", incarnation, false),
+                                        )?;
+                                        self.record_once(
+                                            &subject.subject,
+                                            "harness.diagnostic",
+                                            BTreeMap::from([
+                                                ("severity".into(), Value::from("error")),
+                                                ("code".into(), Value::from("gate-runtime-missing")),
+                                                ("runtime_id".into(), Value::from(member.runtime_id.clone())),
+                                                ("incarnation_id".into(), serde_json::json!(incarnation)),
+                                                ("reason".into(), Value::from(
+                                                    "the refine-loop gate's runtime disappeared without a retained launch receipt; a replacement requires ready work for the selected round",
+                                                )),
+                                            ]),
+                                        )?;
+                                        if self.store.loop_gate_ready_at(subject)?.is_none() {
+                                            anyhow::bail!(
+                                                "refine-loop gate runtime `{}` is missing without a retained launch receipt and no ready work authorizes a replacement; inspect the owning round's report or publish a corrected round",
+                                                member.runtime_id,
+                                            );
+                                        }
+                                    }
                                     if let Some(error) = blocked.take() {
                                         return Err(error);
                                     }

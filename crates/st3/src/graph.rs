@@ -105,6 +105,76 @@ pub(crate) fn parse_execution_intent(
     parse_intent_with_owner(source, default_host, Some(&owner), true, false)
 }
 
+/// Parse run-owned declarations without using the run's opaque id as a round gate's public
+/// identity. Process ids and ownership remain run-scoped; builders and other agents are unchanged.
+pub(crate) fn parse_execution_intent_for_run(
+    source: &str,
+    default_host: &str,
+    run: &crate::model::MissionRunView,
+) -> Result<NormalizedIntent, St3Error> {
+    let mut intent = parse_execution_intent(source, default_host, &run.id)?;
+    let Some(gate) = crate::store::mission_gate_agent(run) else {
+        return Ok(intent);
+    };
+    let previous = format!("agent/{}/gate", owner_run_id(&run.id));
+    rename_round_gate(&mut intent, &previous, &gate)?;
+    // A fully interpolated stop is still lowered through the owned stop parser.
+    let scoped_gate = format!(
+        "agent/{}/{}",
+        owner_run_id(&run.id),
+        gate.strip_prefix("agent/").unwrap_or(&gate)
+    );
+    rename_round_gate(&mut intent, &scoped_gate, &gate)?;
+    Ok(intent)
+}
+
+fn rename_round_gate(
+    intent: &mut NormalizedIntent,
+    previous: &str,
+    gate: &str,
+) -> Result<(), St3Error> {
+    fn rewrite(value: &mut Value, previous: &str, gate: &str) {
+        match value {
+            Value::String(value) if value == previous => *value = gate.to_owned(),
+            Value::Array(values) => {
+                for value in values {
+                    rewrite(value, previous, gate);
+                }
+            }
+            Value::Object(values) => {
+                for value in values.values_mut() {
+                    rewrite(value, previous, gate);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(mut desired) = intent.subjects.remove(previous) {
+        if intent.subjects.contains_key(gate) {
+            return Err(St3Error::new(
+                "duplicate-runtime-subject",
+                format!("round gate `{gate}` is declared more than once"),
+            ));
+        }
+        desired.subject = gate.to_owned();
+        if let Some(member) = desired.member.as_mut() {
+            member.display_name = Some(gate.strip_prefix("agent/").unwrap_or(gate).to_owned());
+        }
+        intent.subjects.insert(gate.to_owned(), desired);
+    }
+    for desired in intent.subjects.values_mut() {
+        rewrite(&mut desired.desired, previous, gate);
+        if let Some(member) = desired.member.as_mut() {
+            for value in member.environment.values_mut().chain(member.tags.values_mut()) {
+                if value == previous {
+                    *value = gate.to_owned();
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The placeholder variables a mission's declarations are interpolated with when they are
 /// checked without a run.
 pub(crate) fn runtime_proof_variables(
@@ -129,6 +199,7 @@ pub(crate) fn runtime_proof_variables(
         ("ST_PARENT_STEP_RUN".into(), String::new()),
         ("ST_GATE".into(), "migration-gate".into()),
         ("ST_AGENT".into(), "agent/migration-proof/worker".into()),
+        ("ST_GATE_AGENT".into(), "agent/migration-proof/gate".into()),
         ("ST_LOOP_ROUND".into(), "1".into()),
         ("ST_LOOP_FEEDBACK".into(), String::new()),
         ("ST_LOOP_ITEM_ID".into(), "migration-item".into()),

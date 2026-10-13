@@ -137,6 +137,15 @@ impl Drop for RuntimeObservationCapture {
 
 const PENDING: &str = "finished=0 OR applied=0 OR (revoked_by IS NOT NULL AND cleanup_verified=0) OR (json_extract(result,'$.error') IS NOT NULL AND cleanup_verified=0)";
 
+/// Read the exact pending-operation fence inside an enclosing identity cutover transaction.
+pub(super) fn pending_for_subject_tx(connection: &Connection, subject: &str) -> Result<bool> {
+    smallclaims::touched::note_read(|| format!("local-runtime-start:{subject}"));
+    connection.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND ({PENDING}))"),
+        [subject], |row| row.get(0),
+    ).map_err(Into::into)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuntimeStartOperation {
     pub id: String,

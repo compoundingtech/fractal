@@ -32,6 +32,10 @@ Once no launch remains in flight, it records the gate runtime as `vanished`, rep
 `gate-runtime-missing`, and follows the declaration's restart policy. A gate with
 `restart "never"` carries an actionable member fault instead of silently waiting
 for readiness forever. Step-produced gates also fail their producing step.
+A restored starting projection without a retained launch receipt is also reported:
+it becomes `vanished` even when no ready work authorizes launching its replacement.
+Ready work for the selected round permits the normal declaration-revision launch;
+until then, the missing runtime remains an actionable member fault.
 If a completed or abandoned start still lacks exact proof that its producer cannot
 publish a runtime later, launch admission stays held and the gate carries a durable
 member fault explaining the missing runtime and start operation. Inspect the owning

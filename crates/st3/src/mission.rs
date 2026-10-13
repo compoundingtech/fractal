@@ -28,6 +28,7 @@ const VARIABLES: &[&str] = &[
     "ST_PARENT_STEP_RUN",
     "ST_GATE",
     "ST_AGENT",
+    "ST_GATE_AGENT",
     "ST_LOOP_ROUND",
     "ST_LOOP_FEEDBACK",
     "ST_LOOP_ITEM_ID",
@@ -2411,6 +2412,20 @@ pub fn interpolate(source: &str, variables: &BTreeMap<String, String>) -> Result
         rest = &tail[end + 1..];
     }
     output.push_str(rest);
+    // Local gate selectors in retained mission revisions use the same run template as other
+    // agents. Resolve that one identity through the round context, including during replay.
+    if let (Some(gate), Some(run)) = (
+        variables.get("ST_GATE_AGENT"),
+        variables.get("ST_MISSION_RUN"),
+    ) {
+        let local = output
+            .strip_prefix("agent/")
+            .and_then(|subject| subject.strip_prefix(run))
+            .is_some_and(|suffix| suffix == "/gate");
+        if local {
+            output.clone_from(gate);
+        }
+    }
     Ok(output)
 }
 
