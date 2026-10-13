@@ -57135,6 +57135,90 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         );
     }
 
+    /// A driver writes each prompt as its own transition, so a later prompt for the same tool is
+    /// another prompt: an answer to it never reaches the earlier prompt's waiter. A restatement
+    /// of the same transition, or a credential edge, is still the same prompt.
+    #[test]
+    fn a_later_prompt_for_the_same_tool_is_another_prompt() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "two-prompts", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "harness.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let waiting = |transition: u64, auth: Value| {
+            json!({"state":"working", "driver":"codex", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"permission", "reason":"commandExecution",
+                "provider_auth": auth, "ownership_sequence":1, "transition_sequence":transition})
+        };
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: serde_json::from_value(json!({"status":"running", "incarnation_id":"one"}))
+                    .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        append(waiting(3, Value::Null));
+        // Restated: the same prompt.
+        append(waiting(3, Value::Null));
+        assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Open);
+        // A credential edge moves the transition without a new prompt.
+        let restated = append(waiting(4, json!(true)));
+        store
+            .answer_native_prompt(seat, &restated.id, "allow", "person/avery")
+            .unwrap();
+        assert_eq!(
+            store.native_prompt_state(seat, 1, 3).unwrap(),
+            NativePromptState::Answered {
+                answer: "allow".into()
+            }
+        );
+        // The next request is its own transition: its answer is never the earlier waiter's.
+        let next = append(waiting(5, json!(true)));
+        store
+            .answer_native_prompt(seat, &next.id, "deny", "person/avery")
+            .unwrap();
+        assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
+        assert_eq!(
+            store.native_prompt_state(seat, 1, 5).unwrap(),
+            NativePromptState::Answered {
+                answer: "deny".into()
+            }
+        );
+    }
+
     /// A Codex approval prompt is answered the same way. The answer names the Codex driver, whose
     /// control connection reads it and answers the app-server; a Codex question stays terminal-only.
     #[test]
@@ -57180,18 +57264,35 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
                 .find(|item| item.kind == "harness-prompt")
         };
         append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
-        // The driver waits on the observation its approval wrote, named by the record's sequences.
-        let asked = append(
+        // A wait the driver knows only from the thread's flag has no request st could answer.
+        let flagged = append(
             "harness.observed",
             json!({"state":"working", "driver":"codex", "incarnation_id":"one",
                 "blocked_on":"human", "ask":"permission", "reason":"waitingOnApproval",
+                "ownership_sequence":1, "transition_sequence":2}),
+        );
+        assert!(prompt().unwrap().answers.is_empty());
+        assert!(prompt().unwrap().detail.contains("did not see requested"));
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &flagged.id, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "stale-fence"
+        );
+        // The driver waits on the observation its approval wrote, named by the record's sequences,
+        // and the observation names what the request asks to do.
+        let asked = append(
+            "harness.observed",
+            json!({"state":"working", "driver":"codex", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"permission", "reason":"commandExecution",
                 "ownership_sequence":1, "transition_sequence":3}),
         );
         assert_eq!(
             prompt().unwrap().answers,
             vec!["allow".to_owned(), "deny".to_owned()]
         );
-        assert!(prompt().unwrap().detail.starts_with("Codex asks for approval;"));
+        assert!(prompt().unwrap().detail.starts_with("Codex asks to run a command;"));
         assert_eq!(
             store.native_prompt_state(seat, 1, 3).unwrap(),
             NativePromptState::Open
@@ -57216,9 +57317,10 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         append(
             "harness.observed",
             json!({"state":"working", "driver":"codex", "incarnation_id":"one",
-                "blocked_on":"human", "ask":"permission", "reason":"waitingOnApproval",
+                "blocked_on":"human", "ask":"permission", "reason":"fileChange",
                 "ownership_sequence":1, "transition_sequence":5}),
         );
+        assert!(prompt().unwrap().detail.starts_with("Codex asks to change files;"));
         assert_eq!(
             store.native_prompt_state(seat, 1, 3).unwrap(),
             NativePromptState::Gone

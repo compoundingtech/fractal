@@ -164,9 +164,15 @@ impl Store {
                 },
                 conversation: Some(seat.clone()),
                 title: format!("{seat} is waiting for {what}"),
-                // Codex names no tool: its reason only says it waits on an approval.
+                // Codex names what its request asks to do, not the call: that is the pending
+                // request in the seat's conversation.
                 detail: if answerable(&harness) && harness["driver"] == "codex" {
-                    "Codex asks for approval; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
+                    format!(
+                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.",
+                        codex_approval_words(prompt)
+                    )
+                } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
+                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable(&harness) {
                     format!(
                         "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
@@ -1451,17 +1457,31 @@ fn native_prompt_gone_operation(observation: &str) -> String {
 }
 
 /// Whether st can answer the prompt `harness` reports from a client: a permission prompt of
-/// Claude, whose hook waits for the answer, or of Codex, whose control connection sends it, that
-/// names its reason (Claude's tool; Codex's `waitingOnApproval`). The call's input is conversation
-/// content a client reads from the seat's conversation and shows beside the answers; it is never
-/// stored here. Other prompts are answered in the seat's terminal.
+/// Claude, whose hook waits for the answer, that names its tool; or of Codex, whose control
+/// connection sends it, that names the request it saw (`commandExecution`, `fileChange`,
+/// `permissions`). A Codex wait known only from its thread's `waitingOnApproval` flag has no
+/// request st could answer. The call's input is conversation content a client reads from the
+/// seat's conversation and shows beside the answers; it is never stored here. Other prompts are
+/// answered in the seat's terminal.
 fn answerable(harness: &Value) -> bool {
+    let reason = harness["reason"].as_str().unwrap_or_default();
     harness["blocked_on"] == "human"
         && harness["ask"] == "permission"
-        && matches!(harness["driver"].as_str(), Some("claude" | "codex"))
-        && harness["reason"]
-            .as_str()
-            .is_some_and(|reason| !reason.is_empty() && reason != "permissionRequest")
+        && match harness["driver"].as_str() {
+            Some("claude") => !reason.is_empty() && reason != "permissionRequest",
+            Some("codex") => matches!(reason, "commandExecution" | "fileChange" | "permissions"),
+            _ => false,
+        }
+}
+
+/// What a Codex approval request asks for, by the reason its observation names.
+fn codex_approval_words(reason: &str) -> &'static str {
+    match reason {
+        "commandExecution" => "to run a command",
+        "fileChange" => "to change files",
+        "permissions" => "for more permissions",
+        _ => "for approval",
+    }
 }
 
 /// The idempotency key of the person's answer to the native prompt `observation` opened.
@@ -1559,13 +1579,24 @@ impl Store {
         };
         // Claude and Codex show one prompt at a time: while every observation since the waiter's
         // own still waits on that permission, it is the same prompt, and an answer to any of them
-        // is the waiter's. Anything else in between means the prompt is gone.
+        // is the waiter's. Anything else in between means the prompt is gone, and so does a new
+        // transition that is not a credential edge: a driver writes each prompt as its own
+        // transition, so a later one waiting on the same tool is another prompt.
         let mut chain = Vec::new();
+        let mut newer: Option<Value> = None;
         for (claim, body) in &recent[..=own] {
             let body: Value = serde_json::from_str(body)?;
-            if !answerable(body.get("fields").unwrap_or(&body)) {
+            let fields = body.get("fields").unwrap_or(&body);
+            if !answerable(fields) {
                 return Ok(NativePromptState::Gone);
             }
+            if let Some(newer) = &newer
+                && newer["transition_sequence"] != fields["transition_sequence"]
+                && newer["provider_auth"] == fields["provider_auth"]
+            {
+                return Ok(NativePromptState::Gone);
+            }
+            newer = Some(fields.clone());
             chain.push(claim.clone());
         }
         for claim in &chain {

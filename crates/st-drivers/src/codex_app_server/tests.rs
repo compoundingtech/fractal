@@ -5677,13 +5677,13 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
             "params": {"threadId": "thread-main", "requestId": 9}}),
         "thread-main",
     );
-    assert!(approval.pending.is_some());
+    assert!(!approval.pending.is_empty());
     approval.observe(
         &json!({"method": "serverRequest/resolved",
             "params": {"threadId": "thread-main", "requestId": 10}}),
         "thread-main",
     );
-    assert!(approval.pending.is_none());
+    assert!(approval.pending.is_empty());
 
     // A request whose wait is a new transition binds to it; st reporting it gone forgets it.
     write(active());
@@ -5699,7 +5699,7 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
     );
     assert_ne!(asked, vec![prompt]);
     assert_eq!(asked, vec![sequences()]);
-    assert!(approval.pending.is_none());
+    assert!(approval.pending.is_empty());
 
     // The thread moving on forgets a request too: a status without the flag, a completed turn.
     approval.observe(&request(12, "thread-main"), "thread-main");
@@ -5708,20 +5708,20 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
             "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}}}),
         "thread-main",
     );
-    assert!(approval.pending.is_some());
+    assert!(!approval.pending.is_empty());
     approval.observe(
         &json!({"method": "thread/status/changed", "params": {"threadId": "thread-main",
             "status": {"type": "active", "activeFlags": []}}}),
         "thread-main",
     );
-    assert!(approval.pending.is_none());
+    assert!(approval.pending.is_empty());
     approval.observe(&request(13, "thread-main"), "thread-main");
     approval.observe(
         &json!({"method": "turn/completed", "params": {"threadId": "thread-main",
             "turn": {"id": "turn-1", "status": "completed"}}}),
         "thread-main",
     );
-    assert!(approval.pending.is_none());
+    assert!(approval.pending.is_empty());
 
     // A legacy request names its thread as a conversation and takes its own words.
     write(active());
@@ -5734,6 +5734,111 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
     assert_eq!(
         approval.answer_if_due(tick(), record, answered("allow")),
         Some(json!({"id": "legacy-1", "result": {"decision": "approved"}}))
+    );
+}
+
+/// Codex can ask twice before either is answered. Each request is its own prompt: the oldest
+/// waits first, the next becomes the prompt once the first is resolved, and its wait is a new
+/// transition, so st's answer to one is never sent to the other.
+#[test]
+fn two_approvals_wait_in_turn_and_each_binds_to_its_own_transition() {
+    use crate::session_control::PromptAnswer;
+    let root = tempfile::tempdir().unwrap();
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let mut state = CodexControlState::new(&runtime, "thread-main".into());
+    let mut writer =
+        harness_state::Writer::new(root.path(), "h.worker", "codex", Some("h.worker".into()));
+    let path = harness_state::harness_state_path(root.path());
+    let record = || harness_state::read(&path, None);
+    let sequences = || {
+        let observed = harness_state::read(&path, None).unwrap();
+        (
+            observed.ownership_sequence.unwrap(),
+            observed.transition_sequence.unwrap(),
+        )
+    };
+    // What `CodexInboxDelivery::observe_control` does: a new request starts a transition.
+    let mut last_request = None;
+    let mut publish = |state: &CodexControlState, writer: &mut harness_state::Writer| {
+        let request = state.approval_request().cloned();
+        if request.is_some() && request != last_request {
+            writer.interrupt();
+        }
+        last_request = request;
+        writer.observe(state.harness_observation().unwrap()).unwrap();
+    };
+    let request = |id: u64, method: &str| {
+        json!({"id": id, "method": method,
+            "params": {"threadId": "thread-main", "turnId": "turn-1"}})
+    };
+    let mut approval = CodexApprovalAnswer::default();
+    let mut at = Instant::now();
+    let mut tick = || {
+        at += APPROVAL_ANSWER_POLL;
+        at
+    };
+    state
+        .observe(&json!({"method": "turn/started",
+            "params": {"threadId": "thread-main", "turn": {"id": "turn-1"}}}))
+        .unwrap();
+    publish(&state, &mut writer);
+
+    for message in [
+        request(1, "item/commandExecution/requestApproval"),
+        request(2, "item/fileChange/requestApproval"),
+    ] {
+        state.observe(&message).unwrap();
+        approval.observe(&message, "thread-main");
+        publish(&state, &mut writer);
+    }
+    // The oldest request is the prompt, and the record names what it asks.
+    assert_eq!(record().unwrap().reason.as_deref(), Some("commandExecution"));
+    let first = sequences();
+    let mut asked = Vec::new();
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Answered {
+                answer: "allow".into(),
+            })
+        }),
+        Some(json!({"id": 1, "result": {"decision": "accept"}}))
+    );
+    assert_eq!(asked, vec![first]);
+
+    // Codex resolves the first; the second is the prompt now, and its own transition.
+    let resolved = json!({"method": "serverRequest/resolved",
+        "params": {"threadId": "thread-main", "requestId": 1}});
+    state.observe(&resolved).unwrap();
+    approval.observe(&resolved, "thread-main");
+    // Before its wait is written, the second request finds only the first's observation: no bind.
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |_, _| unreachable!()),
+        None
+    );
+    publish(&state, &mut writer);
+    assert_eq!(record().unwrap().reason.as_deref(), Some("fileChange"));
+    let second = sequences();
+    assert_ne!(second, first);
+    let mut asked = Vec::new();
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Answered {
+                answer: "deny".into(),
+            })
+        }),
+        Some(json!({"id": 2, "result": {"decision": "decline"}}))
+    );
+    assert_eq!(asked, vec![second]);
+
+    // Once nothing waits, the thread's flag alone is answered in the terminal.
+    let resolved = json!({"method": "serverRequest/resolved",
+        "params": {"threadId": "thread-main", "requestId": 2}});
+    state.observe(&resolved).unwrap();
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("waitingOnApproval")
     );
 }
 
@@ -5783,8 +5888,32 @@ fn approval_request_blocks_until_matching_thread_reports_resolution() {
         crate::harness_state::BlockedOn::Human
     );
     assert_eq!(observation.ask, crate::harness_state::Ask::Permission);
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("commandExecution"),
+        "the wait names the request it saw"
+    );
+    // A reloaded state (an adopted connection) still waits, but never saw the request: only the
+    // terminal can answer it, until the request is seen again.
     state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
     assert!(state.approval_request_pending);
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("waitingOnApproval")
+    );
+    assert!(
+        state
+            .observe(&json!({
+                "id": 1,
+                "method": "item/commandExecution/requestApproval",
+                "params": {"threadId": "thread-main", "turnId": "turn-1"}
+            }))
+            .unwrap()
+    );
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("commandExecution")
+    );
     assert!(
         !state
             .observe(&json!({
@@ -5792,7 +5921,8 @@ fn approval_request_blocks_until_matching_thread_reports_resolution() {
                 "method": "item/commandExecution/requestApproval",
                 "params": {"threadId": "thread-main", "turnId": "turn-1"}
             }))
-            .unwrap()
+            .unwrap(),
+        "the same request again changes nothing"
     );
 
     assert!(
