@@ -20,7 +20,8 @@ function HeaderVariant({ width, scheme }: { width: number; scheme: Scheme }) {
   return <section aria-label={`${width}px ${scheme}`} data-scheme={scheme} {...stylex.props(styles.variant(width), ...baselineTheme, scheme === 'light' && lightTheme)}>
     <h2>{width}px · {scheme}</h2>
     <section aria-label="Host-owned header" {...stylex.props(styles.frame)}>
-      <header role="banner" aria-label="Workspace header">Row projection</header>
+      {/* Like the live workspace, the host header is a labelled group inside the page, not a top-level banner. */}
+      <div role="group" aria-label="Workspace header">Row projection</div>
       <EmbraceRuntimeProvider options={{ messages: [], isRunning: false, onNew: async () => {} }}>
         <Transcript {...transcriptProps} showHeader={false} />
       </EmbraceRuntimeProvider>
@@ -48,7 +49,7 @@ export const AllStates: Story = { play: async ({ canvasElement }) => {
     const variant = within(canvas.getByRole('region', { name: `${width}px ${scheme}` }))
     const hosted = within(variant.getByRole('region', { name: 'Host-owned header' }))
     await expect(hosted.queryByTestId('transcript-header')).toBeNull()
-    await expect(hosted.getByRole('banner', { name: 'Workspace header' })).toBeVisible()
+    await expect(hosted.getByRole('group', { name: 'Workspace header' })).toBeVisible()
     await expect(await hosted.findByTestId('transcript-scroll')).toBeVisible()
     // Failing control: omitting showHeader must retain the default header.
     const standalone = within(variant.getByRole('region', { name: 'Standalone control' }))
