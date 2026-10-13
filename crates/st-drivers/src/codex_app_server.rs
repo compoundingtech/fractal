@@ -2770,7 +2770,8 @@ pub fn run_controlled_paths(
     let codex_argv = if let Some(mode) = crate::access::AccessMode::from_environment()? {
         let workspace = std::env::current_dir().context("reading managed Codex workspace")?;
         let endpoint = std::env::var("ST3_ENDPOINT").ok();
-        managed_codex_argv(mode, endpoint.as_deref(), &workspace, codex_argv)?
+        let permissions = crate::access::Permissions::from_environment()?;
+        managed_codex_argv_with(mode, endpoint.as_deref(), &workspace, codex_argv, permissions)?
     } else {
         codex_argv
     };
@@ -2847,7 +2848,18 @@ pub fn run_controlled_paths(
 }
 
 /// Defaults apply only at the st3 launch entry point, before fresh/resume policy projection.
-fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
+#[cfg(test)]
+fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, argv: Vec<String>) -> Result<Vec<String>> {
+    managed_codex_argv_with(mode, endpoint, workspace, argv, crate::access::Permissions::default())
+}
+
+fn managed_codex_argv_with(
+    mode: crate::access::AccessMode,
+    endpoint: Option<&str>,
+    workspace: &Path,
+    mut argv: Vec<String>,
+    permissions: crate::access::Permissions,
+) -> Result<Vec<String>> {
     let boundary = interactive_root_prefix_end(&argv[1..])?;
     let authored = &argv[1..1 + boundary];
     let mut explicit_permissions = false;
@@ -2868,7 +2880,7 @@ fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, w
         let endpoint = endpoint.context("managed auto Codex needs ST3_ENDPOINT")?;
         Some(Path::new(endpoint.strip_prefix("unix://").unwrap_or(endpoint)))
     } else { None };
-    let mut defaults = crate::access::codex_defaults(mode, socket, workspace, explicit_permissions)?;
+    let mut defaults = crate::access::codex_defaults(mode, socket, workspace, explicit_permissions, permissions)?;
     if authored_bypasses_hook_trust(authored)? {
         defaults.retain(|arg| arg != "--dangerously-bypass-hook-trust");
     }
@@ -4589,6 +4601,7 @@ fn is_permission_config(config: &str) -> bool {
         "default_permissions" | "permissions" | "approval_policy" | "approvals_reviewer" | "sandbox_mode"
     ) || key.starts_with("permissions.")
         || key.starts_with("sandbox_workspace_write")
+        || key.starts_with("auto_review")
 }
 
 fn resume_compatible_root_args(authored_prefix: &[String]) -> Vec<String> {

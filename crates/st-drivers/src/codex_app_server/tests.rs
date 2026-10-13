@@ -8366,7 +8366,39 @@ fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resu
     let has_config = |value: &str| auto.windows(2).any(|pair| pair[0] == "-c" && pair[1] == value);
     assert!(has_config("sandbox_workspace_write.network_access=true"));
     assert!(has_config("web_search=\"live\""));
-    assert!(!bypass.iter().any(|arg| arg.starts_with("sandbox_workspace_write")));
+    assert!(!bypass.iter().any(|arg| arg.starts_with("sandbox_workspace_write") || arg.starts_with("auto_review")));
+    // Off by default: a plain auto seat leaves the approval reviewer's own judgment alone.
+    assert!(!auto.iter().any(|arg| arg.starts_with("auto_review")));
+    // A declaration that opts in (env ST_PERMISSIONS "push-own-branch") gives the reviewer the operator's
+    // authorization for the seat's own branch, as a TOML string in configuration.
+    let opted = managed_codex_argv_with(
+        AccessMode::Auto,
+        socket,
+        workspace,
+        vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()],
+        crate::access::Permissions { push_own_branch: true },
+    )
+    .unwrap();
+    let policy = opted.iter().find(|arg| arg.starts_with("auto_review.extra_policy=")).unwrap();
+    let parsed: toml::Value = toml::from_str(policy).unwrap();
+    let text = parsed["auto_review"]["extra_policy"].as_str().unwrap();
+    assert_eq!(text, crate::access::AUTO_REVIEW_EXTRA_POLICY);
+    assert!(text.starts_with("This session is an unattended fleet seat. For these actions only") && text.contains("Not authorized"));
+    assert!(text.contains("merging or closing pull requests"));
+    // Bypass has no reviewer, so the permission adds nothing there.
+    let bypass_opted = managed_codex_argv_with(
+        AccessMode::Bypass,
+        socket,
+        workspace,
+        vec!["codex".into(), "boot".into()],
+        crate::access::Permissions { push_own_branch: true },
+    )
+    .unwrap();
+    assert!(!bypass_opted.iter().any(|arg| arg.starts_with("auto_review")));
+    // The resumed TUI drops it while the app server keeps it.
+    let resumed_opted = prepare_controlled_launch_args("unix:///control.sock", &opted[1..], Some("prior")).unwrap();
+    assert!(!resumed_opted.tui_args.iter().any(|arg| arg.starts_with("auto_review")));
+    assert!(resumed_opted.server_args.iter().any(|arg| arg.starts_with("auto_review.extra_policy=")));
     let profile = auto.iter().find(|value| value.starts_with("permissions.st-managed=")).unwrap();
     let parsed: toml::Value = toml::from_str(profile).unwrap();
     assert_eq!(parsed["permissions"]["st-managed"]["workspace_roots"]["/work/example"].as_bool(), Some(true));
