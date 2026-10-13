@@ -20,7 +20,7 @@ export const NeedsYouBar = ({ requests, ariaLabel = 'Needs you', expanded, onTog
 
 /** Two-line disclosures per waiting request; `children` renders the host-owned body for an open entry. */
 export const NeedsYouInbox = ({ requests, ariaLabel = 'Needs you inbox', onShowInThread, onOpenTerminal, children }: { readonly requests: readonly NeedsYouRequest[]; readonly ariaLabel?: string; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal?: (id: string) => void; readonly children?: (id: string) => React.ReactNode }) => <section aria-label={ariaLabel} {...stylex.props(styles.body)}>{requests.map(request => <details data-fractal-card="" key={request.id} {...stylex.props(styles.card)}>
-  <summary {...stylex.props(styles.inboxSummary)}><span aria-hidden="true" data-needs-you-chevron {...stylex.props(styles.chevron)}><Icon name="chevron-right" size={12} /></span><span data-needs-you-label {...stylex.props(styles.inboxLabel)}>{request.agentLabel} · {request.prompt}</span></summary>
+  <summary tabIndex={0} {...stylex.props(styles.inboxSummary)}><span aria-hidden="true" data-needs-you-chevron {...stylex.props(styles.chevron)}><Icon name="chevron-right" size={12} /></span><span data-needs-you-label {...stylex.props(styles.inboxLabel)}>{request.agentLabel} · {request.prompt}</span></summary>
   <div {...stylex.props(styles.body)}>
     {children?.(request.id)}
     <footer {...stylex.props(styles.actions)}><Button {...stylex.props(styles.button)} onPress={() => onShowInThread(request.id)}>Show in thread</Button>{onOpenTerminal !== undefined ? <Button {...stylex.props(styles.button)} onPress={() => onOpenTerminal(request.id)}>Open terminal</Button> : null}</footer>
