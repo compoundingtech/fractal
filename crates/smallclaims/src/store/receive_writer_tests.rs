@@ -102,6 +102,7 @@ fn catch_up_admission_bounds_the_work_a_queued_write_waits_for() {
             }),
             profile: None,
             wait: None,
+            holder: crate::windows::holds::Holder::current(),
             done,
         });
         let started = Instant::now();
@@ -900,6 +901,7 @@ fn signing_an_unsigned_backlog_releases_the_writer_between_pages() {
         enqueued: Instant::now(),
         profile: None,
         wait: None,
+        holder: crate::windows::holds::Holder::current(),
         done,
         run: Box::new(move |tx| {
             observed

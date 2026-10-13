@@ -68,6 +68,20 @@ list to 300 ms. The `sql-statement`, `transaction` (`read`, `write`, `writer_hol
 rows cover the store's statements, its read and write transactions, each hold of its single
 writer, and the process's CPU in cores.
 
+The `writer-hold` row names who held the writer, against the transaction target (`max_ms`).
+It is always on, without `ST3_PROFILE_DIR`. A holder is the request route or background task
+the asking thread worked for, with the request's client when known, or `(thread NAME)`; each
+row also gives `at`, the code location that asked. A batch is charged to the write in it that
+ran longest; a lent writer to its borrower. `in_progress` lists each writer's current hold,
+oldest first, with its holder, start (`started_unix_ms`) and `held_ms`, so a stuck hold shows
+before it ends. `holders` ranks up to 16 holders by writer time over the last hour (count, over
+target, total and max). `long_holds` and `long_reads` keep the last 64 writer holds and read
+transactions over the target in that hour, newest first; a long hold also gives its `kind`
+(`batch` or `lend`), `writes` and `longest_write_ms`. `open_reads` lists up to eight read
+snapshots open past the target now. `waiting` counts callers waiting for the writer and reads
+waiting for admission, and `threads` counts this process's threads, in all and by name. `st
+doctor` prints it as `slo/writer-hold`.
+
 The `database` row is this member's store: `max_live_gb` for the pages in use (the file less its
 free pages, which SQLite reuses before the file grows) and `max_growth_mb_per_day` for their net
 daily growth, what is written less what checkpoints and retention free. The daemon samples the
