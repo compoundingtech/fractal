@@ -215,7 +215,21 @@ async fn check_trace_claim_complete(ad_hoc: bool, broken_trace: bool) {
     use st3::agent_trace::issuer::{self, Facts};
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
+    daemon.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    daemon.store.ensure_principal_key("person/avery").unwrap();
     daemon.declare(Some("person/avery"));
+    let root_source = r#"version 2
+agent "example/alder" { accountable "person/avery"; workspace "/tmp"; command "true"; }
+"#;
+    let root_intent = st3::parse_intent(root_source, "example").unwrap();
+    let root_preview = daemon.store.mission(&root_intent, st3::model::IntentInput {
+        kdl: root_source.into(), source_name: None,
+    }).unwrap();
+    daemon.store.apply_as(&root_intent, &root_preview.subject_tokens,
+        "trace-root", Some("person/avery")).unwrap();
+    daemon.store.seal_local_batches().unwrap();
+    daemon.store.judge_claims(true).unwrap();
+    assert_eq!(daemon.store.trace_principal(ALDER).unwrap().as_deref(), Some("person/avery"));
     let source = r#"version 2
 mission "trace-check" state="ready" {
     goal "Check runtime trace lifecycle."

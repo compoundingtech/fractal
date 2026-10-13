@@ -164,38 +164,8 @@ pub fn refresh(
     Ok(runtime)
 }
 
-/// Keep reduced seat ownership authoritative; use only an explicitly declared
-/// host trace principal when that reduction yields no human.
-pub fn resolve_principal(reduced: Option<String>, declared: Option<&str>) -> Option<String> {
-    if reduced.is_some() {
-        return reduced;
-    }
-    let declared = declared?;
-    if !declared.strip_prefix("person/").is_some_and(|name| !name.is_empty()) {
-        tracing::warn!(
-            event = "agent_trace_fallback_principal_invalid",
-            "ignoring declared trace principal that is not person/<name>"
-        );
-        return None;
-    }
-    let admission = (|| -> Result<()> {
-        crate::graph::validate_name(declared, true)?;
-        AgentTraceRuntimeV1WhoPrincipal::validate(declared)?;
-        Ok(())
-    })();
-    match admission {
-        Ok(()) => Some(declared.to_owned()),
-        Err(error) => {
-            tracing::warn!(
-                event = "agent_trace_fallback_principal_invalid", %error,
-                "ignoring declared trace principal outside the runtime authority"
-            );
-            None
-        }
-    }
-}
 
-/// Replace the human principal from reduced ownership or reviewed host declaration.
+/// Replace the human principal with verified fleet-root declaration evidence.
 ///
 /// # Errors
 /// Rejects a principal that the authoritative schema cannot represent.
@@ -249,28 +219,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn declared_principal_is_only_a_validated_fallback_for_missing_reduction() {
-        let reduced = "person/requester";
-        assert!(reduced.starts_with("person/"));
-        assert!(crate::graph::validate_name(reduced, true).is_ok());
-        assert!(AgentTraceRuntimeV1WhoPrincipal::validate(reduced).is_ok());
-        for declared in [None, Some("person/avery"), Some("agent/not-a-human")] {
-            assert_eq!(resolve_principal(Some("person/requester".into()), declared),
-                Some("person/requester".into()));
-        }
-        for declared in ["person/avery", "person/NAME/IDENTITY@IDENTITY", "person/NAME/._-"] {
-            assert!(crate::graph::validate_name(declared, true).is_ok());
-            assert_eq!(resolve_principal(None, Some(declared)), Some(declared.to_owned()));
-        }
-        assert_eq!(resolve_principal(None, None), None);
-        for invalid in ["agent/not-a-human", "person/", "person/a:b", "person/../human",
-            "person/a b", "person/é", "person//human",
-            " person/avery", "person/avery\n", "person/avery "] {
-            assert_eq!(resolve_principal(None, Some(invalid)), None, "{invalid:?}");
-        }
-        assert_eq!(resolve_principal(None, Some(&format!("person/{}", "x".repeat(512)))), None);
-    }
 
     const MISSION: &str = "0123456789abcdef0123456789abcdef";
     const GENERATION: &str = "abcdef0123456789abcdef0123456789";

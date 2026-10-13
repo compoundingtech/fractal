@@ -64,6 +64,7 @@ done
     let source = format!(
         r#"version 2
 agent "garden/worker" {{
+ accountable "person/avery"
  workspace "{}"
  harness "omp" {{ args "--resume" "{}"; }}
 }}
@@ -72,6 +73,8 @@ agent "garden/worker" {{
         transcript.display()
     );
     let store = Arc::new(Store::open(&root.path().join("graph.db"), "resume-link-test").unwrap());
+    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store.ensure_principal_key("person/avery").unwrap();
     let intent = st3::parse_intent(&source, "resume-link-test").unwrap();
     let preview = store
         .mission(
@@ -90,6 +93,9 @@ agent "garden/worker" {{
             Some("person/avery"),
         )
         .unwrap();
+    store.seal_local_batches().unwrap();
+    store.judge_claims(true).unwrap();
+    assert_eq!(store.trace_principal(subject).unwrap().as_deref(), Some("person/avery"));
     store
         .append_claim(&ClaimInput {
             subject: subject.into(),

@@ -1363,7 +1363,7 @@ impl Fixture {
     }
 }
 
-/// A trace refresh resolves one person regardless of the owning mission's step count.
+/// Trace declaration evidence does not hydrate the owning mission's step history.
 #[tokio::test]
 async fn trace_principal_mission_owner_cost_is_independent_of_step_count() {
     use axum::{body::Body, http::Request};
@@ -1373,6 +1373,17 @@ async fn trace_principal_mission_owner_cost_is_independent_of_step_count() {
     for steps in [100, 1000] {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), NODE).unwrap());
+        store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.ensure_principal_key("person/reviewer").unwrap();
+        let root_source = r#"version 2
+agent "cost/principal-root" { accountable "person/reviewer"; command "true"; }
+"#;
+        let root_intent = st3::graph::parse_intent(root_source, NODE).unwrap();
+        let root_planned = store.mission(&root_intent, st3::model::IntentInput {
+            kdl: root_source.into(), source_name: None,
+        }).unwrap();
+        store.apply_as(&root_intent, &root_planned.subject_tokens,
+            "principal-root", Some("person/reviewer")).unwrap();
         let mut source = String::from(
             "version 2\nmission \"cost/principal\" state=\"ready\" {\n  goal \"Bound principal lookup.\"\n",
         );
@@ -1411,8 +1422,10 @@ agent "cost/principal-bound" { harness "claude" { account "principal/bound" } }
             kdl: source.into(), source_name: None,
         }).unwrap();
         store.apply_as(
-            &intent, &planned.subject_tokens, "principal-seats", Some("person/reviewer"),
+            &intent, &planned.subject_tokens, "principal-seats", Some("agent/cost/principal-root"),
         ).unwrap();
+        store.seal_local_batches().unwrap();
+        store.judge_claims(true).unwrap();
         let app = st3::api::router(AppState {
             store: store.clone(),
             notify: Arc::new(Notify::new()),
@@ -1435,21 +1448,18 @@ agent "cost/principal-bound" { harness "claude" { account "principal/bound" } }
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
             let body: Value = serde_json::from_slice(&bytes).unwrap();
             let principal = body["value"].as_str().unwrap();
-            assert_eq!(principal, "person/requester");
-            assert!(principal.starts_with("person/"));
-            assert_eq!(st3::agent_trace::issuer::resolve_principal(None, Some(principal)),
-                Some(principal.to_owned()), "reduction must yield an admitted full person subject");
+            assert_eq!(principal, "person/reviewer");
             samples.push(work::total() - before);
         }
         measurements.push(samples.into_iter().skip(1).min_by_key(|work| work.vm_steps).unwrap());
-        // A bound account still outranks both mission requester and declaration writer.
+        // A bound account is command ownership, not trace declaration evidence.
         let response = app.clone().oneshot(Request::builder()
             .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-bound")
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/owner"));
-        // A declaration without mission ownership follows its writer.
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/reviewer"));
+        // All seats follow the same verified declaring root, independent of mission ownership.
         let response = app.oneshot(Request::builder()
             .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-authored")
             .body(Body::empty()).unwrap()).await.unwrap();

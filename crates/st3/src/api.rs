@@ -15571,31 +15571,13 @@ fn normalized_agent_actor(actor: &str) -> Option<String> {
     }
 }
 
-/// Provenance prefers the same human ownership reduction as prompts, then an
-/// explicitly reviewed host trace declaration. This read is not authorization.
+/// Resolve verified fleet-root declaration evidence only; never command authorization.
 async fn agent_trace_principal(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<Option<String>>, ApiError> {
     let store = state.store.clone();
-    let reduced = blocking_store(move || store.agent_person(&subject)).await?;
-    if reduced.is_some() {
-        return Ok(Json(reduced));
-    }
-    // interim: delete at cutover to compoundingtech/smalltalk#2440.
-    // At that cutover, move reduction-first provenance to the separate trace-only
-    // resolver (not the ownership reduction) and delete this host fallback.
-    // Config::person is command authority, not this reviewed provenance declaration.
-    let declared = match std::env::var("ST_AGENT_TRACE_FALLBACK_PRINCIPAL") {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(error) => {
-            tracing::warn!(event = "agent_trace_fallback_principal_invalid", %error,
-                "ignoring non-text host trace principal");
-            None
-        }
-    };
-    Ok(Json(crate::agent_trace::issuer::resolve_principal(None, declared.as_deref())))
+    Ok(Json(blocking_store(move || store.trace_principal(&subject)).await?))
 }
 
 /// Resolve one immutable mission name, without hydrating its run or step history.

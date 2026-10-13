@@ -16709,7 +16709,7 @@ async fn try_initialize_agent_trace(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        write_driver_log(subject, "agent trace omitted: the seat has no recorded human principal")?;
+        write_driver_log(subject, "agent trace omitted: the seat has no verified accountable root")?;
         return Ok(());
     };
     let work: Vec<StepRunView> = client
@@ -16807,7 +16807,7 @@ async fn try_refresh_agent_trace(
     let Some(principal) = principal else {
         match fs::remove_file(path) {
             Ok(()) => write_driver_log(subject,
-                "agent trace removed: the seat has no recorded human principal")?,
+                "agent trace removed: the seat has no verified accountable root")?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
@@ -16833,7 +16833,7 @@ async fn try_refresh_agent_trace(
             u128::from(st_drivers::message::now_ms()))?;
         runtime
     } else {
-        // Ownership can become known when an unauthored seat claims a person's mission.
+        // A verified accountable root may become available after the provider launch.
         let facts = trace_launch_facts(client, subject, None, incarnation, &[],
             principal, mission_name).await?;
         issuer::build(&facts, lease)?
@@ -26288,15 +26288,11 @@ mod tests {
         assert_eq!(renewals.load(Ordering::SeqCst), 2);
         st_drivers::harness_events::acknowledge(root.path(), sequence).unwrap();
         assert!(st_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
-        for declared in [None, Some("agent/not-a-human")] {
-            let principal = st3::agent_trace::issuer::resolve_principal(None, declared);
-            assert!(principal.is_none());
-            principal_present.store(false, Ordering::SeqCst);
-            if path.is_dir() { fs::remove_dir(&path).unwrap(); }
-            fs::write(&path, b"stale predecessor").unwrap();
-            initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
-            assert!(!path.exists(), "absent or invalid fallback must not leave a trace");
-        }
+        principal_present.store(false, Ordering::SeqCst);
+        if path.is_dir() { fs::remove_dir(&path).unwrap(); }
+        fs::write(&path, b"stale predecessor").unwrap();
+        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        assert!(!path.exists(), "an absent verified accountable root must not leave a trace");
         server.abort();
     }
 
