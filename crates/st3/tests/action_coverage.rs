@@ -21,6 +21,265 @@ const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_git_change_stage_controls_fence_work_and_keep_source_across_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use st3::changes::config::{Config, Repository};
+    use st3::changes::service::Registry;
+    use st3::model::WorkRequest;
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = st3::test_support::command("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+    async fn admitted(daemon: &Daemon, args: &[&str]) -> Value {
+        let output = daemon.cli(WORKER, args).await;
+        if output.status.success() {
+            return cli_value(output);
+        }
+        // Exercise the documented network-read admission protocol. Any other
+        // failure is fatal; no retry hides an authority, CAS or publication defect.
+        let deferred: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+        assert_eq!(deferred["status"], "deferred", "{deferred}");
+        let delay = deferred["retry_after_ms"].as_u64().unwrap();
+        assert!((1..=10_000).contains(&delay), "{deferred}");
+        tokio::time::sleep(Duration::from_millis(delay + 1)).await;
+        cli_value(daemon.cli(WORKER, args).await)
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    daemon.apply(
+        r#"version 2
+mission "cli-git-stage" state="ready" {
+  goal "Exercise original live work through the Git stage CLI."
+  step "build" { assigned-to "agent/example/worker"; goal "Build the source." }
+}
+"#,
+        "cli-git-stage",
+    );
+    let run = daemon.start("cli-git-stage", "cli-git-stage-run");
+    let step = run.steps[0].subject.clone();
+    daemon.store().set_step_state(&step, "ready", None).unwrap();
+    const INCARNATION: &str = "4242:fixture";
+    daemon.claim(
+        WORKER,
+        "harness.observed",
+        json!({"state":"working", "driver":"claude", "incarnation_id":INCARNATION}),
+    );
+    daemon
+        .store()
+        .work_action(
+            &step,
+            "claim",
+            &WorkRequest {
+                actor: Some(WORKER.into()),
+                incarnation: Some(INCARNATION.into()),
+                summary: None,
+                reason: None,
+                evidence: vec![],
+                idempotency_key: "cli-git-stage-claim".into(),
+            },
+        )
+        .unwrap();
+    let binding = daemon
+        .store()
+        .git_change_work_binding(WORKER, &step, INCARNATION)
+        .unwrap();
+
+    let source_directory = daemon.root.path().join("stage-source");
+    let remote = daemon.root.path().join("stage-remote.git");
+    for directory in [&source_directory, &remote] {
+        std::fs::create_dir(directory).unwrap();
+    }
+    git(&source_directory, &["init", "-q"]);
+    git(&remote, &["init", "--bare", "-q"]);
+    git(
+        &source_directory,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(
+        &source_directory,
+        &["commit", "--allow-empty", "-qm", "Synthetic base"],
+    );
+    let base = git(&source_directory, &["rev-parse", "HEAD"]);
+    let id = st3::changes::new_change_id().unwrap();
+    git(
+        &source_directory,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            &format!("Synthetic change\n\nChange-Id: {id}"),
+        ],
+    );
+    let source = git(&source_directory, &["rev-parse", "HEAD"]);
+    let tree = git(&source_directory, &["rev-parse", "HEAD^{tree}"]);
+    let configuration = Config {
+        enabled: true,
+        repositories: vec![Repository {
+            mutations_enabled: true,
+            name: "fixture/garden".into(),
+            reader_node: NODE.into(),
+            transport_directory: source_directory,
+            remote: "origin".into(),
+            remote_url: remote.to_str().unwrap().into(),
+            pilot_started_at: chrono::Utc::now().to_rfc3339(),
+            ..Default::default()
+        }],
+    };
+    daemon
+        .store()
+        .install_git_change_registry(Arc::new(Registry::new(&configuration, NODE).unwrap()))
+        .unwrap();
+    let common = [
+        "--repository",
+        "fixture/garden",
+        "--step",
+        step.as_str(),
+        "--incarnation",
+        INCARNATION,
+    ];
+    let create: Vec<_> = ["changes", "create"]
+        .into_iter()
+        .chain(common)
+        .chain(["--source", source.as_str(), "--base", base.as_str()])
+        .collect();
+    let denied = daemon.cli(PERSON, &create).await;
+    assert!(!denied.status.success());
+    assert!(
+        git(
+            &remote,
+            &["for-each-ref", "--format=%(refname)", "refs/st/"]
+        )
+        .is_empty()
+    );
+    let created = admitted(&daemon, &create).await;
+    assert_eq!(created["revision"]["record"]["change_id"], id);
+    assert_eq!(created["revision"]["record"]["state"], "draft");
+    assert_eq!(created["revision"]["record"]["actor"], WORKER);
+    assert_eq!(created["work"]["claim_id"], binding.claim_id);
+    let draft_oid = created["revision"]["oid"].as_str().unwrap();
+    let ready: Vec<_> = ["changes", "ready", id.as_str()]
+        .into_iter()
+        .chain(common)
+        .chain(["--expected-current", draft_oid, "--next", "build"])
+        .collect();
+    let ready = admitted(&daemon, &ready).await;
+    assert_eq!(ready["revision"]["record"]["state"], "ready");
+    assert_eq!(ready["revision"]["record"]["next"], "build");
+    let ready_oid = ready["revision"]["oid"].as_str().unwrap();
+    let claim: Vec<_> = ["changes", "claim", id.as_str()]
+        .into_iter()
+        .chain(common)
+        .chain(["--expected-current", ready_oid, "--lane", "build"])
+        .collect();
+    let claimed = admitted(&daemon, &claim).await;
+    assert_eq!(claimed["revision"]["record"]["claim"]["worker"], WORKER);
+    assert_eq!(
+        claimed["revision"]["record"]["claim"]["work"]["claim_id"],
+        binding.claim_id
+    );
+    let claim_oid = claimed["revision"]["oid"].as_str().unwrap();
+    let nonce = claimed["revision"]["record"]["claim"]["nonce"]
+        .as_str()
+        .unwrap();
+    let claim_refs = git(
+        &remote,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            &format!("refs/st/changes/v1/{id}/claims/"),
+        ],
+    );
+    assert_eq!(claim_refs.lines().count(), 1);
+    daemon.restart().await;
+    daemon
+        .store()
+        .install_git_change_registry(Arc::new(Registry::new(&configuration, NODE).unwrap()))
+        .unwrap();
+    assert_eq!(
+        daemon
+            .store()
+            .git_change_work_binding(WORKER, &step, INCARNATION)
+            .unwrap(),
+        binding
+    );
+    let release: Vec<_> = ["changes", "release", id.as_str()]
+        .into_iter()
+        .chain(common)
+        .chain([
+            "--expected-current",
+            claim_oid,
+            "--nonce",
+            nonce,
+            "--next",
+            "review",
+        ])
+        .collect();
+    let released = admitted(&daemon, &release).await;
+    assert!(released["revision"]["record"]["claim"].is_null());
+    assert_eq!(released["revision"]["record"]["next"], "review");
+    assert!(
+        git(
+            &remote,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/st/changes/v1/{id}/claims/")
+            ]
+        )
+        .is_empty()
+    );
+    let released_oid = released["revision"]["oid"].as_str().unwrap();
+    let draft: Vec<_> = ["changes", "draft", id.as_str()]
+        .into_iter()
+        .chain(common)
+        .chain(["--expected-current", released_oid])
+        .collect();
+    let drafted = admitted(&daemon, &draft).await;
+    assert_eq!(drafted["revision"]["record"]["state"], "draft");
+    assert!(drafted["revision"]["record"]["next"].is_null());
+    for published in [&created, &ready, &claimed, &released, &drafted] {
+        assert_eq!(published["revision"]["record"]["source_commit"], source);
+        assert_eq!(published["revision"]["record"]["source_tree"], tree);
+        assert_eq!(published["work"]["claim_id"], binding.claim_id);
+    }
+    assert_eq!(
+        git(
+            &remote,
+            &["rev-parse", &format!("refs/st/changes/v1/{id}/current")]
+        ),
+        drafted["revision"]["oid"].as_str().unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart() {
     if st3::test_support::supervise_test() {
         return;
