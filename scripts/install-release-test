@@ -105,6 +105,8 @@ mkdir -p "$work/locked/.smalltalk-install.lock"
 printf 'unchanged' > "$work/locked/st3"
 if "$work/package/install.sh" --bin-dir "$work/locked" --quiet > "$work/locked.out" 2> "$work/locked.err"; then exit 1; fi
 test -d "$work/locked/.smalltalk-install.lock"
+grep -q "Another install may be running" "$work/locked.err"
+grep -q "rmdir .*/locked/.smalltalk-install.lock" "$work/locked.err"
 test "$(cat "$work/locked/st3")" = unchanged
 rm "$INSTALL_FAIL_MARKER"
 if INSTALL_FAIL_MODE=signal "$work/package/install.sh" --bin-dir "$work/fresh" --quiet; then exit 1; else test "$?" = 143; fi
