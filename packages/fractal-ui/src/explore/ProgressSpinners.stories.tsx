@@ -157,10 +157,10 @@ function assertMotion(shells: readonly HTMLElement[]) {
       }
     }
   }
-  expect(failures).toEqual([])
+  expect(failures, failures.join('\n')).toEqual([])
 }
 /** No spinner shifts text: text edges hold at every animation phase, and match with the spinner removed. */
-function assertBaselines(shells: readonly HTMLElement[]) {
+async function assertBaselines(shells: readonly HTMLElement[]) {
   const failures: string[] = []
   for (const shell of shells) {
     const shellId = shell.getAttribute('aria-label')
@@ -189,8 +189,10 @@ function assertBaselines(shells: readonly HTMLElement[]) {
       const offsets = [...pair.querySelectorAll<HTMLElement>('[data-row]')].map(row => snap(textBox(row.querySelector('[data-row-title]')!).top - row.getBoundingClientRect().top))
       if (offsets.length !== 2 || offsets[0] !== offsets[1]) failures.push(`${shellId} / ${pair.dataset.rowPair}: live and settled title offsets differ`)
     }
+    // Seeking phases forces layout; keep the 48-shell comparison responsive without dropping any probe.
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   }
-  expect(failures).toEqual([])
+  expect(failures, failures.join('\n')).toEqual([])
 }
 /** WCAG 2.5.3 label in name: every button's accessible name starts with its visible label. */
 function assertLabelInName(root: HTMLElement) {
@@ -203,7 +205,7 @@ function assertLabelInName(root: HTMLElement) {
   expect(labelled.map(({ label }) => label)).toContain('Details')
   expect(labelled.filter(({ label, name }) => name.slice(0, label.length) !== label)).toEqual([])
 }
-function assertExplorer(canvas: HTMLElement) {
+async function assertExplorer(canvas: HTMLElement) {
   const root = canvas.querySelector<HTMLElement>('[data-spinner-explorer]')!
   expect(root.querySelectorAll('[title], title')).toHaveLength(0)
   assertLabelInName(root)
@@ -224,16 +226,16 @@ function assertExplorer(canvas: HTMLElement) {
     }
   }
   // One assertion per invariant group: Storybook's instrumented expect otherwise copies thousands of call records.
-  expect(failures).toEqual([])
+  expect(failures, failures.join('\n')).toEqual([])
   assertMotion(shells)
-  assertBaselines(shells)
+  await assertBaselines(shells)
 }
 const pick = (canvasElement: HTMLElement, id: string) => userEvent.click(within(canvasElement).getByRole('button', { name: new RegExp(`^${id}: `) }))
 
 /** Deep links land here; the play checks whatever the URL args select, without changing it. */
 export const Exploration: Story = { play: async ({ canvasElement }) => {
   await waitFor(() => expect(canvasElement.querySelector('[data-shell]')).not.toBeNull())
-  assertExplorer(canvasElement)
+  await assertExplorer(canvasElement)
 } }
 
 export const ExplorationProbe: Story = { args: { probe: true }, play: async ({ canvasElement, step }) => {
@@ -249,16 +251,16 @@ export const ExplorationProbe: Story = { args: { probe: true }, play: async ({ c
       expect(root().dataset.currentMotion).toBe(motion.id)
       expect([...root().querySelectorAll<HTMLElement>('[data-shell]')].map(shell => shell.dataset.size)).toEqual(['12', '14', '16'])
     })
-    assertExplorer(canvasElement)
+    await assertExplorer(canvasElement)
   })
   await step('Single size, then every spinner × width × motion × size together', async () => {
     await userEvent.click(canvas.getByRole('button', { name: 'Compare Size' }))
     await pick(canvasElement, '16')
     await waitFor(() => expect([...root().querySelectorAll<HTMLElement>('[data-shell]')].map(shell => shell.dataset.size)).toEqual(['16']))
-    assertExplorer(canvasElement)
+    await assertExplorer(canvasElement)
     for (const label of ['Spinner', 'Size', 'Width', 'Motion']) await userEvent.click(canvas.getByRole('button', { name: `Compare ${label}` }))
     await waitFor(() => expect(root().querySelectorAll('[data-shell]')).toHaveLength(48))
-    assertExplorer(canvasElement)
+    await assertExplorer(canvasElement)
     for (const label of ['Spinner', 'Width', 'Motion']) await userEvent.click(canvas.getByRole('button', { name: `Compare ${label}` }))
     await pick(canvasElement, 'S2')
     await pick(canvasElement, 'M1')
@@ -271,19 +273,19 @@ export const ExplorationProbe: Story = { args: { probe: true }, play: async ({ c
     expect(() => assertMotion([shell])).toThrow(/S2.*work/)
     layoutMotion.cancel(); assertMotion([shell])
     work.style.marginBlockStart = g.icon
-    expect(() => assertBaselines([shell])).toThrow(/S2.*work/)
-    work.style.removeProperty('margin-block-start'); assertBaselines([shell])
+    await expect(assertBaselines([shell])).rejects.toThrow(/S2.*work/)
+    work.style.removeProperty('margin-block-start'); await assertBaselines([shell])
     work.style.color = 'rgb(34, 197, 94)'
-    expect(() => assertExplorer(canvasElement)).toThrow(/S2.*work/)
+    await expect(assertExplorer(canvasElement)).rejects.toThrow(/S2.*work/)
     work.style.removeProperty('color')
     shell.querySelector('[data-context="header"] [data-baseline]')!.setAttribute('title', 'Working')
-    expect(() => assertExplorer(canvasElement)).toThrow()
+    await expect(assertExplorer(canvasElement)).rejects.toThrow()
     shell.querySelector('[data-context="header"] [data-baseline]')!.removeAttribute('title')
     const details = canvas.getByRole('button', { name: 'Details: Spinner descriptions' })
     details.setAttribute('aria-label', 'Spinner descriptions · Details')
     expect(() => assertLabelInName(root())).toThrow()
     details.setAttribute('aria-label', 'Details: Spinner descriptions')
-    assertExplorer(canvasElement)
+    await assertExplorer(canvasElement)
   })
   await step('The other scheme resolves different inks and passes the same assertions', async () => {
     const before = getComputedStyle(root().querySelector('[data-ink="fg"]')!).color
@@ -291,7 +293,7 @@ export const ExplorationProbe: Story = { args: { probe: true }, play: async ({ c
     await userEvent.click(canvas.getByRole('button', { name: 'Light scheme' }))
     await waitFor(() => expect(root().dataset.scheme).not.toBe(scheme))
     expect(getComputedStyle(root().querySelector('[data-ink="fg"]')!).color).not.toBe(before)
-    assertExplorer(canvasElement)
+    await assertExplorer(canvasElement)
   })
 } }
 
