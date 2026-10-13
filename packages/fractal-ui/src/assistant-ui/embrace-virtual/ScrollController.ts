@@ -58,9 +58,14 @@ export class ScrollController {
   private geometry = { contentHeight: 0, viewportHeight: 0 }
   private pressed: ReadingPosition | undefined
   private pressedPointer: number | undefined
-  /** Pointers down anywhere on the page; the jump dock keeps its layout until all are released. */
+  /** Pointers down anywhere on the page. */
   private readonly pointers = new Set<number>()
-  /** The unread mark requested while pointers were down. */
+  /**
+   * A press that ended following holds the jump dock until every pointer releases:
+   * the reader did not ask for news yet. A reader already in history sees news at once.
+   */
+  private dockHeld = false
+  /** The unread mark requested while the dock was held. */
   private deferredUnread: boolean | undefined
   private pendingJump: { readonly key: string; readonly resolve: (result: JumpResult) => void } | undefined
   private leadingKey: string | undefined
@@ -71,9 +76,8 @@ export class ScrollController {
     pending?.resolve(result)
   }
 
-  /** Never reflow the jump dock under an active press: the reveal waits for the last release. */
   private setUnread(unread: boolean) {
-    if (this.pointers.size > 0) this.deferredUnread = unread
+    if (this.dockHeld) this.deferredUnread = unread
     else this.options.setUnread(unread)
   }
 
@@ -255,13 +259,14 @@ export class ScrollController {
     })
     mutations.observe(element, { childList: true, subtree: true })
     observeMountedGeometry()
-    // Document-wide, so presses that start anywhere (a row action included) defer the dock.
+    // Pointers are tracked document-wide: a second pointer anywhere keeps a held dock still.
     const page = element.ownerDocument
     const view = page.defaultView
     const press = (event: PointerEvent) => {
       this.pointers.add(event.pointerId)
       if (!(event.target instanceof Element) || !element.contains(event.target)) return
       // A press in the lane engages the reader: rows arriving meanwhile wait behind the jump.
+      if (this.following) this.dockHeld = true
       this.following = false
       if (this.pressed !== undefined) return
       const row = event.target.closest<HTMLElement>('[data-embrace-entry-id]')
@@ -287,10 +292,11 @@ export class ScrollController {
       }
     }
     const dock = () => {
-      if (this.pointers.size > 0 || this.deferredUnread === undefined) return
+      if (this.pointers.size > 0 || !this.dockHeld) return
+      this.dockHeld = false
       const unread = this.deferredUnread
       this.deferredUnread = undefined
-      this.options.setUnread(unread)
+      if (unread !== undefined) this.options.setUnread(unread)
     }
     const release = (event: PointerEvent) => {
       this.pointers.delete(event.pointerId)
