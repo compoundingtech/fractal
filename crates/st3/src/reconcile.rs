@@ -38,6 +38,7 @@ mod idle_nudge;
 mod placement;
 mod run_report;
 mod start_spacing;
+mod start_jobs;
 mod waits;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
@@ -341,13 +342,42 @@ pub struct RuntimeObservation {
 pub trait RuntimeControl: Send + Sync + 'static {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>>;
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
+    /// Inspect the resulting runtime. Callers must still verify its operation provenance.
+    fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
+        if member.terminal {
+            Ok(self.snapshot_ptys()?.into_iter().find(|item| item.runtime_id == member.runtime_id))
+        } else {
+            self.observe_exec(&member.runtime_id)
+        }
+    }
     fn start(&self, member: &MemberSpec) -> Result<()>;
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         guard()?;
         self.start(member)
     }
+    /// Proof for the operation in this prepared launch: no operation-owned runtime
+    /// remains and no producer can launch later. A returned error or absence alone
+    /// is insufficient. Controls do not wait for launch admission to obtain this proof.
+    fn start_operation_closed(&self, _member: &MemberSpec) -> Result<bool> {
+        Ok(false)
+    }
+    /// Stop the exact incarnation, returning true only after verifying its complete
+    /// retirement. A successful asynchronous signal is not retirement proof.
+    fn stop_with_retirement_proof(
+        &self,
+        runtime_id: &str,
+        terminal: bool,
+        incarnation: &str,
+    ) -> Result<bool> {
+        self.stop(runtime_id, terminal, Some(incarnation))?;
+        Ok(false)
+    }
     /// Physical launch provenance, if the runtime persists it independently of daemon receipts.
     fn rollout_operation(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// Exact launch provenance. Missing evidence never authorizes revoked-start cleanup.
+    fn start_operation(&self, _runtime_id: &str, _terminal: bool, _incarnation: &str) -> Result<Option<String>> {
         Ok(None)
     }
     fn rollout_exited(&self, runtime_id: &str, terminal: bool, incarnation: &str) -> Result<bool> {
@@ -580,8 +610,36 @@ impl RuntimeControl for NativeRuntime {
     fn start(&self, member: &MemberSpec) -> Result<()> {
         self.start_checked(member, None)
     }
+    fn start_operation(&self, runtime_id: &str, terminal: bool, incarnation: &str) -> Result<Option<String>> {
+        if terminal {
+            Ok(self.pty()?.snapshot()?.into_iter().find(|item| {
+                item.name == runtime_id && item.pid.zip(item.created_at.as_ref())
+                    .is_some_and(|(pid, at)| format!("{pid}:{at}") == incarnation)
+            }).and_then(|item| item.tags.get(start_jobs::OPERATION_TAG).cloned()))
+        } else {
+            Ok(match self.exec.observe(runtime_id)? {
+                Some(st_runtime::ExecObservation::Running(generation) | st_runtime::ExecObservation::Exited(generation))
+                    if generation.generation_id == incarnation => generation.start_operation,
+                _ => None,
+            })
+        }
+    }
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         self.start_checked(member, Some(guard))
+    }
+
+    fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
+        let Some(operation) = member.tags.get(start_jobs::OPERATION_TAG) else {
+            return Ok(false);
+        };
+        if member.terminal {
+            // The current PTY producer has no operation-bound closure acknowledgment.
+            return Ok(false);
+        }
+        Ok(matches!(self.exec.observe(&member.runtime_id)?,
+            Some(st_runtime::ExecObservation::Exited(generation))
+                if generation.start_operation.as_ref() == Some(operation)
+                    && generation.group_exited))
     }
 
     fn stop(
@@ -595,6 +653,19 @@ impl RuntimeControl for NativeRuntime {
         } else {
             self.exec.stop_if(runtime_id, expected_incarnation)
         }
+    }
+
+    fn stop_with_retirement_proof(
+        &self,
+        runtime_id: &str,
+        terminal: bool,
+        incarnation: &str,
+    ) -> Result<bool> {
+        self.stop(runtime_id, terminal, Some(incarnation))?;
+        // Native PTY stop verifies the generation-fenced daemon/tree and ends
+        // its work scope before returning. Exec stop remains asynchronous; its
+        // persisted generation/group-exit proof is checked on observation.
+        Ok(terminal)
     }
 
     fn kill(
@@ -657,6 +728,25 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
+        let mut producer_entered = false;
+        self.start_checked_inner(member, guard, &mut producer_entered)
+            .map_err(|error| {
+                if producer_entered {
+                    error
+                } else {
+                    error.context(st_runtime::StartRejected {
+                        operation: member.tags.get(start_jobs::OPERATION_TAG).cloned(),
+                    })
+                }
+            })
+    }
+
+    fn start_checked_inner(
+        &self,
+        member: &MemberSpec,
+        guard: Option<&dyn Fn() -> Result<()>>,
+        producer_entered: &mut bool,
+    ) -> Result<()> {
         let executable = launch_executable()?;
         let environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
@@ -705,6 +795,7 @@ impl NativeRuntime {
                     .get(crate::rollout::PREDECESSOR_ENV)
                     .context("rollout launch needs its predecessor fence")?;
                 if let Some(guard) = guard {
+                    *producer_entered = true;
                     runtime.spawn_after_checked(
                         &member.runtime_id,
                         &launch,
@@ -718,6 +809,7 @@ impl NativeRuntime {
                         guard,
                     )
                 } else {
+                    *producer_entered = true;
                     runtime.spawn_after(
                         &member.runtime_id,
                         &launch,
@@ -732,8 +824,19 @@ impl NativeRuntime {
                 }
             } else {
                 if let Some(guard) = guard {
-                    guard()?;
+                    *producer_entered = true;
+                    return runtime.spawn_checked(
+                        &member.runtime_id,
+                        &launch,
+                        &cwd,
+                        &environment,
+                        member.display_name.as_deref(),
+                        &member.tags,
+                        member.terminal_size,
+                        guard,
+                    );
                 }
+                *producer_entered = true;
                 runtime.spawn(
                     &member.runtime_id,
                     &launch,
@@ -746,8 +849,13 @@ impl NativeRuntime {
             }
         } else {
             if let Some(guard) = guard {
-                guard()?;
+                *producer_entered = true;
+                return self
+                    .exec
+                    .spawn_checked(&member.runtime_id, &launch, &cwd, &environment, guard)
+                    .map(|_| ());
             }
+            *producer_entered = true;
             self.exec
                 .spawn(&member.runtime_id, &launch, &cwd, &environment)
                 .map(|_| ())
@@ -843,6 +951,9 @@ pub struct Reconciler<R = NativeRuntime> {
     notify: Arc<Notify>,
     event_notify: watch::Sender<u64>,
     start_spacing: start_spacing::StartSpacing,
+    start_jobs: start_jobs::StartJobs,
+    #[cfg(any(test, feature = "test-support"))]
+    wait_for_test_starts: AtomicBool,
     /// When an idle seat that holds work is nudged; see `idle_nudge`.
     idle_nudge: Mutex<IdleNudgeSettings>,
     #[cfg(test)]
@@ -906,6 +1017,8 @@ pub struct Reconciler<R = NativeRuntime> {
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
     /// Faults that could not be recorded in the graph during the current pass.
     unrecorded_faults: Mutex<Vec<String>>,
+    runtime_observation_drops: Mutex<HashMap<String, u32>>,
+    runtime_observation_drop_changes: Mutex<HashSet<String>>,
     /// Bound ownership-error logging across all candidates without caching guard results.
     ownership_error_log: Mutex<OwnershipErrorLog>,
     /// Step-timeout faults this reconciler has already raised, so a pass records each once.
@@ -1013,6 +1126,9 @@ impl Reconciler<NativeRuntime> {
             notify,
             event_notify,
             start_spacing: Default::default(),
+            start_jobs: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            wait_for_test_starts: AtomicBool::new(false),
             idle_nudge: Mutex::default(),
             #[cfg(test)]
             background_dispatch_hook: Default::default(),
@@ -1052,6 +1168,8 @@ impl Reconciler<NativeRuntime> {
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
+            runtime_observation_drops: Mutex::default(),
+            runtime_observation_drop_changes: Mutex::default(),
             ownership_error_log: Mutex::new(OwnershipErrorLog::default()),
             step_timeout_faults: Mutex::new(BTreeSet::new()),
             raised_broken_gates: Mutex::new(BTreeSet::new()),
@@ -1099,6 +1217,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             notify,
             event_notify: watch::channel(0_u64).0,
             start_spacing: Default::default(),
+            start_jobs: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            wait_for_test_starts: AtomicBool::new(true),
             idle_nudge: Mutex::default(),
             #[cfg(test)]
             background_dispatch_hook: Default::default(),
@@ -1138,6 +1259,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
+            runtime_observation_drops: Mutex::default(),
+            runtime_observation_drop_changes: Mutex::default(),
             ownership_error_log: Mutex::new(OwnershipErrorLog::default()),
             step_timeout_faults: Mutex::new(BTreeSet::new()),
             raised_broken_gates: Mutex::new(BTreeSet::new()),
@@ -1317,6 +1440,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     pub async fn run(self: Arc<Self>) {
+        #[cfg(any(test, feature = "test-support"))]
+        self.wait_for_test_starts.store(false, Ordering::Release);
         self.notify.notify_one();
         let mut wake_cause = crate::reconcile_telemetry::WakeCause::Startup;
         // When the last pass began, and whether it changed nothing.
@@ -2160,22 +2285,67 @@ impl<R: RuntimeControl> Reconciler<R> {
         gates: &[crate::store::MissionGateRunner],
         eligible: &BTreeSet<String>,
     ) {
-        let mut retries = self.stop_observation_retries.lock()
+        let mut retries = self
+            .stop_observation_retries
+            .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let mut survivors = self.reported_kill_survivors.lock()
+        let mut survivors = self
+            .reported_kill_survivors
+            .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if retries.is_empty() && survivors.is_empty() {
+        let mut drops = self
+            .runtime_observation_drops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut drop_changes = self
+            .runtime_observation_drop_changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if retries.is_empty() && survivors.is_empty() && drops.is_empty() && drop_changes.is_empty()
+        {
             return;
         }
-        let active = eligible.iter().map(String::as_str)
-            .chain(gates.iter().filter(|gate| gate.retired && gate.host == self.host)
-                .map(|gate| gate.subject.as_str()))
+        let active = eligible
+            .iter()
+            .map(String::as_str)
+            .chain(
+                gates
+                    .iter()
+                    .filter(|gate| gate.retired && gate.host == self.host)
+                    .map(|gate| gate.subject.as_str()),
+            )
             .collect::<BTreeSet<_>>();
         retries.retain(|subject, _| active.contains(subject.as_str()));
         survivors.retain(|subject, _| active.contains(subject.as_str()));
+        if !drops.is_empty() || !drop_changes.is_empty() {
+            let mut observed = active;
+            observed.extend(
+                gates
+                    .iter()
+                    .filter(|gate| gate.host == self.host)
+                    .map(|gate| gate.subject.as_str()),
+            );
+            drops.retain(|subject, _| observed.contains(subject.as_str()));
+            drop_changes.retain(|subject| observed.contains(subject.as_str()));
+        }
     }
 
     fn reconcile_pass(&self) -> Result<()> {
+        self.reconcile_start_jobs()?;
+        // A refusal changes this item's diagnostic input during its evaluation.
+        // Deliver that change on the next pass, after the current evaluation has
+        // registered its reads, rather than losing a touch when it becomes clean.
+        let drop_changes = std::mem::take(
+            &mut *self
+                .runtime_observation_drop_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for subject in drop_changes {
+            self.incremental
+                .touch(&format!("runtime-observation-drops:{subject}"));
+        }
+        let _observation_capture = self.store.capture_runtime_observations()?;
         let observe_span = crate::profile::span("pass/changes");
         self.incremental.observe(&self.store)?;
         self.incremental.observe_value(
@@ -5064,7 +5234,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         actual_origin: Option<Option<String>>,
     ) -> Result<()> {
         self.store.owned_desired_guard(subject)?;
-        let Some(actual) = self.store.latest_actual_value(&subject.subject)? else {
+        let pending = self.store.runtime_start_for(&subject.subject)?;
+        let pending_member = pending.as_ref().map(|operation|
+            serde_json::from_value::<MemberSpec>(operation.body["member"].clone())).transpose()?;
+        let actual = self.store.latest_actual_value(&subject.subject)?.or_else(|| pending_member.as_ref()
+            .map(|member| serde_json::json!({"fields": member_fields(member, "starting", None, false)})));
+        let Some(actual) = actual else {
             // A stop-only declaration with no observed runtime is already satisfied.
             // Only its declaring host may project that fact. Otherwise every peer
             // creates a concurrent runtime observation for the same subject.
@@ -5096,7 +5271,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.store.declaration_ended_by_stop(&subject.subject)?
                 .and_then(|ended| ended.declaration.member)
         } else { None };
-        let member = subject.member.as_ref().or(prior_member.as_ref());
+        let member = subject.member.as_ref().or(prior_member.as_ref()).or(pending_member.as_ref());
         let owner_host = member
             .map(|member| member.host.as_str())
             .or_else(|| fields.get("host").and_then(Value::as_str))
@@ -5452,15 +5627,86 @@ impl<R: RuntimeControl> Reconciler<R> {
         timeout_ms: u64,
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
+        let operation = self.store.runtime_start_for(subject)?;
+        let retirement = if let (Some(operation), Some(incarnation)) = (&operation, incarnation) {
+            let member = &operation.body["member"];
+            operation.finished
+                && member["runtime_id"] == runtime_id
+                && member["terminal"] == terminal
+                && observation.is_some_and(|o| {
+                    matches!(
+                        o.status.as_str(),
+                        "running" | "exited" | "stopped" | "vanished"
+                    )
+                })
+                && match self
+                    .runtime
+                    .start_operation(runtime_id, terminal, incarnation)
+                {
+                    Ok(provenance) => provenance.as_deref() == Some(operation.id.as_str()),
+                    Err(error) => {
+                        self.record_once(
+                            subject,
+                            "harness.diagnostic",
+                            BTreeMap::from([
+                                ("severity".into(), Value::from("error")),
+                                ("code".into(), Value::from("start-revocation-unverified")),
+                                (
+                                    "reason".into(),
+                                    Value::from(format!(
+                                        "retirement provenance is unreadable: {error:#}"
+                                    )),
+                                ),
+                            ]),
+                        )?;
+                        false
+                    }
+                }
+        } else {
+            false
+        };
+        self.reconcile_runtime_stop_inner(
+            subject,
+            runtime_id,
+            terminal,
+            incarnation,
+            timeout_ms,
+            observation,
+            operation
+                .as_ref()
+                .filter(|_| retirement)
+                .map(|o| o.id.as_str()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_runtime_stop_inner(
+        &self,
+        subject: &str,
+        runtime_id: &str,
+        terminal: bool,
+        incarnation: Option<&str>,
+        timeout_ms: u64,
+        observation: Option<&RuntimeObservation>,
+        retirement_operation: Option<&str>,
+    ) -> Result<bool> {
+        self.revoke_start(subject)?;
+        if observation.is_none() && self.store.runtime_start_for(subject)?.is_some() {
+            // Absence during launch is not verified stop. Completion/observation wakes this path.
+            return Ok(false);
+        }
         // A runtime whose state could not be read may still run. Wait for a readable observation.
         if observation.is_some_and(|observation| {
             matches!(observation.status.as_str(), "unknown" | "indeterminate")
         }) {
             let now = now_ms();
             let (due, report, episode_started_at) = {
-                let mut retries = self.stop_observation_retries
-                    .lock().unwrap_or_else(PoisonError::into_inner);
-                let retry = retries.entry(subject.into())
+                let mut retries = self
+                    .stop_observation_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let retry = retries
+                    .entry(subject.into())
                     .or_insert_with(|| StopObservationRetry::new(now));
                 let (due, report) = retry.poll(now);
                 (due, report, retry.started_at)
@@ -5480,28 +5726,45 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ("reason".into(), Value::String("runtime state remained unreadable for ten minutes; stop is still pending".into())),
                     ]))?;
                 }
-                eprintln!("st3: WARN stop for {subject} remains pending: runtime state was unreadable for ten minutes");
-                if let Some(retry) = self.stop_observation_retries
-                    .lock().unwrap_or_else(PoisonError::into_inner).get_mut(subject)
+                eprintln!(
+                    "st3: WARN stop for {subject} remains pending: runtime state was unreadable for ten minutes"
+                );
+                if let Some(retry) = self
+                    .stop_observation_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_mut(subject)
                 {
                     retry.fault_reported = true;
                 }
             }
             return Ok(false);
         }
-        let recovered_fault = self.stop_observation_retries.lock()
-            .unwrap_or_else(PoisonError::into_inner).remove(subject)
+        let recovered_fault = self
+            .stop_observation_retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(subject)
             .is_some_and(|retry| retry.fault_reported);
         if recovered_fault && reconcile_decision_admitted(subject) {
-            self.record_once(subject, "runtime.reconcile-decision", BTreeMap::from([
-                ("key".into(), Value::String("stop-observation".into())),
-                ("decision".into(), Value::String("hold".into())),
-                ("reachability".into(), Value::String("reachable".into())),
-                ("reason".into(), Value::Null),
-            ]))?;
+            self.record_once(
+                subject,
+                "runtime.reconcile-decision",
+                BTreeMap::from([
+                    ("key".into(), Value::String("stop-observation".into())),
+                    ("decision".into(), Value::String("hold".into())),
+                    ("reachability".into(), Value::String("reachable".into())),
+                    ("reason".into(), Value::Null),
+                ]),
+            )?;
         }
-        if observation.is_none_or(|observation| observation.status != "running") {
-            self.reported_kill_survivors.lock().unwrap_or_else(PoisonError::into_inner).remove(subject);
+        if retirement_operation.is_none()
+            && observation.is_none_or(|observation| observation.status != "running")
+        {
+            self.reported_kill_survivors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(subject);
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
             self.runtime.end_leftovers(runtime_id, terminal);
@@ -5519,7 +5782,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             // Stops for a restart of a still-live declaration cannot release a placement fence.
             let mut evidence = Vec::new();
             if let Some(token) = self.store.selected_desired_token(subject)?
-                && self.store.claim_by_id(&token)?.is_some_and(|c| c.body["kind"] == "stop")
+                && self
+                    .store
+                    .claim_by_id(&token)?
+                    .is_some_and(|c| c.body["kind"] == "stop")
             {
                 evidence.push(token);
             }
@@ -5565,20 +5831,45 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("stop:{subject}"),
                 deadline.min(now_ms().saturating_add(100)),
             );
-            if let Err(error) = self.runtime.stop(runtime_id, terminal, Some(incarnation)) {
-                self.store.append_claim(&ClaimInput {
-                    subject: subject.into(),
-                    kind: "runtime.action.failed".into(),
-                    actor: None,
-                    fields: BTreeMap::from([
-                        ("action".into(), Value::String("terminate".into())),
-                        ("reason".into(), Value::String(error.to_string())),
-                    ]),
-                    evidence: vec![request.id],
-                    expected_subject: None,
-                    idempotency_key: Some(format!("terminate-failed:{subject}:{incarnation}")),
-                })?;
-                return Err(error);
+            let stopped = if retirement_operation.is_some() {
+                self.runtime
+                    .stop_with_retirement_proof(runtime_id, terminal, incarnation)
+            } else {
+                self.runtime
+                    .stop(runtime_id, terminal, Some(incarnation))
+                    .map(|()| false)
+            };
+            let verified = match stopped {
+                Ok(verified) => verified,
+                Err(error) => {
+                    self.store.append_claim(&ClaimInput {
+                        subject: subject.into(),
+                        kind: "runtime.action.failed".into(),
+                        actor: None,
+                        fields: BTreeMap::from([
+                            ("action".into(), Value::String("terminate".into())),
+                            ("reason".into(), Value::String(error.to_string())),
+                        ]),
+                        evidence: vec![request.id],
+                        expected_subject: None,
+                        idempotency_key: Some(format!("terminate-failed:{subject}:{incarnation}")),
+                    })?;
+                    return Err(error);
+                }
+            };
+            if verified {
+                let operation =
+                    retirement_operation.context("retirement proof has no operation")?;
+                anyhow::ensure!(
+                    self.store.apply_runtime_start_retirement(
+                        operation,
+                        incarnation,
+                        &request.id
+                    )?,
+                    "native retirement proof did not match its operation/request"
+                );
+                self.start_changed(subject);
+                return Ok(true);
             }
             return Ok(false);
         };
@@ -5622,7 +5913,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         {
             let report_survivor = {
-                let mut reported = self.reported_kill_survivors.lock()
+                let mut reported = self
+                    .reported_kill_survivors
+                    .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 if reported.get(subject) == Some(&deadline_key) {
                     false
@@ -5632,7 +5925,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             };
             if report_survivor {
-                eprintln!("st3: WARN runtime {runtime_id} remains live on the observation after SIGKILL");
+                eprintln!(
+                    "st3: WARN runtime {runtime_id} remains live on the observation after SIGKILL"
+                );
             }
             if reconcile_decision_admitted(subject) {
                 self.record_once(
@@ -5648,11 +5943,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                     ]),
                 )?;
             } else {
-                self.record_diagnostic_once(subject, BTreeMap::from([
-                    ("severity".into(), Value::String("warning".into())),
-                    ("code".into(), Value::String("kill-survivor".into())),
-                    ("reason".into(), Value::String(format!("{subject} (runtime {runtime_id}) remained live after SIGKILL"))),
-                ]))?;
+                self.record_diagnostic_once(
+                    subject,
+                    BTreeMap::from([
+                        ("severity".into(), Value::String("warning".into())),
+                        ("code".into(), Value::String("kill-survivor".into())),
+                        (
+                            "reason".into(),
+                            Value::String(format!(
+                                "{subject} (runtime {runtime_id}) remained live after SIGKILL"
+                            )),
+                        ),
+                    ]),
+                )?;
             }
             return Ok(false);
         }
@@ -5693,6 +5996,23 @@ impl<R: RuntimeControl> Reconciler<R> {
         reason: &str,
         request: Option<&crate::model::ClaimRecord>,
     ) -> Result<bool> {
+        if self.store.runtime_start_for(&subject.subject)?.is_some() {
+            return Ok(false);
+        }
+        let selected_token = self.store.selected_desired_token(&subject.subject)?;
+        if selected_token.is_some() {
+            let selected = self
+                .store
+                .desired_subjects_named(std::slice::from_ref(&subject.subject))?;
+            if !selected
+                .iter()
+                .any(|current| current.desired == subject.desired && current.kind == subject.kind)
+            {
+                return Ok(false);
+            }
+        } else if !subject.desired.is_null() {
+            return Ok(false);
+        }
         anyhow::ensure!(
             member.lifecycle != MemberLifecycle::TerminalBound,
             "a bound terminal seat cannot be spawned"
@@ -5792,9 +6112,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         self.bind_account(subject, member, &mut launch_member)?;
         if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
-            let operation = self.store.rollout(&subject.subject)?.context("rollout disappeared before account selection")?;
-            anyhow::ensure!(operation.id == *id && operation.native_account.as_deref() == launch_member.environment.get("ST3_ACCOUNT").map(String::as_str),
-                "strict rollout cannot carry a conversation between native login accounts");
+            let operation = self
+                .store
+                .rollout(&subject.subject)?
+                .context("rollout disappeared before account selection")?;
+            anyhow::ensure!(
+                operation.id == *id
+                    && operation.native_account.as_deref()
+                        == launch_member
+                            .environment
+                            .get("ST3_ACCOUNT")
+                            .map(String::as_str),
+                "strict rollout cannot carry a conversation between native login accounts"
+            );
         }
         for variable in [
             crate::rollout::OPERATION_ENV,
@@ -5824,9 +6154,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             .environment
             .remove(crate::suspension::CONTINUE_PATH_ENV);
         let selector_scope = crate::native_resume::selection_scope(member);
-        launch_member.environment.remove(crate::suspension::SELECTOR_SCOPE_ENV);
+        launch_member
+            .environment
+            .remove(crate::suspension::SELECTOR_SCOPE_ENV);
         if let Some(scope) = &selector_scope {
-            launch_member.environment.insert(crate::suspension::SELECTOR_SCOPE_ENV.into(), scope.clone());
+            launch_member
+                .environment
+                .insert(crate::suspension::SELECTOR_SCOPE_ENV.into(), scope.clone());
         }
         let continued = if subject.kind == "agent"
             && !member
@@ -5838,7 +6172,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &self.store,
                 &subject.subject,
                 harness,
-                launch_member.environment.get("ST3_ACCOUNT").map(String::as_str),
+                launch_member
+                    .environment
+                    .get("ST3_ACCOUNT")
+                    .map(String::as_str),
                 selector_scope.as_deref(),
             )?
         } else {
@@ -5907,15 +6244,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             wrapper.extend(original);
             launch_member.launch = crate::model::LaunchSpec::Argv(wrapper);
         }
-        let operation = format!("{}:start", subject.subject);
-        self.record_once(
-            &subject.subject,
-            "runtime.action.requested",
-            BTreeMap::from([
-                ("action".into(), Value::String("start".into())),
-                ("operation".into(), Value::String(operation.clone())),
-            ]),
-        )?;
         self.store.owned_desired_guard(subject)?;
         if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
             anyhow::ensure!(
@@ -5929,7 +6257,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let desired_token = self.launch_token(&subject.subject)?;
         let guard = || -> Result<()> {
             self.store.owned_desired_guard(subject)?;
-            if member.environment.contains_key(crate::suspension::RESUME_ENV) {
+            if member
+                .environment
+                .contains_key(crate::suspension::RESUME_ENV)
+            {
                 anyhow::ensure!(
                     self.launch_token(&subject.subject)? == desired_token,
                     "the suspended launch changed before resume"
@@ -5937,7 +6268,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             if let Some(request) = request {
                 anyhow::ensure!(
-                    self.store.selected_desired_token(&subject.subject)?.as_deref()
+                    self.store
+                        .selected_desired_token(&subject.subject)?
+                        .as_deref()
                         == request.body.pointer("/evidence/0").and_then(Value::as_str),
                     "the explicit restart declaration changed before launch"
                 );
@@ -5952,31 +6285,57 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             Ok(())
         };
-        if let Some(request) = request {
-            // Persist before the side effect. An interrupted attempt is never launched twice,
-            // including when the owner daemon loses its in-memory state between passes.
-            guard()?;
-            let (_, appended) = self.store.append_claim_outcome(&ClaimInput {
-                subject: subject.subject.clone(),
-                kind: "runtime.action.requested".into(),
-                // Actor-bound control receipts survive checkpoint trimming.
-                actor: request.actor.clone(),
-                fields: BTreeMap::from([
-                    ("action".into(), Value::String("start".into())),
-                    ("reason".into(), Value::String(reason.into())),
-                ]),
-                evidence: vec![request.id.clone()],
-                expected_subject: None,
-                idempotency_key: Some(format!("agent-restart-attempt:{}", request.id)),
-            })?;
-            if !appended {
-                return Ok(false);
-            }
-        }
-        if let Err(error) = self.runtime.start_guarded(&launch_member, &guard) {
+        // Admission writes the requester control attempt and physical request
+        // together, only after its writer validates this captured declaration.
+        guard()?;
+        self.dispatch_start(start_jobs::PreparedStart {
+            subject: subject.clone(),
+            member: member.clone(),
+            launch_member,
+            reason: reason.to_owned(),
+            request: request.cloned(),
+            desired_token,
+            selected_token,
+            placement_evidence,
+            start_request: String::new(),
+            start_request_receipt: None,
+            control_request: None,
+            control_request_receipt: None,
+            expected_incarnation: self.store.latest_actual_value(&subject.subject)?.and_then(
+                |actual| {
+                    actual_field(&actual, "incarnation_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                },
+            ),
+            resume_operation: if member
+                .environment
+                .contains_key(crate::suspension::RESUME_ENV)
+            {
+                crate::suspension::current(&self.store, &subject.subject)?
+                    .filter(|s| s.phase == "restoring")
+                    .map(|s| s.operation_id)
+            } else {
+                None
+            },
+        })
+    }
+
+    fn finish_start(
+        &self,
+        operation_id: &str,
+        prepared: &start_jobs::PreparedStart,
+        result: Result<Option<String>>,
+    ) -> Result<start_jobs::StartCompletion> {
+        let subject = &prepared.subject;
+        let member = &prepared.member;
+        let desired_token = prepared.desired_token.clone();
+        let reason = prepared.reason.as_str();
+        let operation = operation_id.to_owned();
+        let placement_evidence = prepared.placement_evidence.clone();
+        if let Err(error) = result {
             let reason = error.to_string();
-            let prior_failures = self.start_failures(&subject.subject, &desired_token)?;
-            self.store.append_claim(&ClaimInput {
+            let failed = ClaimInput {
                 subject: subject.subject.clone(),
                 kind: "runtime.action.failed".into(),
                 actor: None,
@@ -5986,69 +6345,72 @@ impl<R: RuntimeControl> Reconciler<R> {
                     ("reason".into(), Value::String(reason)),
                     ("desired_token".into(), Value::String(desired_token.clone())),
                 ]),
+                evidence: vec![prepared.start_request.clone()],
+                expected_subject: None,
+                idempotency_key: Some(format!("start-failed:{operation_id}")),
+            };
+            let observed = ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: member_fields(member, "absent", None, false),
                 evidence: Vec::new(),
                 expected_subject: None,
-                idempotency_key: Some(format!(
-                    "start-failed:{}:{desired_token}:{}",
-                    subject.subject,
-                    prior_failures.len() + 1
-                )),
-            })?;
-            self.record_once(
-                &subject.subject,
-                "runtime.observed",
-                member_fields(member, "absent", None, false),
-            )?;
-            return Err(error).context("start member runtime");
+                idempotency_key: Some(format!("start-absent:{operation_id}")),
+            };
+            if !self
+                .store
+                .apply_runtime_start_result(operation_id, &[failed, observed])?
+            {
+                return Ok(start_jobs::StartCompletion::Superseded);
+            }
+            return Ok(start_jobs::StartCompletion::Applied(Some(format!(
+                "start member runtime: {error:#}"
+            ))));
         }
-        let incarnation = if member.terminal {
-            self.runtime.snapshot_ptys().ok().and_then(|items| {
-                items.into_iter().find(|item| item.runtime_id == member.runtime_id)
-            })
-        } else {
-            self.runtime.observe_exec(&member.runtime_id).ok().flatten()
-        }
-        .and_then(|item| item.incarnation_id);
+        let incarnation = result?;
         let mut fields = BTreeMap::from([
             ("action".into(), Value::String("start".into())),
+            ("operation".into(), Value::String(operation)),
             ("desired_token".into(), Value::String(desired_token)),
-            ("runtime_id".into(), Value::String(member.runtime_id.clone())),
+            (
+                "runtime_id".into(),
+                Value::String(member.runtime_id.clone()),
+            ),
             ("reason".into(), Value::String(reason.into())),
         ]);
         if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
             fields.insert("rollout_operation".into(), serde_json::json!(operation));
         }
-        if let Some(incarnation) = incarnation {
-            fields.insert("incarnation_id".into(), Value::String(incarnation));
+        if let Some(incarnation) = &incarnation {
+            fields.insert("incarnation_id".into(), Value::String(incarnation.clone()));
         }
-        self.store.append_claim(&ClaimInput {
+        let succeeded = ClaimInput {
             subject: subject.subject.clone(),
             kind: "runtime.action.succeeded".into(),
             actor: None,
             fields,
-            evidence: Vec::new(),
+            evidence: vec![prepared.start_request.clone()],
             expected_subject: None,
-            idempotency_key: None,
-        })?;
-        self.record_once_with_evidence(
-            &subject.subject,
-            "runtime.observed",
-            member_fields(member, "starting", None, false),
-            placement_evidence,
-        )?;
-        self.record_once(
-            &subject.subject,
-            "runtime.action.succeeded",
-            BTreeMap::from([
-                ("reason".into(), Value::String(reason.into())),
-                (
-                    "runtime_id".into(),
-                    Value::String(member.runtime_id.clone()),
-                ),
-            ]),
-        )?;
+            idempotency_key: Some(format!("start-succeeded:{operation_id}")),
+        };
+        let observed = ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: member_fields(member, "starting", incarnation.as_deref(), false),
+            evidence: placement_evidence,
+            expected_subject: None,
+            idempotency_key: Some(format!("start-observed:{operation_id}")),
+        };
+        if !self
+            .store
+            .apply_runtime_start_result(operation_id, &[succeeded, observed])?
+        {
+            return Ok(start_jobs::StartCompletion::Superseded);
+        }
         self.signal_changed();
-        Ok(true)
+        Ok(start_jobs::StartCompletion::Applied(None))
     }
 
     /// The configured person's latest `terminal.launch-geometry`: the size their client draws a
@@ -6356,6 +6718,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok(())
             }
             "restoring" => {
+                if self.store.runtime_start_for(agent)?.is_some() { return Ok(()); }
                 if suspension.host.as_deref().is_some_and(|host| host != self.host) { return Ok(()); }
                 if suspension.host.is_some()
                     && let Some(token) = self.store.selected_desired_token(agent)?
@@ -6397,10 +6760,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 resumed
                     .environment
                     .insert(suspended::RESUME_ENV.into(), session);
-                let before = self
-                    .store
-                    .latest_observation(agent, "runtime.action.succeeded")?
-                    .map(|claim| claim.id);
                 if let Err(error) =
                     self.perform_start(subject, &resumed, "a suspended seat was resumed")
                 {
@@ -6412,23 +6771,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         Vec::new(),
                     );
                 }
-                let after = self
-                    .store
-                    .latest_observation(agent, "runtime.action.succeeded")?
-                    .map(|claim| claim.id);
-                if after == before {
-                    return Ok(());
-                }
-                self.record_suspension_phase(
-                    agent,
-                    suspension,
-                    "runtime.action.succeeded",
-                    suspended::resume_started_key(&suspension.operation_id),
-                    BTreeMap::from([(
-                        "operation_status".into(),
-                        Value::String("verifying".into()),
-                    )]),
-                )
+                // The operation-bound completion advances this resume to verifying.
+                Ok(())
             }
             "verifying" => {
                 let due = suspension
@@ -6632,10 +6976,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         let attempted = self
             .store
             .operation_claim(&format!("agent-restart-attempt:{}", request.id))?;
+        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(true); }
         let previous = request.body["fields"]["incarnation_id"]
             .as_str()
             .unwrap_or("");
+        // An unidentified prior target supplies no replacement proof. In
+        // particular, an older exited runtime after a closed failed attempt
+        // cannot complete a new request that has not admitted any start yet.
         if let Some(observation) = observation
+            && (attempted.is_some() || !previous.is_empty())
             && observation.status != "unknown"
             && observation
                 .incarnation_id
@@ -6749,6 +7098,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart blocked: {error:#}"),
             );
         }
+        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(true); }
         if attempted.is_some() {
             return self.fail_requested_restart(
                 subject,
@@ -6787,6 +7137,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         request: &crate::model::ClaimRecord,
         detail: &str,
     ) -> Result<bool> {
+        let reason = self.record_requested_restart_failure(subject, member, request, detail)?;
+        anyhow::bail!("{reason}")
+    }
+
+    fn record_requested_restart_failure(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        request: &crate::model::ClaimRecord,
+        detail: &str,
+    ) -> Result<String> {
         // Capture the launch lineage before checking the request's fence. A concurrent
         // declaration change must never make this old failure park a replacement declaration.
         let token = self.launch_token(&subject.subject)?;
@@ -6834,7 +7195,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             idempotency_key: Some(format!("agent-restart-completed:{}", request.id)),
         })?;
         self.signal_changed();
-        anyhow::bail!("{reason}")
+        Ok(reason)
     }
 
     fn reconcile_restart(
@@ -6843,6 +7204,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         member: &MemberSpec,
         observation: &RuntimeObservation,
     ) -> Result<()> {
+        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(()); }
         if subject.kind == "agent"
             && member.lifecycle == MemberLifecycle::Service
             && member.driver.as_deref() != Some("codex")
@@ -7506,6 +7868,42 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.record_once_with_evidence(subject, kind, fields, Vec::new())
     }
 
+    fn record_runtime_observation_admission(&self, subject: &str, dropped: bool) -> Result<()> {
+        const FAULT_AFTER_DROPS: u32 = 3;
+        smallclaims::touched::note_read(|| format!("runtime-observation-drops:{subject}"));
+        let (consecutive, changed) = {
+            let mut drops = self
+                .runtime_observation_drops
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if dropped {
+                let count = drops.entry(subject.into()).or_default();
+                let previous = *count;
+                *count = count.saturating_add(1).min(FAULT_AFTER_DROPS);
+                (*count, *count != previous)
+            } else {
+                (0, drops.remove(subject).is_some())
+            }
+        };
+        if changed {
+            self.runtime_observation_drop_changes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(subject.into());
+            self.signal_changed();
+        }
+        let target = format!("daemon/{}", self.host);
+        let scope = format!("runtime-observation:{subject}");
+        if !dropped {
+            self.close_fault(&target, &scope, "a fresh runtime observation was admitted")?;
+        } else if consecutive >= FAULT_AFTER_DROPS {
+            self.record_fault(&target, &scope, Err(anyhow::anyhow!(
+                "three consecutive physical captures for {subject} were refused; fresh runtime proof is still required"
+            )))?;
+        }
+        Ok(())
+    }
+
     fn record_once_with_evidence(
         &self,
         subject: &str,
@@ -7522,9 +7920,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && claim.body.get("evidence") == Some(&serde_json::json!(evidence))
             })
         {
+            if kind == "runtime.observed" {
+                self.record_runtime_observation_admission(subject, false)?;
+            }
             return Ok(());
         }
-        let record = self.store.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: None,
@@ -7532,7 +7933,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             evidence,
             expected_subject: None,
             idempotency_key: None,
-        })?;
+        };
+        let record = if kind == "runtime.observed" {
+            let Some(record) = self.store.append_reconciled_runtime_observation(&input)? else {
+                // The worker's durable result superseded this physical capture.
+                // Wake a fresh pass instead of publishing the prior incarnation.
+                self.record_runtime_observation_admission(subject, true)?;
+                return Ok(());
+            };
+            self.record_runtime_observation_admission(subject, false)?;
+            record
+        } else {
+            self.store.append_claim(&input)?
+        };
         if crate::store::local_observation_position(&record).is_some() {
             // Only this node reads a local observation, and it cannot advance a mission.
             self.event_notify
@@ -9460,6 +9873,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let runtime_id = subject.replace('/', ".");
         if let Some(request) = self.store.latest_claim(&subject, Some("gate.requested"))? {
+            if let Some(error) = self.store.runtime_start_failure(&subject)? {
+                anyhow::bail!("metric `{}` could not start: {error}", metric.name);
+            }
             if now_ms().saturating_sub(request.accepted_at_unix_ms) >= *time_limit_ms as u128 {
                 self.stop_gate_runner(&subject, true)?;
                 anyhow::bail!("metric `{}` exceeded {}ms", metric.name, time_limit_ms);
@@ -11566,6 +11982,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// once it is free, as it does for the run's cleanup. Holding the step for any of these ran
     /// it into its execution timeout, which failed the run's final step and so the run.
     fn stop_is_settled(&self, subject: &DesiredSubject) -> Result<bool> {
+        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(false); }
         let Some(actual) = self.store.latest_actual_value(&subject.subject)? else {
             return Ok(true);
         };
@@ -14233,6 +14650,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .latest_claim(&operation, Some("gate.requested"))?
         {
+            if let Some(error) = self.store.runtime_start_failure(&operation)? {
+                return self.record_gate_check(stage, check_result(None, Vec::new(), Some(error)));
+            }
             let elapsed = now_ms().saturating_sub(requested.accepted_at_unix_ms);
             if elapsed >= time_limit_ms as u128 {
                 // A delayed pass is not proof that the check ran late. Only its authenticated
@@ -14661,6 +15081,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             }),
         )?;
         let runtime_id = result_subject.replace('/', ".");
+        if let Some(result) = self.store.latest_claim(&result_subject, Some("gate.result"))?
+            && result.body["fields"]["verdict"] == "error"
+        {
+            self.raise_broken_gate(stage, name, &result_subject, &result)?;
+            return Ok(GateOutcome::Broken(gate_result_reason(&result, "the LLM gate could not start")));
+        }
+        if host == self.host && self.store.latest_claim(&result_subject, Some("gate.requested"))?.is_some() {
+            if let Some(error) = self.store.runtime_start_failure(&result_subject)? {
+                let reason = format!("LLM gate `{name}` could not start: {error}");
+                self.record_once(&result_subject, "gate.result", BTreeMap::from([
+                    ("verdict".into(), Value::String("error".into())),
+                    ("reason".into(), Value::String(reason.clone())),
+                    ("token_usage".into(), Value::from(0)),
+                ]))?;
+                if let Some(result) = self.store.latest_claim(&result_subject, Some("gate.result"))? {
+                    self.raise_broken_gate(stage, name, &result_subject, &result)?;
+                }
+                return Ok(GateOutcome::Broken(reason));
+            }
+        }
         if let Some(result) = self.store.latest_actual_value(&result_subject)? {
             let verdict = actual_field(&result, "verdict")
                 .and_then(Value::as_str)
@@ -14886,6 +15326,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn stop_gate_runner(&self, subject: &str, hard: bool) -> Result<()> {
+        self.revoke_start(subject)?;
         let runtime_id = subject.replace('/', ".");
         smallclaims::touched::note_read(|| format!("exec:{runtime_id}"));
         let Some(observation) = self.runtime.observe_exec(&runtime_id)? else {
@@ -16289,13 +16730,19 @@ fn member_fields(
     incarnation_id: Option<&str>,
     adopted: bool,
 ) -> BTreeMap<String, Value> {
-    let mut fields = BTreeMap::from([
+    // Omission retains the earlier field in actual-state folding. Explicit null
+    // clears that old identity when the physical capture cannot identify it.
+    BTreeMap::from([
         ("status".into(), Value::String(status.into())),
         (
             "runtime_id".into(),
             Value::String(member.runtime_id.clone()),
         ),
         ("terminal".into(), Value::Bool(member.terminal)),
+        (
+            "incarnation_id".into(),
+            incarnation_id.map_or(Value::Null, Value::from),
+        ),
         ("host".into(), Value::String(member.host.clone())),
         ("adopted".into(), Value::Bool(adopted)),
         (
@@ -16304,14 +16751,7 @@ fn member_fields(
         ),
         ("reachability".into(), Value::String("reachable".into())),
         ("reason".into(), Value::Null),
-    ]);
-    if let Some(incarnation_id) = incarnation_id {
-        fields.insert(
-            "incarnation_id".into(),
-            Value::String(incarnation_id.into()),
-        );
-    }
-    fields
+    ])
 }
 
 enum RestartDecision {
@@ -16678,6 +17118,7 @@ mod tests {
     mod rollout_tests;
     mod run_report_tests;
     mod start_spacing_loop;
+    mod start_preemption;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
@@ -17040,6 +17481,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         observe_at: Mutex<Option<u128>>,
         failed_stops: Mutex<std::collections::HashSet<String>>,
         started_members: Mutex<Vec<MemberSpec>>,
+        start_operations: Mutex<HashMap<(String, String), String>>,
         stops: Mutex<Vec<String>>,
         kills: Mutex<Vec<String>>,
         removes: Mutex<Vec<String>>,
@@ -17156,6 +17598,95 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     }
 
     impl RuntimeControl for FakeRuntime {
+        fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
+            let started = self
+                .started_members
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|started| {
+                    started.tags.get(start_jobs::OPERATION_TAG)
+                        == member.tags.get(start_jobs::OPERATION_TAG)
+                })
+                .cloned();
+            let Some(started) = started else {
+                return Ok(None);
+            };
+            // Honor each fixture's post-start publication and fast-exit hooks. Bind
+            // that first launch incarnation once; later planner observations cannot
+            // manufacture provenance for another incarnation.
+            let observation = if member.terminal {
+                self.snapshot_ptys()?
+                    .into_iter()
+                    .find(|item| item.runtime_id == member.runtime_id)
+            } else {
+                self.observe_exec(&member.runtime_id)?
+            };
+            if observation.is_none()
+                && member
+                    .driver
+                    .as_deref()
+                    .is_some_and(|driver| driver.ends_with("gate"))
+            {
+                return Ok(None);
+            }
+            let observation = observation.unwrap_or_else(|| RuntimeObservation {
+                runtime_id: started.runtime_id.clone(),
+                terminal: started.terminal,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(format!(
+                    "fake-start:{}",
+                    started.tags[start_jobs::OPERATION_TAG]
+                )),
+            });
+            if let Some(incarnation) = &observation.incarnation_id {
+                let operation = &started.tags[start_jobs::OPERATION_TAG];
+                let mut bindings = self.start_operations.lock().unwrap();
+                if !bindings.values().any(|bound| bound == operation) {
+                    bindings.insert((started.runtime_id, incarnation.clone()), operation.clone());
+                }
+            }
+            Ok(Some(observation))
+        }
+        fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> Result<Option<String>> {
+            Ok(self.start_operations.lock().unwrap()
+                .get(&(id.into(), incarnation.into())).cloned())
+        }
+        fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
+            if member
+                .driver
+                .as_deref()
+                .is_some_and(|driver| driver.ends_with("gate"))
+            {
+                // No fixture process/scope survives an acknowledged exact exit.
+                // Before publication the producer is still outstanding.
+                if self
+                    .failed_starts
+                    .lock()
+                    .unwrap()
+                    .contains(&member.runtime_id)
+                {
+                    return Ok(true);
+                }
+                let Some(observation) = self.observe_exec(&member.runtime_id)? else {
+                    return Ok(false);
+                };
+                let Some(incarnation) = observation.incarnation_id else {
+                    return Ok(false);
+                };
+                return Ok(matches!(observation.status.as_str(), "exited" | "stopped")
+                    && self
+                        .start_operations
+                        .lock()
+                        .unwrap()
+                        .get(&(member.runtime_id.clone(), incarnation))
+                        == member.tags.get(start_jobs::OPERATION_TAG));
+            }
+            // Other virtual fixture launches have no process or detached producer.
+            Ok(true)
+        }
         fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
             if let Some(before) = self.before_snapshot.lock().unwrap().as_ref() {
                 before();
@@ -17423,6 +17954,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 .unwrap()
                 .unwrap()
                 .0;
+            let _capture = store.capture_runtime_observations().unwrap();
             reconciler
                 .record_member(
                     &desired,
@@ -17592,6 +18124,13 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             .unwrap()
             .0;
         let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let incarnation = store
+            .observations_for(&desired.subject, "runtime.action.succeeded")
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.body["fields"]["action"] == "start")
+            .unwrap().body["fields"]["incarnation_id"]
+            .as_str().unwrap().to_owned();
         runtime.execs.lock().unwrap().insert(
             runtime_id.clone(),
             RuntimeObservation {
@@ -17599,7 +18138,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 terminal: false,
                 status: "running".into(),
                 exit_code: None,
-                incarnation_id: Some("wrapper-one".into()),
+                incarnation_id: Some(incarnation),
             },
         );
         // The driver publishes its provider's result before its own process exits. A
@@ -26570,7 +27109,7 @@ mission "orchid/timeout" state="ready" timeout="1ms" {
         // This oracle checks convergence/lifecycle, at the fastest supported configured cap.
         // Default30 start spacing is independently covered by deterministic gate controls.
         reconciler.set_max_passes_per_minute(600).unwrap();
-        let task = tokio::spawn(reconciler.run());
+        let task = tokio::spawn(reconciler.clone().run());
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -26609,7 +27148,24 @@ mission "orchid/timeout" state="ready" timeout="1ms" {
             }
         })
         .await
-        .expect("one cancellation wake did not finish cleanup");
+        .unwrap_or_else(|error| {
+            let current = beside_the_loop(|| store.mission_run(&run.id)).unwrap();
+            let pending = beside_the_loop(|| store.pending_runtime_starts());
+            let starts = pending
+                .iter()
+                .map(|operation| (
+                    operation.subject.as_str(),
+                    operation.finished,
+                    operation.applied,
+                    operation.cleanup_verified,
+                    operation.revoked_by.as_deref(),
+                    operation.result.as_ref().map(|result| &result["verification"]),
+                ))
+                .collect::<Vec<_>>();
+            let drops = reconciler.runtime_observation_drops.lock().unwrap().clone();
+            panic!("one cancellation wake did not finish cleanup: {error}; task_finished={}; run={}/{}; starts={starts:?}; drops={drops:?}",
+                task.is_finished(), current.status, current.phase);
+        });
         task.abort();
 
         assert!(
@@ -28400,9 +28956,25 @@ mission "waiting" state="ready" {
             .find(|step| step.step == "build")
             .unwrap()
             .clone();
+        let runtime = Arc::new(FakeRuntime::default());
+        let physical = Arc::downgrade(&runtime);
+        *runtime.before_snapshot.lock().unwrap() = Some(Box::new(move || {
+            let runtime = physical.upgrade().unwrap();
+            let members = runtime.started_members.lock().unwrap().clone();
+            let mut observations = runtime.ptys.lock().unwrap();
+            for member in members.iter().filter(|member| member.terminal) {
+                if observations.iter().all(|observation| observation.runtime_id != member.runtime_id) {
+                    observations.push(RuntimeObservation {
+                        runtime_id: member.runtime_id.clone(), terminal:true,
+                        status:"running".into(), exit_code:None,
+                        incarnation_id:Some(format!("fake-start:{}", member.tags[start_jobs::OPERATION_TAG])),
+                    });
+                }
+            }
+        }));
         let reconciler = Reconciler::new(
             store.clone(),
-            Arc::new(FakeRuntime::default()),
+            runtime,
             "node".into(),
             Arc::new(Notify::new()),
         );
@@ -35367,15 +35939,37 @@ version 2
 
 "#;
         apply_source(&store, source, "publish-fake-observer");
+        let (event_notify, mut event_changed) = watch::channel(0_u64);
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
             "node".into(),
             Arc::new(Notify::new()),
         )
-        .with_resource_provider(Arc::new(FakeResourceProvider));
+        .with_resource_provider(Arc::new(FakeResourceProvider))
+        .with_event_notify(event_notify);
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if store
+                    .latest_actual_value("resource/github/acme/demo/pull/1")
+                    .unwrap()
+                    .is_some()
+                    && store
+                        .latest_actual_value("observer/github/acme/demo/pull/1")
+                        .unwrap()
+                        .is_some_and(|actual| actual["status"] == "healthy")
+                {
+                    break;
+                }
+                event_changed
+                    .changed()
+                    .await
+                    .expect("observer event sender closed");
+            }
+        })
+        .await
+        .expect("one-shot observer did not publish its completed result");
         let facts = store
             .latest_actual_value("resource/github/acme/demo/pull/1")
             .unwrap()
