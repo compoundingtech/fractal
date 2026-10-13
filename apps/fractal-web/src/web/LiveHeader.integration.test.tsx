@@ -16,7 +16,7 @@ import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@st3/sdk/effect'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { createConversationTranscript } from './conversationTranscript.ts'
-import { readFileSync } from 'node:fs'
+import workspaceThreadHeaderSource from './WorkspaceThreadHeader.tsx?raw'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
@@ -58,24 +58,11 @@ beforeEach(async () => {
 afterEach(async () => { await act(async () => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals() })
 
 describe('live header parity', () => {
-  it('keeps title and status flexible while native actions align to the trailing edge', () => {
-    const style = document.createElement('style')
-    // Vitest disables CSS imports; load the production stylesheet rather than its empty module stub.
-    style.textContent = readFileSync('src/web/app.css', 'utf8')
-    document.head.append(style)
-    try {
-      const titleStatus = host.querySelector<HTMLElement>("[data-workspace-header] [data-testid='thread-header'] > nav + div")!
-      const actions = host.querySelector<HTMLElement>("[data-workspace-header] [data-testid='native-action-slot']")!
-      expect(titleStatus).not.toBeNull()
-      expect(actions).not.toBeNull()
-      expect(getComputedStyle(titleStatus).marginInlineStart).toMatch(/^0(?:px)?$/)
-      expect(getComputedStyle(titleStatus).flex).toBe('1 1 0px')
-      expect(getComputedStyle(titleStatus).minWidth).toMatch(/^0(?:px)?$/)
-      expect(getComputedStyle(actions).marginInlineStart).toBe('auto')
-    } finally { style.remove() }
+  it('opts into the kit status-beside-title layout', () => {
+    expect(workspaceThreadHeaderSource).toContain('<ThreadHeader {...props} layout="status-beside-title" />')
   })
   it('keeps synchronization described without a native tooltip over header disclosures', async () => {
-    const header = host.querySelector<HTMLElement>('[data-workspace-header]')!
+    const header = host.querySelector<HTMLElement>('[role="group"][aria-label="Conversation header"]')!
     expect(header.getAttribute('role')).toBe('group')
     expect(header.hasAttribute('title')).toBe(false)
     expect(header.hasAttribute('aria-description')).toBe(false)

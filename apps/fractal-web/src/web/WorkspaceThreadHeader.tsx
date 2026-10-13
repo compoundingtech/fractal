@@ -10,5 +10,5 @@ export const WorkspaceThreadHeader = ({ agentRef, ...props }: React.ComponentPro
   const now = useNow()
   const descriptionId = React.useId()
   const description = observation === undefined ? 'Conversation synchronization pending' : syncLine({ ...observation, label: 'conversation', now })?.text ?? 'Conversation is up to date'
-  return <div data-workspace-header role="group" aria-label="Conversation header" aria-describedby={descriptionId} style={{ display: 'contents' }}><ThreadHeader {...props} /><VisuallyHidden><span id={descriptionId}>{description}</span></VisuallyHidden></div>
+  return <div role="group" aria-label="Conversation header" aria-describedby={descriptionId} style={{ display: 'contents' }}><ThreadHeader {...props} layout="status-beside-title" /><VisuallyHidden><span id={descriptionId}>{description}</span></VisuallyHidden></div>
 }
