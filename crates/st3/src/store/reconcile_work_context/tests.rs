@@ -311,6 +311,27 @@ fn batched_work_metadata_keeps_real_person_blockers_and_responses() {
             .latest_claim(&own.subject, Some("work.person-asked"))
             .unwrap()
             .unwrap();
+
+        store.connection.write().execute(
+            "UPDATE claims SET body=json_set(body,'$.fields.origin_step','step-run/another-origin') WHERE id=?1",
+            [&request.id],
+        ).unwrap();
+        let moved_origin = parity(&store, &input.actor, at);
+        assert!(moved_origin.iter().all(|v| v.person_answers.is_empty()));
+        assert!(
+            support(&store.readers.get(), &moved_origin)
+                .unwrap()
+                .iter()
+                .all(|row| !row.1)
+        );
+        store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claims SET body=?2 WHERE id=?1",
+                params![request.id, serde_json::to_string(&request.body).unwrap()],
+            )
+            .unwrap();
         store
             .connection
             .write()
@@ -872,4 +893,112 @@ fn batched_work_support_query_errors_refuse_the_whole_read() {
         .unwrap();
     let error = read(&store, ACTOR, now_ms()).unwrap_err();
     assert!(error.to_string().contains("no such index"), "{error}");
+}
+
+#[test]
+fn batched_work_support_cost_reports_empty_and_all_present_4200_step_mixes() {
+    let store = fixture(4200);
+    let at = now_ms();
+    let base = read(&store, ACTOR, at).unwrap();
+    let connection = store.readers.get();
+    let legacy_helpers = || {
+        let mut views = base.clone();
+        for view in &mut views {
+            adhoc_work::enrich_handoff(&connection, view, at).unwrap();
+            person_work::enrich_responses(&connection, view).unwrap();
+        }
+        views
+    };
+    let with_proof = || {
+        let flags = support(&connection, &base).unwrap();
+        let mut views = base.clone();
+        for (view, (release, ask)) in views.iter_mut().zip(flags) {
+            if release {
+                adhoc_work::enrich_handoff(&connection, view, at).unwrap();
+            }
+            if ask {
+                person_work::enrich_responses(&connection, view).unwrap();
+            }
+        }
+        views
+    };
+    // Warm each path outside scopes. These counters isolate the proof and the two
+    // unchanged helpers; the separate whole-read control includes owners and definitions.
+    legacy_helpers();
+    with_proof();
+    support(&connection, &base).unwrap();
+    let (empty_old, old_work, old_time) = measured(legacy_helpers);
+    let (empty_new, new_work, new_time) = measured(with_proof);
+    let (_, proof_work, proof_time) = measured(|| support(&connection, &base).unwrap());
+    println!(
+        "4200-step EMPTY helper mix: old={old_work:?} {old_time:?}; proof-only={proof_work:?} {proof_time:?}; proof+helpers={new_work:?} {new_time:?}"
+    );
+    assert_eq!(
+        serde_json::to_value(empty_old).unwrap(),
+        serde_json::to_value(empty_new).unwrap()
+    );
+    assert_eq!(old_work.statements, 8400);
+    assert_eq!(proof_work.statements, 4200_usize.div_ceil(CHUNK) as u64);
+    assert_eq!(new_work, proof_work);
+    assert!(proof_work.vm_steps < old_work.vm_steps);
+    assert_eq!(proof_work.fullscan_steps, 0);
+    drop(connection);
+    // Isolated presence fixtures append actual claim rows without projecting their
+    // lifecycle. Every step has both kinds; releases have no handoff note and requests
+    // have no resolution, so this measures the proof's pure overhead when it skips none.
+    store.connection.batched(|tx| -> Result<()> {
+        for view in &base {
+            append_claim_tx(tx, "alder", &view.subject, "work.released", Some(ACTOR),
+                &json!({"fields":{"attempt":view.attempt,"status":"ready","summary":"Released"}}), &[], None)?;
+            append_claim_tx(tx, "alder", &view.subject, "work.person-asked", Some(ACTOR),
+                &json!({"fields":{"origin_step":view.subject,"origin_attempt":view.attempt}}), &[], None)?;
+        }
+        Ok(())
+    }).unwrap().unwrap();
+    let connection = store.readers.get();
+    let flags = support(&connection, &base).unwrap();
+    assert!(flags.iter().all(|row| *row == (true, true)));
+    let legacy_helpers = || {
+        let mut views = base.clone();
+        for view in &mut views {
+            adhoc_work::enrich_handoff(&connection, view, at).unwrap();
+            person_work::enrich_responses(&connection, view).unwrap();
+        }
+        views
+    };
+    let with_proof = || {
+        let flags = support(&connection, &base).unwrap();
+        let mut views = base.clone();
+        for (view, (release, ask)) in views.iter_mut().zip(flags) {
+            if release {
+                adhoc_work::enrich_handoff(&connection, view, at).unwrap();
+            }
+            if ask {
+                person_work::enrich_responses(&connection, view).unwrap();
+            }
+        }
+        views
+    };
+    legacy_helpers();
+    with_proof();
+    support(&connection, &base).unwrap();
+    let (present_old, old_work, old_time) = measured(legacy_helpers);
+    let (present_new, new_work, new_time) = measured(with_proof);
+    let (_, proof_work, proof_time) = measured(|| support(&connection, &base).unwrap());
+    println!(
+        "4200-step ALL-PRESENT helper mix: old={old_work:?} {old_time:?}; proof-only={proof_work:?} {proof_time:?}; proof+helpers={new_work:?} {new_time:?}; added VM={} statements={}",
+        new_work.vm_steps - old_work.vm_steps,
+        new_work.statements - old_work.statements
+    );
+    assert_eq!(
+        serde_json::to_value(present_old).unwrap(),
+        serde_json::to_value(present_new).unwrap()
+    );
+    assert_eq!(old_work.statements, 8400);
+    assert_eq!(
+        new_work.statements,
+        old_work.statements + proof_work.statements
+    );
+    assert_eq!(new_work.vm_steps, old_work.vm_steps + proof_work.vm_steps);
+    assert_eq!(proof_work.fullscan_steps, 0);
 }
