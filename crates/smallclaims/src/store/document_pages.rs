@@ -53,7 +53,10 @@ fn query(
         WHERE b.hash=d.hash AND c.id=d.binding_claim_id"
     );
     if named {
-        sql.push_str(" AND d.name=?1");
+        // Equal inclusive BINARY bounds select exactly this name. Retaining a range
+        // loop lets the planner prove the full index order even when ANALYZE estimates
+        // one version per name and a correlated cursor predicate reduces that estimate.
+        sql.push_str(" AND d.name>=?1 AND d.name<=?1");
     }
     if lower {
         // A named page already seeks d.name=?1. Keep redundant range bounds on that
@@ -98,13 +101,7 @@ fn query(
     }
     // Fixed slot 7 keeps the binding arity fixed even when earlier slots are unused. Values
     // are always bound: the statement cache has a finite set of shapes, not one per prefix.
-    // Name is constant in a named page. Omitting that constant ordering term preserves
-    // the same version order and avoids a redundant sort under analyzed statistics.
-    sql.push_str(if named {
-        " ORDER BY d.binding_key DESC LIMIT ?7"
-    } else {
-        " ORDER BY d.name,d.binding_key DESC LIMIT ?7"
-    });
+    sql.push_str(" ORDER BY d.name,d.binding_key DESC LIMIT ?7");
     sql
 }
 
