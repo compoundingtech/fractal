@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "unknown",
-    "detail": "Source-table index builds were rejected after an estimated 71.26 seconds on the frozen production-size census. The replacement creates only empty derived tables at open and bootstraps after the API binds. Native page costs and bootstrap timings are under measurement; deployed restart-to-health is not yet measured. No deliberate seat interruption is added."
+    "detail": "Source-table index builds were rejected after an estimated 71.26 seconds on the frozen production-size census. Empty derived-schema setup measured 0.43\u20130.57 seconds in native WAL/FULL scratch probes; bootstrap measured 22.70 seconds over matching rows and 41.58 seconds for the two indexed shared kinds read from the immutable census. Bootstrap runs after both APIs bind in durable bounded pages. Component writer loans can exceed the between-row processing budget (maximum 1.05 seconds in the matching fixture). Whole deployed restart-to-health is not yet measured; operations will record it on the first authorized deploy. No deliberate seat interruption is added."
   },
   "manual": {
     "status": "none",
