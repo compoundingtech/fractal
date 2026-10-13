@@ -6,10 +6,18 @@ use std::time::Duration;
 pub trait Engine: Sized {
     const NAME: &'static str;
     fn load(bundle: &str) -> Self;
-    fn decide(&mut self, program: &str, history: &str) -> Result<String, String>;
+    /// Calls one of the bundle's global functions with string arguments; returns its string.
+    fn call(&mut self, function: &str, args: &[&str]) -> Result<String, String>;
     /// The same call, stopped by the bridge when it runs past `budget`.
-    fn decide_with_budget(&mut self, program: &str, history: &str, budget: Duration) -> Result<String, String>;
+    fn call_with_budget(&mut self, function: &str, args: &[&str], budget: Duration) -> Result<String, String>;
     fn heap_bytes(&mut self) -> Option<usize>;
+
+    fn decide(&mut self, program: &str, history: &str) -> Result<String, String> {
+        self.call("__decide", &[program, history])
+    }
+    fn decide_with_budget(&mut self, program: &str, history: &str, budget: Duration) -> Result<String, String> {
+        self.call_with_budget("__decide", &[program, history], budget)
+    }
 }
 
 #[cfg(feature = "quickjs")]
@@ -49,20 +57,25 @@ pub mod quickjs {
             QuickJs { runtime, context, deadline, epoch }
         }
 
-        fn decide(&mut self, program: &str, history: &str) -> Result<String, String> {
+        fn call(&mut self, function: &str, args: &[&str]) -> Result<String, String> {
             self.context.with(|ctx| {
-                let f: Function = ctx.globals().get("__decide").map_err(|e| e.to_string())?;
-                f.call::<_, String>((program, history)).map_err(|e| {
+                let f: Function = ctx.globals().get(function).map_err(|e| e.to_string())?;
+                let result = match args {
+                    [a] => f.call::<_, String>((*a,)),
+                    [a, b] => f.call::<_, String>((*a, *b)),
+                    _ => return Err("one or two arguments".to_owned()),
+                };
+                result.map_err(|e| {
                     let caught = ctx.catch();
                     format!("{e}: {caught:?}")
                 })
             })
         }
 
-        fn decide_with_budget(&mut self, program: &str, history: &str, budget: Duration) -> Result<String, String> {
+        fn call_with_budget(&mut self, function: &str, args: &[&str], budget: Duration) -> Result<String, String> {
             let limit = self.epoch.elapsed() + budget;
             self.deadline.store(limit.as_nanos() as u64, Ordering::Relaxed);
-            let out = self.decide(program, history);
+            let out = self.call(function, args);
             self.deadline.store(0, Ordering::Relaxed);
             out
         }
@@ -76,7 +89,7 @@ pub mod quickjs {
 #[cfg(feature = "boa")]
 pub mod boa {
     use super::*;
-    use boa_engine::{Context, JsString, JsValue, Source, js_string};
+    use boa_engine::{Context, JsString, JsValue, Source};
 
     pub struct Boa {
         context: Context,
@@ -93,25 +106,20 @@ pub mod boa {
             Boa { context }
         }
 
-        fn decide(&mut self, program: &str, history: &str) -> Result<String, String> {
+        fn call(&mut self, function: &str, args: &[&str]) -> Result<String, String> {
             let ctx = &mut self.context;
-            let f = ctx.global_object().get(js_string!("__decide"), ctx).map_err(|e| e.to_string())?;
-            let f = f.as_callable().ok_or("no __decide")?.clone();
-            let out = f
-                .call(
-                    &JsValue::undefined(),
-                    &[JsValue::from(JsString::from(program)), JsValue::from(JsString::from(history))],
-                    ctx,
-                )
-                .map_err(|e| e.to_string())?;
-            Ok(out.as_string().ok_or("decide returned no string")?.to_std_string_escaped())
+            let f = ctx.global_object().get(JsString::from(function), ctx).map_err(|e| e.to_string())?;
+            let f = f.as_callable().ok_or("not a function")?.clone();
+            let args: Vec<JsValue> = args.iter().map(|a| JsValue::from(JsString::from(*a))).collect();
+            let out = f.call(&JsValue::undefined(), &args, ctx).map_err(|e| e.to_string())?;
+            Ok(out.as_string().ok_or("the call returned no string")?.to_std_string_escaped())
         }
 
         // Boa has no time-based interrupt. Its closest guard is a loop-iteration limit, which
         // stops `for (;;) {}` but not a slow loop that finishes, so this is a weaker guarantee.
-        fn decide_with_budget(&mut self, program: &str, history: &str, _budget: Duration) -> Result<String, String> {
+        fn call_with_budget(&mut self, function: &str, args: &[&str], _budget: Duration) -> Result<String, String> {
             self.context.runtime_limits_mut().set_loop_iteration_limit(10_000_000);
-            let out = self.decide(program, history);
+            let out = self.call(function, args);
             self.context.runtime_limits_mut().set_loop_iteration_limit(u64::MAX);
             out
         }
@@ -130,32 +138,33 @@ pub mod v8 {
 
     pub struct V8 {
         runtime: JsRuntime,
-        decide: v8::Global<v8::Function>,
+        functions: std::collections::HashMap<String, v8::Global<v8::Function>>,
     }
 
     fn finish(mut runtime: JsRuntime, load_bundle: Option<&str>) -> V8 {
         if let Some(bundle) = load_bundle {
             runtime.execute_script("bundle.js", bundle.to_owned()).map_err(|e| e.to_string()).unwrap();
         }
-        let value = runtime.execute_script("decide.js", "globalThis.__decide").unwrap();
-        let decide = {
+        let mut functions = std::collections::HashMap::new();
+        for name in ["__decide", "__open", "__apply", "__close"] {
+            let value = runtime.execute_script("lookup.js", format!("globalThis.{name}")).unwrap();
             scope!(scope, runtime);
             let local = v8::Local::new(scope, value);
             let f: v8::Local<v8::Function> = local.try_into().unwrap();
-            v8::Global::new(scope, f)
-        };
-        V8 { runtime, decide }
+            functions.insert(name.to_owned(), v8::Global::new(scope, f));
+        }
+        V8 { runtime, functions }
     }
 
-    fn call(engine: &mut V8, program: &str, history: &str) -> Result<String, String> {
+    fn call(engine: &mut V8, function: &str, args: &[&str]) -> Result<String, String> {
+        let global = engine.functions.get(function).ok_or("unknown function")?.clone();
         let runtime = &mut engine.runtime;
         scope!(scope, runtime);
         v8::tc_scope!(let tc, scope);
-        let f = v8::Local::new(tc, &engine.decide);
-        let p = v8::String::new(tc, program).unwrap();
-        let h = v8::String::new(tc, history).unwrap();
+        let f = v8::Local::new(tc, &global);
+        let args: Vec<v8::Local<v8::Value>> = args.iter().map(|a| v8::String::new(tc, a).unwrap().into()).collect();
         let this = v8::undefined(tc).into();
-        match f.call(tc, this, &[p.into(), h.into()]) {
+        match f.call(tc, this, &args) {
             Some(v) => Ok(v.to_rust_string_lossy(tc)),
             None => Err(match tc.exception() {
                 Some(e) => e.to_rust_string_lossy(tc),
@@ -164,7 +173,7 @@ pub mod v8 {
         }
     }
 
-    fn budgeted(engine: &mut V8, program: &str, history: &str, budget: Duration) -> Result<String, String> {
+    fn budgeted(engine: &mut V8, function: &str, args: &[&str], budget: Duration) -> Result<String, String> {
         let handle = engine.runtime.v8_isolate().thread_safe_handle();
         let (done, wait) = mpsc::channel::<()>();
         let watchdog = std::thread::spawn(move || {
@@ -172,7 +181,7 @@ pub mod v8 {
                 handle.terminate_execution();
             }
         });
-        let out = call(engine, program, history);
+        let out = call(engine, function, args);
         let _ = done.send(());
         watchdog.join().unwrap();
         engine.runtime.v8_isolate().cancel_terminate_execution();
@@ -189,11 +198,11 @@ pub mod v8 {
         fn load(bundle: &str) -> Self {
             finish(JsRuntime::new(RuntimeOptions::default()), Some(bundle))
         }
-        fn decide(&mut self, program: &str, history: &str) -> Result<String, String> {
-            call(self, program, history)
+        fn call(&mut self, function: &str, args: &[&str]) -> Result<String, String> {
+            call(self, function, args)
         }
-        fn decide_with_budget(&mut self, program: &str, history: &str, budget: Duration) -> Result<String, String> {
-            budgeted(self, program, history, budget)
+        fn call_with_budget(&mut self, function: &str, args: &[&str], budget: Duration) -> Result<String, String> {
+            budgeted(self, function, args, budget)
         }
         fn heap_bytes(&mut self) -> Option<usize> {
             heap(self)
@@ -222,11 +231,11 @@ pub mod v8 {
             let runtime = JsRuntime::new(RuntimeOptions { startup_snapshot: Some(snapshot), ..Default::default() });
             V8Snapshot(finish(runtime, None))
         }
-        fn decide(&mut self, program: &str, history: &str) -> Result<String, String> {
-            call(&mut self.0, program, history)
+        fn call(&mut self, function: &str, args: &[&str]) -> Result<String, String> {
+            call(&mut self.0, function, args)
         }
-        fn decide_with_budget(&mut self, program: &str, history: &str, budget: Duration) -> Result<String, String> {
-            budgeted(&mut self.0, program, history, budget)
+        fn call_with_budget(&mut self, function: &str, args: &[&str], budget: Duration) -> Result<String, String> {
+            budgeted(&mut self.0, function, args, budget)
         }
         fn heap_bytes(&mut self) -> Option<usize> {
             heap(&mut self.0)

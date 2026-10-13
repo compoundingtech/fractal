@@ -260,52 +260,81 @@ const toJson = (value: unknown): Json => {
   return JSON.parse(JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v)))
 }
 
+// A live run: the program stays suspended between events, so a new event costs only the work it
+// causes. open() replays the history once; apply() feeds what happened since. For any history,
+// open(h).decision() equals decide(h), and open(h).apply(e) equals decide(h ++ e).
+export class Session {
+  private readonly engine: Engine
+  private readonly fiber: { pollUnsafe(): Exit.Exit<unknown, unknown> | undefined }
+  private readonly history: Array<HistoryEvent>
+
+  constructor(program: Program, history: ReadonlyArray<HistoryEvent>, options: DecideOptions = {}) {
+    const start = history[0]
+    if (!start || start.type !== "started") throw new Error("a history starts with a started event")
+    const engine = new Engine(start.at, `${start.program}:${start.at}`)
+    this.history = [...history]
+    engine.history = this.history
+    engine.options = options
+    engine.accepted = new Set(history.flatMap((e) => (e.type === "upgraded" ? (e.accepted ?? []) : [])))
+    const runnable = program.run(start.input).pipe(
+      Effect.provideService(EngineRef, engine),
+      Effect.provideService(Clock.Clock, engine.clock),
+      Effect.provideService(Random.Random, engine.random)
+    )
+    this.fiber = Effect.runFork(runnable, { scheduler: engine.scheduler })
+    this.engine = engine
+    engine.drain()
+    this.feed(1)
+  }
+
+  private feed(from: number): void {
+    for (let i = from; i < this.history.length && !this.engine.divergence; i++) {
+      const event = this.history[i]!
+      this.engine.cursor = i
+      this.engine.now = event.at
+      if (event.type === "upgraded") for (const op of event.accepted ?? []) this.engine.accepted.add(op)
+      this.engine.apply(event)
+    }
+  }
+
+  apply(events: ReadonlyArray<HistoryEvent>): Decision {
+    const from = this.history.length
+    this.history.push(...events)
+    this.feed(from)
+    return this.decision()
+  }
+
+  decision(): Decision {
+    const engine = this.engine
+    const commands: Array<Command> = []
+    const open: Array<Decision["open"][number]> = []
+    for (const op of engine.order) {
+      const state = engine.ops.get(op)!
+      if (state.state === "open") {
+        open.push({ op, kind: state.kind, spec: state.spec, scheduled: state.scheduled })
+        if (!state.scheduled) commands.push({ type: "schedule", op, kind: state.kind, spec: state.spec, hash: state.hash })
+      } else if (state.record && !state.scheduled) {
+        commands.push({ type: "schedule", op, kind: state.kind, spec: state.spec, hash: state.hash })
+      } else if (state.state === "abandoned" && state.scheduled && !state.finished) {
+        commands.push({ type: "cancel", op })
+      }
+    }
+    const status = engine.divergence ? { state: "running" as const } : statusOf(this.fiber.pollUnsafe())
+    return {
+      status,
+      open: engine.divergence ? [] : open,
+      commands: engine.divergence ? [] : commands,
+      ...(engine.divergence ? { divergence: engine.divergence } : {}),
+      ...(engine.changes.length > 0 ? { changes: [...engine.changes] } : {}),
+      stats: { events: this.history.length, ops: engine.order.length, drains: engine.drains }
+    }
+  }
+}
+
 export const decide = (
   program: Program,
   history: ReadonlyArray<HistoryEvent>,
   options: DecideOptions = {}
-): Decision => {
-  const start = history[0]
-  if (!start || start.type !== "started") throw new Error("a history starts with a started event")
-  const engine = new Engine(start.at, `${start.program}:${start.at}`)
-  engine.history = history
-  engine.options = options
-  engine.accepted = new Set(history.flatMap((e) => (e.type === "upgraded" ? (e.accepted ?? []) : [])))
-  const runnable = program.run(start.input).pipe(
-    Effect.provideService(EngineRef, engine),
-    Effect.provideService(Clock.Clock, engine.clock),
-    Effect.provideService(Random.Random, engine.random)
-  )
-  const fiber = Effect.runFork(runnable, { scheduler: engine.scheduler })
-  engine.drain()
-  for (let i = 1; i < history.length && !engine.divergence; i++) {
-    const event = history[i]!
-    engine.cursor = i
-    engine.now = event.at
-    engine.apply(event)
-  }
-  const commands: Array<Command> = []
-  const open: Array<Decision["open"][number]> = []
-  for (const op of engine.order) {
-    const state = engine.ops.get(op)!
-    if (state.state === "open") {
-      open.push({ op, kind: state.kind, spec: state.spec, scheduled: state.scheduled })
-      if (!state.scheduled) commands.push({ type: "schedule", op, kind: state.kind, spec: state.spec, hash: state.hash })
-    } else if (state.record && !state.scheduled) {
-      commands.push({ type: "schedule", op, kind: state.kind, spec: state.spec, hash: state.hash })
-    } else if (state.state === "abandoned" && state.scheduled && !state.finished) {
-      commands.push({ type: "cancel", op })
-    }
-  }
-  const status = engine.divergence ? { state: "running" as const } : statusOf(fiber.pollUnsafe())
-  return {
-    status,
-    open: engine.divergence ? [] : open,
-    commands: engine.divergence ? [] : commands,
-    ...(engine.divergence ? { divergence: engine.divergence } : {}),
-    ...(engine.changes.length > 0 ? { changes: engine.changes } : {}),
-    stats: { events: history.length, ops: engine.order.length, drains: engine.drains }
-  }
-}
+): Decision => new Session(program, history, options).decision()
 
 export type { OpError }

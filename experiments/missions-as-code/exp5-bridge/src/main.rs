@@ -138,6 +138,53 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
         }));
     }
 
+    // Incremental: open a live run once, then feed one event at a time, as a driver or the daemon
+    // would after each result. The final decision must equal Node's full replay.
+    let mut incremental = Vec::new();
+    for f in fixtures.iter().filter(|f| ["ship-messy", "long-100", "long-1000", "wide-1000"].contains(&f.name.as_str())) {
+        let events: Vec<serde_json::Value> = serde_json::from_str(&f.history).unwrap();
+        let first = serde_json::to_string(&events[..1]).unwrap();
+        let t = Instant::now();
+        let id = engine.call("__open", &[&f.program, &first]).expect("open");
+        let open_ms = t.elapsed().as_secs_f64() * 1e3;
+        let mut samples = Vec::with_capacity(events.len());
+        let mut last = String::new();
+        for event in &events[1..] {
+            let one = serde_json::to_string(&[event]).unwrap();
+            let t = Instant::now();
+            last = engine.call("__apply", &[&id, &one]).expect("apply");
+            samples.push(t.elapsed());
+        }
+        engine.call("__close", &[&id]).unwrap();
+        let mut expected: serde_json::Value = serde_json::from_str(&f.decision).unwrap();
+        expected.as_object_mut().unwrap().remove("stats");
+        let got: serde_json::Value = serde_json::from_str(&last).unwrap();
+        let total: f64 = samples.iter().map(|d| d.as_secs_f64() * 1e3).sum();
+        incremental.push(serde_json::json!({
+            "fixture": f.name,
+            "events": f.events,
+            "matches_full_replay": got == expected,
+            "open_ms": open_ms,
+            "apply_p50_us": percentile(&mut samples, 0.5) * 1e3,
+            "apply_p99_us": percentile(&mut samples, 0.99) * 1e3,
+            "apply_max_us": percentile(&mut samples, 1.0) * 1e3,
+            "whole_run_ms": total,
+        }));
+    }
+
+    // Live-run memory: hold 50 open sessions of the 1000-step run in one engine.
+    let long = fixtures.iter().find(|f| f.name == "long-1000").unwrap();
+    let mut holder = E::load(&bundle);
+    let heap0 = holder.heap_bytes();
+    let rss0 = rss_bytes();
+    let ids: Vec<String> = (0..50).map(|_| holder.call("__open", &[&long.program, &long.prefix]).unwrap()).collect();
+    let session_heap_kb = holder.heap_bytes().zip(heap0).map(|(a, b)| a.saturating_sub(b) / 50 / 1024);
+    let session_rss_kb = rss_bytes().saturating_sub(rss0) / 50 / 1024;
+    for id in ids {
+        holder.call("__close", &[&id]).unwrap();
+    }
+    drop(holder);
+
     // Isolation: a program that never yields must be stopped by the bridge, not hang the caller.
     let spin = r#"[{"type":"started","at":1,"program":"orchard/spin","version":"dev","input":null},{"type":"scheduled","at":1,"op":"first","kind":"step","hash":"x"},{"type":"completed","at":2,"op":"first","value":{"summary":"ok","evidence":[],"attempt":1}}]"#;
     let mut fresh = E::load(&bundle);
@@ -156,6 +203,8 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
         "process_rss_mb_at_start": rss_before / (1024 * 1024),
         "all_match_node": all_match,
         "cases": cases,
+        "incremental": incremental,
+        "session_of_2000_events": { "heap_kb": session_heap_kb, "rss_kb": session_rss_kb },
         "spin": { "stopped": spin_result.is_err(), "after_ms": spin_stopped_ms, "error": spin_result.err() },
         "reads_clock": clock_result.map_err(|e| e).unwrap_or_else(|e| e),
     })

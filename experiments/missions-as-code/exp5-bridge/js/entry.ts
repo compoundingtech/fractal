@@ -1,10 +1,33 @@
 // The bridge's only surface: decide(programName, historyJson) -> decisionJson.
 // The host provides no functions. The script gets no clock, no randomness, no timers and no I/O.
 import "./polyfill.ts"
-import { decide } from "../../sdk/engine.ts"
+import { decide, Session } from "../../sdk/engine.ts"
 import { programs } from "./programs.ts"
 
 let seed = 0x9e3779b9
+
+// Live runs for incremental decisions: open once, then feed only new events.
+const sessions = new Map<number, Session>()
+let nextSession = 1
+const withoutStats = ({ stats: _, ...rest }: any) => rest
+
+;(globalThis as any).__open = (name: string, historyJson: string): string => {
+  seed = 0x9e3779b9
+  const program = (programs as any)[name]
+  if (!program) throw new Error(`unknown program ${name}`)
+  const id = nextSession++
+  sessions.set(id, new Session(program, JSON.parse(historyJson)))
+  return String(id)
+}
+;(globalThis as any).__apply = (id: string, eventsJson: string): string => {
+  const session = sessions.get(Number(id))
+  if (!session) throw new Error(`no session ${id}`)
+  return JSON.stringify(withoutStats(session.apply(JSON.parse(eventsJson))))
+}
+;(globalThis as any).__close = (id: string): string => {
+  sessions.delete(Number(id))
+  return ""
+}
 
 ;(globalThis as any).__decide = (name: string, historyJson: string): string => {
   seed = 0x9e3779b9 // every decision sees the same Math.random sequence
