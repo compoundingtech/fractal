@@ -20,7 +20,7 @@ const buckets: readonly ContextBucket[] = Array.from({ length: 96 }, (_, index) 
   const start = range.start + index * 15 * 60_000
   const idle = (index >= 30 && index < 34) || (index >= 70 && index < 74)
   const phase = index < 22 ? index : index < 50 ? index - 22 : index - 50
-  const base = index < 22 ? 30_000 : index < 50 ? 28_000 : 34_000
+  const base = index < 22 ? 30_000 : index < 50 ? 28_000 : 38_000
   return { start, end: start + 15 * 60_000, windowTokens, ...(idle ? {} : { usedTokens: Math.min(194_000, base + phase * 3_400 + (index % 3) * 1_200) }) }
 })
 const spendPoints: readonly SpendPoint[] = Array.from({ length: 49 }, (_, index) => ({ at: range.start + index * 30 * 60_000, sessionUsd: Number((71.35 * Math.pow(index / 48, 0.8)).toFixed(2)), subagentsUsd: Number((6.05 * Math.pow(index / 48, 1.6)).toFixed(2)) }))
