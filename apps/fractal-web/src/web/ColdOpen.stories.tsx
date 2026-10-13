@@ -13,7 +13,8 @@ const assertBootstrap = (frame: HTMLIFrameElement): void => {
   expect(document.documentElement.style.colorScheme).toBe(scheme)
   expect(frame.contentWindow!.getComputedStyle(document.body).backgroundColor).toBe(scheme === 'light' ? 'rgb(252, 252, 252)' : 'rgb(10, 10, 10)')
   expect(document.querySelectorAll('[data-wf-sidebar-skeleton] > div')).toHaveLength(8)
-  expect(document.querySelector('[data-wf-sidebar-skeleton]')!.getBoundingClientRect().width).toBe(256)
+  // index.html caps the skeleton at max-width: 40vw, so narrow frames (440 px) get less than 256 px.
+  expect(document.querySelector('[data-wf-sidebar-skeleton]')!.getBoundingClientRect().width).toBeCloseTo(Math.min(256, frame.contentWindow!.innerWidth * 0.4), 1)
 }
 const bootstrapPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
   const frame = canvasElement.querySelector<HTMLIFrameElement>('iframe')!
