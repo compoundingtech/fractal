@@ -129,7 +129,7 @@ export const ContextOccupancy: Story = {
   },
 }
 
-const metricRow: Row = { ...knownRow, context: { _tag: 'Known', usedPercent: 18, observedAt: storyNow }, spend: {
+const metricRow: Row = { ...knownRow, ref: 'agent/metric', id: 'metric', context: { _tag: 'Known', usedPercent: 18, observedAt: storyNow }, spend: {
   last24h: { _tag: 'Known', usd: 1.84, since: storyNow - 86_400_000, until: storyNow, observedAt: storyNow },
   last7d: { _tag: 'Known', usd: 9.25, since: storyNow - 604_800_000, until: storyNow, observedAt: storyNow },
 } }
