@@ -1996,6 +1996,10 @@ impl Ui {
             }
             // A usage tab names its group whatever the list groups by, so it draws from its key.
             Some(pane @ Pane::Usage(_)) => self.draw_pane(buf, content, &pane),
+            // A session has no sidebar agent selection: render the tab's subject directly.
+            Some(Pane::Agent(Some(id))) if id.starts_with("session/") => {
+                self.draw_pane(buf, content, &Pane::Agent(Some(id)))
+            }
             // A terminal tab that is not the attached one says so, rather than drawing whatever
             // stui's own tab has selected.
             Some(Pane::Terminal(id))
