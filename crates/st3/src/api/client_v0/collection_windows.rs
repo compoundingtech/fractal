@@ -86,6 +86,8 @@ pub(super) struct Windows {
     observed: Mutex<Observed>,
     entries: Mutex<WindowEntries>,
     observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
+    /// Where this store's reread grid starts: see [`Self::reread_boundary`].
+    reread_anchor: tokio::time::Instant,
     #[cfg(test)]
     builds: std::sync::atomic::AtomicUsize,
 }
@@ -123,6 +125,7 @@ impl Windows {
             }),
             entries: Mutex::new(VecDeque::new()),
             observer: Mutex::new(None),
+            reread_anchor: tokio::time::Instant::now(),
             #[cfg(test)]
             builds: std::sync::atomic::AtomicUsize::new(0),
         });
@@ -250,6 +253,22 @@ impl Windows {
             .iter()
             .position(|name| *name == collection)
             .map(|position| revisions.values[position]))
+    }
+
+    /// The first step at or after `after` on this store's reread grid, which starts when its
+    /// windows were first attached and steps by `interval`. Sockets on one store that come due
+    /// for a paced reread therefore read together: the first computes a changed window and the
+    /// others reuse it at the same revision, where sockets drifting apart would each compute it.
+    /// The step is at most one interval after `after`, and it is found from `after` alone, so a
+    /// timer that fires late reads once and never catches up on missed steps.
+    pub(super) fn reread_boundary(&self, after: tokio::time::Instant, interval: Duration) -> tokio::time::Instant {
+        if after <= self.reread_anchor || interval.is_zero() {
+            return after;
+        }
+        let step = interval.as_nanos();
+        let steps = (after - self.reread_anchor).as_nanos().div_ceil(step);
+        // A u64 of nanoseconds spans centuries; saturate rather than wrap past it.
+        self.reread_anchor + Duration::from_nanos(u64::try_from(steps * step).unwrap_or(u64::MAX))
     }
 
     /// Every collection's revision, when another socket already weighed the newest commit: then
@@ -521,6 +540,27 @@ mod tests {
         assert_ne!(read(&windows, &state, &session, &missions, 0, &count), first);
         assert_ne!(read(&windows, &state, &session, &missions, 0, &count), first);
         assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reread_boundary_is_the_next_shared_step_and_never_catches_up() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let windows = Windows::attach(&state.store).unwrap();
+        let (anchor, step) = (windows.reread_anchor, Duration::from_millis(1_500));
+        let at = |ms: u64| anchor + Duration::from_millis(ms);
+        assert_eq!(windows.reread_boundary(at(1), step), at(1_500));
+        assert_eq!(windows.reread_boundary(at(1_500), step), at(1_500), "a step is its own boundary");
+        assert_eq!(windows.reread_boundary(at(1_501), step), at(3_000));
+        // Far past the last step, the next one is still the only one: no burst of missed steps.
+        assert_eq!(windows.reread_boundary(at(10_300), step), at(10_500));
+        for ms in (0..20_000).step_by(37) {
+            let boundary = windows.reread_boundary(at(ms), step);
+            assert!(boundary >= at(ms) && boundary - at(ms) < step, "at most one interval later");
+        }
+        // Before the grid starts, there is nothing to align to.
+        let early = anchor - Duration::from_millis(5);
+        assert_eq!(windows.reread_boundary(early, step), early);
     }
 
     #[test]

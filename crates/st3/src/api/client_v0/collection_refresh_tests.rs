@@ -252,6 +252,42 @@ async fn a_retry_reads_only_the_failed_subscription() {
     assert_eq!(fixture.counts(), counts(&[("agents", 2), ("missions", 1)]));
 }
 
+/// Sockets on one store that joined at different times reread a changing window on the same
+/// steps, so the first computes it and the rest reuse it; each still rereads an interval apart.
+#[tokio::test(start_paused = true)]
+async fn sockets_that_join_apart_reread_a_changing_window_on_the_same_steps() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "alder");
+    let mut first = Fixture::open(state.clone(), false, None, &["missions"]).await;
+    assert_eq!(first.paused_frame().await["kind"], "snapshot");
+    tokio::time::advance(Duration::from_millis(700)).await;
+    let mut second = Fixture::open(state.clone(), false, None, &["missions"]).await;
+    assert_eq!(second.paused_frame().await["kind"], "snapshot");
+    // A commit every 100 ms keeps both windows due; note when each socket rereads.
+    let start = tokio::time::Instant::now();
+    let (mut first_at, mut second_at) = (Vec::new(), Vec::new());
+    for step in 0..60 {
+        let status = if step % 2 == 0 { "running" } else { "stopped" };
+        first.claim("agent/fixture-roster", "runtime.observed", json!({"status": status}));
+        for (fixture, at) in [(&mut first, &mut first_at), (&mut second, &mut second_at)] {
+            if let Some(frame) = fixture.paused_settle(Duration::from_millis(30)).await {
+                assert_eq!(frame["kind"], "changes");
+                at.push(tokio::time::Instant::now() - start);
+            }
+        }
+        tokio::time::advance(Duration::from_millis(100)).await;
+    }
+    let shared = first_at.iter().filter(|at| second_at.contains(at)).count();
+    assert!(shared >= 2, "the sockets reread together: {first_at:?} and {second_at:?}");
+    for at in [&first_at, &second_at] {
+        for pair in at.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(gap >= COLLECTION_REREAD_INTERVAL - Duration::from_millis(100), "paced: {at:?}");
+            assert!(gap < 2 * COLLECTION_REREAD_INTERVAL, "never more than an interval late: {at:?}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_usage_commit_rereads_agents_and_leaves_missions_idle() {
     let root = tempfile::tempdir().unwrap();
