@@ -1,5 +1,7 @@
 //! st3 claims graph, API, reconciliation, and CLI support.
 
+pub mod cli_output;
+
 #[cfg(any(test, feature = "test-support"))]
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]
@@ -47,12 +49,14 @@ pub mod harness_events;
 /// The lifecycle hook set st3 publishes beneath its own state directory.
 pub mod hooks;
 pub mod incremental;
+pub mod instance;
 pub mod lane;
 pub mod mailbox;
 pub mod message_body;
 /// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
 pub mod maintenance;
 pub(crate) mod memory;
+pub(crate) mod read_cache;
 pub mod mission;
 pub mod model;
 /// A driver relaunches its harness on the native session a suspended seat resumes.

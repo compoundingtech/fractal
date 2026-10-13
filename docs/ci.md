@@ -71,8 +71,14 @@ uses Namespace priority 2, preserving the self-hosted fork boundary. Native Mac 
 installer checks use standard GitHub-hosted `macos-15` (ARM64); Linux installer/assembly/publish
 use GitHub-hosted Ubuntu. Operations found no owned macOS runner, so Mac placement is explicitly
 hosted rather than a claim of owned Mac capacity. Release jobs no longer need Namespace outside
-PR validation. The `main` release concurrency group preserves an active build while replacing
-its older pending successor; independent tag/manual identities remain intact. Required PR checks
+PR validation. Linux release jobs put the flake-pinned C compiler on PATH before installer tests
+and Cargo: self-hosted runners do not inherit Ubuntu's host toolchain. Target linking
+still uses the pinned Zig/glibc-baseline wrapper. The `main` release concurrency group
+preserves an active run, including a build waiting for a runner. New pushes replace
+only its pending successor, so the newest pending source starts after the active run
+finishes. PR release validation replaces its own obsolete head; independent tag/manual
+identities remain intact. A cancelled pending run is not evidence of active-run
+cancellation; the run-level concurrency state distinguishes them. Required PR checks
 use priority 2, and optional benchmarks, main upkeep and manual Workspace work use
 priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
 and daily publishing use GitHub-hosted `ubuntu-latest`: these jobs verify or publish
@@ -148,6 +154,14 @@ Queue time is measured separately from execution time. Already queued jobs retai
 from their immutable workflow revision and finish naturally; this change does not rerun them.
 Optional jobs remain subject to capacity after required checks. See Namespace's
 [job ordering and priority controls](https://namespace.so/docs/solutions/github-actions/runner-controls/job-ordering).
+
+CI's default Nix shell explicitly appends `$CARGO_HOME/bin` to `PATH` after
+its pinned tools. Cargo otherwise searches that directory first
+for external subcommands, so a runner's rustup `cargo-clippy` proxy can shadow
+Nix Clippy even inside `nix develop`. The explicit late entry makes Cargo honor
+the shell's order for Clippy and nextest, without changing Cargo's cache home or
+configuring an unpinned rustup default. The Linux guard tests this lookup with
+real Cargo and benign stand-in commands; it compiles no Rust.
 
 `scripts/ci-linux STAGE` runs one stage:
 
@@ -820,13 +834,15 @@ accepted-source verification remain in place.
 
 ## Required mail redelivery canaries
 
-Alongside the two Linux test shards, `scripts/ci-mail-redelivery-canaries` requires twenty named,
+Alongside the two Linux test shards, `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
 Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
 current offer's receipt sequence; and delivered-but-unread retention across native channel
 restart. Claude's missing-channel cases also require automatic recovery, attachment during
 recheck without replacing the seat, and durable parking after three failed replacements.
+Its MCP bootstrap cases answer initialization with the daemon offline or binding pending,
+attach and reconnect in the same child, preserve native receipts, and cancel attachment on EOF.
 The mailbox cases seed hour-old sent mail and recent staged and delivered-but-unread
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.

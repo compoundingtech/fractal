@@ -189,6 +189,9 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     // Validate every answer before writing, including the persisted machine identity.
     merge_config(&path, &config)?;
     println!("Saved {}", path.display());
+    if let Some(kib) = crate::read_cache::override_kib() {
+        println!("Read cache: {kib} KiB per reader.");
+    }
     let current_exe = std::env::current_exe()?;
     let executable = if install {
         install_binaries(&current_exe)?
@@ -622,8 +625,12 @@ fn find_pty(executable: &Path) -> Result<PathBuf> {
 }
 
 fn install_binaries(executable: &Path) -> Result<PathBuf> {
+    // An instance always gets its own copies, below its own directory, so removing the
+    // directory removes them and the default install is never the one that runs.
+    let instance = crate::instance::current();
     // Keep managed installations (including the signed macOS app bundle) in place.
-    if let Ok(environment) = crate::environment::snapshot()
+    if instance.is_none()
+        && let Ok(environment) = crate::environment::snapshot()
         && st_runtime::resolve_executable("st", &environment)
             .ok()
             .is_some_and(|st| same_file(&st, executable))
@@ -631,7 +638,10 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
         return Ok(executable.into());
     }
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-    let bin = home.join(".local/bin");
+    let bin = match &instance {
+        Some(instance) => instance.bin_dir(),
+        None => home.join(".local/bin"),
+    };
     // Locate pty before changing any installed file.
     let pty = find_pty(executable)?;
     fs::create_dir_all(&bin)?;
@@ -666,11 +676,45 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
         fs::rename(pending.path().join("st"), &link)?;
     }
     File::open(&bin)?.sync_all()?;
+    record_installed_binaries(&bin)?;
     println!("Installed st3, st and pty in {}", bin.display());
     Ok(target)
 }
 
+fn record_installed_binaries(bin: &Path) -> Result<()> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("st3");
+    fs::create_dir_all(&data)?;
+    let bin = fs::canonicalize(bin)?;
+    let manifest = serde_json::json!({
+        "version": 1,
+        "source": "setup",
+        "files": [bin.join("st3"), bin.join("st"), bin.join("pty")],
+    });
+    let mut pending = tempfile::NamedTempFile::new_in(&data)?;
+    pending.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
+    pending.as_file().sync_all()?;
+    pending
+        .persist(data.join("install.json"))
+        .context("record setup-installed executables for st uninstall")?;
+    File::open(&data)?.sync_all()?;
+    Ok(())
+}
+
 fn check_login_path(executable: &Path) {
+    // An instance is run by name from its own directory; nothing belongs on the login PATH.
+    if let Some(instance) = crate::instance::current() {
+        println!(
+            "This instance's commands are in {}. Run them with: {} --instance {}",
+            instance.bin_dir().display(),
+            instance.bin_dir().join("st").display(),
+            instance.name()
+        );
+        return;
+    }
     match crate::environment::snapshot() {
         Ok(environment) => {
             if st_runtime::resolve_executable("st", &environment)
@@ -703,7 +747,8 @@ async fn daemon_ready(config: &Config) -> bool {
 fn try_linger() {
     let user = std::env::var("USER").ok().filter(|user| !user.is_empty());
     // Never allow a polkit/password conversation to open in setup.
-    let mut command = Command::new("loginctl");
+    // Lingering belongs to the real user session, never to an instance's environment.
+    let mut command = crate::service::host_command("loginctl");
     command.args(["--no-ask-password", "enable-linger"]);
     if let Some(user) = &user {
         command.arg(user);
@@ -781,6 +826,9 @@ async fn start_daemon(
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
+    if let Some(kib) = crate::read_cache::override_kib() {
+        command.env("SMALLCLAIMS_READ_CACHE_KIB", kib.to_string());
+    }
     // SAFETY: setsid is async-signal-safe; no allocation or environment changes after fork.
     unsafe {
         command.pre_exec(|| {

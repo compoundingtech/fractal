@@ -82,6 +82,10 @@ mod mail_backlog;
 pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
 mod owned_sets;
+mod published_attention;
+pub use published_attention::start_attention_list;
+#[cfg(test)]
+pub(crate) use published_attention::{published_attention_rows, refresh_attention_list};
 mod directive_notes;
 mod request_latency;
 mod client_observations;
