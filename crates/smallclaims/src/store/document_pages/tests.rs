@@ -426,7 +426,7 @@ fn actual_store_document_plans_seek_before_and_after_population_and_analyze() {
         bind(
             &store,
             &format!("doc/before/{n:04}"),
-            "unrelated",
+            &format!("distinct-content-{n}"),
             1001 + n,
             "population",
             None,
@@ -435,6 +435,93 @@ fn actual_store_document_plans_seek_before_and_after_population_and_analyze() {
     assert_plans(&store);
     store.connection.write().execute_batch("ANALYZE").unwrap();
     assert_plans(&store);
+}
+
+#[test]
+fn normal_and_upgraded_document_read_indexes_match_the_required_layout() {
+    fn layout(store: &Store) {
+        let conn = store.readers.get();
+        for (table, index, expected) in [
+            (
+                "documents",
+                "document_canonical_latest",
+                vec![
+                    ("name".to_owned(), 0_i64, "BINARY".to_owned()),
+                    ("binding_key".to_owned(), 1, "BINARY".to_owned()),
+                ],
+            ),
+            (
+                "blobs",
+                "sqlite_autoindex_blobs_1",
+                vec![("hash".to_owned(), 0_i64, "BINARY".to_owned())],
+            ),
+        ] {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_index_list(?1) WHERE name=?2)",
+                    params![table, index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "{table} lacks required {index}");
+            let columns = conn
+                .prepare(
+                    "SELECT name,desc,coll FROM pragma_index_xinfo(?1) WHERE key=1 ORDER BY seqno",
+                )
+                .unwrap()
+                .query_map([index], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(columns, expected, "{table}/{index}");
+        }
+    }
+    layout(&node());
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("documents.sqlite3");
+    let store = Store::open(&path, "documents-upgrade", Arc::new(runtime::Plain)).unwrap();
+    bind(&store, "doc/upgrade", "first", 1000, "first", None);
+    bind(
+        &store,
+        "doc/upgrade",
+        "second",
+        2000,
+        "second",
+        Some("agent/author"),
+    );
+    layout(&store);
+    let expected = serde_json::to_value(read(&store, None, None, true, None, 10).unwrap()).unwrap();
+    // The supported schema-fourteen document layout, on the actual configured writer.
+    // blobs retains its historical hash PK; document_index rebuilds the added binding key.
+    store
+        .connection
+        .write()
+        .execute_batch(
+            "DROP TRIGGER projection_digest_documents_insert;
+         DROP TRIGGER projection_digest_documents_update;
+         DROP TRIGGER projection_digest_documents_delete;
+         DROP INDEX document_canonical_latest;
+         ALTER TABLE documents DROP COLUMN binding_key;
+         DELETE FROM meta WHERE key='canonical_document_binding_keys';
+         PRAGMA user_version=14;",
+        )
+        .unwrap();
+    drop(store);
+    for _ in 0..2 {
+        let reopened = Store::open(&path, "documents-upgrade", Arc::new(runtime::Plain)).unwrap();
+        layout(&reopened);
+        assert_eq!(
+            serde_json::to_value(read(&reopened, None, None, true, None, 10).unwrap()).unwrap(),
+            expected
+        );
+        parity(&reopened, None, Some("doc/"), true, None, 10);
+    }
 }
 
 fn measured(
@@ -656,6 +743,15 @@ fn isolated_blob_boundary_explains_the_retained_one_step_difference() {
             )
             .unwrap();
     };
+    // 0896... is below all target hashes; c270... is above them. These are real hashes
+    // of the bound bytes, not synthetic keys that bypass the Store's normal representation.
+    let lowest_target = hex::encode(Sha256::digest(b"target-1"));
+    let highest_target = hex::encode(Sha256::digest(b"target-2"));
+    assert!(hex::encode(Sha256::digest(b"below-8")) < lowest_target);
+    assert!(hex::encode(Sha256::digest(b"unrelated")) > highest_target);
+    insert_blob("below-8");
+    execute();
+    let (below_rows, below) = execute();
     insert_blob("unrelated");
     execute();
     let (one_rows, one) = execute();
@@ -664,21 +760,30 @@ fn isolated_blob_boundary_explains_the_retained_one_step_difference() {
     }
     execute();
     let (many_rows, many) = execute();
-    println!("document-page isolated blob boundary BEFORE={before:?} ONE={one:?} MANY={many:?}");
+    println!(
+        "document-page isolated blob boundary BEFORE={before:?} BELOW={below:?} ABOVE={one:?} MANY={many:?}"
+    );
+    assert_eq!(before_rows, below_rows);
     assert_eq!(before_rows, one_rows);
     assert_eq!(one_rows, many_rows);
     assert_eq!(before.statements, 1);
+    assert_eq!(below.statements, 1);
     assert_eq!(one.statements, 1);
     assert_eq!(many.statements, 1);
     assert_eq!(one.vm_steps, before.vm_steps + 1);
+    assert_eq!(below.vm_steps, before.vm_steps);
     assert_eq!(many.vm_steps, one.vm_steps);
     assert_eq!(
         (
             before.fullscan_steps,
+            below.fullscan_steps,
             one.fullscan_steps,
             many.fullscan_steps
         ),
-        (0, 0, 0)
+        (0, 0, 0, 0)
     );
-    assert_eq!((before.sorts, one.sorts, many.sorts), (0, 0, 0));
+    assert_eq!(
+        (before.sorts, below.sorts, one.sorts, many.sorts),
+        (0, 0, 0, 0)
+    );
 }

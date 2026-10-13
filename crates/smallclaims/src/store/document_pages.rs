@@ -37,6 +37,8 @@ fn query(
     // because named/current queries otherwise choose the (name,hash) PK and add a sort.
     // The normal blobs.hash PK is also required: ANALYZE of a small blob table can
     // otherwise choose a table scan for every selected document.
+    // normal_and_upgraded_document_read_indexes_match_the_required_layout guards both
+    // names and key layouts on fresh and in-place-upgraded stores before a schema edit lands.
     // Current-only rows already satisfy the latest predicate. Avoid computing it a second
     // time for the returned boolean. History still reports each row's actual latest flag.
     let latest = if history {
