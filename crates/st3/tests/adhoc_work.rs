@@ -233,6 +233,10 @@ async fn progress_eta_survives_replay_and_is_replaced_by_the_next_note() {
     assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported)"));
     assert!(daemon.ok(&["work", "ls", "--as", ALDER]).await.to_string().contains("ETA (self-reported)"));
     daemon
+        .ok(&["work", "progress", step, "--as", ALDER, "--incarnation", "alder-one"])
+        .await;
+    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported)"));
+    daemon
         .ok(&[
             "work", "progress", step, "--as", ALDER, "--incarnation", "alder-one",
             "--summary", "Estimate withdrawn",

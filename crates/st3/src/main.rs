@@ -4633,7 +4633,7 @@ struct WorkProgressArgs {
     /// Estimated finish: a positive duration from now or a future RFC3339 timestamp.
     ///
     /// Adds a self-reported ETA to this progress note, not an execution deadline.
-    /// The next progress note replaces it. Omit --eta to clear the estimate.
+    /// The next nonempty summary replaces it. Use --summary without --eta to withdraw it.
     #[arg(long)]
     eta: Option<String>,
 }
