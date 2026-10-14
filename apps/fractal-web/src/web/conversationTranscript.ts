@@ -35,9 +35,16 @@ export const transcriptSendFailureReason = (reason: string): KitSendFailureReaso
   return classified ?? sendFailureReasons.failed
 }
 
-/** Only failed Text sends require an adapter allocation; every other source item stays by reference. */
+/** Only failed or unconfirmed Text sends require an adapter allocation; every other source item stays by reference. */
 const hasKitSendState = (item: ConversationItem): item is ConversationItem & KitConversationItem =>
-  item._tag !== 'Text' || item.sendState?._tag !== 'Failed'
+  item._tag !== 'Text' || (item.sendState?._tag !== 'Failed' && item.sendState?._tag !== 'Unconfirmed')
+
+/** Raw send diagnostics never reach the kit; it shows fixed human copy for each outcome. */
+const kitSendState = (state: SendState): KitTextItem['sendState'] =>
+  state._tag === 'Failed'
+    ? { ...state, reason: transcriptSendFailureReason(state.reason), detail: sendFailureDetail(state.reason) }
+    : state._tag === 'Unconfirmed' ? { _tag: 'Unconfirmed', detail: sendFailureDetail('unconfirmed') }
+      : state
 
 const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly role: 'user' } =>
   item._tag === 'Text' && item.role === 'user'
@@ -156,10 +163,7 @@ export const prepareTranscriptTurns = (
       ? { _tag: 'Notice', id: sourceItem.id, kind: 'event', text: 'An event this view cannot show yet.',
         ...(sourceItem.at === undefined ? {} : { at: sourceItem.at }) }
       : hasKitSendState(sourceItem) ? sourceItem
-        : { ...sourceItem, sendState: sourceItem.sendState?._tag === 'Failed'
-          ? { ...sourceItem.sendState, reason: transcriptSendFailureReason(sourceItem.sendState.reason),
-            detail: sendFailureDetail(sourceItem.sendState.reason) }
-          : sourceItem.sendState }
+        : { ...sourceItem, sendState: sourceItem.sendState === undefined ? undefined : kitSendState(sourceItem.sendState) }
     if (isPrompt(item)) {
       flush()
       prompt = item

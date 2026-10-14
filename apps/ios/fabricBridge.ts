@@ -1,7 +1,7 @@
 // The carrier's ports on this build's native fabric bridge. Nothing here runs unless the person
 // chose fabric and the build links the bridge.
-import type { CarrierPorts, FabricPath } from './carrier';
-import { nativeRefusedAfter } from './fabricSession';
+import { FabricRefusal, type CarrierPorts, type FabricPath } from './carrier';
+import { nativeRefusalAfter } from './fabricSession';
 import { dialFabric, fabricAvailable, fabricIdentity, fabricStats, stopFabric } from './modules/st-fabric';
 
 export { fabricAvailable, fabricIdentity };
@@ -14,14 +14,29 @@ function newestAttempt(stats: Record<string, unknown>): number {
 export function nativeCarrierPorts(): CarrierPorts {
   // Attempts before this dial are old news: only a refusal after it concerns this connection.
   let floor = 0;
+  const refusal = async () => {
+    const refused = nativeRefusalAfter(await fabricStats(), floor);
+    return refused ? new FabricRefusal(refused.code) : null;
+  };
   return {
     dial: async target => {
       try { floor = newestAttempt(await fabricStats()); } catch { /* the first dial has no earlier attempts */ }
       const result = await dialFabric(target.node, target.service, target.address, 'auto');
+      // The listener answers before the member does. One unauthenticated capabilities read through it
+      // shows whether the member admitted this phone, refused it, or cannot be reached; the carrier's
+      // dial limit bounds it, and stopping the bridge ends it.
+      try {
+        const response = await fetch(`${result.url}/v1/client/capabilities`, { headers: { accept: 'application/json' } });
+        await response.text().catch(() => '');
+      } catch {
+        const refused = await refusal().catch(() => null);
+        if (refused) throw refused;
+        throw new Error('The member did not answer over fabric');
+      }
       return { url: result.url };
     },
     stop: stopFabric,
-    refused: async () => nativeRefusedAfter(await fabricStats(), floor),
+    refusal,
     now: () => Date.now(),
     wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
   };
