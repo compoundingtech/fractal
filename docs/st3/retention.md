@@ -50,6 +50,10 @@ claim of the kind, so a later claim does not replace an earlier one. A test fail
 class allows dropping and it has neither a rule nor a `pending` reason, and when a durable kind has
 a rule.
 
+The harness question rule drops whole questions rather than witnessed claims: every claim of a
+question goes once its resolution was accepted at least a day before the cut, and none goes while
+it is pending. See [Harness questions](harness-questions.md).
+
 Each rule has:
 
 - `kind`, and `when`: conditions that must all hold (`actor=null`, `FIELD=set`, `FIELD=VALUE`);

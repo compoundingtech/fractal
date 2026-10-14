@@ -2900,15 +2900,33 @@ witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
-fn the_policy_renders_the_rules_description_with_only_the_limits_rule_changed_since_14() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 15);
+fn the_policy_renders_the_rules_description_changed_since_14_only_by_limits_and_questions() {
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 16);
+    let questions = "keep=all-while-pending,none-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
-        RULES_V14_DESCRIPTION.replace(
-            "harness.limits keep=all-source-observations",
-            "harness.limits slot=subject keep=newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at\n\
-             runtime.reconcile-decision slot=subject,key keep=newest,newest-carrier-of-each-field",
-        )
+        RULES_V14_DESCRIPTION
+            .replace(
+                "harness.limits keep=all-source-observations",
+                "harness.limits slot=subject keep=newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at\n\
+                 runtime.reconcile-decision slot=subject,key keep=newest,newest-carrier-of-each-field",
+            )
+            .replace(
+                "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n",
+                &format!(
+                    "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n\
+                     harness-question.observed slot=subject {questions}\n\
+                     harness-question.resolved slot=subject {questions}\n"
+                ),
+            )
+            .replace(
+                "witness=every-field-set-again-by-a-later-kept-claim-of-the-slot",
+                "witness=every-field-set-again-by-a-later-kept-claim-of-the-slot-but-harness-questions",
+            )
+            .replace(
+                "carriers=every-rule-but-loop.state-keeps",
+                "carriers=every-rule-but-loop.state-and-harness-questions-keeps",
+            )
     );
 }
 
@@ -2984,6 +3002,7 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         Rule::UsageSeries => "series",
         Rule::UsageCumulative => "cumulative",
         Rule::AccountLimits => "limits",
+        Rule::QuestionLifecycle => "question",
     };
     let field_sets = [
         json!({}),
@@ -3031,6 +3050,12 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
     let mut old_to_new = BTreeMap::new();
     let mut new_to_old = BTreeMap::new();
     for claim in &claims {
+        // Rules version 16 added the harness question rule.
+        if super::checkpoint_rules::question_kind(&claim.kind) {
+            let slot = vec![claim.subject.clone(), claim.kind.clone()];
+            assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("question", slot)));
+            continue;
+        }
         // Rules version 15 added rules for `harness.limits` and `runtime.reconcile-decision`;
         // every other kind is unchanged.
         if claim.kind == "harness.limits" {
@@ -3195,4 +3220,62 @@ fn reconcile_decisions_keep_the_newest_of_each_key() {
     store.apply_checkpoint_drop("checkpoint/1970-01-01", &plan.envelopes, &plan.claims).unwrap();
     assert_eq!(store.member_reconcile_fault(AGENT, None).unwrap(), fault_before);
     assert_eq!(store.latest_claim(AGENT, Some("runtime.reconcile-decision")).unwrap().unwrap().id, restart.id);
+}
+
+#[test]
+fn a_harness_question_goes_whole_a_day_after_its_resolution() {
+    use st3_schema::harness_questions::{Question, Status};
+    use super::harness_questions::QuestionObservation;
+    let store = Store::open_memory("alder").unwrap();
+    let ask = |native_id: &str, at: u128| {
+        store.set_write_clock_at(at).unwrap();
+        let question = store
+            .observe_harness_question(&QuestionObservation {
+                agent: AGENT.into(),
+                session: "tester".into(),
+                native_id: native_id.into(),
+                runtime_incarnation: "inc-1".into(),
+                questions: vec![Question { id: "q0".into(), options: 2, multi: false, required: true }],
+            })
+            .unwrap();
+        store.seal_local_batches().unwrap();
+        question
+    };
+    let resolve = |question: &super::harness_questions::HarnessQuestion, at: u128| {
+        store.set_write_clock_at(at).unwrap();
+        store
+            .resolve_harness_question(&question.id, Status::Cancelled, &question.revision, &BTreeMap::new(), None)
+            .unwrap();
+        store.seal_local_batches().unwrap();
+    };
+    let cut = 3 * DAY_MS;
+    let pending = ask("pending", 100);
+    let old = ask("old", 200);
+    resolve(&old, 300);
+    let recent = ask("recent", 400);
+    resolve(&recent, cut - DAY_MS + 1);
+    store.set_write_clock_at(cut + 1).unwrap();
+    store.append_claim(&input("daemon/alder", "daemon.diagnostic", None,
+        json!({"severity": "warning", "code": "slow-request", "reason": "last"}), "question-last")).unwrap();
+    store.seal_local_batches().unwrap();
+    let claims_of = |subject: &str| {
+        store.claims_for(subject, None).unwrap().into_iter().map(|claim| claim.id).collect::<Vec<_>>()
+    };
+    let (old_claims, kept) = (claims_of(&old.id), [claims_of(&pending.id), claims_of(&recent.id)].concat());
+    assert_eq!(old_claims.len(), 2);
+    let scratch = tempfile::tempdir().unwrap();
+    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
+    assert!(proof.passed, "{proof:?}");
+    let gone = dropped(&plan);
+    for id in &old_claims {
+        assert!(gone.contains(id), "a question resolved a day before the cut goes whole");
+    }
+    for id in &kept {
+        assert!(!gone.contains(id), "a pending or recently resolved question stays");
+    }
+    store.apply_checkpoint_drop("checkpoint/1970-01-04", &plan.envelopes, &plan.claims).unwrap();
+    assert!(store.harness_question(&old.id, cut).unwrap().is_none());
+    assert!(store.latest_claim(&old.id, None).unwrap().is_none());
+    assert!(store.harness_question(&pending.id, cut).unwrap().is_some());
+    assert!(store.harness_question(&recent.id, cut).unwrap().unwrap().resolution.is_some());
 }
