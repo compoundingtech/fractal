@@ -64,7 +64,7 @@ async fn daemon(root: &Path) {
                 |State(state): State<AppState>,
                  Query(fence): Query<Fence>,
                  websocket: WebSocketUpgrade| async move {
-                    websocket.on_upgrade(move |socket| stream(state, fence, socket))
+                    websocket.on_upgrade(move |socket| stream_with_reader(state, fence, socket, raw_snapshot))
                 },
             ),
         )
@@ -316,7 +316,7 @@ async fn many_streams() {
         if targeted {
             loop {
                 let (recipient, received, at) =
-                    tokio::time::timeout(MAILBOX_FULL_SNAPSHOT / 2, rx.recv())
+                    tokio::time::timeout(MAILBOX_RECHECK / 2, rx.recv())
                         .await
                         .unwrap()
                         .unwrap();
@@ -349,7 +349,7 @@ async fn many_streams() {
             .await
             .unwrap();
         loop {
-            let (_, received, at) = tokio::time::timeout(MAILBOX_FULL_SNAPSHOT / 2, rx.recv())
+            let (_, received, at) = tokio::time::timeout(MAILBOX_RECHECK / 2, rx.recv())
                 .await
                 .unwrap()
                 .unwrap();

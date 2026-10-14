@@ -6,7 +6,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         &self,
         subject: &DesiredSubject,
         ptys: Option<&HashMap<String, RuntimeObservation>>,
-        work_message_agents: &mut Vec<(String, String, MemberSpec)>,
+        work_message_agents: &mut Vec<(DesiredSubject, String, MemberSpec)>,
     ) -> Result<()> {
         if !subject.subject.starts_with("agent/")
             || subject.member.as_ref().is_some_and(|m| m.host == self.host)
@@ -111,7 +111,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.reconcile_driver_readiness(subject, member, observation, now_ms())?;
                     if let Some(incarnation) = incarnation {
                         work_message_agents.push((
-                            subject.subject.clone(), incarnation.into(), member.clone(),
+                            subject.clone(), incarnation.into(), member.clone(),
                         ));
                     }
                     stopped = false;

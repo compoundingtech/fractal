@@ -197,6 +197,31 @@ impl PtyRuntime {
         self.spawn_guarded(id, launch, cwd, env, display_name, tags, size, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_checked(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        self.spawn_guarded(
+            id,
+            launch,
+            cwd,
+            env,
+            display_name,
+            tags,
+            size,
+            None,
+            Some(guard),
+        )
+    }
+
     /// Start a cutover only after its predecessor exited. A replay can reuse only the exact
     /// operation's tagged replacement; an unrelated live incarnation is never adopted.
     #[allow(clippy::too_many_arguments)]
@@ -272,7 +297,16 @@ impl PtyRuntime {
         if fence.is_file() {
             let previous = std::fs::read_to_string(&fence)
                 .with_context(|| format!("read PTY publication fence {}", fence.display()))?;
-            self.wait_for_publication(id, (!previous.is_empty()).then_some(previous.as_str()))?;
+            // Give the unknown launch one recovery window to publish. If it still has not,
+            // retire its fence and let this pass replace it with `pty run --force`.
+            match self.wait_for_publication(id, (!previous.is_empty()).then_some(previous.as_str())) {
+                Ok(_) => {}
+                Err(error)
+                    if error.downcast_ref::<PtySpawnTimeout>().is_some_and(|timeout| {
+                        timeout.phase == PtySpawnTimeoutPhase::Publication
+                    }) => {}
+                Err(error) => return Err(error),
+            }
             std::fs::remove_file(&fence)
                 .with_context(|| format!("clear PTY publication fence {}", fence.display()))?;
             before = self
@@ -304,6 +338,10 @@ impl PtyRuntime {
                 }
         }
         if before.as_ref().is_some_and(observation_is_live) {
+            anyhow::ensure!(
+                guard.is_none() || cutover.is_some(),
+                "guarded start cannot attribute an existing incarnation to a new launch"
+            );
             return Ok(());
         }
         // What the previous incarnation left running ends before its replacement starts. Each
@@ -320,9 +358,6 @@ impl PtyRuntime {
             let recorded = self.spawn_state_path(id, "scope");
             std::fs::write(&recorded, &unit)
                 .with_context(|| format!("record PTY scope {}", recorded.display()))?;
-        }
-        if let Some(guard) = guard {
-            guard()?;
         }
         let previous_incarnation = before.as_ref().and_then(observation_incarnation);
         std::fs::write(&fence, previous_incarnation.as_deref().unwrap_or_default())
@@ -398,7 +433,25 @@ impl PtyRuntime {
                 command.env_clear().envs(environment);
             }
             command.env("PTY_ROOT", &self.root);
-            let output = match output_within(command, self.command_timeout) {
+            // A later failed attempt cannot close a producer created by an earlier
+            // attempt. Only failure to create the first launcher proves rejection.
+            let operation = (attempt == 0)
+                .then(|| env.get("ST3_START_OPERATION").map(String::as_str))
+                .flatten();
+            if let Some(guard) = guard
+                && let Err(error) = guard()
+            {
+                let _ = std::fs::remove_file(&fence);
+                // Only rejection before the first launcher proves there is no
+                // producer. An earlier launcher may still publish after returning.
+                return Err(match operation {
+                    Some(operation) => error.context(crate::StartRejected {
+                        operation: Some(operation.to_owned()),
+                    }),
+                    None => error,
+                });
+            }
+            let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = std::fs::remove_file(&fence);
@@ -854,12 +907,29 @@ impl PtyRuntime {
 }
 
 /// A wedged PTY command must not stall the reconciler indefinitely.
-pub(crate) fn output_within(mut command: Command, timeout: Duration) -> Result<Output> {
+pub(crate) fn output_within(command: Command, timeout: Duration) -> Result<Output> {
+    output_for_start(command, timeout, None)
+}
+
+fn output_for_start(
+    mut command: Command,
+    timeout: Duration,
+    operation: Option<&str>,
+) -> Result<Output> {
     let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| {
+            let error = anyhow::Error::from(error);
+            match operation {
+                Some(operation) => error.context(crate::StartRejected {
+                    operation: Some(operation.to_owned()),
+                }),
+                None => error,
+            }
+        })?;
     let pid = child.id();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -1648,32 +1718,89 @@ exit 0
     }
 
     #[test]
-    fn an_unresolved_publication_fences_followup_launches() {
+    fn an_unresolved_publication_gets_only_one_recovery_window_before_respawn() {
         let root = tempfile::tempdir().unwrap();
         let binary = fake_pty(root.path(), "fake-pty-unresolved-publication", "");
         let runtime = PtyRuntime::new(root.path().join("registry"))
             .with_binary(binary.to_string_lossy())
+            // Parallel tests may briefly inherit the lock while forking their fake PTYs.
+            // Allow that contention without changing production deadlines.
+            .with_spawn_timeout(Duration::from_secs(1));
+        let fence = runtime.spawn_state_path("work", "pending");
+
+        for expected_launches in 1..=3 {
+            let error = spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<PtySpawnTimeout>().unwrap().phase,
+                PtySpawnTimeoutPhase::Publication
+            );
+            assert!(fence.is_file(), "keep the new launch's recovery window");
+            assert_eq!(
+                fs::read_to_string(binary.with_extension("count"))
+                    .unwrap()
+                    .trim(),
+                expected_launches.to_string(),
+                "an unresolved fence must not permanently block new launches"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_publication_fence_respawns_in_the_same_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-stale-fence", "  publish new");
+        let runtime = PtyRuntime::new(root.path().join("registry"))
+            .with_binary(binary.to_string_lossy())
             .with_spawn_timeout(Duration::from_millis(30));
-        let spawn = || spawn_work(&runtime, root.path(), &BTreeMap::new());
+        fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
+        let fence = runtime.spawn_state_path("work", "pending");
+        fs::write(&fence, "42:old").unwrap();
 
-        let first = spawn().unwrap_err();
-        let second = spawn().unwrap_err();
+        spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap();
 
-        assert_eq!(
-            first.downcast_ref::<PtySpawnTimeout>().unwrap().phase,
-            PtySpawnTimeoutPhase::Publication
-        );
-        assert_eq!(
-            second.downcast_ref::<PtySpawnTimeout>().unwrap().phase,
-            PtySpawnTimeoutPhase::Publication
-        );
+        assert!(!fence.exists());
         assert_eq!(
             fs::read_to_string(binary.with_extension("count"))
                 .unwrap()
                 .trim(),
-            "1",
-            "the unresolved first launch must fence later callers"
+            "1"
         );
+        assert_eq!(
+            runtime.snapshot().unwrap()[0].created_at.as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn a_late_publication_is_adopted_during_fence_recovery_without_respawn() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        let binary = fake_pty(root.path(), "fake-pty-late-fence", "");
+        let runtime = PtyRuntime::new(registry.clone())
+            .with_binary(binary.to_string_lossy())
+            .with_spawn_timeout(Duration::from_secs(1));
+        fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
+        let fence = runtime.spawn_state_path("work", "pending");
+        fs::write(&fence, "42:old").unwrap();
+        let publisher_runtime = runtime.clone();
+        let publisher = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while publisher_runtime.try_spawn_lock("work").unwrap().is_some() {
+                assert!(Instant::now() < deadline, "spawn never acquired its lock");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            write_record(&registry, "work", serde_json::json!({"createdAt":"late"}));
+            write_pid(&registry, "work", std::process::id());
+            fs::write(registry.join("work.sock"), "").unwrap();
+        });
+
+        spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap();
+        publisher.join().unwrap();
+
+        assert!(!fence.exists());
+        assert!(!binary.with_extension("count").exists(), "do not double spawn");
+        assert_eq!(runtime.snapshot().unwrap()[0].created_at.as_deref(), Some("late"));
     }
 
     #[test]

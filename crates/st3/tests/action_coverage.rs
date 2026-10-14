@@ -16,6 +16,8 @@ use tokio::sync::{Notify, watch};
 
 const NODE: &str = "action-coverage";
 const PERSON: &str = "person/avery";
+/// A mailbox owner: a person has no inbox, so mail to read and clean up goes to an agent.
+const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -208,7 +210,18 @@ impl Daemon {
         let socket = self.socket();
         let state = self.state.clone();
         self.server = Some(tokio::spawn(async move {
-            st3::api::serve_unix(&socket, st3::api::router(state)).await
+            // Provider lifecycle is simulated here; discovery must use the same fixture.
+            let router = st3::api::router(state).layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    if request.uri().path() == "/v1/harnesses" {
+                        return axum::response::IntoResponse::into_response(axum::Json(json!({
+                            "api_version": "st3.v1", "value": ["claude"]
+                        })));
+                    }
+                    next.run(request).await
+                },
+            ));
+            st3::api::serve_unix(&socket, router).await
         }));
         let mut last_error = None;
         for _ in 0..200 {
@@ -371,7 +384,7 @@ impl Daemon {
     }
 
     fn cli_command(&self, actor: &str, args: &[&str]) -> tokio::process::Command {
-        let mut command = st3::test_support::async_command(assert_cmd::cargo::cargo_bin!("st3-fixture"));
+        let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
         command
             .args([
                 "--endpoint",
@@ -454,7 +467,7 @@ async fn dispatch(
         "agent.create" => agent_create, "agent.queue-move" => agent_queue_move,
         "agent.resume" => agent_resume, "agent.start" => agent_start,
         "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
-        "custom.reply" => custom_reply,
+        "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
         "arrangement.edit" => arrangement_edit,
         "attention.resolve" => attention_resolve,
         "lane.approve" => lane_approve, "lane.join" => lane_join, "lane.leave" => lane_leave,
@@ -715,6 +728,7 @@ mission "example/review" state="ready" {{
                         step,
                         action,
                         &st3::model::WorkRequest {
+                            wait_ms: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
                             summary: Some("Drafted the copper proof.".into()),
@@ -1723,6 +1737,9 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["work", "revision", "generations", &run.subject],
         vec!["work", "revision", "generation", &run.generation],
         vec!["usage"],
+        vec!["slo"],
+        vec!["slo", "ls"],
+        vec!["slo", "explain", "cpu"],
         vec!["terminals", "ls"],
         vec!["machines"],
         vec!["launch", "ls"],
@@ -1783,6 +1800,78 @@ async fn cli_reads_preserve_operational_views_after_restart() {
             "ready"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use sha2::Digest as _;
+    let mut daemon = Daemon::new().await;
+    let session = uuid::Uuid::now_v7().to_string();
+    let seed = daemon.root.path().join(format!("time_{session}.jsonl"));
+    let inventory = daemon.root.path().join("seed-inventory");
+    std::fs::write(&seed, format!("{{\"type\":\"session\",\"id\":\"{session}\"}}\n")).unwrap();
+    daemon.apply(
+        &format!(
+            "version 2\nagent \"example/worker\" {{ host {NODE:?}; workspace {:?}; harness \"omp\" {{ seed {:?}; }} }}",
+            daemon.root.path().display().to_string(), seed.display().to_string(),
+        ),
+        "coverage-seeded-worker",
+    );
+    let client = st3::client::Client::new(st3::client::Endpoint::Unix(daemon.socket()));
+    assert_eq!(
+        st3::native_seed::first_launch(&client, WORKER, "seed-attempt", "omp", Some(&seed), &inventory, false)
+            .await.unwrap(),
+        Some(session.clone()),
+    );
+    let marker = format!(
+        "custom/agent/first-native-launch-{}",
+        hex::encode(sha2::Sha256::digest(WORKER.as_bytes())),
+    );
+    let receipt = daemon.store().claims_for(&marker, Some("custom.agent.first-native-launch"))
+        .unwrap().pop().unwrap();
+    daemon.restart().await;
+    std::fs::remove_file(&seed).unwrap();
+    assert_eq!(
+        st3::native_seed::first_launch(&client, WORKER, "before-acknowledgement", "omp", Some(&seed), &inventory, false)
+            .await.unwrap(),
+        None,
+        "an incomplete attempt starts fresh even before acknowledgement, without reading the missing seed",
+    );
+    let notice = daemon.store().latest_claim(WORKER, Some("harness.diagnostic")).unwrap().unwrap();
+    assert_eq!(notice.body["fields"]["code"], "first-native-launch-incomplete");
+    let args = [
+        "agents", "acknowledge-seed", "example/worker", "--reason", "Accept the interrupted import",
+    ];
+    let acknowledgement = cli_value(daemon.cli(PERSON, &args).await);
+    assert_eq!(acknowledgement["kind"], "custom.agent.first-native-launch-acknowledged");
+    assert_eq!(acknowledgement["actor"], PERSON, "the configured person is the default actor");
+    assert_eq!(acknowledgement["body"]["fields"]["receipt"], receipt.id);
+    assert_eq!(acknowledgement["body"]["fields"]["reason"], "Accept the interrupted import");
+    assert_eq!(acknowledgement["body"]["evidence"], json!([receipt.id]));
+    daemon.restart().await;
+    let replay = cli_value(daemon.cli(PERSON, &[
+        "agents", "acknowledge-seed", WORKER, "--reason", "Accept the interrupted import", "--as", PERSON,
+    ]).await);
+    assert_eq!(replay["id"], acknowledgement["id"], "restart replay must not duplicate the acknowledgement");
+    let saved = daemon.store().claims_for(&marker, Some("custom.agent.first-native-launch-acknowledged")).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].body, acknowledgement["body"]);
+    assert_eq!(
+        st3::native_seed::first_launch(&client, WORKER, "after-acknowledgement", "omp", Some(&seed), &inventory, false)
+            .await.unwrap(),
+        None,
+        "acknowledgement never rearms or restages the missing seed",
+    );
+    assert_eq!(daemon.store().latest_claim(WORKER, Some("harness.diagnostic")).unwrap().unwrap().id, notice.id);
+    let receipts = daemon.store().claims_for(&marker, Some("custom.agent.first-native-launch")).unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].id, receipt.id);
+    assert_eq!(receipts[0].body["fields"]["outcome"], "seeded");
+    assert_eq!(receipts[0].body["fields"]["session_id"], session);
+    assert!(daemon.store().claims_for(WORKER, Some("harness.session-file")).unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1925,13 +2014,9 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
         daemon
             .cli(
                 PERSON,
-                &[
-                    "missions",
-                    "publish",
-                    file.to_str().unwrap(),
-                    "--as",
-                    PERSON,
-                ],
+                &["apply", file.to_str().unwrap(),
+                "--as",
+                PERSON,],
             )
             .await,
     );
@@ -1956,9 +2041,39 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
     );
     let run = daemon
         .store()
-        .mission_run("coverage-cli-run")
+        .mission_run("example/cli-work/coverage-cli-run")
         .unwrap()
         .unwrap();
+    cli_value(
+        daemon
+            .cli(
+                PERSON,
+                &[
+                    "missions",
+                    "report-to",
+                    &run.subject,
+                    "--agent",
+                    "agent/example/watcher",
+                    "--stalled-after",
+                    "1h",
+                    "--report-stalls",
+                    "false",
+                    "--as",
+                    PERSON,
+                ],
+            )
+            .await,
+    );
+    daemon.restart().await;
+    let report = daemon
+        .store()
+        .latest_claim(&run.subject, Some("mission-run.report-to"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.actor.as_deref(), Some(PERSON));
+    assert_eq!(report.body["fields"]["report_to"], "agent/example/watcher");
+    assert_eq!(report.body["fields"]["stalled_after_ms"], 3_600_000);
+    assert_eq!(report.body["fields"]["report_stalls"], false);
     let step = &run.steps[0].subject;
     daemon.store().set_step_state(step, "ready", None).unwrap();
     // An unclaimed step must still reject an obsolete caller incarnation without writes.
@@ -2029,6 +2144,50 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
                     .timeout_extension_ms,
                 3_600_000
             );
+            cli_value(
+                daemon
+                    .cli(
+                        WORKER,
+                        &[
+                            "work",
+                            "wait",
+                            step,
+                            "--as",
+                            WORKER,
+                            "--incarnation",
+                            "4242:fixture",
+                            "--for",
+                            "1h",
+                            "--reason",
+                            "build slot",
+                        ],
+                    )
+                    .await,
+            );
+            daemon.restart().await;
+            let waiting = daemon.store().step_run(step).unwrap().unwrap();
+            assert_eq!(waiting.execution_started_at_unix_ms, None);
+            assert!(waiting.execution_paused_until_unix_ms.is_some());
+            assert_eq!(waiting.blocked_reason.as_deref(), Some("build slot"));
+            cli_value(
+                daemon
+                    .cli(
+                        WORKER,
+                        &[
+                            "work",
+                            "resume",
+                            step,
+                            "--as",
+                            WORKER,
+                            "--incarnation",
+                            "4242:fixture",
+                        ],
+                    )
+                    .await,
+            );
+            let running = daemon.store().step_run(step).unwrap().unwrap();
+            assert!(running.execution_started_at_unix_ms.is_some());
+            assert_eq!(running.execution_paused_until_unix_ms, None);
         }
     }
     daemon.restart().await;
@@ -2186,22 +2345,54 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
         daemon.restart().await;
         cli_value(daemon.cli(WORKER, &arguments).await);
     }
+    // People have no inbox: the worker cannot answer the person with st, and nothing is written.
+    let sent_before = daemon.store().claims_for_kind_at("message.sent", None, true, 1_000).unwrap().claims.len();
+    let refused = daemon
+        .cli(
+            WORKER,
+            &[
+                "conversations", "reply", message, "--from", WORKER, "--body", "Copper answer",
+                "--idempotency-key", "coverage-cli-reply-refused",
+            ],
+        )
+        .await;
+    assert!(!refused.status.success());
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(refusal.contains("people do not have inboxes: print your answer in the chat"), "{refusal}");
+    assert_eq!(
+        daemon.store().claims_for_kind_at("message.sent", None, true, 1_000).unwrap().claims.len(),
+        sent_before
+    );
+    // A reply between agents is unchanged: it keeps its thread and is sent once across a restart.
+    const PEER: &str = "agent/example/peer";
+    let ask = cli_value(
+        daemon
+            .cli(
+                WORKER,
+                &[
+                    "conversations", "send", PEER, "--from", WORKER, "--body", "Copper handoff?",
+                    "--idempotency-key", "coverage-cli-ask-peer",
+                ],
+            )
+            .await,
+    );
+    let ask = ask["subject"].as_str().unwrap().to_owned();
     let reply_args = [
         "conversations",
         "reply",
-        message,
+        ask.as_str(),
         "--from",
-        WORKER,
+        PEER,
         "--body",
         "Copper answer",
         "--idempotency-key",
         "coverage-cli-reply-once",
     ];
-    let reply = cli_value(daemon.cli(WORKER, &reply_args).await);
+    let reply = cli_value(daemon.cli(PEER, &reply_args).await);
     let reply_id = reply["subject"].as_str().unwrap();
     daemon.restart().await;
     assert_eq!(
-        cli_value(daemon.cli(WORKER, &reply_args).await)["subject"],
+        cli_value(daemon.cli(PEER, &reply_args).await)["subject"],
         reply_id
     );
     assert_eq!(
@@ -2212,7 +2403,7 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
             .unwrap()
             .in_reply_to
             .as_deref(),
-        Some(message)
+        Some(ask.as_str())
     );
     cli_value(
         daemon
@@ -2240,6 +2431,166 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_silent_kinds_and_count_reads_survive_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    const PEER: &str = "agent/example/peer";
+    let send = |key: &'static str, flag: &'static str| {
+        vec![
+            "conversations",
+            "send",
+            WORKER,
+            "--from",
+            PEER,
+            "--body",
+            key,
+            "--idempotency-key",
+            key,
+            "--kind",
+            flag,
+        ]
+    };
+    let silent_args = send("copper-silent", "silent");
+    let sent = cli_value(daemon.cli(PEER, &silent_args).await);
+    assert_eq!(sent["kind"], "silent");
+    let held = sent["subject"].as_str().unwrap().to_owned();
+    assert!(st3::silent::is_held(
+        &daemon.store().message(&held).unwrap().unwrap()
+    ));
+    daemon.restart().await;
+    assert_eq!(
+        cli_value(daemon.cli(PEER, &silent_args).await)["subject"],
+        held
+    );
+    // An unoffered silent is readable on demand, before any question wakes the seat.
+    let read = cli_value(
+        daemon
+            .cli(WORKER, &["conversations", "read", &held, "--as", WORKER])
+            .await,
+    );
+    assert_eq!(read["status"], "read");
+    let question = cli_value(daemon.cli(PEER, &send("copper-question", "wake")).await);
+    assert_eq!(question["kind"], "wake");
+    assert!(!st3::silent::is_held(
+        &daemon
+            .store()
+            .message(question["subject"].as_str().unwrap())
+            .unwrap()
+            .unwrap()
+    ));
+    let asked = cli_value(
+        daemon
+            .cli(
+                WORKER,
+                &[
+                    "conversations",
+                    "send",
+                    PEER,
+                    "--from",
+                    WORKER,
+                    "--body",
+                    "Which proof?",
+                    "--kind",
+                    "wake",
+                    "--idempotency-key",
+                    "copper-asked",
+                ],
+            )
+            .await,
+    );
+    let parent = asked["subject"].as_str().unwrap();
+    let answer = cli_value(
+        daemon
+            .cli(
+                PEER,
+                &[
+                    "conversations",
+                    "reply",
+                    parent,
+                    "--from",
+                    PEER,
+                    "--body",
+                    "The copper proof.",
+                    "--idempotency-key",
+                    "copper-answer",
+                ],
+            )
+            .await,
+    );
+    assert!(!st3::silent::is_held(
+        &daemon
+            .store()
+            .message(answer["subject"].as_str().unwrap())
+            .unwrap()
+            .unwrap()
+    ));
+    let reply = cli_value(
+        daemon
+            .cli(
+                WORKER,
+                &[
+                    "conversations",
+                    "reply",
+                    &held,
+                    "--from",
+                    WORKER,
+                    "--body",
+                    "Noted.",
+                    "--kind",
+                    "silent",
+                    "--idempotency-key",
+                    "copper-silent-reply",
+                ],
+            )
+            .await,
+    );
+    assert!(st3::silent::is_held(
+        &daemon
+            .store()
+            .message(reply["subject"].as_str().unwrap())
+            .unwrap()
+            .unwrap()
+    ));
+    let fence = daemon.fence(PEER).await;
+    let api = dispatch(
+        &daemon.client(PEER),
+        "message.send",
+        "coverage-copper-api-silent",
+        fence,
+        json!({"to": WORKER, "content":"A client silent.", "kind":"silent"}),
+    )
+    .await
+    .unwrap();
+    let api = serde_json::to_value(api).unwrap();
+    let api_id = api["value"]["affected_ids"][0].as_str().unwrap();
+    assert!(st3::silent::is_held(
+        &daemon.store().message(api_id).unwrap().unwrap()
+    ));
+    let before = daemon.store().index().unwrap();
+    let counts = cli_value(
+        daemon
+            .cli(WORKER, &["usage", "--messages-only", "--hours", "24"])
+            .await,
+    );
+    assert_eq!(counts["agent_to_agent"], 6);
+    assert_eq!(counts["silent"], 3);
+    assert_eq!(counts["complete"], true);
+    assert_eq!(
+        daemon.store().index().unwrap(),
+        before,
+        "count read wrote or built"
+    );
+    daemon.restart().await;
+    assert_eq!(
+        cli_value(daemon.cli(WORKER, &["usage", "--messages-only"]).await)["silent"],
+        3
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() {
     if st3::test_support::supervise_test() {
         return;
@@ -2251,13 +2602,13 @@ async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() 
         .as_millis();
     let mut messages = BTreeMap::new();
     for (name, recipient, phase, fresh) in [
-        ("old-sent", PERSON, "sent", false),
-        ("old-delivered", PERSON, "delivered", false),
-        ("old-read", PERSON, "read", false),
-        ("old-closed", PERSON, "closed", false),
-        ("old-other", "person/blair", "sent", false),
-        ("fresh-sent", PERSON, "sent", true),
-        ("fresh-delivered", PERSON, "delivered", true),
+        ("old-sent", READER, "sent", false),
+        ("old-delivered", READER, "delivered", false),
+        ("old-read", READER, "read", false),
+        ("old-closed", READER, "closed", false),
+        ("old-other", "agent/example/other", "sent", false),
+        ("fresh-sent", READER, "sent", true),
+        ("fresh-delivered", READER, "delivered", true),
     ] {
         daemon
             .store()
@@ -2335,13 +2686,13 @@ async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() 
         "conversations",
         "cleanup",
         "--as",
-        PERSON,
+        READER,
         "--older-than",
         "1h",
     ];
-    assert_eq!(cli_value(daemon.cli(PERSON, &scoped).await)["count"], 2);
+    assert_eq!(cli_value(daemon.cli(READER, &scoped).await)["count"], 2);
     daemon.restart().await;
-    assert_eq!(cli_value(daemon.cli(PERSON, &scoped).await)["count"], 0);
+    assert_eq!(cli_value(daemon.cli(READER, &scoped).await)["count"], 0);
     for (name, expected) in [
         ("old-sent", "closed"),
         ("old-delivered", "closed"),
@@ -2880,7 +3231,13 @@ def start():
     child = subprocess.Popen([os.environ['ST3_COVERAGE_BINARY'], 'up', '--config', str(root / 'config/st3/config.toml'), '--pty-binary', str(root / 'bin/pty')], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     pid_file.write_text(str(child.pid))
 if 'show' in args:
+    if 'st3-replication.service' in args and not (root / 'config/systemd/user/st3-replication.service').exists():
+        print('LoadState=not-found\nActiveState=inactive\nSubState=dead')
+        sys.exit(4)
     print('LoadState=loaded\nActiveState=active\nSubState=running')
+elif 'st3-replication.service' in args and not (root / 'config/systemd/user/st3-replication.service').exists():
+    print('Failed to stop st3-replication.service: Unit not loaded.', file=sys.stderr)
+    sys.exit(5)
 elif 'st3.service' in args:
     if 'stop' in args or 'restart' in args or ('disable' in args and '--now' in args): stop()
     if 'start' in args or 'restart' in args: start()
@@ -2907,10 +3264,10 @@ PY
     let run = |args: Vec<String>| {
         let mut command = if args.get(1).map(String::as_str) == Some("reset") {
             let mut command = tokio::process::Command::new("python3");
-            command.args(["-c", "import os,pty,subprocess,sys; master,slave=pty.openpty(); os.write(master,b'yes\\nfixture-service\\nerase st state\\n'); result=subprocess.run(sys.argv[1:],stdin=slave); os.close(master); os.close(slave); sys.exit(result.returncode)", assert_cmd::cargo::cargo_bin!("st3-fixture").to_str().unwrap()]);
+            command.args(["-c", "import os,pty,subprocess,sys; master,slave=pty.openpty(); os.write(master,b'yes\\nfixture-service\\nerase st state\\n'); result=subprocess.run(sys.argv[1:],stdin=slave); os.close(master); os.close(slave); sys.exit(result.returncode)", test_bin!("st3-fixture").to_str().unwrap()]);
             command
         } else {
-            st3::test_support::async_command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+            st3::test_support::async_command(test_bin!("st3-fixture"))
         };
         command
             .env_clear()
@@ -2928,7 +3285,7 @@ PY
             .env("XDG_DATA_HOME", root.path().join("data"))
             .env("XDG_RUNTIME_DIR", root.path().join("run"))
             .env("ST3_COVERAGE_ROOT", root.path())
-            .env("ST3_COVERAGE_BINARY", assert_cmd::cargo::cargo_bin!("st3-fixture"))
+            .env("ST3_COVERAGE_BINARY", test_bin!("st3-fixture"))
             .args(args);
         async move {
             tokio::time::timeout(Duration::from_secs(30), command.output())
@@ -2962,6 +3319,7 @@ PY
         if action == "reset" {
             assert!(!config.state_dir.join("must-be-erased").exists());
         }
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Unit not loaded"));
         if matches!(action, "install" | "restart" | "reset") {
             Client::unix_as(&config.socket, PERSON)
                 .capabilities()
@@ -3914,6 +4272,7 @@ mission "example/review" state="ready" {{
                         step,
                         action,
                         &st3::model::WorkRequest {
+                            wait_ms: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
                             summary: Some("Drafted the copper proof.".into()),
@@ -4003,8 +4362,9 @@ fn action_inventory_matches_contract_and_has_existing_test_references() {
             "{action} is absent from the real typed-client dispatch"
         );
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     for group in [
+        "client_commands",
         "typed_actions",
         "cli",
         "stui_effects",
@@ -4260,7 +4620,7 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
         daemon
             .cli(
                 PERSON,
-                &["agents", "apply", file.to_str().unwrap(), "--as", PERSON],
+                &["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON],
             )
             .await,
     );

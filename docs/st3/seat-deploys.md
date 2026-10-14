@@ -5,6 +5,32 @@ new one such as a new Nix store path. The daemon adopts every running seat; it d
 This document explains how each seat's message path follows the new binary without ending the
 provider session, and how st reports a seat whose message path did not.
 
+## Local response and event storage upgrade
+
+Schema 17 is a one-way database upgrade. Capture a supported backup before restarting with the
+matching daemon; rolling back requires restoring that pre-upgrade backup, because older binaries
+reject the upgraded store. Durable claims and checkpoint rules remain authoritative.
+
+Existing local response rows remain untouched in this release: their historical claims lack the
+caller-key association. Operations records the deployment timestamp and the fixed cohort's
+deployment-plus-30-day removal date in [issue 1741](https://github.com/compoundingtech/smalltalk/issues/1741).
+New receipts expire after seven days; durable effect claims recognise later retries and either
+rebuild the original response or return terminal `idempotency-key-expired`. Response cleanup
+subscribes to committed writes before its first rowid deadline read, reads deadlines outside the
+writer, and examines at most 64 responses per transaction while protecting active runs. No
+indexes are added, dropped or changed. Event payload
+copies drain in transactions of at most 64 positions; operations must use the measured writer-held
+and total migration evidence for the exact release, rather than treating a row limit as a latency
+bound. No fixed migration duration is assumed. Transient busy/locked errors retry with backoff;
+permanent errors stop the worker visibly.
+
+Converting a legacy event table seeds a floor at the current frontier. A caught-up follower resumes
+normally; a lagging follower receives HTTP 410 with the floor/frontier and must explicitly resync
+once. Raw trace/history followers stop and report the gap. Projection clients use one bounded
+replacement and establish a fresh cursor; they must not repeatedly request the rejected cursor.
+Upgrade the CLI with the daemon for owner-filtered or subject-filtered migration traversal. A new
+CLI stops before requesting history from a daemon that lacks bounded continuation support.
+
 ## Harness admission at the next launch
 
 Before starting an unseen installed omp or OpenCode build, st measures its native delivery
@@ -108,7 +134,7 @@ lookup, and receipt publication failures have separate diagnostics and retry wit
 at 30 seconds. Retained handoffs are inspected only to recover missing receipts from exact native
 proof. Boot and reconnect never authorize a fresh offer of delivered-but-unread mail.
 
-`st doctor` and stui count unread (`sent`, `staged`, or `delivered`) messages older than one hour, including
+`st doctor` and the terminal UI count unread (`sent`, `staged`, or `delivered`) messages older than one hour, including
 retained mail for retired seats. Boot never clears that backlog. To deliberately archive it across
 all mailboxes, run `st conversations cleanup --all --older-than 1h`. Add `--dry-run` to list matching
 message IDs first, or replace `--all` with `--as AGENT` to clean one mailbox. Cleanup archives as each
@@ -121,7 +147,42 @@ Epochs are allocated by the daemon, independently of wall-clock time. An initial
 request token; a lost acknowledgement retries that same epoch, and retired tokens cannot allocate
 another epoch after replacement. Reexec carries the returned epoch and token. Only an explicit
 `stale-mailbox-session` ends a subscription as fenced. Store/read worker failures close its socket
-and the current owner reconnects after one second without creating a receipt or replaying old mail.
+and the current owner reconnects without creating a receipt or replaying old mail. A driver waits
+between half a second and a second and a half, at random, before it reconnects or retries a call
+the daemon could not take. A deploy re-executes every driver and restarts the daemon in the same
+few seconds. With a fixed pause, every driver would reach the new daemon in the instant it starts
+to listen.
+
+Claude's MCP handshake is local to its stdio child and does not wait for the daemon. Previously,
+the child discovered the runtime incarnation and bound its mailbox before answering `initialize`.
+A daemon outage or delayed runtime observation could consume Claude's
+[30-second MCP startup timeout](https://code.claude.com/docs/en/env-vars#environment-variables).
+Once Claude closes that child's stdin, reconnecting to the daemon cannot restore the stdio
+connection. Healthy provider hooks could then coexist with a missing channel. The isolated
+offline-start regression reproduces the blocked handshake; historical incidents without Claude
+loader logs cannot be attributed conclusively to that timeout.
+
+The push channel now answers initialization and metadata requests while incarnation discovery and
+binding retry. A fresh binding also keeps waiting when its own nonterminal hook activity precedes
+`runtime.running`; those hooks allocate no ownership and cannot revive an exited incarnation.
+Matching `ended` or `indeterminate` hook states remain terminal rather than waiting for startup.
+If that runtime observation never arrives, the existing bounded seat-restart recovery still
+bounds the missing-channel episode. After initialization and binding, a failed
+initialization-diagnostic POST retries the identical claim and idempotency key until acknowledged. The existing one-second tick
+schedules retries after 1, 2, 4, 8, 16 and then 30 seconds, capped there while failures continue.
+MCP requests and EOF remain responsive while that POST is pending.
+The initialization diagnostic carries no native activity state. Native readiness comes from
+hooks or the driver's push-only hookless grace. No attachment is reported and no mailbox is
+read until binding succeeds. When the daemon returns, the same initialized child attaches; a later transport outage reconnects using
+its existing fence. Native handoff tracking and receipts prevent replay. EOF cancels a pending
+attachment immediately, leaving no detached reconnect worker. An omitted plugin, an uninitialized
+MCP client, or a child Claude has already closed still needs the bounded seat-restart recovery;
+st does not type into the provider to recreate its channel.
+
+A resumed push channel whose saved incarnation differs from the live incarnation now refuses
+before mailbox binding, instead of continuing until a later fence. The non-push `claude-mcp`
+path also skips the synchronous daemon-incarnation wait; its existing filesystem protocol and
+owned readiness writer remain unchanged. This does not add a non-push readiness fallback.
 
 OMP todo observation does not own delivery's lifetime. If the local PTY incarnation is ahead of
 the graph, the channel retains the latest validated todo snapshot while delivery continues. Its

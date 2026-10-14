@@ -276,6 +276,10 @@ fn query_kind(sql: &str) -> String {
     }
     out.trim().to_owned()
 }
+/// The text a statement is counted under: literals and numbers removed.
+pub fn normalize_query(sql: &str) -> String {
+    query_kind(sql)
+}
 pub fn record_query(sql: &str, duration: Duration) {
     let kind = query_kind(sql);
     METER.get_or_init(Mutex::default).lock().unwrap().record(
@@ -365,6 +369,16 @@ pub fn task<T>(kind: &'static str, work: impl FnOnce() -> T) -> T {
 pub struct Charged {
     kind: String,
     client: Option<String>,
+}
+impl Charged {
+    /// The request route or background task.
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+    /// The client that sent the request, when known.
+    pub fn client(&self) -> Option<&str> {
+        self.client.as_deref()
+    }
 }
 thread_local! {static CURRENT: RefCell<Option<Charged>> = const {RefCell::new(None)};}
 pub fn current() -> Option<Charged> {

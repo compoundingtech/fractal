@@ -4,6 +4,16 @@ use crate::model::MemberSpec;
 use serde::Deserialize;
 use std::cell::RefCell;
 
+pub(super) const STAGED_SUBJECTS_QUERY: &str =
+    "SELECT DISTINCT subject FROM claims WHERE json_extract(body,'$.owned_set') IS NOT NULL";
+
+// One statement proves both absences in a current SQLite snapshot. Any receipt, including a
+// repaired or malformed one, conservatively requires the existing full authority evaluation.
+const EMPTY_DESIRED_AUTHORITY_QUERY: &str =
+    "SELECT NOT EXISTS(SELECT 1 FROM claims WHERE kind='owned-set.revised')
+        AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1
+                       AND json_extract(body,'$.owned_set') IS NOT NULL)";
+
 struct SnapshotRows {
     connection: usize,
     rows: BTreeMap<Option<u64>, Vec<View>>,
@@ -512,6 +522,21 @@ pub(super) fn owner(
     Ok(owners.into_iter().next())
 }
 
+/// The owning sets of every member at `at`, from one read of the set receipts. A member with
+/// more than one is what [`owner`] refuses as a conflict.
+pub(super) fn owners_at(
+    connection: &Connection,
+    at: Option<u64>,
+) -> Result<BTreeMap<String, BTreeSet<String>>, St3Error> {
+    let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
+    for view in rows(connection, at)? {
+        for member in view.receipt.members.keys().chain(view.receipt.retired.keys()) {
+            owners.entry(member.clone()).or_default().insert(view.id.clone());
+        }
+    }
+    Ok(owners)
+}
+
 pub(super) fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), St3Error> {
     if let Some(set) = owner(connection, member, None)? {
         return Err(St3Error::new(
@@ -656,20 +681,9 @@ pub(super) fn plan_tx(
             manual_seats |= manual_member(transaction, member)?;
         }
     }
-    for desired in input
-        .subjects
-        .values()
-        .filter(|d| crate::rollout::manual(d))
-    {
-        if let Some(member) = &desired.member {
-            if let Err(refusal) = crate::native_resume::rollout_support(member) {
-                blockers.push(format!("{}: {}", desired.subject, refusal.reason));
-            }
-        } else {
-            blockers.push(format!(
-                "{}: manual rollout needs a native seat launch",
-                desired.subject
-            ));
+    for desired in input.subjects.values().filter(|d| crate::rollout::manual(d)) {
+        if desired.member.as_ref().is_none_or(|member| !matches!(member.launch, crate::model::LaunchSpec::Argv(_))) {
+            blockers.push(format!("{}: manual rollout needs a typed native harness launch", desired.subject));
         }
     }
     let membership = fleet_membership_tx(transaction).map_err(internal)?;
@@ -816,7 +830,7 @@ pub(super) fn plan_tx(
                                     "{s}: when-idle requires the same native account binding"
                                 ));
                             }
-                            if let Err(refusal) = crate::native_resume::rollout_support(new) {
+                            if !manual && let Err(refusal) = crate::native_resume::rollout_support(new) {
                                 blockers.push(format!("{s}: {}", refusal.reason));
                             }
                             if new.host != old.host || new.driver != old.driver {
@@ -953,10 +967,19 @@ pub(super) fn plan_tx(
     let declaration_diffs = declarations::diffs(
         transaction,
         &intent,
-        changes.iter().filter(|(_, change)| change.as_str() != "unchanged")
+        changes
+            .iter()
+            .filter(|(_, change)| change.as_str() != "unchanged")
             .map(|(subject, _)| subject.as_str()),
         Some(current_index(transaction).map_err(internal)?),
     )?;
+    let rollouts = input.subjects.values().filter(|desired| crate::rollout::manual(desired))
+        .filter_map(|desired| {
+            let refusal = desired.member.as_ref()
+                .and_then(|member| crate::native_resume::rollout_support(member).err())?;
+            Some((desired.subject.clone(), json!({"action":"cutover","policy":{"mode":"manual"},
+                "blocking":[refusal.reason]})))
+        }).collect();
     let preview = Preview {
         declaration_diffs,
         rollout: options.rollout.clone(),
@@ -967,7 +990,7 @@ pub(super) fn plan_tx(
         effects,
         running_restart_count: running_restarts.len(),
         running_restarts,
-        rollouts: BTreeMap::new(),
+        rollouts,
         expected_subjects: heads,
         digest,
         mass_retirement: mass,
@@ -1268,32 +1291,158 @@ impl Store {
         intent: &NormalizedIntent,
         options: &Options,
     ) -> Result<Preview, St3Error> {
-        self.connection
+        let mut preview = self.connection
             .batched(|tx| plan_tx(tx, intent, options).map(|p| p.preview))
-            .map_err(|e| St3Error::new("internal", e))?
+            .map_err(|e| St3Error::new("internal", e))??;
+        // Operational annotations belong to preview only. Publication keeps its existing
+        // transaction reads and suspension follows the shared launch-lineage comparator.
+        for (subject, effect) in &mut preview.effects {
+            let Some(next) = intent.subjects.get(subject) else { continue; };
+            if let Some(action) = crate::suspension::publication_action(
+                self, next, true, || {
+                    Ok(self.desired_subject_with_writer(subject)?
+                        .and_then(|(desired, _)| desired.member))
+                },
+            ).map_err(internal)? {
+                effect.push_str("; ");
+                effect.push_str(&action.reason);
+            }
+        }
+        Ok(preview)
     }
     pub fn owned_member_guard(&self, s: &str) -> Result<(), St3Error> {
         guard_member(&self.readers.get(), s)
     }
-    /// Fence an external effect prepared from a declaration against the selected set.
-    pub fn owned_desired_guard(&self, desired: &DesiredSubject) -> Result<(), St3Error> {
-        let connection = self.readers.get();
-        guard_member(&connection, &desired.subject)?;
-        if let Some(set) = owner(&connection, &desired.subject, None)? {
-            let view = selected(&connection, None)?
-                .into_iter()
-                .find(|v| v.id == set)
-                .ok_or_else(|| St3Error::new("owned-set-pending", "missing owning set"))?;
-            let members = effective_members(&connection, &view, None)?;
-            let member = members.get(&desired.subject);
-            if member.is_none_or(|(m, _, _)| m.revision != desired_revision(desired)) {
-                return Err(St3Error::new(
-                    "stale-set-member",
-                    "declaration changed since this effect was prepared",
-                ));
-            }
+    /// Select a pass's candidates from one authority snapshot. This is not an effect fence:
+    /// callers must still check current authority before workspace, render or runtime effects.
+    pub(crate) fn owned_desired_subjects(
+        &self,
+        desired: &[DesiredSubject],
+    ) -> Result<BTreeSet<String>, St3Error> {
+        if desired.is_empty() {
+            return Ok(BTreeSet::new());
         }
-        Ok(())
+        for declaration in desired {
+            smallclaims::touched::note_read(|| declaration.subject.clone());
+        }
+        self.read_snapshot(|_| {
+            self.with_owned_set_snapshot_reads(|| {
+                let connection = self.readers.get();
+                let history = rows(&connection, None)?;
+                let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
+                for view in &history {
+                    for subject in view
+                        .receipt
+                        .members
+                        .keys()
+                        .chain(view.receipt.retired.keys())
+                    {
+                        owners
+                            .entry(subject.clone())
+                            .or_default()
+                            .insert(view.id.clone());
+                    }
+                }
+                // The partial index created at open contains only staged owned declarations.
+                // Let the planner choose: a missing index must not fence otherwise valid work.
+                // Empty ownership uses one receipt and one staged-subject query for any roster;
+                // statement count alone does not bound rows or CPU for nonempty history.
+                let staged = connection
+                    .prepare(STAGED_SUBJECTS_QUERY)
+                    .map_err(internal)?
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(internal)?
+                    .collect::<Result<BTreeSet<_>, _>>()
+                    .map_err(internal)?;
+                // Keep failures local to owned candidates, as the individual guard does.
+                // An unowned subject does not depend on selected/effective membership.
+                let selected = selected(&connection, None);
+                let members = selected
+                    .as_ref()
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter(|view| view.blockers.is_empty())
+                    .map(|view| (view.id.clone(), effective_members(&connection, view, None)))
+                    .collect::<BTreeMap<_, _>>();
+                let eligible = desired
+                    .iter()
+                    .filter(|declaration| {
+                        let Some(sets) = owners.get(&declaration.subject) else {
+                            return !staged.contains(&declaration.subject);
+                        };
+                        if sets.len() != 1 {
+                            return false;
+                        }
+                        let set = sets.first().expect("one owner");
+                        members.get(set).is_some_and(|members| {
+                            members.as_ref().is_ok_and(|members| {
+                                members
+                                    .get(&declaration.subject)
+                                    .is_some_and(|(member, _, _)| {
+                                        member.revision == desired_revision(declaration)
+                                    })
+                            })
+                        })
+                    })
+                    .map(|declaration| declaration.subject.clone())
+                    .collect();
+                Ok(eligible)
+            })
+        })
+        .map_err(internal)
+    }
+    /// Fence an external effect prepared from a declaration against the selected set.
+    /// Effect callers must enter outside an enclosing read snapshot and wait for this
+    /// method to return before writing or performing the effect.
+    pub fn owned_desired_guard(&self, desired: &DesiredSubject) -> Result<(), St3Error> {
+        smallclaims::sqlite::debug_assert_no_pinned_read();
+        smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
+        smallclaims::touched::note_read(|| desired.subject.clone());
+        let empty: bool = {
+            let connection = self.readers.get();
+            connection
+                .prepare_cached(EMPTY_DESIRED_AUTHORITY_QUERY)
+                .map_err(internal)?
+                .query_row([&desired.subject], |row| row.get(0))
+                .map_err(internal)?
+        };
+        if empty {
+            return Ok(());
+        }
+        // A negative probe is not authorization. Start another current snapshot for the full
+        // fence and reuse receipt rows only within it, never across invocations or effects.
+        self.read_snapshot(|_| {
+            Ok(self.with_owned_set_snapshot_reads(|| {
+                let connection = self.readers.get();
+                if let Some(set) = owner(&connection, &desired.subject, None)? {
+                    let view = selected(&connection, None)?
+                        .into_iter()
+                        .find(|v| v.id == set)
+                        .ok_or_else(|| St3Error::new("owned-set-pending", "missing owning set"))?;
+                    if !view.blockers.is_empty() {
+                        return Err(St3Error::new("owned-set-pending", view.blockers.join("; ")));
+                    }
+                    let members = effective_members(&connection, &view, None)?;
+                    let member = members.get(&desired.subject);
+                    if member.is_none_or(|(m, _, _)| m.revision != desired_revision(desired)) {
+                        return Err(St3Error::new(
+                            "stale-set-member",
+                            "declaration changed since this effect was prepared",
+                        ));
+                    }
+                } else {
+                    let staged: bool = connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND json_extract(body,'$.owned_set') IS NOT NULL)",
+                        [&desired.subject], |row| row.get(0),
+                    ).map_err(internal)?;
+                    if staged {
+                        return Err(St3Error::new("owned-set-pending", "staged member awaits its owning set revision"));
+                    }
+                }
+                Ok(())
+            }))
+        }).map_err(internal)?
     }
     pub fn apply_owned_set(
         &self,
@@ -1308,7 +1457,11 @@ impl Store {
             &options.expected_subjects,
             &key,
             Some(actor),
-            Some(options),
+            None,
+            publication::CommitChecks {
+                owned: Some(options),
+                guard: None,
+            },
             None,
         )
     }

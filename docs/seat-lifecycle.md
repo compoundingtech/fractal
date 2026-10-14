@@ -2,7 +2,7 @@
 
 A seat's declaration, work, messages, and decisions live in the graph. A running harness also has its own native session. Restarting a process does not erase the plan; preserving the **exact native conversation** is what suspend/resume is for.
 
-Use the worker from [getting started](getting-started.md). Check it before changing anything:
+Use the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat). Check it before changing anything:
 
 ```sh
 st agents show agent/garden/worker
@@ -24,7 +24,7 @@ st agents restart agent/garden/worker --as person/ada
 st agents show agent/garden/worker
 ```
 
-When repeated failed starts have parked a seat, a person's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the seat parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
+When repeated failed starts have parked a seat, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the seat parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
@@ -32,6 +32,16 @@ The graph retains claimed work and pending mail. A relaunch continues the previo
 st agents stop agent/garden/worker --as person/ada
 st agents start garden/worker --as person/ada
 ```
+
+Native drivers check their work once a minute and renew held claims only while the claim's
+exact harness incarnation remains live, including an idle or blocked harness. Seats without
+held claims do not read full subject status for lease maintenance. Checking work before
+status keeps resident seats cheap without extending the renewal period or weakening the
+incarnation check.
+
+A restarted seat that cannot continue its conversation (another account, another model, a crash)
+gets a first message with the handoff it left and the live state of its work. See
+[seat handoff](st3/seat-continuity.md); a seat writes its handoff with `st agents handoff write`.
 
 To preserve the exact conversation, wait until the seat has finished its turn and holds no claim:
 
@@ -248,8 +258,16 @@ native startup argument. With no message, the seat starts idle. The Rust `st3-cl
 Ctrl+\\ detaches and leaves the agent running. `st terminals attach agent/builder.site` attaches
 again later, from any machine in the fleet. A terminal on another host is attached PTY to PTY over
 Fabric when that host runs `st terminals expose-fabric` and grants your machine the protocol it
-prints; no st daemon carries the bytes. Otherwise it goes through the client gateway as your
-person, the same path the apps use.
+prints; the owner's st daemon routes each tunnel straight to the PTY session. While that daemon is
+stopped or restarting, as during every deploy, it refuses new tunnels and its live remote attaches
+drop; `st terminals attach` reconnects once it is back. A host that needs attaches to work without
+its daemon runs `st terminals expose-fabric --exec`, which has Fabric start a process per attach.
+Otherwise it goes through the client gateway as your person, the same path the apps use. `st ui`
+on a machine with its own st daemon attaches a terminal on this host to its PTY session, and one
+on another fleet host over Fabric when Fabric reaches the owner; the daemon only says where it lives.
+When Fabric cannot reach the owner, `st ui` goes through the client gateway and the terminal header
+says so with Fabric's reason. An owner that refuses the incarnation is never worked around. A paired
+device with no daemon of its own, such as the phone, uses the gateway.
 
 After creating a seat, st explains whether it is ready or still starting and prints the exact
 commands to attach, send it a message, inspect it, and stop it. These commands are also printed
@@ -422,3 +440,182 @@ The label must be non-empty. Like declaring a seat in free mode, a person or an 
 any seat. A bound harness must act as itself, and rename preserves the original declaring actor.
 
 [`examples/st3/seats`](../examples/st3/seats) has a seat file for each harness.
+
+Ordinary messages are `silent` or `wake` (the default for every sender and seat). Silent mail stays unread without waking; each real wake offers at most eight, with older mail available on demand. There is no per-seat wake policy or inferred question type. See [silent messages](st3/silent-messages.md).
+
+## Pending runtime starts
+
+Starts run on two dedicated launch workers, with one outstanding operation per seat. A blocked launch retains its slot; revocation does not free it until the backend call returns. Other reconciliation, physical stops and safety checks continue. When both workers are occupied, another start remains durably queued and completion wakes its admission.
+
+`st agents show` displays `START` with the pending operation ID and queued, running, unknown, completed or revoked phase. `START JOBS` counts this owner's running launch calls and revoked calls still running. `START OPEN` counts unresolved operations, including revoked operations whose producer or runtime closure remains unverified after their launch call returned. These detail fields are local to the runtime owner. Revoked means authority was withdrawn; it does not mean the producer or runtime has ended. No launch input or environment is exposed in this view.
+
+Stop requests revoke pending starts before physical control. An absent observation does not establish a completed stop while a launch remains unresolved. A stale or revoked completion cannot write a start-success or starting observation. If a revoked runtime publishes later, cleanup requires its recorded operation tag and exact incarnation; missing or conflicting provenance leaves the operation unresolved and raises a diagnostic. Same-name replacement identity never authorizes that cleanup. A successful native PTY stop supplies positive retirement proof only after its generation-fenced process tree and work scope have ended. The writer binds that proof to the original operation, resulting incarnation and exact terminate request/result receipts before releasing admission; it does not depend on a live PID remaining in the exited registry entry.
+
+Returned launches remain unknown until their resulting incarnation and operation provenance are verified. Missing observations, conflicting tags and provenance lookup errors retain admission and evidence; they do not write a success receipt. Later exact verification completes only the original operation and declaration. Positive closure without a verified launch resolves as failure. Public action receipts carry writer-set `operation_status`: `verified` for an exact-incarnation start, `producer-closed` for a positively closed start failure, and `retired` for a positively verified exact termination. Each carries its immutable operation, runtime kind and ID, original desired token and exact request evidence; a verified launch also carries the resulting incarnation. Ordinary failure has no closure status, and a UUID or status label alone is not proof without those bindings.
+
+This dispatch change does not guarantee that a detached PTY producer cannot publish after revocation. That needs a producer-side cancellation boundary. A returned error or an absent runtime is not proof that the producer closed. Native rejection before producer or exec child creation carries closure evidence bound to the exact operation; exec retirement requires its matching persisted generation and verified group exit. Errors after producer creation retain admission until exact closure or operation-owned retirement is proved. Unresolved records survive daemon restart without replaying the launch. Resolved ledger rows and their prepared launch bodies are also retained, so local disk use currently grows with launch count.
+
+
+Ledger installation captures immutable publication format cuts in local `meta` before the first operation-bound request. Reopening, graph replay and view forgetting retain them. A used ledger missing either cut is refused: preserve the store and original boundary evidence for forward recovery rather than inventing a later boundary. Resolved ledger bindings and proof remain stored, but releasing their evidence pins allows original local request/result observation bodies to be trimmed. Consumers must use the exact owner ledger and request bindings, never UUID text alone.
+
+When `START OPEN` stays nonzero after a launch error, publish an ordinary stop for the affected seat, inspect its operation ID and `start-revocation-unverified` diagnostic, and preserve the owner database and runtime records for Operations. Continue work on other seats. A later publication carrying that operation tag is retired using its exact incarnation. With an older PTY producer that never publishes, there is currently no supported command that proves producer closure and releases that seat: leave the stop and ledger intact and escalate to Operations. PID absence, elapsed time, daemon restart and deleting the ledger are not closure proofs. Shipping with this residual liveness limit requires the producer-contract decision; producer acknowledgment is a separate coordinated slice.
+
+The additive ledger migration advances local storage to version 19. Before rollback, Operations must drain launch calls, revoke pending work and verify closure of every producer and operation-owned runtime. Preserve the upgraded database, ledger and runtime generation records as evidence, then restore a consistent pre-upgrade database and runtime state with their matching binary. New exec generation records contain operation provenance that older runtimes cannot read; restoring only SQLite is insufficient. Never downgrade the header in place or use a claim-only backup to erase unresolved cancellation authority. If closure cannot be established, roll forward.
+
+### Runtime records and a consistent capture
+
+Resolve `OPS_STATE_DIR` and `OPS_PTY_ROOT` from each member's actual service arguments and config, and record them in a private Operations manifest with the exact installed binary SHA. The default state directory is `${XDG_STATE_HOME:-$HOME/.local/state}/st3`; `--state-dir` or config can override it. The default PTY root is `OPS_STATE_DIR/pty`; `--pty-root` or config can override it. Keep member names and resolved home paths out of public documents.
+
+| Evidence | Exact location |
+|---|---|
+| Database, including the operation ledger | `OPS_STATE_DIR/claims.sqlite3`; committed data may also be in `claims.sqlite3-wal` before backup |
+| Current and previous exec generations | `OPS_STATE_DIR/exec/<runtime-id>.json` and `<runtime-id>.json.1` |
+| PTY generation, operation tags and registry identity | `OPS_PTY_ROOT/<runtime-id>.json`, `<runtime-id>.pid`, and `.recovery/<runtime-id>.revision.json` |
+| PTY spawn work-scope record and lock file | `<canonical-pty-root-parent>/.st3-pty-spawn-locks/<root-hash>/<runtime-hash>.scope` and `.lock` |
+
+`root-hash` is lowercase SHA256 of the canonical absolute PTY root's raw Unix path bytes, with symlinks resolved, no trailing separator and no newline. `runtime-hash` is lowercase SHA256 of the runtime ID's UTF-8 bytes, with no newline. The lock-tree parent is the **canonical** root's parent, which may differ from the configured parent when a symlink is used. Existing roots must be readable directories; do not guess the digest of a missing root. Lock files contain no persisted kernel lock ownership and are not closure proof.
+
+The version-19 roll is forward-only. Operations' routine pre-roll backup remains the online SQLite snapshot; it does not supply a swap-back cut. The following consistent runtime capture stops every owned seat and the daemon on one member. It is a planned full-outage maintenance procedure only if the people responsible request a swap-back option and accept that window. Do not require this outage as part of an ordinary roll.
+
+Before either a requested pre-upgrade rollback cut or an emergency restoration capture:
+
+1. Record the member's exact binary SHA, resolved roots and a reviewed, explicit JSON array of owned runtime IDs. On that owner's daemon, run `st agents ls --all --json`, follow every returned cursor with `--cursor`, and retain all pages. Use each local agent's runtime ID, plus the exact runtime IDs of operations being closed and declared exec runtimes from the owner inventory. Historical agent rows are not proof of live writers. Supplement this with Operations' service/process inventory so an undeclared but live producer/runtime cannot be omitted. An unlisted live writer makes the capture inconsistent and prohibits swap-back. Resolve every unknown producer and runtime; an incomplete inventory prohibits swap-back. Do not enumerate or copy the exec/PTY trees to construct this list.
+2. Withdraw launch authority, stop each owned runtime through ordinary incarnation-fenced controls, and obtain the per-operation evidence below while the daemon can still reconcile. `START JOBS=0` and `START OPEN=0` are necessary checks for modern operations, not closure proof. If a producer or runtime cannot be proved closed, preserve the store and roll forward. Stopping the daemon or losing a PID does not supply that proof.
+3. Quiesce the daemon under its service manager only after closure is established. Keep it stopped and prevent any listed runtime/producer from writing its records throughout the capture. If a writer cannot be quiesced, do not take a purportedly consistent capture.
+4. Take a SQLite backup and copy only the named generation/scope files into one new private archive, recording each listed file's presence or absence. The following Python 3.9-compatible recipe uses point lookups, not directory walks. A SQLite backup includes committed WAL contents; copying `claims.sqlite3` alone while a WAL exists is insufficient. The archive does not contain live sockets, processes or kernel locks.
+
+```sh
+# Set these from the private member manifest; inventory is an explicit JSON array.
+umask 077
+python3 - "$OPS_STATE_DIR" "$OPS_PTY_ROOT" "$OPS_CAPTURE_DIR" "$OPS_RUNTIME_IDS" <<'PY'
+import hashlib, json, os, shutil, sqlite3, stat, sys
+from pathlib import Path
+
+state, pty, capture, inventory = map(Path, sys.argv[1:])
+pty_bytes = os.path.realpath(os.fsencode(pty))
+if not os.path.isdir(pty_bytes):
+    raise SystemExit("PTY root is missing or unreadable; capture refused")
+spawn = Path(os.fsdecode(os.path.join(
+    os.path.dirname(pty_bytes), b".st3-pty-spawn-locks",
+    hashlib.sha256(pty_bytes).hexdigest().encode("ascii"))))
+runtime_ids = json.loads(inventory.read_text())
+if not isinstance(runtime_ids, list) or any(
+    not isinstance(i, str) or not i or i in (".", "..")
+    or "/" in i or "\\" in i or "\0" in i for i in runtime_ids
+):
+    raise SystemExit("inventory must contain explicit runtime basenames")
+source = sqlite3.connect(state.joinpath("claims.sqlite3").resolve().as_uri() + "?mode=ro", uri=True)
+# Account for committed WAL pages and reserve room for both recovery cuts.
+database_bytes = source.execute("PRAGMA page_count").fetchone()[0] * source.execute("PRAGMA page_size").fetchone()[0]
+margin = max(1024 ** 3, database_bytes // 10)
+required_bytes = 2 * database_bytes + margin
+# OPS_CAPTURE_DIR's parent must already exist on the intended archive filesystem.
+# Preserve the checked margin there; do not allocate this member's last free space.
+available_bytes = shutil.disk_usage(capture.parent).free
+if available_bytes < required_bytes:
+    raise SystemExit("insufficient free space for two database cuts plus margin; capture refused")
+capture.mkdir(mode=0o700, exist_ok=False)
+target = sqlite3.connect(str(capture / "claims.sqlite3"))
+source.backup(target)
+target.close()
+(capture / "claims.sqlite3").chmod(0o600)
+source.close()
+files = []
+for runtime in sorted(set(runtime_ids)):
+    digest = hashlib.sha256(runtime.encode("utf-8")).hexdigest()
+    candidates = [
+        ("exec", state / "exec", runtime + ".json"),
+        ("exec", state / "exec", runtime + ".json.1"),
+        ("pty", pty, runtime + ".json"),
+        ("pty", pty, runtime + ".pid"),
+        ("pty", pty, ".recovery/" + runtime + ".revision.json"),
+        ("spawn", spawn, digest + ".scope"),
+        ("spawn", spawn, digest + ".lock"),
+    ]
+    for role, root, name in candidates:
+        original = root / name
+        entry = {"role": role, "name": name}
+        try:
+            mode = original.lstat().st_mode
+        except FileNotFoundError:
+            entry["present"] = False
+        else:
+            if not stat.S_ISREG(mode):
+                raise SystemExit("non-regular record; capture refused: " + str(original))
+            destination = capture / role / name
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shutil.copyfile(original, destination)
+            destination.chmod(0o600)
+            entry.update(present=True, sha256=hashlib.sha256(destination.read_bytes()).hexdigest())
+        files.append(entry)
+(capture / "runtime-manifest.json").write_text(json.dumps({
+    "state_dir": str(state.resolve()), "pty_root": os.fsdecode(pty_bytes),
+    "spawn_root": str(spawn), "runtime_ids": sorted(set(runtime_ids)), "files": files,
+}, indent=2) + "\n")
+PY
+```
+
+Operations adds the closure evidence, service-quiescence evidence and exact binary SHA to this archive and verifies the backup before restarting anything. An exception or partial archive is not a recovery cut. For swap-back, first preserve the upgraded cut using the same recipe, then restore the pre-upgrade database and its matching listed runtime files together while writers remain quiesced. Honor the manifest's recorded absence only for its explicitly inventoried paths; do not remove unrelated files or recursively replace a runtime tree. If a post-upgrade operation touched an ID absent from the pre-upgrade inventory, or a prior file is not captured, the preimage is unproved: preserve and roll forward. No live process may be reconstructed from an archived PID or socket.
+
+### Check closure per operation
+
+Inspect each exact operation on its owner, using a read-only database connection. Substitute its recorded ID for `OPERATION_ID`; this primary-key lookup exposes bindings and proof without dumping launch environment or input:
+
+```sh
+python3 - "$OPS_STATE_DIR" "$OPERATION_ID" <<'PY'
+import json, sqlite3, sys
+from pathlib import Path
+connection = sqlite3.connect(
+    Path(sys.argv[1]).joinpath("claims.sqlite3").resolve().as_uri() + "?mode=ro", uri=True)
+connection.row_factory = sqlite3.Row
+row = connection.execute("""
+SELECT id, subject, owner, dispatched, finished, applied, cleanup_verified,
+       revoked_by,
+       json_extract(body,'$.selected_token') AS selected_token,
+       json_extract(body,'$.desired_token') AS desired_token,
+       json_extract(body,'$.member.runtime_id') AS runtime_id,
+       json_extract(body,'$.member.terminal') AS terminal,
+       json_extract(body,'$.start_request') AS start_request,
+       json_extract(result,'$.operation_id') AS result_operation,
+       json_extract(result,'$.verification') AS verification,
+       json_extract(result,'$.producer_closed') AS producer_closed,
+       json_extract(result,'$.incarnation') AS incarnation,
+       json_extract(result,'$.closure_proof_id') AS closure_proof_id,
+       json_extract(result,'$.closure_proof') AS closure_proof,
+       json_extract(result,'$.result_receipts') AS result_receipts,
+       json_extract(result,'$.retirement_request') AS retirement_request,
+       json_extract(result,'$.retirement_result') AS retirement_result
+FROM local_runtime_starts WHERE id=?;
+""", (sys.argv[2],)).fetchone()
+if row is None:
+    raise SystemExit("operation not found; closure unproved")
+print(json.dumps(dict(row), indent=2))
+connection.close()
+PY
+```
+
+Operations must verify the retained owner, subject, runtime ID/kind, original selected declaration, exact start request and result bindings, then record which positive proof applies:
+
+- A positively closed producer has `finished=1`, `applied=1`, `cleanup_verified=1` and `producer_closed=true`. A typed `producer-closed` result binds it to the exact operation. A revoked operation never dispatched to a worker carries a retained `closure_proof` with witness `never-dispatched`; no runtime was created by that operation. Any prior runtime still needs its own retirement check.
+- An already-ended exact operation has `verification=operation-ended` and a retained closure proof naming its actual incarnation and ending status, distinct from the prior `expected_incarnation`. The owner verifies matching physical operation provenance before writing this proof. An ending observation or cleanup flag without that binding is insufficient.
+- A verified retirement has `verification=operation-retired`, `finished=1`, `applied=1`, `cleanup_verified=1`, a resulting incarnation, and a retained `closure_proof` with witness `verified-native-retirement`, the full original request snapshots, exact terminate-request snapshot and result identity. `retirement_request`/`retirement_result` identify public receipts when their original evidence is still retained; withdrawal of original evidence suppresses publication but leaves the authoritative retained positive proof. Their proof binds both the original start request and the exact terminate request to that operation and incarnation. Receipts may have trimmed; use the permanent owner ledger proof and bindings, not UUID text or a caller label.
+- For exec closure backed by generation records, the current or previous `.json` must bind `start_operation` to the exact operation and `generation_id` to its resulting incarnation, with verified `group_exited=true`. Verify retirement of its recorded `scope_unit` as well when present; for a Linux user scope, `systemctl --user show --property=ActiveState --value UNIT` must establish inactivity. On a launchd member without a scope unit, the matching generation and verified `group_exited` are the exec closure evidence; do not invent a systemd check there. Preserve the generation and scope evidence. PID absence or a missing generation file alone is insufficient.
+
+`verification=operation-incarnation` proves a launch, not runtime closure. Ordinary failure, `launch-accepted-unverified`, a cleanup flag without matching positive evidence, zero aggregate counts, missing registry entries and old PTY errors do not prove closure. If a historical operation has no retained positive retirement/closure proof and cannot be matched to a verified retired generation, mark it unproved and refuse swap-back; this slice adds no general closure or operator-release command. In particular, an old PTY launcher that errors after starting and never publishes leaves its seat busy with **no supported release command**. The cancel-before-start producer protocol and this residual limitation were approved for this slice; the closure command is deferred. Operations still refuses a swap-back without positive closure proof.
+
+### Measure retained-ledger growth
+
+`local_runtime_starts` lives inside each owner's `OPS_STATE_DIR/claims.sqlite3`, with uncheckpointed updates possibly in `claims.sqlite3-wal`. It retains one row for every durably admitted/queued start, including resolved, failed and revoked starts; seat-busy and superseded refusals add no row. No rows or prepared bodies are pruned. The capture requires free space for two full database cuts plus a margin of at least 1 GiB or ten percent of the committed database size, whichever is larger; large member stores require a planned capacity check. Payload includes immutable original physical/control request snapshots, typed closure proofs when resolved by closure, and the full authoritative runtime observation plus canonical sortable key for verified starts. Payload size varies with prepared input/environment and results, so there is no fixed bytes-per-launch bound.
+
+At an Operations capacity review, measure the retained row count and logical payload bytes (this intentional offline aggregate reads the ledger, not the exec directory):
+
+```sql
+SELECT COUNT(*) AS operations,
+       COALESCE(SUM(length(CAST(body AS BLOB))
+                    + COALESCE(length(CAST(result AS BLOB)),0)),0) AS payload_bytes
+FROM local_runtime_starts;
+```
+
+Compare two timestamped samples: `delta(operations)/elapsed` is the admission rate and `delta(payload_bytes)/elapsed` is the measured payload growth rate. Include SQLite row/index/page overhead and other tables by separately tracking the database plus WAL disk allocation. Begin with the first deployment member and add the other member-specific manifests; do not infer an unmeasured fleet-wide rate. Evidence pins can be released, but this retained ledger continues to grow.
+
+Operations rolls forward-only storage changes separately: deploy the first merged storage upgrade alone, verify it and settle that cut, then deploy the other as its own cut. Do not combine the version-19/version-20 upgrades in one roll. Operations confirmed that production members never ran these unreleased draft builds; if a draft-opened store is discovered, preserve it and roll forward only.
