@@ -1456,11 +1456,16 @@ fn observe_payload(
     if let Some(edge) = turn_failure_edge(event, &payload) {
         driver_diagnostic::publish_turn_failure(agent_dir, driver_diagnostic::Driver::Claude, edge);
     }
-    let Some(mut observation) = observe_hook_event(event, &payload) else {
+    let top = observe_hook_event(event, &payload).map(|mut observation| {
+        if let Some(edge) = provider_auth_edge(event, &payload) {
+            observation.provider_auth = Some(edge == ProviderAuthEdge::Accepted);
+        }
+        observation
+    });
+    // A subagent's event says nothing about top-level state, but its prompts and their answers
+    // do: the seat waits on a person while any agent in it does.
+    if top.is_none() && !crate::claude_prompts::concerns_prompts(event, &payload, agent_dir) {
         return Ok(());
-    };
-    if let Some(edge) = provider_auth_edge(event, &payload) {
-        observation.provider_auth = Some(edge == ProviderAuthEdge::Accepted);
     }
     let mut writer = observe_writer(
         agent_dir,
@@ -1471,7 +1476,7 @@ fn observe_payload(
         exported_session,
         exported_seq,
     );
-    if observation.provider_auth.is_some() {
+    if top.as_ref().is_some_and(|top| top.provider_auth.is_some()) {
         writer.interrupt();
     }
     if event == "SessionStart" {
@@ -1479,10 +1484,21 @@ fn observe_payload(
         // matches a fresh predecessor record, continuity must not be claimed across the restart.
         writer.interrupt();
     }
-    // A late hook finishing after the wrapper reaped Claude must not replace the terminal record
-    // with a live state: the wrapper's `ended` carries this same token and is the session's last
-    // word. (`false` = suppressed; the hook has nothing else to do with it.)
-    writer.observe_unless_ended(observation).map(|_wrote| ())
+    let record = crate::harness_state::harness_state_path(agent_dir);
+    crate::claude_prompts::observe(agent_dir, event, &payload, raw, top, |observation, new_prompt| {
+        if new_prompt {
+            // Each prompt is its own transition: its hook answers only that observation.
+            writer.interrupt();
+        }
+        // A late hook finishing after the wrapper reaped Claude must not replace the terminal
+        // record with a live state: the wrapper's `ended` carries this same token and is the
+        // session's last word.
+        if !writer.observe_unless_ended(observation)? {
+            return Ok(None);
+        }
+        Ok(crate::harness_state::read(&record, None)
+            .and_then(|observed| observed.ownership_sequence.zip(observed.transition_sequence)))
+    })
 }
 
 /// `transcript_path` is the file Claude says holds the session, which follows the seat's own
