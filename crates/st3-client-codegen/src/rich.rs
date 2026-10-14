@@ -161,7 +161,7 @@ fn literal_values(test: &Value) -> Option<Vec<Value>> {
         .or_else(|| test.get("enum").and_then(Value::as_array).cloned())
 }
 
-/// Inline `allOf`, distribute an `allOf` base over a sibling `oneOf`, and expand `if`/`then` on one
+/// Inline `allOf`, distribute object siblings over `oneOf`, and expand `if`/`then` on one
 /// enum property into a `oneOf` of complete branches. An open discriminator adds one fallback
 /// branch whose tag is `{ type: string, not: { enum: known } }`.
 /// Predicates on independent properties stay as object relationship assertions instead.
@@ -193,8 +193,18 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         };
         node.insert(key.clone(), child);
     }
-    let Some(all_of) = node.remove("allOf") else {
-        return Ok(Value::Object(node));
+    let all_of = match node.remove("allOf") {
+        Some(parts) => parts,
+        None
+            if node.contains_key("oneOf")
+                && (node.get("type").and_then(Value::as_str) == Some("object")
+                    || ["properties", "required", "additionalProperties"]
+                        .iter()
+                        .any(|key| node.contains_key(*key))) =>
+        {
+            json!([])
+        }
+        None => return Ok(Value::Object(node)),
     };
     let parts = all_of.as_array().context("allOf")?;
     let (conditionals, plain): (Vec<&Value>, Vec<&Value>) =
@@ -1604,8 +1614,8 @@ mod tests {
                 "Duration": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 },
                 "Challenge": {
                     "type": "object", "additionalProperties": false,
-                    "properties": { "grant_kind": { "enum": ["person", "assistant"] }, "person_id": { "type": "string" } },
-                    "allOf": [],
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "pairing-challenge" }, "grant_kind": { "enum": ["person", "assistant"] }, "person_id": { "type": "string" } },
                     "oneOf": [
                         { "required": ["person_id"], "properties": { "grant_kind": { "const": "person" } } },
                         { "required": ["grant_kind"], "properties": { "grant_kind": { "const": "assistant" }, "person_id": false } }
@@ -1613,6 +1623,15 @@ mod tests {
                 }
             }
         });
+        let normalized = normalize(&schema["$defs"]["Challenge"], &Map::new()).unwrap();
+        for branch in normalized["oneOf"].as_array().unwrap() {
+            assert_eq!(branch["properties"]["kind"], json!({ "const": "pairing-challenge" }));
+            assert!(branch["required"].as_array().unwrap().contains(&json!("kind")));
+            assert_eq!(branch["additionalProperties"], json!(false));
+        }
+        let mut with_all_of = schema["$defs"]["Challenge"].clone();
+        with_all_of["allOf"] = json!([]);
+        assert_eq!(normalize(&with_all_of, &Map::new()).unwrap(), normalized);
         let rendered = models(&schema).unwrap();
         assert!(rendered.contains("Schema.Never"));
         assert!(rendered.contains("Schema.Union"));
