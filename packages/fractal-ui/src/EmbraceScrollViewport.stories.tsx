@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button } from 'react-aria-components'
 import { EmbraceScrollViewport } from './assistant-ui/EmbraceScrollViewport'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -38,7 +38,8 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
   await expect(canvas.getByRole('button', { name: 'New messages ↓' })).toBeVisible()
   await userEvent.click(canvas.getByRole('button', { name: 'Change width' }))
   await frame()
-  await expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1)
+  // ResizeObserver schedules compensation on the next frame; two frames alone race that work.
+  await waitFor(() => expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1))
   await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
   await frame()
   await expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1)

@@ -5,6 +5,7 @@
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
@@ -199,21 +200,33 @@ fn is_svg(path: &Path, bytes: &[u8]) -> bool {
 /// Draw an SVG on white, the way a browser shows one on its own page. An `<image href>`, such as a
 /// screenshot the SVG marks up, is a `data:` URL or a file inside the SVG's own folder.
 fn render_svg(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, (u32, u32))> {
+    let mut fonts = resvg::usvg::fontdb::Database::new();
+    fonts.load_system_fonts();
+    render_svg_with(path, bytes, fonts)
+}
+
+fn render_svg_with(
+    path: &Path,
+    bytes: &[u8],
+    fonts: resvg::usvg::fontdb::Database,
+) -> Result<(Vec<u8>, (u32, u32))> {
     use resvg::{tiny_skia, usvg};
     let shown = path.display();
     let folder = std::fs::canonicalize(path)
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));
     let refused = Arc::new(Mutex::new(Vec::new()));
-    let mut options = usvg::Options {
+    let fontless = Arc::new(AtomicBool::new(false));
+    let options = usvg::Options {
         resources_dir: folder.clone(),
         image_href_resolver: usvg::ImageHrefResolver {
             resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
             resolve_string: folder_resolver(folder, Arc::clone(&refused)),
         },
+        font_resolver: any_font_resolver(Arc::clone(&fontless)),
+        fontdb: Arc::new(fonts),
         ..usvg::Options::default()
     };
-    options.fontdb_mut().load_system_fonts();
     let tree = usvg::Tree::from_data(bytes, &options)
         .map_err(|error| anyhow::anyhow!("{shown} is not an SVG st can draw: {error}"))?;
     let refused = std::mem::take(&mut *refused.lock().unwrap_or_else(|error| error.into_inner()));
@@ -223,7 +236,7 @@ fn render_svg(path: &Path, bytes: &[u8]) -> Result<(Vec<u8>, (u32, u32))> {
             refused.join(", ")
         );
     }
-    if options.fontdb.is_empty() && has_text(tree.root()) {
+    if fontless.load(Ordering::Relaxed) {
         bail!(
             "{shown} has text, and this machine has no fonts to draw it with; install a font, or turn the text into paths"
         );
@@ -272,12 +285,26 @@ fn folder_resolver(
     })
 }
 
-fn has_text(group: &resvg::usvg::Group) -> bool {
-    group.children().iter().any(|node| match node {
-        resvg::usvg::Node::Text(_) => true,
-        resvg::usvg::Node::Group(group) => has_text(group),
-        _ => false,
-    })
+/// Draw text in the font it names, or else in any font this machine has. usvg leaves out text
+/// whose font-family no installed font matches, and its default family is Times New Roman, which a
+/// server rarely has; the caption on a marked-up screenshot would then vanish without a word.
+/// Text with no font at all to draw it is recorded for the error.
+fn any_font_resolver(fontless: Arc<AtomicBool>) -> resvg::usvg::FontResolver<'static> {
+    use resvg::usvg::{FontResolver, fontdb::Style};
+    let named = FontResolver::default_font_selector();
+    FontResolver {
+        select_font: Box::new(move |font, fonts| {
+            let id = named(font, fonts).or_else(|| {
+                let face = fonts.faces().find(|face| face.style == Style::Normal);
+                face.or_else(|| fonts.faces().next()).map(|face| face.id)
+            });
+            if id.is_none() {
+                fontless.store(true, Ordering::Relaxed);
+            }
+            id
+        }),
+        select_fallback: FontResolver::default_fallback_selector(),
+    }
 }
 
 /// Name a converted file for what it now is: `chart.svg` is attached as `chart.png`.
@@ -391,6 +418,44 @@ mod tests {
     }
 
     #[test]
+    fn a_caption_in_a_font_this_machine_lacks_is_drawn_in_one_it_has() {
+        let font = Path::new(test_env!("CARGO_MANIFEST_DIR")).join(
+            "../../apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+        );
+        let mut fonts = resvg::usvg::fontdb::Database::new();
+        fonts.load_font_data(std::fs::read(font).unwrap());
+        for family in [
+            "",
+            r#" font-family="Invented Sans""#,
+            r#" font-family="sans-serif""#,
+        ] {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40"><text x="4" y="30" font-size="28"{family} fill="red">WWWW</text></svg>"#
+            );
+            let (png, _) = render_svg_with(Path::new("caption.svg"), svg.as_bytes(), fonts.clone())
+                .unwrap_or_else(|error| panic!("{family}: {error}"));
+            let image = image::load_from_memory(&png).unwrap().to_rgb8();
+            assert!(
+                image.pixels().any(|pixel| pixel.0 == [255, 0, 0]),
+                "{family}: the caption is not drawn"
+            );
+        }
+    }
+
+    #[test]
+    fn text_with_no_font_to_draw_it_is_refused() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40"><text x="4" y="30">Save</text></svg>"#;
+        let error = render_svg_with(
+            Path::new("caption.svg"),
+            svg,
+            resvg::usvg::fontdb::Database::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no fonts"), "{error}");
+    }
+
+    #[test]
     fn an_svg_draws_only_images_inside_its_own_folder() {
         let root = tempfile::tempdir().unwrap();
         let folder = root.path().join("a/b");
@@ -451,6 +516,15 @@ mod tests {
                     assert_eq!((image.width(), image.height()), (2560, 1600), "{source}");
                     // The red outline at (40, 120) sits over the screenshot.
                     assert_eq!(image.get_pixel(80, 300).0, [255, 0, 0], "{source}");
+                    if source == "help" {
+                        use image::GenericImageView as _;
+                        // So is its caption, below the outline.
+                        let caption = image.view(80, 340, 600, 70).to_image();
+                        assert!(
+                            caption.pixels().any(|pixel| pixel.0 == [255, 0, 0]),
+                            "the help example's caption is not drawn"
+                        );
+                    }
                 }
                 // A build sandbox may have no fonts for the help example's caption.
                 Err(error) => assert!(

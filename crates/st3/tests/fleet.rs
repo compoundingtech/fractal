@@ -3241,7 +3241,7 @@ PY
       [ "$?" = 0 ] || exit 1
     fi
     rm -f "$registry/$(key "$me" "$2")" ;;
-  dial) f="$registry/$(key "$2" "$3")"; [ -f "$f" ] || {{ echo "no such exposure" >&2; exit 1; }}; cat "$f" ;;
+  dial) f="$registry/$(key "$2" "$3")"; [ -f "$f" ] || {{ echo '{{"error":{{"code":"service_not_exposed","class":"fault","message":"no such exposure","peer":null,"service":null}}}}'; exit 69; }}; printf '{{"address":"%s"}}\n' "$(cat "$f")" ;;
   send-file) mkdir -p "$registry/home-$2/inbox/$me" && cp "$3" "$registry/home-$2/inbox/$me/$5" ;;
   probe) [ -f "$registry/$(key "$2" "$3")" ] ;;
   *) exit 1 ;;
