@@ -29,7 +29,7 @@ import { normalizeGatewayUrl } from './gatewayUrl';
 import { tabOrder, type Tab } from './tabs';
 import type { SidebarResource } from './sidebarView';
 import { readSidebarResources } from './sidebarResources';
-import { sidebarArrangement, uuid7 } from './sidebarEdits';
+import { sidebarArrangement, sidebarSubject } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
 
@@ -653,7 +653,7 @@ function useAppStore(proof?: FabricProfile) {
     async editSidebar(operations: ArrangementOperation[]): Promise<boolean> {
       if (!client || status !== 'online' || !arrangementPerson || !arrangementsGranted || sidebarWriting.current) return false;
       const existing = sidebarArrangement(arrangements);
-      const draft = sidebarCreation.current ?? { subject: `arrangement/${arrangementPerson}/${uuid7(Date.now(), Crypto.getRandomBytes(10))}`, created: false };
+      const draft = sidebarCreation.current ?? { subject: sidebarSubject(arrangementPerson), created: false };
       if (!existing) sidebarCreation.current = draft;
       const creating = !existing && !draft.created;
       const parameters = { subject: existing?.id ?? draft.subject, owner: arrangementPerson, operations: creating ? [{ op: 'create' as const, name: 'Sidebar' }, ...operations] : operations };

@@ -87,8 +87,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     // Fleet and replication status count every replica record (9.7x).
     ("GET /v1/internal/fleet/status", 15.0),
     ("GET /v1/replication/status", 15.0),
-    // A replica record is found by scanning them all (9.8x).
-    ("GET /v1/replication/records/{*record}", 15.0),
     // Outcome history reads every finished step to page them (8.3x).
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
@@ -457,6 +455,11 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    // Offline reads exercise populated local receipts without network timing. The sync
+    // probe exercises the named non-owner refusal; real fetch/import is tested in changes::service.
+    get("GET /v1/client/changes", "/v1/client/changes?repository=cost/garden&offline=true&limit=10"),
+    get("GET /v1/client/change", "/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001"),
+    post("POST /v1/client/changes/sync", "/v1/client/changes/sync", |_, _| json!({"repository":"cost/garden"})),
     put("PUT /v1/notes", "/v1/notes", |_, attempt| json!({
         "person":"person/bench-operator", "actor":"person/bench-operator",
         "text":format!("Invented current person context {attempt}"),
@@ -768,6 +771,7 @@ const PROBES: &[Probe] = &[
     get("GET /v1/usage", "/v1/usage"),
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
+    get("GET /v1/slo/history", "/v1/slo/history?id=cpu"),
     get("GET /v1/reviews", "/v1/reviews"),
     get("GET /v1/attention", "/v1/attention"),
     get(
@@ -1854,6 +1858,36 @@ where
     }
 }
 
+fn seed_git_change_reads(store: &Store, scale: f64) {
+    use st3::changes::{Record, Revision, State, TrailerStatus};
+    use st3::changes::config::{Config, Repository};
+    store.install_git_change_registry(Arc::new(st3::changes::service::Registry::new(
+        &Config { enabled: true, repositories: vec![Repository {
+            name: "cost/garden".into(), reader_node: "cost-other".into(),
+            transport_directory: PathBuf::from("/missing/cost/transport"),
+            remote: "origin".into(), remote_url: "https://example.invalid/cost/garden.git".into(),
+            pilot_started_at: "2026-01-01T00:00:00Z".into(), ..Repository::default()
+        }] }, NODE,
+    ).unwrap())).unwrap();
+    // A fixed populated answer and increasing unrelated repositories. No request is
+    // allowed to enumerate these unrelated receipts before selecting its page.
+    for (repository, count) in [("cost/garden", 12), ("cost/unrelated", (scale * 100_000.0).ceil() as usize)] {
+        for n in 1..=count {
+            store.index_git_change(repository, &Revision {
+                oid: format!("{n:040x}"),
+                record: Record {
+                    schema_version: 1, change_id: format!("I{n:040x}"), generation: 1,
+                    previous_record: None, source_commit: "1".repeat(40), source_tree: "2".repeat(40),
+                    base_commit: "3".repeat(40), trailer_status: TrailerStatus::Present,
+                    state: State::Draft, next: None, depends_on: vec![],
+                    actor: "agent/cost/builder".into(), created_at: "2026-01-01T00:00:00Z".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(), claim: None, mirror: None,
+                },
+            }).unwrap();
+        }
+    }
+}
+
 async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
     let work_directory = tempfile::tempdir().unwrap();
     let root = work_directory.path();
@@ -1869,6 +1903,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
         }
     }
     let store = Arc::new(Store::open(&database, NODE).unwrap());
+    seed_git_change_reads(&store, scale);
     store.bind_fleet(FLEET).ok();
     let peer = Arc::new(Store::open(&peer_database, PEER).unwrap());
     // Notes publish only after the real fleet admission/advertisement barrier.
@@ -1957,6 +1992,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
     let client = Client::unix(&socket);
     // Client reads come from a person, as stui and the app make them.
     let person = Client::unix_as(&socket, "person/bench-operator").unwrap();
+    let changes: Value = person.get("/v1/client/changes?repository=cost/garden&offline=true&limit=10").await.unwrap();
+    assert_eq!(changes["items"].as_array().unwrap().len(), 10);
+    assert!(changes["items"][0]["last_indexed"].is_object());
+    let change: Value = person.get("/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001").await.unwrap();
+    assert!(change["item"]["last_indexed"].is_object());
+    let sync: Value = person.post("/v1/client/changes/sync", &json!({"repository":"cost/garden"})).await.unwrap();
+    assert_eq!(sync["sync"]["status"], "unavailable");
     let seeded: Value = person.request("PUT", "/v1/notes", Some(&json!({
         "person":"person/bench-operator", "actor":"person/bench-operator",
         "text":"Invented current person context",

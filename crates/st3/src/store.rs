@@ -19,6 +19,8 @@ mod mailbox_changes;
 mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
+#[cfg(test)]
+mod message_thread_legacy_rank_dependency_tests;
 pub mod owned_sets;
 #[cfg(test)]
 mod owned_sets_tests;
@@ -763,18 +765,6 @@ WHERE (kind='harness.observed' AND (
         THEN '$.state' ELSE '$.fields.state' END)='needs-login'))
     OR (kind='harness.diagnostic'
         AND json_extract(body, '$.fields.code')='provider-auth-expired');
-
--- Retained stops read their diagnostic family, not every harness diagnostic of a seat.
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_diagnostic_index
- ON claims(subject,length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC)
- WHERE kind='harness.diagnostic'
-   AND json_extract(body,'$.fields.code') IN ('stop-deferred','stop-deferral-cleared');
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_failure_index
- ON claims(subject,length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC)
- WHERE kind='operational.failure' AND json_extract(body,'$.fields.condition')='stop-deferred';
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_recovery_index
- ON claims(subject,json_extract(body,'$.fields.failure'))
- WHERE kind='operational.recovered';
 
 CREATE TABLE IF NOT EXISTS desired (
     subject TEXT PRIMARY KEY,
@@ -8084,11 +8074,21 @@ impl Store {
     /// are intentionally too expensive for the daemon's inner control loop.
     pub fn work_for_reconcile(&self, actor: &str) -> Result<Vec<StepRunView>> {
         let work = self.work_at_snapshot_internal(Some(actor), true, now_ms(), false)?;
-        // A step joins a seat's work when a generation creates it or another seat lets it go;
-        // after that its changes are written on the step and its run.
+        // A generation can add steps this seat has not read yet. Existing steps already
+        // register their own subjects below; their state changes must not invalidate every
+        // seat. Handoffs mark the new recipient's actor key in incremental::change_keys.
         smallclaims::touched::note_read(|| format!("actor:{actor}"));
         smallclaims::touched::note_read(|| "kind:run-generation.created".to_owned());
-        smallclaims::touched::note_read(|| "kind:step-run.state".to_owned());
+        // Proposals enter and leave revision-draining on the proposal subject,
+        // not the run subject. Approval and cancellation receipts do not carry
+        // the run, so retain these collection dependencies without another query.
+        for kind in [
+            "revision-proposal.created",
+            "revision-proposal.approved",
+            "revision-proposal.cancelled",
+        ] {
+            smallclaims::touched::note_read(|| format!("kind:{kind}"));
+        }
         for step in &work {
             smallclaims::touched::note_read(|| step.subject.clone());
             smallclaims::touched::note_read(|| step.run.clone());
@@ -8466,6 +8466,14 @@ impl Store {
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
         let mut visible = Vec::with_capacity(views.len());
         for mut view in views {
+            if actor.is_some() && !detailed {
+                // A pending available-to step or a draining run can become visible
+                // without joining a new generation. Record every candidate before
+                // filtering, so its own transition invalidates the seat's work.
+                smallclaims::touched::note_read(|| view.subject.clone());
+                smallclaims::touched::note_read(|| view.run.clone());
+                smallclaims::touched::note_read(|| view.generation.clone());
+            }
             if detailed {
                 enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
             } else {
@@ -9639,11 +9647,23 @@ impl Store {
         intent: &NormalizedIntent,
         key: &str,
     ) -> Result<ApplyResponse, St3Error> {
+        self.apply_internal_with_declared_agents(intent, key, &BTreeSet::new())
+    }
+
+    /// A reconciler may defer an agent it parsed from an owned mission declaration.
+    /// Messages can still address that declared seat before it enters the desired graph.
+    /// This evidence is local to admission; it adds no field to any persisted intent.
+    pub(crate) fn apply_internal_with_declared_agents(
+        &self,
+        intent: &NormalizedIntent,
+        key: &str,
+        declared_agents: &BTreeSet<String>,
+    ) -> Result<ApplyResponse, St3Error> {
         let source = IntentInput {
             kdl: String::new(),
             source_name: Some("st reconciler".into()),
         };
-        let mission = self.mission(intent, source)?;
+        let mission = self.mission_at_with_declared_agents(intent, source, None, declared_agents)?;
         if !mission.blockers.is_empty() {
             return Err(St3Error::new(
                 "internal-mission-blocked",
@@ -9680,6 +9700,16 @@ impl Store {
         intent: &NormalizedIntent,
         resolved_intent: IntentInput,
         at_index: Option<u64>,
+    ) -> Result<MissionResponse, St3Error> {
+        self.mission_at_with_declared_agents(intent, resolved_intent, at_index, &BTreeSet::new())
+    }
+
+    fn mission_at_with_declared_agents(
+        &self,
+        intent: &NormalizedIntent,
+        resolved_intent: IntentInput,
+        at_index: Option<u64>,
+        declared_agents: &BTreeSet<String>,
     ) -> Result<MissionResponse, St3Error> {
         let connection = self.readers.get();
         let current_index = current_index(&connection).map_err(internal)?;
@@ -9741,7 +9771,7 @@ impl Store {
         }
 
         let known = |subject: &str| -> Result<bool, St3Error> {
-            if intent.subjects.contains_key(subject) {
+            if intent.subjects.contains_key(subject) || declared_agents.contains(subject) {
                 return Ok(true);
             }
             connection
@@ -57198,6 +57228,79 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
         assert_eq!(
             store.native_prompt_state(seat, 1, 5).unwrap(),
+            NativePromptState::Answered {
+                answer: "deny".into()
+            }
+        );
+    }
+
+    /// A subagent asks while its parent's Task call is still open: the only call the seat's
+    /// conversation shows unanswered is the parent's, so an allow offered beside it would let
+    /// through a call the person never saw. st offers only deny for a subagent's prompt.
+    #[test]
+    fn a_subagents_prompt_is_answered_only_with_deny() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "subagent-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        // The seat's own Task call is open (its conversation shows it unanswered), and the
+        // subagent it started asks to run Bash.
+        let asked = append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"permission", "reason":"subagent:Bash",
+                "ownership_sequence":1, "transition_sequence":3}),
+        );
+        let shown = store
+            .attention_items(Some("person/avery"))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.kind == "harness-prompt")
+            .unwrap();
+        assert_eq!(shown.answers, vec!["deny".to_owned()]);
+        assert!(shown.detail.starts_with("A subagent of this seat asks to use Bash;"), "{}", shown.detail);
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &asked.id, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "invalid-answer"
+        );
+        store
+            .answer_native_prompt(seat, &asked.id, "deny", "person/avery")
+            .unwrap();
+        assert_eq!(
+            store.native_prompt_state(seat, 1, 3).unwrap(),
             NativePromptState::Answered {
                 answer: "deny".into()
             }
