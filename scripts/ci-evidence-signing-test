@@ -160,6 +160,22 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='../x')).returncode == 1
     print('passed: a stage note carries the stage command, its real exit status and the digest of its exact log; a missing or garbled timing is a failure')
 
+    # --- step-facts: jobs with no stage log record the outcomes of the steps that ran
+    base_env = dict(STEP_CHECK='isolation-vm', STEP_COMMAND=json.dumps(['isolation-vm', 'nixos-test-driver']), GITHUB_RUN_ID='7',
+                    RUNNER_OS='Linux')
+    ok = helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=json.dumps({'driver': 'success', 'vmtest': 'success'})))
+    got = json.loads(out.read_text())
+    assert ok.returncode == 0 and got['exit_code'] == 0 and got['output'] == {'steps': {'driver': 'success', 'vmtest': 'success'}}
+    assert got['command'] == ['isolation-vm', 'nixos-test-driver'] and got['inputs']['step_outcomes'] == 'driver=success,vmtest=success'
+    helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=json.dumps({'driver': 'success', 'vmtest': 'failure'})))
+    assert json.loads(out.read_text())['exit_code'] == 1, 'one failed step makes the note a failure, never a success'
+    for outcome in ('skipped', 'cancelled', ''):
+        refused = helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=json.dumps({'driver': 'success', 'vmtest': outcome})))
+        assert refused.returncode == 1 and 'did not run' in refused.stdout, (outcome, refused.stdout)
+    assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='not json')).returncode == 1
+    assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='{}')).returncode == 1
+    print('passed: a step-based job note records each step outcome; a skipped, cancelled or missing step means no note, a failed one a failure')
+
     # --- cleanup: key overwritten and removed
     alias = tmp / 'alias'
     os.link(home / 'signing-key', alias)

@@ -19,6 +19,9 @@ import {
   evidenceStageJob,
   evidenceStageNames,
   evidenceStageSteps,
+  evidenceStepJob,
+  evidenceStepNames,
+  evidenceStepSteps,
   linuxStageRunner,
   linuxStageRunsOn,
   perfStoresCache,
@@ -239,10 +242,12 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       ...afterPickRunner,
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
+      ...evidenceStepJob(),
       steps: [
         ...commonSetupSteps.filter((step) => !('id' in step && step.id === 'cargo-cache') && step !== buildSnapshotPrepare && step !== buildSnapshotRestore),
-        nixDevelopStep({ name: 'Check license coverage, runner selection and generated files', flake: '.#genie', command: ['bash', 'scripts/ci-genie-freshness'] }),
+        { ...nixDevelopStep({ name: 'Check license coverage, runner selection and generated files', flake: '.#genie', command: ['bash', 'scripts/ci-genie-freshness'] }), id: 'freshness' },
         { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
+        ...evidenceStepSteps('genie-freshness', ['bash', 'scripts/ci-genie-freshness'], ['freshness']),
       ],
     },
     // Check the shared client and its iOS consumer before merge.
@@ -253,6 +258,7 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       if: "${{ !cancelled() && needs.genie-freshness.result == 'success' }}",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 10,
+      ...evidenceStepJob(),
       defaults: { run: { shell: 'bash' } },
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: [
@@ -276,8 +282,9 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           },
         },
         // Corepack provisions the root manifest's pnpm@12.7.0; the workspace forbids install scripts.
-        { name: 'Install the frozen workspace', env: pnpmStoreEnv, run: 'corepack enable\npnpm install --frozen-lockfile' },
-        { name: 'Check the client, shared views and iOS consumers', run: 'bash scripts/ci-typescript-client' },
+        { name: 'Install the frozen workspace', id: 'install', env: pnpmStoreEnv, run: 'corepack enable\npnpm install --frozen-lockfile' },
+        { name: 'Check the client, shared views and iOS consumers', id: 'client', run: 'bash scripts/ci-typescript-client' },
+        ...evidenceStepSteps('typescript-client', ['bash', 'scripts/ci-typescript-client'], ['install', 'client']),
       ],
     },
     'linux-test-build': {
@@ -423,7 +430,7 @@ done`,
     // key. The signer scripts come from the BASE commit of the change, never from the tree under test.
     'evidence-note-linux-gate': {
       name: 'evidence-note-linux-gate',
-      needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries'],
+      needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries', ...evidenceStepNames],
       if: "${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}",
       'runs-on': 'ubuntu-latest',
       environment: 'evidence-signing',
@@ -486,7 +493,7 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
           run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
 python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
-  --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${evidenceStageNames.join(',')}" --remote origin`,
+  --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames].join(',')}" --remote origin`,
         },
         { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
       ],
@@ -517,20 +524,23 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
       if: "${{ !cancelled() }}",
       'runs-on': supportingLinuxRunsOn,
       'timeout-minutes': 60,
+      ...evidenceStepJob(),
       defaults: { run: { shell: 'bash' } },
       env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
       steps: [
         // The VM's own warm cache also contains its driver; keep that primary entry.
         ...testArchiveConsumerSetup.map((step: any) => step.id === 'nix-cache' ? nixCacheStep : step),
-        { name: 'Probe KVM', run: kvmProbe },
+        { name: 'Probe KVM', id: 'kvm', run: kvmProbe },
         {
           name: 'Build the NixOS VM test driver',
+          id: 'driver',
           run: `start=$SECONDS
 nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
 printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
         {
           name: 'Run all three systemd-scope tests in the VM',
+          id: 'vmtest',
           env: {
             ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/st2.tar.zst',
             ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
@@ -547,12 +557,14 @@ printf '| VM test driver total | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_ST
         // VM runs it with this st binary (nix/sekrets-vm.nix).
         {
           name: 'Build the sekrets VM test driver',
+          id: 'sekrets-driver',
           run: `start=$SECONDS
 nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
 printf '| sekrets VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
         {
           name: 'Run the sekrets gateway test in the VM',
+          id: 'sekrets-test',
           env: { ST_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}' },
           run: `start=$SECONDS
 mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
@@ -560,6 +572,7 @@ mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
 printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
         { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
+        ...evidenceStepSteps('isolation-vm', ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'], ['kvm', 'driver', 'vmtest', 'sekrets-driver', 'sekrets-test']),
       ],
     },
     // Not yet a required check: the ruleset gains `fractal-web` after both PR and merge-group

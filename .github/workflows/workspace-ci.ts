@@ -292,9 +292,26 @@ export const evidenceStageNames = [
 const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
 export const evidenceStageJob = (name: string) =>
   (evidenceStageNames as readonly string[]).includes(name) ? { environment: 'evidence-signing' } : {}
-export const evidenceStageSteps = (name: string, stage: string): unknown[] => {
-  if (!(evidenceStageNames as readonly string[]).includes(name)) return []
+
+/**
+ * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness,
+ * typescript-client, isolation-vm). They sign from the outcomes of their own steps; a step that did
+ * not run (for example because the job was covered by a trusted note) makes no note.
+ */
+export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
+export const evidenceStepJob = () => ({ environment: 'evidence-signing' })
+
+const signingCore = (
+  name: string,
+  facts: { helper: 'stage-facts' | 'step-facts'; env: Record<string, string>; toolchain: boolean },
+): unknown[] => {
   const soft = { if: 'always()', 'continue-on-error': true } as const
+  // Without a toolchain override the wrapper asks nix for the dev shell derivation; jobs without a
+  // stage shell fingerprint what they ran on instead.
+  const toolchain = facts.toolchain
+    ? ` \\
+  --toolchain-sha256 "$(printf '%s|%s|%s|%s|%s|%s' "$RUNNER_OS" "$RUNNER_ARCH" "\${ImageVersion:-}" "$(nix --version 2>/dev/null)" "$(node --version 2>/dev/null)" "$(pnpm --version 2>/dev/null)" | sha256sum | cut -d' ' -f1)"`
+    : ''
   return [
     {
       ...soft,
@@ -323,28 +340,45 @@ git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
     },
     {
       ...soft,
-      name: 'Sign this stage result',
+      name: `Sign this ${facts.helper === 'stage-facts' ? 'stage' : 'job'} result`,
       if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
-      env: { STAGE: stage, STAGE_JOB: name },
+      env: facts.env,
       run: `helper=${evidenceHelper}
-python3 "$helper" once "$STAGE_JOB"
-python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+python3 "$helper" once ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'}
+python3 "$helper" ${facts.helper} "$RUNNER_TEMP/job-facts.json"
 home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
-  --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
-  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
-  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
-  --out "$RUNNER_TEMP/evidence-notes"`,
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check ${facts.helper === 'stage-facts' ? '"$STAGE_JOB"' : '"$STEP_CHECK"'} \\
+  --aggregate "$RUNNER_TEMP/job-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \\
+  --out "$RUNNER_TEMP/evidence-notes"${toolchain}`,
     },
     { ...soft, name: 'Remove the key', run: `python3 ${evidenceHelper} cleanup` },
     {
       ...soft,
-      name: 'Retain the signed stage note',
+      name: 'Retain the signed note',
       uses: 'actions/upload-artifact@v4',
       with: { name: `evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
     },
   ]
 }
+
+export const evidenceStageSteps = (name: string, stage: string): unknown[] =>
+  (evidenceStageNames as readonly string[]).includes(name)
+    ? signingCore(name, { helper: 'stage-facts', env: { STAGE: stage, STAGE_JOB: name }, toolchain: false })
+    : []
+
+/** Signing steps for a job made of steps: `command` names what they stand for, `steps` maps step ids to outcomes. */
+export const evidenceStepSteps = (name: string, command: string[], stepIds: string[]): unknown[] =>
+  signingCore(name, {
+    helper: 'step-facts',
+    env: {
+      STEP_CHECK: name,
+      STEP_COMMAND: JSON.stringify(command),
+      STEP_OUTCOMES: '{' + stepIds.map((id) => `"${id}":"\${{ steps.${id}.outcome }}"`).join(',') + '}',
+    },
+    toolchain: true,
+  })
 
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
