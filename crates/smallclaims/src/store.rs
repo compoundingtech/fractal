@@ -3865,12 +3865,12 @@ pub fn compact_replication_difference(
 }
 
 /// `compact_replication_difference`, listing the differing ranges that hold an envelope with a
-/// payload first and the rest after, each group from the range `turn` counts to (modulo its
-/// size) and on around. The first range listed is always listed whole. Ranges that differ only by
-/// payloadless checkpoint identities never settle, so a listing that always began at the first
-/// differing range could spend every exchange on them and never reach a range with an envelope to
-/// send; live ranges come first, and a listing that moves on each exchange lists every differing
-/// range in turn.
+/// payload first and the rest after, each group from the range `turn` picks
+/// (`listing_turn_start`) and on around. The first range listed is always listed whole. Ranges
+/// that differ only by payloadless checkpoint identities never settle, so a listing that always
+/// began at the first differing range could spend every exchange on them and never reach a range
+/// with an envelope to send; live ranges come first, and a listing that moves on each exchange
+/// lists every differing range in turn.
 pub fn compact_replication_difference_turn(
     inventory: &CompactReplicationInventory,
     buckets: &[ReplicationInventoryBucket],
@@ -3944,7 +3944,7 @@ pub fn compact_replication_difference_turn(
         );
     }
     for group in [&mut live, &mut payloadless] {
-        let start = turn % group.len().max(1);
+        let start = listing_turn_start(turn, group.len());
         group.rotate_left(start);
     }
     let mut listed = Vec::new();
@@ -3956,6 +3956,17 @@ pub fn compact_replication_difference_turn(
         listed.extend(inventory.identities(range));
     }
     (missing, listed)
+}
+
+/// The range a listing of `len` differing ranges starts from on answer `turn`: the fractional part
+/// of `turn` times the golden ratio, scaled to `len`. One store counts turns across all its peers,
+/// so a peer answered every `k`th time sees every `k`th turn. Starting at `turn % len` would then
+/// show that peer only the ranges `k` reaches modulo `len`, and with four peers and four ranges
+/// only the first. Golden-ratio steps have no such stride: every peer's answers reach every range,
+/// within twice `len` answers for one peer and within four times for four.
+fn listing_turn_start(turn: usize, len: usize) -> usize {
+    const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+    (((turn as u64).wrapping_mul(GOLDEN) as u128 * len as u128) >> 64) as usize
 }
 
 /// Count the envelopes only the peer holds and only this node holds, as `(peer_only,
@@ -4492,15 +4503,49 @@ pub fn compact_listing_puts_live_ranges_first_and_reaches_every_payloadless_rang
     let remote = peer.summary();
     let limit = REPLICATION_EXCHANGE_ENVELOPE_LIMIT;
     let live = test_envelope_ids("birch", 0..10, "a");
-    let mut reached = BTreeSet::new();
-    for turn in 0..4 {
-        let (_, listed) =
-            compact_replication_difference_turn(&inventory, &buckets, &remote, limit, turn);
-        assert_eq!(listed[..10], live[..], "the live range leads every listing");
-        assert!(listed.len() <= limit, "{}", listed.len());
-        reached.extend(listed[10..].iter().map(|identity| replication_bucket_start(identity.sequence)));
+    // One payloadless range fits beside the live one in each listing. The store's turn counter is
+    // shared by its peers, so a peer answered every `stride`th time sees every `stride`th turn.
+    for stride in 1..=4 {
+        for first in 0..stride {
+            let mut reached = BTreeSet::new();
+            for turn in (first..).step_by(stride).take(12) {
+                let (_, listed) =
+                    compact_replication_difference_turn(&inventory, &buckets, &remote, limit, turn);
+                assert_eq!(listed[..10], live[..], "the live range leads every listing");
+                assert!(listed.len() <= limit, "{}", listed.len());
+                reached.extend(
+                    listed[10..].iter().map(|identity| replication_bucket_start(identity.sequence)),
+                );
+            }
+            assert_eq!(
+                reached,
+                BTreeSet::from([0, 256, 512, 768]),
+                "a peer seeing every {stride}th turn from {first} reaches every range"
+            );
+        }
     }
-    assert_eq!(reached, BTreeSet::from([0, 256, 512, 768]), "every range is listed in turn");
+}
+
+#[cfg(test)]
+#[test]
+pub fn every_peer_sharing_the_turn_counter_reaches_every_range() {
+    for peers in 1..=4 {
+        for len in 1..=64 {
+            for peer in 0..peers {
+                let answers = 4 * len;
+                let starts = (peer..)
+                    .step_by(peers)
+                    .take(answers)
+                    .map(|turn| listing_turn_start(turn, len))
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    starts.len(),
+                    len,
+                    "peer {peer} of {peers} reaches every one of {len} ranges in {answers} answers"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

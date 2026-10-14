@@ -1321,7 +1321,7 @@ mod retry_tests {
         let grant = root.path().join("grant");
         let program = root.path().join("fabric");
         std::fs::write(&program, format!(
-            "#!/bin/sh\nif test -f '{}'; then cat '{}'; exit 0; fi\necho \"$2\" >> '{}'\necho 'peer not permitted for service st3-peer-v1' >&2\nexit 1\n",
+            "#!/bin/sh\nif test -f '{}'; then printf '{{\"address\":\"%s\"}}\\n' \"$(cat '{}')\"; exit 0; fi\necho \"$2\" >> '{}'\necho '{{\"error\":{{\"code\":\"peer_not_permitted_for_service\",\"class\":\"refusal\",\"message\":\"peer not permitted for service st3-peer-v1\",\"peer\":null,\"service\":\"st3-peer-v1\"}}}}'\nexit 77\n",
             grant.display(), grant.display(), log.display()
         )).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();

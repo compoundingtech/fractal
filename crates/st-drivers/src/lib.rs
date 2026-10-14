@@ -25,6 +25,7 @@ pub mod catalog_lock;
 pub mod catalog_transaction;
 pub mod claude_channel;
 pub mod claude_mcp;
+pub mod claude_prompts;
 pub mod claude_session;
 pub mod codex_app_server;
 pub mod context;
