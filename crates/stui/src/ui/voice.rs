@@ -1,4 +1,4 @@
-//! Voice mode in a message input: Ctrl+R (or a click on ◉ voice) starts the speech helper; the
+//! Voice mode in a message input: Ctrl+Y (or a click on ◉ voice) starts the speech helper; the
 //! input shows a waveform and the words as they come. Enter sends them, Tab keeps them in the
 //! input to edit, Esc drops them. A message whose words came from voice is tagged `dictated`.
 
