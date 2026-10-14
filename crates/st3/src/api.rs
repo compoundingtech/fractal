@@ -48,8 +48,7 @@ use crate::model::{
     PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest,
     PlanningProposalRequest, PlanningRevisionRequest,
     PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse,
-    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse, ReplicationHealAnswer,
-    ReplicationHealAnswerRequest, ReplicationHealNextRequest, ReplicationHealStep,
+    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse,
     ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
@@ -828,17 +827,11 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             post(replication_checkpoint_adopt)
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
-        .route(
-            "/v1/internal/replication/heal/answer",
-            post(replication_heal_answer)
-                .layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
-        )
-        .route(
-            "/v1/internal/replication/heal/next",
-            post(replication_heal_next)
-                .layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
-        )
         .route("/v1/internal/fleet/membership", get(fleet_membership_view))
+        .route(
+            "/v1/internal/fleet/admission-residue",
+            get(fleet_admission_residue),
+        )
         .route("/v1/internal/fleet/status", get(fleet_status))
         .route(
             "/v1/internal/fleet/invites",
@@ -8585,8 +8578,8 @@ fn doctor_report_with_operation_drift(
                         .collect::<String>(),
                     first_sync_failed
                         .map(|first| format!(
-                            "the first sync with {} ended with a different graph, and a heal \
-                             did not fix it: {}; ",
+                            "the first sync with {} failed on an earlier build: {}; it ends at \
+                             the next exchange where both hold the same claims; ",
                             first.peer.as_deref().unwrap_or("a peer"),
                             first.message.as_deref().unwrap_or("no reason recorded")
                         ))
@@ -9105,7 +9098,7 @@ async fn replication_receive(
         if let Some(round_trip_ms) = request.round_trip_ms {
             store.record_replication_round_trip(Duration::from_millis(round_trip_ms));
         }
-        // Only the worker's own requests carry a round trip, and only they heal.
+        // Only the worker's own requests carry a round trip, and only they prove its route out.
         let receipt = store.receive_replication_exchange_asking(
             &request.peer,
             &request.fleet_id,
@@ -9207,50 +9200,6 @@ async fn replication_receive(
             .send_modify(|generation| *generation = generation.saturating_add(1));
     }
     Ok(Json(response))
-}
-
-/// Answer a peer's heal question. A swap or a replay can change the graph.
-async fn replication_heal_answer(
-    State(state): State<AppState>,
-    Json(request): Json<ReplicationHealAnswerRequest>,
-) -> Result<Json<ReplicationHealAnswer>, ApiError> {
-    if state.fleet_id.as_deref() != Some(request.fleet_id.as_str()) {
-        return Err(ApiError::bad(St3Error::new(
-            "fleet-id-mismatch",
-            "the peer belongs to another fleet",
-        )));
-    }
-    let store = state.store.clone();
-    let (answer, changed) = blocking_store(move || {
-        let before = store.replication_change_point()?;
-        let answer = store.heal_answer(&request.peer, &request.query)?;
-        let changed = store.replication_change_point()? != before;
-        Ok((answer, changed))
-    })
-    .await?;
-    if changed {
-        signal_changed(&state);
-    }
-    Ok(Json(answer))
-}
-
-/// Compare a peer's heal answer with this node's claims and say what to ask next.
-async fn replication_heal_next(
-    State(state): State<AppState>,
-    Json(request): Json<ReplicationHealNextRequest>,
-) -> Result<Json<ReplicationHealStep>, ApiError> {
-    let store = state.store.clone();
-    let (step, changed) = blocking_store(move || {
-        let before = store.replication_change_point()?;
-        let step = store.heal_next(&request.peer, request.answer)?;
-        let changed = store.replication_change_point()? != before;
-        Ok((step, changed))
-    })
-    .await?;
-    if changed {
-        signal_changed(&state);
-    }
-    Ok(Json(step))
 }
 
 /// A span such as `45s`, `12m` or `3h` for a doctor message.
@@ -9639,8 +9588,6 @@ async fn refuse_while_leaving(
                 | "/v1/internal/replication/receive"
                 | "/v1/internal/replication/peer-failure"
                 | "/v1/internal/replication/worker-status"
-                | "/v1/internal/replication/heal/answer"
-                | "/v1/internal/replication/heal/next"
                 | "/v1/internal/replication/checkpoint"
                 | "/v1/internal/replication-wake"
         );
@@ -9663,6 +9610,17 @@ async fn fleet_membership_view(
 ) -> Result<Json<crate::fleet::FleetView>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || store.fleet_view_sealed())
+        .await
+        .map(Json)
+}
+
+/// What doctor's fleet-admission check reports as admitted before this node knew better, for
+/// `st fleet wait` to refuse on.
+async fn fleet_admission_residue(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<smallclaims::store::FleetAdmissionResidue>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.fleet_admission_residue())
         .await
         .map(Json)
 }
