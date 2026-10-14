@@ -214,6 +214,8 @@ jobs:
           python3 scripts/install-macos-test
           python3 scripts/release_notes_test.py
 
+      - name: Test the daily release failure path
+        run: python3 scripts/release-smalltalk-daily-test
       - name: Report job cache coverage
         if: always()
         shell: bash

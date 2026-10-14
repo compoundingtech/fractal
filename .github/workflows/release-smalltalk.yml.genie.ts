@@ -86,6 +86,10 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         {
           "name": "Test install entry points and isolated app transactions",
           "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\n"
+        },
+        {
+          "name": "Test the daily release failure path",
+          "run": "python3 scripts/release-smalltalk-daily-test"
         }
       ]
     },
