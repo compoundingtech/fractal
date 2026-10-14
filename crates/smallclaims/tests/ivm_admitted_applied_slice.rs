@@ -531,13 +531,21 @@ impl Slice {
     fn prune(&self) -> Result<usize> {
         let mut writer = self.store.connection.write_background();
         let tx = writer.transaction()?;
-        self.check(&tx)?;
+        let count = self.prune_in(&tx)?;
+        tx.commit()?;
+        Ok(count)
+    }
+
+    // The ordinary, rollback, refused-COMMIT and crash cases share this exact body.
+    // The caller owns the managed outer transaction and its physical writer loan.
+    fn prune_in(&self, tx: &Transaction<'_>) -> Result<usize> {
+        self.check(tx)?;
         let applied: u64 = tx.query_row(
             "SELECT revision FROM main.ivm_install_roots WHERE view=?1",
             [VIEW],
             |r| r.get(0),
         )?;
-        self.installer.prune_journal(&tx, SOURCE, PAGE_ROWS)?;
+        self.installer.prune_journal(tx, SOURCE, PAGE_ROWS)?;
         tx.execute("UPDATE main.slice_limits SET draining=1 WHERE id=1", [])?;
         let count = tx.execute(
             "DELETE FROM main.slice_images WHERE revision IN
@@ -545,7 +553,6 @@ impl Slice {
             params![applied, PAGE_ROWS],
         )?;
         tx.execute("UPDATE main.slice_limits SET draining=0 WHERE id=1", [])?;
-        tx.commit()?;
         Ok(count)
     }
 }
@@ -1559,4 +1566,1102 @@ fn canonical_metadata_inventory_growth_reports_actual_page_work() {
     panic!(
         "required growth measurement is unavailable: build with test-support and require this exact name with positive traced statement counts; missing instrumentation is not evidence"
     );
+}
+
+// Retention controls are private to this single-consumer, fixed-width fixture.
+// This oracle copies actual rows separately from the counters it reconciles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RetainedImage {
+    revision: u64,
+    store_index: u64,
+    id: String,
+    subject: String,
+    kind: String,
+    body: Vec<u8>,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RetainedReference {
+    revision: u64,
+    payload: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RetentionState {
+    // admitted revision, source available, journal rows, journal bytes
+    source: (u64, bool, u64, u64),
+    // retained rows, retained bytes, lifetime total rows, capturing, draining
+    counters: (u64, u64, u64, u64, u64),
+    // applied revision, persisted ready bit, generation, status revision
+    root: (u64, bool, u64, u64),
+    coverage: u64,
+    images: Vec<RetainedImage>,
+    journal: Vec<RetainedReference>,
+    output: Vec<(String, String, String, String)>,
+    native: Vec<(String, String, String, String)>,
+}
+
+impl Slice {
+    fn retention_state(&self) -> Result<RetentionState> {
+        self.read(|db| {
+            self.check(db)?;
+            let source = db.query_row(
+                "SELECT revision,available,journal_rows,journal_bytes
+                 FROM main.ivm_install_sources WHERE name=?1",
+                [SOURCE],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            let counters = db.query_row(
+                "SELECT retained_rows,retained_bytes,total_rows,capturing,draining
+                 FROM main.slice_limits WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )?;
+            let root = db.query_row(
+                "SELECT revision,ready,generation,status_revision
+                 FROM main.ivm_install_roots WHERE view=?1",
+                [VIEW],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+            let namespace: String = db.query_row(
+                "SELECT namespace FROM main.ivm_install_roots WHERE view=?1",
+                [VIEW],
+                |r| r.get(0),
+            )?;
+            let coverage = db.query_row(
+                "SELECT through FROM main.slice_coverage WHERE namespace=?1",
+                [&namespace],
+                |r| r.get(0),
+            )?;
+            let images = db
+                .prepare(
+                    "SELECT revision,store_index,claim_id,subject,kind,body,bytes
+                          FROM main.slice_images ORDER BY revision LIMIT 257",
+                )?
+                .query_map([], |r| {
+                    Ok(RetainedImage {
+                        revision: r.get(0)?,
+                        store_index: r.get(1)?,
+                        id: r.get(2)?,
+                        subject: r.get(3)?,
+                        kind: r.get(4)?,
+                        body: r.get(5)?,
+                        bytes: r.get(6)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(
+                images.len() <= PENDING_ROWS as usize,
+                "retention oracle image bound"
+            );
+            let journal = db
+                .prepare(
+                    "SELECT revision,payload,bytes FROM main.ivm_install_journal
+                          WHERE source=?1 ORDER BY revision LIMIT 257",
+                )?
+                .query_map([SOURCE], |r| {
+                    Ok(RetainedReference {
+                        revision: r.get(0)?,
+                        payload: r.get(1)?,
+                        bytes: r.get(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(
+                journal.len() <= PENDING_ROWS as usize,
+                "retention oracle journal bound"
+            );
+            let output = db
+                .prepare(
+                    "SELECT claim_id,subject,kind,digest FROM main.slice_output
+                          WHERE namespace=?1 ORDER BY claim_id LIMIT 4097",
+                )?
+                .query_map([&namespace], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(
+                output.len() <= TOTAL_ROWS as usize,
+                "retention oracle output bound"
+            );
+            let native = db
+                .prepare("SELECT id,subject,kind,body FROM main.claims ORDER BY id LIMIT 4097")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ensure!(
+                native.len() <= TOTAL_ROWS as usize,
+                "retention oracle native bound"
+            );
+            Ok(RetentionState {
+                source,
+                counters,
+                root,
+                coverage,
+                images,
+                journal,
+                output,
+                native,
+            })
+        })
+    }
+}
+
+impl RetentionState {
+    fn reconcile(&self) -> Result<()> {
+        ensure!(
+            self.source.1 && self.root.1,
+            "retention fixture must retain compatible coverage"
+        );
+        ensure!(
+            self.root.0 == self.coverage,
+            "retention coverage differs from applied prefix"
+        );
+        ensure!(
+            self.counters.3 == 0 && self.counters.4 == 0,
+            "retention mode left active"
+        );
+        let mut image_bytes = 0u64;
+        for image in &self.images {
+            let actual =
+                8 + image.id.len() + image.subject.len() + image.kind.len() + image.body.len();
+            ensure!(
+                actual <= IMAGE_BYTES && image.bytes == actual as u64,
+                "retention image byte oracle differs from stored size"
+            );
+            image_bytes += actual as u64;
+        }
+        ensure!(
+            self.counters.0 == self.images.len() as u64 && self.counters.1 == image_bytes,
+            "retained row/byte counters differ from actual images"
+        );
+        let mut journal_bytes = 0u64;
+        for reference in &self.journal {
+            ensure!(
+                reference.payload.len() <= REFERENCE_BYTES
+                    && reference.bytes == reference.payload.len() as u64,
+                "journal byte oracle differs from actual payload"
+            );
+            journal_bytes += reference.payload.len() as u64;
+            let mutation: Mutation = serde_json::from_str(&reference.payload)?;
+            let image = self
+                .images
+                .iter()
+                .find(|i| i.revision == reference.revision)
+                .context("retained reference lost its immutable image")?;
+            let key: Value = serde_json::from_str(&mutation.key)?;
+            ensure!(
+                key[0] == "claims"
+                    && key[1][0].as_u64() == Some(image.store_index)
+                    && mutation.old.is_none()
+                    && mutation.new.as_ref().and_then(|v| v["revision"].as_u64())
+                        == Some(image.revision),
+                "retained reference does not identify its immutable image"
+            );
+        }
+        ensure!(
+            self.source.2 == self.journal.len() as u64 && self.source.3 == journal_bytes,
+            "journal counters differ from actual payloads"
+        );
+        ensure!(
+            self.images.len() == self.journal.len(),
+            "image/reference prefix differs"
+        );
+        ensure!(
+            self.counters.2 == self.native.len() as u64 && self.source.0 == self.counters.2,
+            "lifetime admitted total differs from fixed native fixture"
+        );
+        Ok(())
+    }
+
+    // Compute the expected single prune from copied rows, not from stored counters.
+    fn after_consumed_prune(&self) -> Result<Self> {
+        self.reconcile()?;
+        let consumed: Vec<_> = self
+            .images
+            .iter()
+            .filter(|i| i.revision <= self.root.0)
+            .collect();
+        ensure!(
+            consumed.len() <= PAGE_ROWS,
+            "oracle covers exactly one bounded prune"
+        );
+        let mut expected = self.clone();
+        expected.images.retain(|i| i.revision > self.root.0);
+        expected.journal.retain(|r| r.revision > self.root.0);
+        expected.counters.0 = expected.images.len() as u64;
+        expected.counters.1 = expected.images.iter().map(|i| i.bytes).sum();
+        expected.source.2 = expected.journal.len() as u64;
+        expected.source.3 = expected
+            .journal
+            .iter()
+            .map(|r| r.payload.len() as u64)
+            .sum();
+        Ok(expected)
+    }
+
+    fn assert_complete_output(&self) -> Result<()> {
+        self.reconcile()?;
+        ensure!(self.root.0 == self.source.0, "native inputs remain pending");
+        let expected = self
+            .native
+            .iter()
+            .map(|(id, subject, kind, body)| {
+                let body: Value = serde_json::from_str(body)?;
+                let canonical = smallclaims::hash::canonical_json_text(&body)?;
+                Ok((
+                    id.clone(),
+                    subject.clone(),
+                    kind.clone(),
+                    hex::encode(Sha256::digest(canonical.as_bytes())),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(
+            self.output, expected,
+            "output ID/subject/kind/digest must match native rows"
+        );
+        Ok(())
+    }
+}
+
+fn retention_split(slice: &Slice) -> Result<PreparedPage> {
+    for n in 0..PAGE_ROWS * 2 {
+        append(slice, &format!("note/retention-{n:02}"))?;
+    }
+    let page = slice.capture()?.reduce()?;
+    slice.publish(&page)?;
+    let state = slice.retention_state()?;
+    state.reconcile()?;
+    ensure!(
+        state.source.0 == 32
+            && state.root.0 == 16
+            && state.images.len() == 32
+            && state.output.len() == 16,
+        "fixed retention split not established"
+    );
+    Ok(page)
+}
+
+#[test]
+fn applied_prefix_prune_rollback_and_refused_commit_preserve_exact_retention() -> Result<()> {
+    use rusqlite::hooks::Action;
+    use std::sync::atomic::AtomicUsize;
+
+    let (_root, slice) = fixture()?;
+    let _old_page = retention_split(&slice)?;
+    let before = slice.retention_state()?;
+    for refuse_commit in [false, true] {
+        let images_deleted = Arc::new(AtomicUsize::new(0));
+        let journal_deleted = Arc::new(AtomicUsize::new(0));
+        let commit_refused = Arc::new(AtomicBool::new(false));
+        {
+            let mut writer = slice.store.connection.write_background();
+            let images = images_deleted.clone();
+            let journal = journal_deleted.clone();
+            writer.update_hook(Some(
+                move |action: Action, database: &str, table: &str, _: i64| {
+                    if action == Action::SQLITE_DELETE && database == "main" {
+                        if table == "slice_images" {
+                            images.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if table == "ivm_install_journal" {
+                            journal.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                },
+            ));
+            if refuse_commit {
+                let refused = commit_refused.clone();
+                // SQLite nonzero commit-hook return converts COMMIT to ROLLBACK.
+                // The exact SQLITE_CONSTRAINT_COMMITHOOK code is checked below.
+                writer.commit_hook(Some(move || {
+                    refused.store(true, Ordering::Release);
+                    true
+                }));
+            }
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+                    let tx = writer.transaction()?;
+                    ensure!(
+                        slice.prune_in(&tx)? == PAGE_ROWS,
+                        "fault prune must delete one page"
+                    );
+                    ensure!(
+                        slice.retention_state()? == before,
+                        "WAL reader observed uncommitted reclamation"
+                    );
+                    if refuse_commit {
+                        tx.commit()?;
+                    } else {
+                        tx.rollback()?;
+                    }
+                    Ok(())
+                }));
+            // Also remove both hooks on an unexpected panic before the loan can return.
+            writer.commit_hook(None::<fn() -> bool>);
+            writer.update_hook(None::<fn(Action, &str, &str, i64)>);
+            ensure!(writer.is_autocommit(), "fault prune left an active writer");
+            match result {
+                Ok(Ok(())) => ensure!(!refuse_commit, "commit hook did not refuse"),
+                Ok(Err(error)) if refuse_commit => {
+                    let sqlite = error
+                        .downcast_ref::<rusqlite::Error>()
+                        .context("commit refusal lost SQLite cause")?;
+                    match sqlite {
+                        rusqlite::Error::SqliteFailure(code, _) => assert_eq!(
+                            code.extended_code,
+                            rusqlite::ffi::SQLITE_CONSTRAINT_COMMITHOOK
+                        ),
+                        other => bail!("unexpected commit refusal: {other:?}"),
+                    }
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+        assert_eq!(images_deleted.load(Ordering::Acquire), PAGE_ROWS);
+        assert_eq!(journal_deleted.load(Ordering::Acquire), PAGE_ROWS);
+        assert_eq!(commit_refused.load(Ordering::Acquire), refuse_commit);
+        let after = slice.retention_state()?;
+        after.reconcile()?;
+        assert_eq!(after, before);
+        assert!(
+            slice.ready_rows().is_err(),
+            "pending prefix must not become ready"
+        );
+        assert_eq!(
+            slice.capture()?.images.len(),
+            PAGE_ROWS,
+            "pending images must survive"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn committed_prune_preserves_pending_images_and_counter_reconciliation() -> Result<()> {
+    let (_root, slice) = fixture()?;
+    let old_page = retention_split(&slice)?;
+    let before = slice.retention_state()?;
+    let expected = before.after_consumed_prune()?;
+    assert_eq!(slice.prune()?, PAGE_ROWS);
+    let after = slice.retention_state()?;
+    after.reconcile()?;
+    assert_eq!(
+        after, expected,
+        "pending images/references must remain byte-identical"
+    );
+    assert!(
+        slice.publish(&old_page).is_err(),
+        "consumed page cannot replay after reclamation"
+    );
+    assert_eq!(slice.retention_state()?, after);
+    assert!(slice.ready_rows().is_err());
+    slice.publish(&slice.capture()?.reduce()?)?;
+    slice.retention_state()?.assert_complete_output()?;
+    let applied = slice.retention_state()?;
+    assert_eq!(slice.prune()?, PAGE_ROWS);
+    let empty = slice.retention_state()?;
+    empty.assert_complete_output()?;
+    assert_eq!(empty, applied.after_consumed_prune()?);
+    assert_eq!(empty.counters, (0, 0, 32, 0, 0));
+    assert_eq!((empty.source.2, empty.source.3), (0, 0));
+    assert_eq!(slice.ready_rows()?.len(), 32);
+    Ok(())
+}
+
+fn durable_retention_artifact(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::File::open(path.parent().context("artifact parent missing")?)?.sync_all()?;
+    Ok(())
+}
+
+#[test]
+fn actual_prune_crash_child() -> Result<()> {
+    let Some(phase) = std::env::var_os("SLICE_RETENTION_CHILD_PHASE") else {
+        return Ok(());
+    };
+    let path = PathBuf::from(
+        std::env::var_os("SLICE_RETENTION_CHILD_PATH").context("retention child path missing")?,
+    );
+    let phase = phase.to_str().context("retention child phase invalid")?;
+    let code = match phase {
+        "uncommitted-prune" => 76,
+        "committed-prune" => 77,
+        _ => bail!("unknown retention child phase"),
+    };
+    let slice = Slice::create(&path)?;
+    let _page = retention_split(&slice)?;
+    let before = slice.retention_state()?;
+    durable_retention_artifact(
+        &path.with_extension("retention-before.json"),
+        &serde_json::to_vec(&before)?,
+    )?;
+    let mut writer = slice.store.connection.write_background();
+    let deleted = Arc::new(AtomicBool::new(false));
+    let witnessed = deleted.clone();
+    writer.update_hook(Some(
+        move |action: rusqlite::hooks::Action, database: &str, table: &str, _: i64| {
+            if action == rusqlite::hooks::Action::SQLITE_DELETE
+                && database == "main"
+                && table == "slice_images"
+            {
+                witnessed.store(true, Ordering::Release);
+            }
+        },
+    ));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+        let tx = writer.transaction()?;
+        ensure!(
+            slice.prune_in(&tx)? == PAGE_ROWS && deleted.load(Ordering::Acquire),
+            "child must witness actual prune DML"
+        );
+        // Child intentionally dies with the transaction open in the uncommitted case.
+        // Remove its fixture hook before death; no connection is lent back by process::exit.
+        tx.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+        if phase == "committed-prune" {
+            tx.commit()?;
+        } else {
+            durable_retention_artifact(&path.with_extension("retention-phase"), phase.as_bytes())?;
+            println!("SLICE_RETENTION_CRASH {phase}");
+            std::io::stdout().flush()?;
+            std::process::exit(code);
+        }
+        Ok(())
+    }));
+    writer.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>);
+    match result {
+        Ok(result) => result?,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+    ensure!(
+        writer.is_autocommit(),
+        "committed child writer must be idle"
+    );
+    drop(writer);
+    durable_retention_artifact(&path.with_extension("retention-phase"), phase.as_bytes())?;
+    println!("SLICE_RETENTION_CRASH {phase}");
+    std::io::stdout().flush()?;
+    std::process::exit(code);
+}
+
+#[test]
+fn prune_crash_reopen_preserves_only_committed_reclamation() -> Result<()> {
+    for (phase, code) in [("uncommitted-prune", 76), ("committed-prune", 77)] {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("claims.db");
+        let output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "actual_prune_crash_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SLICE_RETENTION_CHILD_PHASE", phase)
+            .env("SLICE_RETENTION_CHILD_PATH", &path)
+            .output()?;
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("SLICE_RETENTION_CRASH {phase}"))
+        );
+        assert_eq!(
+            std::fs::read(path.with_extension("retention-phase"))?,
+            phase.as_bytes()
+        );
+        let mut bytes = Vec::new();
+        std::fs::File::open(path.with_extension("retention-before.json"))?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() <= 1024 * 1024,
+            "retention child oracle exceeds bound"
+        );
+        let before: RetentionState = serde_json::from_slice(&bytes)?;
+        before.reconcile()?;
+        let expected = if phase == "committed-prune" {
+            before.after_consumed_prune()?
+        } else {
+            before
+        };
+        let reopened = Slice::open(&path)?;
+        let observed = reopened.retention_state()?;
+        observed.reconcile()?;
+        assert_eq!(
+            observed, expected,
+            "open must not replay or repair reclamation"
+        );
+        assert!(reopened.ready_rows().is_err());
+        reopened.publish(&reopened.capture()?.reduce()?)?;
+        reopened.retention_state()?.assert_complete_output()?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn full_prune_accounting_includes_physical_writer_return() -> Result<()> {
+    let (_root, slice) = fixture()?;
+    let _page = retention_split(&slice)?;
+    let before = slice.retention_state()?;
+    let expected = before.after_consumed_prune()?;
+    let removed_bytes: u64 = before
+        .images
+        .iter()
+        .filter(|i| i.revision <= before.root.0)
+        .map(|i| i.bytes)
+        .sum();
+    let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    let removed_rows = slice.prune()?;
+    let work = scope.finish(); // acquisition, SQL/COMMIT and physical writer return, before oracle
+    eprintln!(
+        "whole-prune accounted work including physical writer return: {work:?} removed_rows={removed_rows} removed_image_bytes={removed_bytes}"
+    );
+    assert!(
+        work.statements > 0 && work.vm_steps > 0,
+        "zero measured work cannot qualify pruning"
+    );
+    assert!(
+        work.statements <= 128,
+        "unqualified prune statement work: {work:?}"
+    );
+    assert!(
+        work.vm_steps <= 50000,
+        "unqualified prune VM work: {work:?}"
+    );
+    assert_eq!(
+        work.autoindex_rows, 0,
+        "prune must not build an automatic index"
+    );
+    assert_eq!(removed_rows, PAGE_ROWS);
+    let after = slice.retention_state()?;
+    after.reconcile()?;
+    assert_eq!(after, expected);
+    assert_eq!(before.counters.1 - after.counters.1, removed_bytes);
+    Ok(())
+}
+
+#[cfg(not(feature = "test-support"))]
+#[test]
+fn full_prune_accounting_includes_physical_writer_return() {
+    panic!(
+        "required prune accounting is unavailable: build with test-support and require this exact name with positive SQL/VM counts; missing instrumentation is not a passed or omitted prerequisite"
+    );
+}
+
+// These two-consumer controls exercise the library's journal deletion directly.
+// Images remain retained: there is no multiconsumer image-prune policy here.
+const JOURNAL_FOLLOWER: &str = "fixture.journal-follower";
+
+struct JournalFollower;
+impl Operator for JournalFollower {
+    fn name(&self) -> &'static str {
+        JOURNAL_FOLLOWER
+    }
+    fn source(&self) -> &'static str {
+        SOURCE
+    }
+    fn fingerprint(&self) -> &'static str {
+        "fixture.journal-follower.v1"
+    }
+    fn create_schema(&self, _: &Connection) -> Result<()> {
+        // Ledger already owns the shared namespace-keyed tables; add no DDL.
+        Ok(())
+    }
+    fn apply(&self, tx: &Transaction<'_>, ns: &Namespace, rows: &[Mutation]) -> Result<bool> {
+        Ledger.apply(tx, ns, rows)
+    }
+    fn validate_publication(&self, tx: &Transaction<'_>, ns: &Namespace) -> Result<()> {
+        Ledger.validate_publication(tx, ns)
+    }
+    fn reclaim(&self, tx: &Transaction<'_>, ns: &Namespace, rows: usize) -> Result<bool> {
+        Ledger.reclaim(tx, ns, rows)
+    }
+}
+
+type JournalOutput = (String, String, String, String);
+
+#[derive(Debug, PartialEq)]
+struct JournalConsumerState {
+    // namespace, applied revision, stored prefix-ready, generation, status, error
+    root: (Option<String>, u64, bool, u64, u64, Option<String>),
+    // phase, applied revision, queued rows/bytes, pages, extracted/applied rows, cursor, error
+    job: (
+        String,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        u64,
+        Vec<u8>,
+        Option<String>,
+    ),
+    coverage: Option<u64>,
+    output: Vec<JournalOutput>,
+    // All physical metadata columns, including unchanged binding/limit/time fields.
+    root_row: Vec<Sql>,
+    job_row: Vec<Sql>,
+}
+
+fn journal_metadata_row(db: &Connection, query: &str, key: &str) -> Result<Vec<Sql>> {
+    let mut statement = db.prepare(query)?;
+    let columns = statement.column_count();
+    ensure!((1..=32).contains(&columns), "fixture metadata column bound");
+    Ok(statement.query_row([key], |row| {
+        (0..columns).map(|column| row.get(column)).collect()
+    })?)
+}
+
+struct JournalConsumers {
+    slice: Slice,
+    follower: String,
+}
+
+impl JournalConsumers {
+    fn fixture(publish_follower: bool) -> Result<(tempfile::TempDir, Self)> {
+        let (root, mut slice) = fixture()?;
+        slice.installer = Installer::new(vec![Box::new(Ledger), Box::new(JournalFollower)])?;
+        let follower = {
+            let mut writer = slice.store.connection.write_background();
+            let tx = writer.transaction()?;
+            slice.check(&tx)?;
+            ensure!(
+                slice.installer.position(&tx, SOURCE)?.revision == 0,
+                "two-consumer setup requires empty admitted source"
+            );
+            let job = slice.installer.start(
+                &tx,
+                JOURNAL_FOLLOWER,
+                Limits {
+                    page_rows: PAGE_ROWS,
+                    page_bytes: PAGE_BYTES,
+                    pending_rows: PENDING_ROWS,
+                    pending_bytes: JOURNAL_BYTES,
+                    total_rows: TOTAL_ROWS,
+                    callback_ms: 1000,
+                    lifetime_ms: 60000,
+                },
+                0,
+            )?;
+            tx.commit()?;
+            job
+        };
+        let pair = Self { slice, follower };
+        let scan = pair.slice.read(|db| {
+            pair.slice.check(db)?;
+            pair.slice.installer.prepare_scan(
+                db,
+                &ScanPage {
+                    job: pair.follower.clone(),
+                    expected_cursor: vec![],
+                    next_cursor: vec![],
+                    position: pair.slice.installer.position(db, SOURCE)?,
+                    rows: vec![],
+                    finished: true,
+                },
+                limits(),
+            )
+        })?;
+        assert_eq!(pair.slice.publish(&scan)?, Outcome::Progress);
+        if publish_follower {
+            let page = pair.capture(JOURNAL_FOLLOWER, true)?.reduce()?;
+            assert_eq!(pair.slice.publish(&page)?, Outcome::Published);
+        }
+        assert_ne!(pair.follower, pair.slice.manifest.job);
+        Ok((root, pair))
+    }
+
+    fn namespace(&self, view: &str) -> Result<&str> {
+        match view {
+            VIEW => Ok(&self.slice.manifest.job),
+            JOURNAL_FOLLOWER => Ok(&self.follower),
+            _ => bail!("unknown fixture journal consumer"),
+        }
+    }
+
+    fn state_at(&self, db: &Connection, view: &str) -> Result<JournalConsumerState> {
+        let ns = self.namespace(view)?;
+        let root = db.query_row(
+            "SELECT namespace,revision,ready,generation,status_revision,error
+             FROM main.ivm_install_roots WHERE view=?1",
+            [view],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )?;
+        let job = db.query_row(
+            "SELECT phase,applied_revision,queued_rows,queued_bytes,pages,extracted_rows,
+             applied_rows,cursor,error FROM main.ivm_install_jobs WHERE id=?1",
+            [ns],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            },
+        )?;
+        let coverage = db.query_row(
+            "SELECT (SELECT through FROM main.slice_coverage WHERE namespace=?1)",
+            [ns],
+            |r| r.get(0),
+        )?;
+        let output = db
+            .prepare(
+                "SELECT claim_id,subject,kind,digest FROM main.slice_output
+             WHERE namespace=?1 ORDER BY claim_id LIMIT 33",
+            )?
+            .query_map([ns], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ensure!(output.len() <= 32, "two-consumer output oracle bound");
+        let state = JournalConsumerState {
+            root,
+            job,
+            coverage,
+            output,
+            root_row: journal_metadata_row(
+                db,
+                "SELECT * FROM main.ivm_install_roots WHERE view=?1",
+                view,
+            )?,
+            job_row: journal_metadata_row(
+                db,
+                "SELECT * FROM main.ivm_install_jobs WHERE id=?1",
+                ns,
+            )?,
+        };
+        if let Some(actual) = &state.root.0 {
+            ensure!(actual == ns, "consumer namespace replaced");
+        }
+        Ok(state)
+    }
+
+    fn state(&self, view: &str) -> Result<JournalConsumerState> {
+        self.slice.read(|db| {
+            self.slice.check(db)?;
+            self.state_at(db, view)
+        })
+    }
+
+    fn current_output(&self, view: &str) -> Result<Vec<JournalOutput>> {
+        self.slice.read(|db| {
+            self.slice.check(db)?;
+            let status = self.slice.installer.status(db, view)?;
+            ensure!(status.ready, "consumer is not current");
+            let state = self.state_at(db, view)?;
+            ensure!(
+                state.root.1 == status.source.revision
+                    && state.coverage == Some(status.source.revision),
+                "consumer current coverage differs"
+            );
+            Ok(state.output)
+        })
+    }
+
+    fn capture(&self, view: &str, active_job: bool) -> Result<OwnedPage> {
+        self.slice.read(|db| {
+            self.slice.check(db)?;
+            let mut prepared = if active_job {
+                ensure!(view == JOURNAL_FOLLOWER, "unexpected fixture active job");
+                self.slice
+                    .installer
+                    .prepare_catch_up(db, &self.follower, limits())?
+            } else {
+                self.slice.installer.prepare_live_bounded(
+                    db,
+                    view,
+                    limits(),
+                    PAGE_ROWS,
+                    PAGE_ROWS * REFERENCE_BYTES,
+                )?
+            };
+            ensure!(
+                prepared.rows().len() <= PAGE_ROWS,
+                "consumer input fanout bound"
+            );
+            prepared.capture_tables(db, &["slice_output", "slice_coverage"])?;
+            let mut images = Vec::new();
+            let mut bytes = 0usize;
+            for row in prepared.rows() {
+                smallclaims::read_budget::check()?;
+                let reference = row.new.as_ref().context("consumer input missing image")?;
+                ensure!(
+                    row.old.is_none() && reference["table"] == "claims" && reference["side"] == 1,
+                    "unsupported consumer mutation"
+                );
+                let revision = reference["revision"]
+                    .as_u64()
+                    .context("bad consumer revision")?;
+                let key: Value = serde_json::from_str(&row.key)?;
+                let index = key[1][0].as_u64().context("bad consumer primary key")?;
+                ensure!(key[0] == "claims" && index > 0, "unexpected consumer key");
+                let (id, subject, kind, body, size): (i64, i64, i64, i64, i64) = db.query_row(
+                    "SELECT octet_length(claim_id),octet_length(subject),octet_length(kind),
+                     octet_length(body),bytes FROM main.slice_images WHERE revision=?1",
+                    [revision],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )?;
+                ensure!(
+                    (1..=128).contains(&id)
+                        && (0..=256).contains(&subject)
+                        && (0..=128).contains(&kind)
+                        && body >= 0
+                        && 8 + id + subject + kind + body == size
+                        && size <= IMAGE_BYTES as i64,
+                    "consumer image width/counter invalid"
+                );
+                bytes = bytes
+                    .checked_add(size as usize)
+                    .context("consumer byte overflow")?;
+                ensure!(bytes <= PAGE_BYTES, "consumer page bytes exceeded");
+                let image = db.query_row(
+                    "SELECT store_index,claim_id,subject,kind,body FROM main.slice_images
+                     WHERE revision=?1",
+                    [revision],
+                    |r| {
+                        Ok(Image {
+                            store_index: r.get(0)?,
+                            id: r.get(1)?,
+                            subject: r.get(2)?,
+                            kind: r.get(3)?,
+                            body: r.get(4)?,
+                        })
+                    },
+                )?;
+                ensure!(
+                    image.store_index == index,
+                    "consumer image/reference mismatch"
+                );
+                images.push(image);
+            }
+            self.slice.check(db)?;
+            Ok(OwnedPage {
+                prepared,
+                images,
+                bytes,
+            })
+        })
+    }
+
+    fn publish_live(&self, view: &str) -> Result<()> {
+        let page = self.capture(view, false)?.reduce()?;
+        self.slice.publish(&page)?;
+        Ok(())
+    }
+
+    fn prune_journal(&self) -> Result<usize> {
+        let mut writer = self.slice.store.connection.write_background();
+        let tx = writer.transaction()?;
+        self.slice.check(&tx)?;
+        // Only production code chooses a minimum and deletes references; no image deletion.
+        let removed = self.slice.installer.prune_journal(&tx, SOURCE, PAGE_ROWS)?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
+    fn cancel_follower(&self) -> Result<()> {
+        let mut writer = self.slice.store.connection.write_background();
+        let tx = writer.transaction()?;
+        self.slice.check(&tx)?;
+        self.slice.installer.cancel(&tx, &self.follower)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+// This oracle changes only journal rows/counters in an independently copied full snapshot.
+// It never supplies a cutoff to the library, and images remain intentionally retained.
+fn expected_journal_after(
+    before: &RetentionState,
+    remaining: Vec<RetainedReference>,
+) -> Result<RetentionState> {
+    let mut expected = before.clone();
+    let mut bytes = 0u64;
+    for reference in &remaining {
+        ensure!(
+            reference.payload.len() <= REFERENCE_BYTES
+                && reference.bytes == reference.payload.len() as u64,
+            "two-consumer reference byte oracle"
+        );
+        bytes += reference.payload.len() as u64;
+    }
+    expected.source.2 = remaining.len() as u64;
+    expected.source.3 = bytes;
+    expected.journal = remaining;
+    Ok(expected)
+}
+
+fn expected_journal_output(
+    native: &[(String, String, String, String)],
+) -> Result<Vec<JournalOutput>> {
+    native
+        .iter()
+        .map(|(id, subject, kind, body)| {
+            let body: Value = serde_json::from_str(body)?;
+            let canonical = smallclaims::hash::canonical_json_text(&body)?;
+            Ok((
+                id.clone(),
+                subject.clone(),
+                kind.clone(),
+                hex::encode(Sha256::digest(canonical.as_bytes())),
+            ))
+        })
+        .collect()
+}
+
+#[test]
+fn production_journal_prune_keeps_slowest_installed_consumer_prefix() -> Result<()> {
+    let (_directory, pair) = JournalConsumers::fixture(true)?;
+    for n in 0..32 {
+        append(&pair.slice, &format!("note/two-consumers-{n:02}"))?;
+    }
+    pair.publish_live(VIEW)?;
+    pair.publish_live(VIEW)?;
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    let before = pair.slice.retention_state()?;
+    before.assert_complete_output()?;
+    let slow = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(before.root.0, 32);
+    assert_eq!(slow.root.1, 16);
+    assert!(slow.root.2); // Stored live prefix still pins, even though it is not current.
+    assert_eq!(slow.coverage, Some(16));
+    assert_eq!(slow.output.len(), 16);
+    assert!(
+        !pair
+            .slice
+            .read(|db| Ok(pair.slice.installer.status(db, JOURNAL_FOLLOWER)?.ready))?
+    );
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+    assert_eq!(pair.prune_journal()?, 16);
+    let remaining = before
+        .journal
+        .iter()
+        .filter(|r| r.revision > 16)
+        .cloned()
+        .collect();
+    let pinned = expected_journal_after(&before, remaining)?;
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    // A fast-view/source-head cutoff would wrongly remove the remaining16 on this second call.
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, pinned);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, slow);
+    pair.publish_live(JOURNAL_FOLLOWER)?;
+    let complete = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(complete.root.1, 32);
+    assert_eq!(complete.coverage, Some(32));
+    let native = expected_journal_output(&before.native)?;
+    assert_eq!(pair.current_output(VIEW)?, native);
+    assert_eq!(pair.current_output(JOURNAL_FOLLOWER)?, native);
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(
+        pair.slice.retention_state()?,
+        expected_journal_after(&before, vec![])?
+    );
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, complete);
+    assert_eq!(pair.prune_journal()?, 0);
+    Ok(())
+}
+
+#[test]
+fn production_journal_prune_pins_active_job_until_explicit_cancel() -> Result<()> {
+    let (_directory, pair) = JournalConsumers::fixture(false)?;
+    for n in 0..32 {
+        append(&pair.slice, &format!("note/active-follower-{n:02}"))?;
+    }
+    pair.publish_live(VIEW)?;
+    pair.publish_live(VIEW)?;
+    let before = pair.slice.retention_state()?;
+    before.assert_complete_output()?;
+    let active = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(active.job.0, "catchup");
+    assert_eq!(active.job.1, 0);
+    assert_eq!(active.job.2, 32);
+    assert!(active.root.0.is_none() && !active.root.2);
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+    // Ignoring an active job without a published root would delete16 here, rather than zero.
+    assert_eq!(pair.prune_journal()?, 0);
+    assert_eq!(pair.slice.retention_state()?, before);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, active);
+    let stale = pair.capture(JOURNAL_FOLLOWER, true)?.reduce()?;
+    let ready_primary = pair.state(VIEW)?;
+    assert!(ready_primary.root.2 && ready_primary.root.0.is_some());
+    pair.cancel_follower()?; // Only this explicit committed cancel releases the job pin.
+    let stopped = pair.state(JOURNAL_FOLLOWER)?;
+    assert_eq!(stopped.job.0, "stopped");
+    assert!(stopped.root.0.is_none() && !stopped.root.2);
+    assert_eq!(
+        pair.state(VIEW)?,
+        ready_primary,
+        "cancel must not remove the other's ready root"
+    );
+    assert_eq!(pair.slice.retention_state()?, before);
+    assert!(pair.slice.publish(&stale).is_err());
+    assert_eq!(
+        pair.slice.retention_state()?,
+        before,
+        "stale publication changed journal counters or native state"
+    );
+    assert_eq!(
+        pair.state(JOURNAL_FOLLOWER)?,
+        stopped,
+        "stale publication changed follower rows"
+    );
+    assert_eq!(pair.state(VIEW)?, ready_primary);
+    let remaining = before
+        .journal
+        .iter()
+        .filter(|r| r.revision > 16)
+        .cloned()
+        .collect();
+    // Leaving a cancelled job in the minimum would incorrectly keep this count at zero.
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(
+        pair.slice.retention_state()?,
+        expected_journal_after(&before, remaining)?
+    );
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, stopped);
+    assert_eq!(pair.prune_journal()?, 16);
+    assert_eq!(
+        pair.slice.retention_state()?,
+        expected_journal_after(&before, vec![])?
+    );
+    assert_eq!(pair.state(VIEW)?, ready_primary);
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, stopped);
+    assert!(pair.slice.publish(&stale).is_err());
+    assert_eq!(pair.state(JOURNAL_FOLLOWER)?, stopped);
+    assert_eq!(
+        pair.slice.retention_state()?,
+        expected_journal_after(&before, vec![])?
+    );
+    assert_eq!(
+        pair.current_output(VIEW)?,
+        expected_journal_output(&before.native)?
+    );
+    assert!(pair.current_output(JOURNAL_FOLLOWER).is_err());
+    assert_eq!(pair.prune_journal()?, 0);
+    Ok(())
 }

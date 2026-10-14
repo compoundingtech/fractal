@@ -452,7 +452,19 @@ fn judge_claim(
         memo,
         links: RefCell::default(),
     };
-    let fields = row.body.get("fields").cloned().unwrap_or(Value::Null);
+    let mut fields = row.body.get("fields").cloned().unwrap_or(Value::Null);
+    // A long message's claim holds a preview, and names its whole text in an `attachments` entry
+    // of type text/plain. A device that signs such a message names `body_sha256` and `body_bytes`
+    // among its signed fields; they are those entry's hash and size, not stored fields.
+    if row.kind == "message.sent"
+        && let Some(body) = fields
+            .get("attachments")
+            .and_then(crate::principal::message_body_entry)
+            .cloned()
+    {
+        fields["body_sha256"] = body.get("sha256").cloned().unwrap_or(Value::Null);
+        fields["body_bytes"] = body.get("size").cloned().unwrap_or(Value::Null);
+    }
     let judged = crate::principal::Judged {
         id: &row.id,
         subject: &row.subject,
@@ -496,6 +508,26 @@ fn write_verdict_tx(
             signature.on_behalf
         ])?;
     Ok(previous.as_ref() != Some(verdict))
+}
+
+/// Forget a claim's signature and every cached verdict row of it, when a checkpoint drops the
+/// claim. None of these rows is synced or in a digest, and nothing reads them for a claim that is
+/// gone: a nonce counts as used before only by a claim the store still holds, and a dropped claim
+/// is never a delegation another verdict relies on (those kinds are never dropped).
+pub(crate) fn forget_claim_tx(connection: &Connection, claim_id: &str) -> Result<usize> {
+    let mut rows = 0;
+    for table in [
+        "claim_signatures",
+        "claim_verdicts",
+        "claim_verdict_links",
+        "claim_verdict_queue",
+        "claim_verdict_fresh",
+    ] {
+        rows += connection
+            .prepare_cached(&format!("DELETE FROM {table} WHERE claim_id=?1"))?
+            .execute([claim_id])?;
+    }
+    Ok(rows)
 }
 
 /// Queue every verdict linked to `link`.

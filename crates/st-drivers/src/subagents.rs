@@ -416,7 +416,13 @@ fn apply_claude(ledger: &mut Ledger, event: &str, payload: &Value, now: u64) {
             {
                 subagent.transcript = Some(PathBuf::from(path));
             }
-            ledger.end(&id, "completed", None, now);
+            let outcome = ledger
+                .running
+                .get(&id)
+                .and_then(|subagent| subagent.transcript.as_deref())
+                .and_then(claude_subagent_outcome)
+                .unwrap_or("completed");
+            ledger.end(&id, outcome, None, now);
         }
         "Stop" => {
             // A subagent's own events carry its ID; only the parent's Stop lists its tasks.
@@ -445,6 +451,33 @@ fn apply_claude(ledger: &mut Ledger, event: &str, payload: &Value, now: u64) {
         }
         _ => {}
     }
+}
+
+/// SubagentStop carries final response text, not an outcome. Claude's last assistant record
+/// carries typed API-error and mid-stream-abort flags. Ignore diagnostic/progress records:
+/// `system/api_error` describes a retry and is not evidence that the run failed.
+fn claude_subagent_outcome(transcript: &Path) -> Option<&'static str> {
+    let file = fs::File::open(transcript).ok()?;
+    let mut outcome = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.ok()?;
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if record.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        outcome = Some(
+            if record.get("isApiErrorMessage").and_then(Value::as_bool) == Some(true) {
+                "failed"
+            } else if record.get("isAbortedMidStream").and_then(Value::as_bool) == Some(true) {
+                "interrupted"
+            } else {
+                "completed"
+            },
+        );
+    }
+    outcome
 }
 
 /// Claude writes a subagent's transcript at `SESSION/subagents/agent-ID.jsonl` beside the
@@ -600,23 +633,36 @@ pub fn observe_omp(agent_dir: &Path, frame: &Value, parent: &str) -> Result<()> 
     update(agent_dir, |ledger| apply_omp(ledger, frame, parent, now))
 }
 
+/// Bound omp's producer strings before copying them into the ledger. Never truncate an ID:
+/// distinct IDs with the same prefix must not share a run.
+fn omp_text<'a>(frame: &'a Value, key: &str, max_bytes: usize) -> Option<&'a str> {
+    frame.get(key)?.as_str().map(str::trim)
+        .filter(|text| !text.is_empty() && text.len() <= max_bytes)
+}
+
 fn apply_omp(ledger: &mut Ledger, frame: &Value, parent: &str, now: u64) {
-    let Some(thread) = text(frame, "id") else {
+    let Some(thread) = omp_text(frame, "id", 256) else {
         return;
     };
     ledger.change_session(parent, now);
-    let current = run_id(ledger, &thread);
+    let current = run_id(ledger, thread);
     match frame.get("event").and_then(Value::as_str) {
-        // A progress report starts a run whose start this ledger missed.
+        // A progress report starts a run whose start this ledger missed, but never resurrects
+        // an ended run. Only an explicit start can run a known, finished thread again.
         Some("start" | "progress") => {
             if let Some(running) = ledger.running.get_mut(&current) {
                 running.reported_at_ms = Some(now);
                 return;
             }
-            let id = next_run(ledger, &thread);
+            if frame.get("event").and_then(Value::as_str) == Some("progress")
+                && ledger.runs.contains_key(thread)
+            {
+                return;
+            }
+            let id = next_run(ledger, thread);
             ledger.start(Subagent {
                 id,
-                subagent_type: text(frame, "name"),
+                subagent_type: omp_text(frame, "name", 128).map(str::to_owned),
                 description: None,
                 session_id: Some(parent.into()),
                 started_at_ms: now,
@@ -910,6 +956,54 @@ mod tests {
     }
 
     #[test]
+    fn claude_stop_uses_the_last_assistant_outcome_not_retry_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        let transcript = directory.path().join("agent-tester.jsonl");
+        for (tail, expected) in [
+            (
+                json!({"type": "assistant", "isApiErrorMessage": true,
+                "message": {"content": [{"type": "text", "text": "usage limit"}]}}),
+                "failed",
+            ),
+            (
+                json!({"type": "assistant", "isAbortedMidStream": true}),
+                "interrupted",
+            ),
+            (
+                json!({"type": "assistant", "message": {"stop_reason": "end_turn"}}),
+                "completed",
+            ),
+        ] {
+            fs::write(
+                &transcript,
+                format!(
+                    "{}\n{}\n{}\n{}\n",
+                    json!({"type": "assistant", "isApiErrorMessage": true}),
+                    json!({"type": "system", "subtype": "api_error", "retryAttempt": 1}),
+                    tail,
+                    json!({"type": "progress"}),
+                ),
+            )
+            .unwrap();
+            let mut ledger = Ledger::default();
+            started(&mut ledger, "tester", "p-1", "general-purpose", 11);
+            apply_claude(
+                &mut ledger,
+                "SubagentStop",
+                &json!({
+                    "session_id": "s-1", "agent_id": "tester",
+                    "agent_transcript_path": transcript,
+                    // Text is not an outcome: a successful response may discuss failure.
+                    "last_assistant_message": "failed",
+                }),
+                12,
+            );
+            assert!(ledger.running.is_empty());
+            assert_eq!(ledger.ended[0].outcome, expected);
+        }
+    }
+
+    #[test]
     fn a_subagent_the_parent_stops_listing_is_interrupted_after_the_grace() {
         let mut ledger = Ledger::default();
         started(&mut ledger, "fg", "p-1", "general-purpose", 1);
@@ -1191,6 +1285,9 @@ mod tests {
         // A repeated end changes nothing; a new start is the subagent's second run.
         apply_omp(&mut ledger, &frame("end", json!({})), "native", 5);
         assert_eq!(ledger.ended.len(), 1);
+        apply_omp(&mut ledger, &frame("progress", json!({})), "native", 5);
+        assert!(ledger.running.is_empty(), "late progress must not start a phantom run");
+        assert_eq!(ledger.runs["0-Review"], 1);
         apply_omp(&mut ledger, &frame("start", json!({})), "native", 6);
         assert!(ledger.running.contains_key("0-Review#2"));
         // An outcome the extension cannot report reads as completed.
@@ -1207,6 +1304,22 @@ mod tests {
         let before = ledger.clone();
         apply_omp(&mut ledger, &json!({"type": "subagent", "event": "end"}), "native", 10);
         assert_eq!(ledger, before);
+    }
+
+    #[test]
+    fn omp_strings_are_bounded_in_bytes_without_truncating_ids() {
+        let mut ledger = Ledger::default();
+        let id = "é".repeat(128);
+        let frame = json!({"type": "subagent", "event": "start", "id": id, "name": "é".repeat(64)});
+        apply_omp(&mut ledger, &frame, "native", 1);
+        assert_eq!(ledger.running[&id].subagent_type.as_ref().unwrap().len(), 128);
+        let before = ledger.clone();
+        apply_omp(&mut ledger, &json!({"type": "subagent", "event": "start",
+            "id": format!("{id}x")}), "other", 2);
+        assert_eq!(ledger, before, "an oversized ID changes nothing, including the session");
+        apply_omp(&mut ledger, &json!({"type": "subagent", "event": "start",
+            "id": "no-type", "name": format!("{}x", "é".repeat(64))}), "native", 2);
+        assert_eq!(ledger.running["no-type"].subagent_type, None);
     }
 
     #[test]

@@ -35,9 +35,7 @@ use crate::fleet::transport::{Fabric, LocalTransports, Route, local_addresses, p
 use crate::fleet::{FleetView, MemberKey};
 use crate::model::{
     ApiResponse, ReplicaEnvelopeId, ReplicationExchange, ReplicationExportRequest,
-    ReplicationExportResponse, ReplicationHealAnswer, ReplicationHealAnswerRequest,
-    ReplicationHealNextRequest, ReplicationHealQuery, ReplicationHealStep, ReplicationInventory,
-    ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
+    ReplicationExportResponse, ReplicationInventory, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
 };
 use crate::store::Store;
 use crate::relay_trace::{self, Outcome, Phase};
@@ -1095,7 +1093,7 @@ async fn receive_raw_terminal(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "raw terminal signature failed").into_response(),
     };
     let mut response = websocket.max_message_size(64 * 1024).max_frame_size(64 * 1024)
-        .on_upgrade(move |socket| crate::api::raw_terminal_splice(socket, transport, None, None, None));
+        .on_upgrade(move |socket| crate::api::raw_terminal_splice(socket, transport, None, None, None, None, None));
     response.headers_mut().extend(signed);
     response
 }
@@ -1511,7 +1509,25 @@ impl Backend for MainBackend {
                     fleet_id: fleet_id.to_owned(),
                     inventory: inventory.clone(),
                     summary_only,
+                    authority_guard: false,
                     signature_requests: signature_requests.to_vec(),
+                },
+            )
+            .await
+    }
+
+    async fn guard_summary(&self, fleet_id: &str) -> Result<ReplicationExportResponse> {
+        // This marker goes only to our local daemon, never into a signed peer exchange.
+        // Old daemons ignore it and return the same complete summary.
+        self.client
+            .post(
+                "/v1/internal/replication/export",
+                &ReplicationExportRequest {
+                    fleet_id: fleet_id.to_owned(),
+                    inventory: ReplicationInventory::default(),
+                    summary_only: true,
+                    authority_guard: true,
+                    signature_requests: Vec::new(),
                 },
             )
             .await
@@ -1532,40 +1548,6 @@ impl Backend for MainBackend {
                     fleet_id: fleet_id.to_owned(),
                     exchange: exchange.clone(),
                     round_trip_ms: round_trip.map(|duration| duration.as_millis() as u64),
-                },
-            )
-            .await
-    }
-
-    async fn heal_answer(
-        &self,
-        peer: &str,
-        fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> Result<ReplicationHealAnswer> {
-        self.client
-            .post(
-                "/v1/internal/replication/heal/answer",
-                &ReplicationHealAnswerRequest {
-                    peer: peer.to_owned(),
-                    fleet_id: fleet_id.to_owned(),
-                    query: query.clone(),
-                },
-            )
-            .await
-    }
-
-    async fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> Result<ReplicationHealStep> {
-        self.client
-            .post(
-                "/v1/internal/replication/heal/next",
-                &ReplicationHealNextRequest {
-                    peer: peer.to_owned(),
-                    answer,
                 },
             )
             .await
@@ -1765,8 +1747,8 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use smallclaims::fleet::MemberKey;
     use smallclaims::sync::{
-        FleetContext, PeerState, exchange, fetch_checkpoint_manifest, heal,
-        peer_router, replication_http_client,
+        FleetContext, PeerState, exchange, fetch_checkpoint_manifest, peer_router,
+        replication_http_client,
     };
     use std::collections::BTreeSet;
     use std::os::unix::fs::PermissionsExt as _;
@@ -2462,6 +2444,240 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() {
+        let owner_root = tempfile::tempdir().unwrap();
+        let gateway_root = tempfile::tempdir().unwrap();
+        let app_state = |root: &Path, node: &str| crate::api::AppState {
+            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.to_path_buf(),
+            pty_root: root.join("pty"),
+            pty_binary: root.join("unused-pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: crate::model::PlannerSpec::default(),
+        };
+        let owner = app_state(owner_root.path(), "owner-node");
+        let mut gateway = app_state(gateway_root.path(), "gateway-node");
+        let gateway_store = gateway.store.clone();
+        let owner_store = owner.store.clone();
+        let owner_socket = owner_root.path().join("st3.sock");
+        let main_socket = owner_socket.clone();
+        let owner_app = crate::api::router(owner);
+        tokio::spawn(async move { crate::api::serve_unix(&main_socket, owner_app).await });
+        let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "owner-node".into(), FleetAuth::test("fleet-test", &[7; 32]), FleetContext::legacy(BTreeSet::from(["gateway-node".into()])));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes())).await });
+        let secret = gateway_root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        gateway.client_relay = ClientRelay::from_config(&Config {
+            node: "gateway-node".into(),
+            fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            peers: vec![PeerConfig {
+                name: "owner-node".into(),
+                url: format!("http://{address}"),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let gateway_app = crate::api::router(gateway);
+        let gateway_socket = gateway_root.path().join("st3.sock");
+        let serving = gateway_socket.clone();
+        let served = gateway_app.clone();
+        tokio::spawn(async move { crate::api::serve_unix(&serving, served).await });
+        for _ in 0..100 {
+            if owner_socket.exists() && gateway_socket.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Pasted on the owner: 256 KiB of multi-byte text.
+        let mut body = String::new();
+        while body.len() < crate::message_body::MAX_BYTES {
+            body.push_str(&format!("note {} é — pasted\n", body.len()));
+        }
+        while body.len() > crate::message_body::MAX_BYTES {
+            body.pop();
+        }
+        let hash = hex::encode(Sha256::digest(body.as_bytes()));
+        let message = crate::client::Client::unix(&owner_socket)
+            .send_message(&crate::model::MessageSendRequest {
+                idempotency_key: "pasted-notes".into(),
+                from: "person/avery".into(),
+                to: "agent/gateway-node.seat".into(),
+                content: body.clone(),
+                title: None,
+                in_reply_to: None,
+                tags: Vec::new(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap()
+            .message;
+        assert_eq!(message.body_origin.as_deref(), Some("host/owner-node"));
+        assert_eq!(message.body_ref, Some(format!("blob/{hash}")));
+        assert!(message.content.len() < 1100);
+        // The owner holds the text as a file, and its database holds no copy of it.
+        assert_eq!(
+            crate::message_body::bodies(owner_root.path()).read("person/avery", &message.subject).unwrap().unwrap(),
+            body.as_bytes()
+        );
+        assert!(owner_store.get_blob(&hash).unwrap().is_none());
+        // Sync carries the claim to the gateway: a preview and a reference.
+        let claim = owner_store.claims_for(&message.subject, Some("message.sent")).unwrap().remove(0);
+        let carried = serde_json::to_string(&claim.body).unwrap();
+        assert!(carried.len() < 2048, "{} bytes in the claim", carried.len());
+        gateway_store
+            .append_claim(&crate::model::ClaimInput {
+                subject: message.subject.clone(),
+                kind: "message.sent".into(),
+                actor: Some("person/avery".into()),
+                fields: claim.body["fields"].as_object().unwrap().clone().into_iter().collect(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("pasted-notes".into()),
+            })
+            .unwrap();
+        let on_gateway = gateway_store.message(&message.subject).unwrap().unwrap();
+        assert_eq!(on_gateway.content, message.content);
+        assert_eq!(on_gateway.body_bytes, Some(body.len() as u64));
+
+        // The gateway asks the owner each time, and keeps nothing.
+        let gateway_client = crate::client::Client::unix(&gateway_socket);
+        let read = |subject: String| {
+            let client = gateway_client.clone();
+            async move {
+                client
+                    .get::<Value>(&format!("/v1/messages/body/{subject}"))
+                    .await
+                    .unwrap()
+            }
+        };
+        let started = std::time::Instant::now();
+        let whole = read(message.subject.clone()).await;
+        eprintln!("cost: 256 KiB body read from its owner through the peer route: {:?}", started.elapsed());
+        assert_eq!(whole["text"], body.as_str());
+        assert_eq!(whole["complete"], true);
+        // A 64 KiB body for comparison, over the same route.
+        let mut end = 64 * 1024;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        let smaller = &body[..end];
+        let sent = crate::client::Client::unix(&owner_socket)
+            .send_message(&crate::model::MessageSendRequest {
+                idempotency_key: "pasted-notes-64".into(),
+                from: "person/avery".into(),
+                to: "agent/gateway-node.seat".into(),
+                content: smaller.to_owned(),
+                title: None,
+                in_reply_to: None,
+                tags: Vec::new(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap()
+            .message;
+        if sent.body_ref.is_some() {
+            let claim = owner_store.claims_for(&sent.subject, Some("message.sent")).unwrap().remove(0);
+            gateway_store
+                .append_claim(&crate::model::ClaimInput {
+                    subject: sent.subject.clone(),
+                    kind: "message.sent".into(),
+                    actor: Some("person/avery".into()),
+                    fields: claim.body["fields"].as_object().unwrap().clone().into_iter().collect(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some("pasted-notes-64".into()),
+                })
+                .unwrap();
+            let started = std::time::Instant::now();
+            let small = read(sent.subject.clone()).await;
+            eprintln!(
+                "cost: {} B body read from its owner through the peer route: {:?}",
+                smaller.len(),
+                started.elapsed()
+            );
+            assert_eq!(small["text"], smaller);
+        }
+        assert!(gateway_store.get_blob(&hash).unwrap().is_none());
+        assert!(!crate::message_body::bodies(gateway_root.path()).exists("person/avery", &message.subject));
+        assert!(!crate::blobs::BlobDir::under(gateway_root.path()).path(&hash).exists());
+        // The owner's raw blob routes do not hand a body out as an image or copy it.
+        let (status, _) = {
+            let response = gateway_app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/v1/client/blobs/{hash}?message={}", message.subject))
+                        .header("x-st3-person", "person/avery")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            (response.status(), response.into_body())
+        };
+        assert!(!status.is_success());
+        assert!(!crate::blobs::BlobDir::under(gateway_root.path()).path(&hash).exists());
+        // A message to an agent is readable by the fleet's people; the participant rule is tested
+        // where the message is between two people.
+        let response = gateway_app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/client/message-bodies/{}", message.subject))
+                    .header("x-st3-person", "person/avery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+        let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(value["value"]["text"], body.as_str());
+
+        // The owner's file gone: the preview and a note saying where the text was.
+        crate::message_body::bodies(owner_root.path()).remove("person/avery", &message.subject);
+        let gone = read(message.subject.clone()).await;
+        assert_eq!(gone["complete"], false);
+        assert!(gone["text"].as_str().unwrap().starts_with(&on_gateway.content));
+        assert!(gone["text"].as_str().unwrap().contains("host/owner-node"));
+        // An owner that cannot be reached answers the same, and the client route says so.
+        let mut fields = claim.body["fields"].clone();
+        fields["attachments"][0]["origin"] = "host/offline-node".into();
+        gateway_store
+            .append_claim(&crate::model::ClaimInput {
+                subject: "message/offline-notes".into(),
+                kind: "message.sent".into(),
+                actor: Some("person/avery".into()),
+                fields: fields.as_object().unwrap().clone().into_iter().collect(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("offline-notes".into()),
+            })
+            .unwrap();
+        let offline = read("message/offline-notes".into()).await;
+        assert_eq!(offline["complete"], false);
+        assert!(offline["text"].as_str().unwrap().contains("host/offline-node"));
+        let response = gateway_app
+            .oneshot(
+                Request::get("/v1/client/message-bodies/message/offline-notes")
+                    .header("x-st3-person", "person/avery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
     async fn a_read_reaches_an_owner_through_a_peer_that_can_dial_it() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         // A chain of isolated daemons: the gateway dials only the relay, and only the relay
@@ -2837,6 +3053,34 @@ mod tests {
         assert_eq!(replicated.source, "owner");
         assert!(replicated.complete);
         assert_eq!(replicated.state, "current");
+
+        // A trusted intermediary can carry this invented owner's read through the internal
+        // forwarding route. The owner still authenticates the gateway and supplies the page.
+        let forwarded: Value = crate::client::Client::unix(&sockets[0])
+            .post(
+                CLIENT_READ_FORWARD_PATH,
+                &ClientReadRequest {
+                    authority_actor: "person/avery".into(),
+                    request: ClientReadOperation::Messages {
+                        actor: agent.into(),
+                        history: false,
+                        limit: Some(20),
+                        cursor: None,
+                    },
+                    relay: Some(ClientReadRoute {
+                        target: "host/lag-owner".into(),
+                        path: vec!["lag-source".into()],
+                        hops_left: 3,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let items = forwarded["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "forwarded page has exact owner membership");
+        assert_eq!(items[0]["id"], "message/lag-first");
+        assert_eq!(items[0]["content"], "done, ready for review");
+        assert_eq!(forwarded["page"]["has_more"], false);
 
         // With the owner out of reach the gateway shows what it has and says the list may be
         // missing items; it never passes an empty replica off as the whole list.
@@ -3887,8 +4131,7 @@ mod tests {
                 &dialer,
             )
             .await
-            .unwrap()
-            .0;
+            .unwrap();
             if !moved {
                 break;
             }
@@ -3914,10 +4157,11 @@ mod tests {
         server.abort();
     }
 
-    /// A first sync that ends with different graphs heals at once over the signed heal route:
-    /// the node that lost claims asks the peer that holds them and admits their envelopes again.
+    /// A first sync over the signed route ends once both nodes hold the same envelopes. It
+    /// settles on claims alone: a graph that differs there is not compared, replayed or repaired
+    /// from the peer, and no peer route offers a heal.
     #[tokio::test]
-    async fn a_first_sync_heals_a_node_that_lost_claims_over_the_signed_route() {
+    async fn a_first_sync_settles_on_claims_and_never_repairs_from_the_peer() {
         let fleet = "1f91ca65-7793-48cc-866e-ac15690130e1";
         let auth = FleetAuth::test(fleet, &[6; 32]);
         let root = tempfile::tempdir().unwrap();
@@ -3991,31 +4235,39 @@ mod tests {
         assert_ne!(graph(&target), graph(&source));
 
         // Transport observations move for an exchange or two before the envelopes match.
-        let mut heal_now = false;
         for _ in 0..4 {
-            heal_now = exchange(&http, &backend, "target", &peer, &auth, &context)
+            exchange(&http, &backend, "target", &peer, &auth, &context)
                 .await
-                .unwrap()
-                .1;
-            if heal_now {
-                break;
-            }
+                .unwrap();
         }
-        assert!(
-            heal_now,
-            "the first comparison of a first sync heals at once"
-        );
-        heal(&backend, "target", &peer, &auth, &context).await;
-
         let status = target
             .replication_status(true, Some(fleet), &["source".into()])
             .unwrap();
-        let report = status.peers[0].sync.as_ref().unwrap().heal.clone().unwrap();
-        assert!(report.healed, "{report:?}");
-        assert_eq!(graph(&target), graph(&source));
-        assert_eq!((report.refetched, report.pushed), (1, 0));
         let first = status.first_sync.unwrap();
-        assert_eq!((first.state.as_str(), first.healed), ("verified", true));
+        assert_eq!(first.state, "verified", "{first:?}");
+        assert_eq!(first.message, None, "{first:?}");
+        assert_ne!(
+            graph(&target),
+            graph(&source),
+            "the lost claim is not repaired from the peer"
+        );
+        let desired: u64 = target
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM claims WHERE kind='intent.desired'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(desired, 0, "no envelope is admitted again to restore the lost claim");
+        let heal = http
+            .post(format!("http://{address}/v1/peer/heal"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(heal.status(), reqwest::StatusCode::NOT_FOUND);
         server.abort();
     }
 

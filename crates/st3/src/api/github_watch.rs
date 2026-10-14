@@ -4,12 +4,12 @@ use crate::github_http::GithubAuth;
 use super::*;
 use crate::github_watch::ThreadRef;
 
-/// Watch one thread as one seat, until an optional deadline.
+/// Watch one thread as one seat, for fourteen days unless a deadline or `none` is named.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WatchRequest {
     pub actor: String,
     pub thread: String,
-    /// A duration such as `2h`, or an RFC 3339 time.
+    /// A duration such as `2h`, an RFC 3339 time, or `none`; omitted defaults to fourteen days.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
 }
@@ -58,22 +58,31 @@ fn bad(code: &'static str, message: impl Into<String>) -> ApiError {
     ApiError::bad(St3Error::new(code, message.into()))
 }
 
-/// A deadline from now: a duration such as `90m` or `2h`, or an RFC 3339 time.
+const DEFAULT_WATCH_DURATION_MS: u128 = 14 * 24 * 60 * 60 * 1_000;
+
+/// GitHub alias policy only; existing declarations retain their stored deadline.
 fn deadline(until: Option<&str>) -> Result<Option<u128>, ApiError> {
-    let Some(until) = until.map(str::trim).filter(|until| !until.is_empty()) else {
-        return Ok(None);
+    deadline_at(until, smallclaims::store::now_ms())
+}
+
+fn deadline_at(until: Option<&str>, now: u128) -> Result<Option<u128>, ApiError> {
+    let Some(until) = until.map(str::trim) else {
+        return Ok(Some(now.saturating_add(DEFAULT_WATCH_DURATION_MS)));
     };
+    if until == "none" {
+        return Ok(None);
+    }
     if let Some(at) = crate::github_watch::parse_rfc3339_ms(until) {
         return Ok(Some(at));
     }
     let duration = crate::graph::parse_duration(until, true).map_err(|_| {
         bad(
             "invalid-watch-deadline",
-            format!("`{until}` is neither a duration such as 2h nor an RFC 3339 time"),
+            format!("`{until}` is neither a duration such as 2h, an RFC 3339 time, nor none"),
         )
     })?;
     Ok(Some(
-        smallclaims::store::now_ms().saturating_add(u128::from(duration)),
+        now.saturating_add(u128::from(duration)),
     ))
 }
 
@@ -499,6 +508,82 @@ pub(super) async fn watches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_deadline_alias_distinguishes_omitted_finite_and_none() {
+        let now = 1_800_000_000_000u128;
+        for (input, expected) in [
+            (None, Some(now + 14 * 86_400_000)),
+            (Some("4h"), Some(now + 4 * 3_600_000)),
+            (Some("none"), None),
+            (Some("  none  "), None),
+            (Some("2027-01-15T08:00:00.000Z"), Some(1_800_000_000_000)),
+        ] {
+            let request: WatchRequest = serde_json::from_value(json!({
+                "actor":"agent/deadline", "thread":"acme/garden#12", "until":input
+            }))
+            .unwrap();
+            assert_eq!(
+                deadline_at(request.until.as_deref(), now).unwrap(),
+                expected
+            );
+        }
+        let omitted: WatchRequest = serde_json::from_value(json!({
+            "actor":"agent/deadline", "thread":"acme/garden#12"
+        }))
+        .unwrap();
+        assert_eq!(
+            deadline_at(omitted.until.as_deref(), now).unwrap(),
+            Some(now + 14 * 86_400_000)
+        );
+        for invalid in ["", "  ", "never", "0h"] {
+            assert_eq!(
+                deadline_at(Some(invalid), now).unwrap_err().code,
+                "invalid-watch-deadline"
+            );
+        }
+    }
+
+    #[test]
+    fn watch_deadline_alias_and_legacy_lifetimes_survive_store_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("watches.sqlite3");
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let now = smallclaims::store::now_ms();
+        let mut expected = Vec::new();
+        {
+            let store = Store::open(&path, "deadline-fixture").unwrap();
+            for (agent, input) in [
+                ("agent/deadline/default", None),
+                ("agent/deadline/finite", Some("4h")),
+                ("agent/deadline/none", Some("none")),
+            ] {
+                let until = deadline_at(input, now).unwrap();
+                let view = store.declare_watch(&thread, agent, until).unwrap();
+                assert_eq!(view["state"], "active");
+                assert_eq!(
+                    view["until"]
+                        .as_str()
+                        .and_then(crate::github_watch::parse_rfc3339_ms),
+                    until
+                );
+                expected.push((agent, view["until"].clone()));
+            }
+            // Existing indefinite declarations do not acquire the new alias default
+            // merely because the store upgrades or reopens.
+            let legacy = "agent/deadline/legacy";
+            let view = store.declare_watch(&thread, legacy, None).unwrap();
+            assert!(view["until"].is_null());
+            expected.push((legacy, Value::Null));
+        }
+        let reopened = Store::open(&path, "deadline-fixture").unwrap();
+        for (agent, until) in expected {
+            let watches = reopened.watches(Some(agent)).unwrap();
+            assert_eq!(watches.len(), 1);
+            assert_eq!(watches[0]["state"], "active");
+            assert_eq!(watches[0]["until"], until);
+        }
+    }
 
     async fn request(app: Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
         let response = app

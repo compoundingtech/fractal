@@ -4,11 +4,28 @@ use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
 
 #[cfg(test)]
+type FaultReadHook = Box<dyn FnOnce(&Connection) -> Result<()>>;
+
+#[cfg(test)]
 thread_local! {
+    static BEFORE_FAULT_READER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static DURING_FAULT_READ: std::cell::RefCell<Option<FaultReadHook>> = const { std::cell::RefCell::new(None) };
     static AFTER_FAULT_ACQUISITION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static CARD_FAULT_DEADLINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Runs once, after a promotion's reader pre-check found something that may promote and
     /// before the writer is borrowed, so a test can change the lease in that gap.
     static AFTER_PROMOTION_PRECHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+impl Store {
+    pub(crate) fn expire_next_card_fault_read_for_test() {
+        Self::expire_card_fault_reads_for_test(1);
+    }
+
+    pub(crate) fn expire_card_fault_reads_for_test(count: usize) {
+        CARD_FAULT_DEADLINES.with(|remaining| remaining.set(count));
+    }
 }
 
 fn lease(
@@ -50,6 +67,61 @@ fn lease(
         .map_err(internal)
 }
 
+fn capture_mailbox_faults(
+    connection: &Connection, subjects: &[String], index: u64,
+) -> Result<BTreeMap<String, String>> {
+    let work = smallclaims::profile::span("mailbox_faults/work");
+    #[cfg(test)]
+    DURING_FAULT_READ.with(|hook| {
+        hook.borrow_mut().take().map_or(Ok(()), |hook| hook(connection))
+    })?;
+    let query = canonical_sql(
+        "WITH selected(subject) AS (SELECT DISTINCT value FROM json_each(?1)),
+         failures AS MATERIALIZED (
+           SELECT subject, (SELECT id FROM claims INDEXED BY claims_subject_kind_accepted_index
+             WHERE claims.subject=selected.subject AND kind='operational.failure'
+             AND +store_index<=?2
+             AND json_extract(body,'$.fields.condition')='mailbox-channel-lost'
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1) AS failure FROM selected
+         ), unresolved AS MATERIALIZED (
+           SELECT subject,failure FROM failures WHERE failure IS NOT NULL
+           AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+             WHERE claims.subject=failures.subject AND kind='operational.recovered'
+             AND store_index<=?2 AND json_extract(body,'$.fields.failure')=failures.failure)
+         )
+         SELECT unresolved.subject, fault.body,
+           (SELECT body FROM claims INDEXED BY claims_subject_kind_accepted_index
+            WHERE claims.subject=unresolved.subject AND kind='runtime.observed'
+            AND +store_index<=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1)
+         FROM unresolved JOIN claims fault ON fault.id=unresolved.failure",
+    );
+    let mut statement = connection.prepare_cached(&query)?;
+    let rows = statement.query_map(params![serde_json::to_string(subjects)?, index], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+    })?;
+    let mut faults = BTreeMap::new();
+    for row in rows {
+        smallclaims::read_budget::check()?;
+        let (subject, fault, runtime) = row?;
+        let body: Value = serde_json::from_str(&fault)?;
+        let runtime: Value = runtime.map(|body| serde_json::from_str(&body))
+            .transpose()?.unwrap_or(Value::Null);
+        let fields = runtime.get("fields").unwrap_or(&runtime);
+        // A fault's exact runtime must still be the running one at this same cut.
+        if fields["status"] == "running"
+            && fields["incarnation_id"] == body["fields"]["incarnation"]
+        {
+            faults.insert(subject, body["fields"]["reason"].as_str()
+                .unwrap_or("mailbox channel lost").into());
+        }
+    }
+    // Finish the successful work check before statement/reader cleanup. A later
+    // scheduling pause must not turn a completed read into a local work overrun.
+    smallclaims::read_budget::check()?;
+    drop(work);
+    Ok(faults)
+}
+
 /// Whether `promote_current_mailbox_ownership` has nothing to promote for this lease row: there
 /// is none, or the caller is not a bootstrap promotion and not a same-session sequence advance.
 /// Re-exec can claim a newer sequence for the surviving provider session; only that exact
@@ -89,6 +161,104 @@ mod tests {
         declare(&store);
         crate::mailbox::tests::ready(&store, "current");
         store
+    }
+
+    fn fault_capture_stall(phase: &str) {
+        let store = fixture();
+        let subjects = vec![String::from("agent/eval.worker")];
+        store.append_claim(&ClaimInput {
+            subject: subjects[0].clone(), kind: "operational.failure".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
+                "incarnation":"current", "reason":"fixture loss", "reviewer":subjects[0],
+                "title":"Mailbox lost", "severity":"error", "targets":subjects})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let cut = store.index().unwrap();
+        let expected = BTreeMap::from([(subjects[0].clone(), "fixture loss".into())]);
+        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = reached.clone();
+        let pause = move || {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(60));
+        };
+        match phase {
+            "before" => BEFORE_FAULT_READER.with(|hook| *hook.borrow_mut() = Some(Box::new(pause))),
+            "during" => DURING_FAULT_READ.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |connection| {
+                    let _: i64 = connection.query_row("SELECT 1", [], |row| row.get(0))?;
+                    pause();
+                    Ok(())
+                }));
+            }),
+            "after" => AFTER_FAULT_ACQUISITION.with(|hook| *hook.borrow_mut() = Some(Box::new(pause))),
+            _ => unreachable!(),
+        }
+        let parent = smallclaims::read_budget::ReadBudget::new("/fault-stall", std::time::Duration::from_secs(15));
+        let actual = smallclaims::read_budget::with(Some(parent), ||
+            store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)));
+        println!("fault stall phase={phase} injected={}", reached.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(reached.load(std::sync::atomic::Ordering::SeqCst), "the control must inject its stall");
+        assert_eq!(actual.unwrap(), expected, "a {phase}-work wait is not reader CPU work");
+        assert_eq!(store.index().unwrap(), cut, "a stalled read cannot write or repair its cut");
+    }
+
+    #[test]
+    fn fault_capture_wait_before_reader_does_not_spend_cpu_budget() {
+        fault_capture_stall("before");
+    }
+
+    #[test]
+    fn fault_capture_wait_during_reader_does_not_spend_cpu_budget() {
+        fault_capture_stall("during");
+    }
+
+    #[test]
+    fn fault_capture_wait_after_reader_does_not_spend_cpu_budget() {
+        fault_capture_stall("after");
+    }
+
+    #[test]
+    fn fault_capture_real_sql_overrun_still_refuses_with_live_parent() {
+        let store = fixture();
+        let subjects = vec!["agent/eval.worker".into()];
+        let cut = store.index().unwrap();
+        DURING_FAULT_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|connection| {
+                let _: i64 = connection.query_row(
+                    "WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<1000000)
+                     SELECT sum(n) FROM work", [], |row| row.get(0),
+                )?;
+                Ok(())
+            }));
+        });
+        let parent = smallclaims::read_budget::ReadBudget::new("/fault-work", std::time::Duration::from_secs(15));
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let error = smallclaims::read_budget::with(Some(parent.clone()), ||
+            store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index))).unwrap_err();
+        let work = scope.finish();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert!(parent.check().is_ok(), "the local work limit must refuse before its parent");
+        assert!(work.vm_steps > 1000, "the control must execute real SQLite work");
+        assert_eq!(store.index().unwrap(), cut, "a refused read cannot return a repaired cut");
+    }
+
+    #[test]
+    fn fault_capture_stalls_still_observe_parent_cancellation_and_non_request_wall_bound() {
+        let store = fixture();
+        let subjects = vec!["agent/eval.worker".into()];
+        let cut = store.index().unwrap();
+        let parent = smallclaims::read_budget::ReadBudget::new("/fault-cancel", std::time::Duration::from_secs(15));
+        let cancel = parent.clone();
+        AFTER_FAULT_ACQUISITION.with(|hook| *hook.borrow_mut() = Some(Box::new(move || cancel.cancel())));
+        let error = smallclaims::read_budget::with(Some(parent), ||
+            store.mailbox_faults_for(&subjects, cut)).unwrap_err();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        BEFORE_FAULT_READER.with(|hook| *hook.borrow_mut() = Some(Box::new(||
+            std::thread::sleep(std::time::Duration::from_millis(60)))));
+        let error = store.mailbox_faults_for(&subjects, cut).unwrap_err();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(store.index().unwrap(), cut);
     }
 
     #[test]
@@ -537,6 +707,215 @@ mod tests {
         ).unwrap();
         store.apply_internal(&intent, "argv-monitor-fixture").unwrap();
         store.desired_subjects_named(&["agent/eval.worker".into()]).unwrap().remove(0).member.unwrap()
+    }
+
+    // A typed Store fixture changes the captured member without a runtime
+    // reconciliation or process restart. This is not a physical argv witness.
+    fn update_argv_member(store: &Store, member: &MemberSpec) {
+        let mut intent = crate::graph::parse_intent(
+            "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; argv \"python3\" \"probe\"; }",
+            "node",
+        ).unwrap();
+        intent.subjects.get_mut("agent/eval.worker").unwrap().member = Some(member.clone());
+        store
+            .apply_internal(&intent, "argv-member-edit-fixture")
+            .unwrap();
+        assert_eq!(
+            store
+                .desired_subjects_named(&["agent/eval.worker".into()])
+                .unwrap()[0]
+                .member
+                .as_ref(),
+            Some(member)
+        );
+    }
+
+    #[test]
+    fn argv_metadata_edits_preserve_capability_and_receipt_admission() {
+        for edit in ["tags", "display", "environment", "restart"] {
+            let store = fixture();
+            let captured = declare_argv(&store, "node");
+            let bound = store
+                .bind_argv_mailbox_checked(&request(), &captured, &|| Ok(()))
+                .unwrap();
+            let runtime = store
+                .latest_claim(&bound.subject, Some("runtime.observed"))
+                .unwrap()
+                .unwrap()
+                .id;
+            store
+                .append_claim(&ClaimInput {
+                    subject: "message/argv-metadata".into(),
+                    kind: "message.sent".into(),
+                    actor: Some("person/fixture".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("sent")),
+                        ("from".into(), json!("person/fixture")),
+                        ("to".into(), json!(bound.subject)),
+                        ("content".into(), json!("Original envelope")),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            let receipt = |phase: &str| ClaimInput {
+                subject: "message/argv-metadata".into(),
+                kind: format!("message.{phase}"),
+                actor: Some(bound.subject.clone()),
+                fields: BTreeMap::from([("status".into(), json!(phase))]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("argv-metadata:{phase}")),
+            };
+            store
+                .append_mailbox_receipt_outcome(&receipt("staged"), &bound)
+                .unwrap();
+            let mut changed = captured.clone();
+            match edit {
+                "tags" => {
+                    changed.tags.insert("purpose".into(), "updated".into());
+                }
+                "display" => changed.display_name = Some("Updated display".into()),
+                "environment" => {
+                    changed
+                        .environment
+                        .insert("ARGV_FIXTURE".into(), "updated".into());
+                }
+                "restart" => {
+                    changed.restart = crate::model::RestartType::Never;
+                    changed.restart_intensity.attempts += 1;
+                    changed.shutdown_timeout_ms += 1;
+                }
+                _ => unreachable!(),
+            }
+            assert_ne!(changed, captured);
+            assert!(changed.launch_changes(&captured).is_empty());
+            update_argv_member(&store, &changed);
+            assert_eq!(
+                store
+                    .latest_claim(&bound.subject, Some("runtime.observed"))
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                runtime
+            );
+            store.check_mailbox(&bound).unwrap();
+            for phase in ["staged", "delivered", "read"] {
+                // Cached and fresh receipts must both keep the original current
+                // capability; metadata changes do not grant another owner.
+                store
+                    .append_mailbox_receipt_outcome(&receipt(phase), &bound)
+                    .unwrap();
+                store
+                    .append_mailbox_receipt_outcome(&receipt(phase), &bound)
+                    .unwrap();
+                assert_eq!(
+                    store
+                        .claims_for("message/argv-metadata", Some(&format!("message.{phase}")))
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            for member in [&captured, &changed] {
+                let reconnect = store
+                    .bind_argv_mailbox_checked(&bound, member, &|| Ok(()))
+                    .unwrap();
+                assert_eq!(
+                    (reconnect.token, reconnect.epoch),
+                    (bound.token.clone(), bound.epoch)
+                );
+            }
+            assert!(store.mailbox_lease_authority(&bound).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn argv_launch_edits_still_fence_the_unchanged_running_capability() {
+        for edit in ["workspace", "cwd", "terminal", "runtime", "raw-argv"] {
+            let store = fixture();
+            let mut captured = declare_argv(&store, "node");
+            if edit == "raw-argv" {
+                captured.launch = LaunchSpec::Argv(vec![
+                    "wrapper".into(),
+                    "--".into(),
+                    "program".into(),
+                    "--settings".into(),
+                    "old.json".into(),
+                    "argument".into(),
+                ]);
+                update_argv_member(&store, &captured);
+            }
+            let bound = store
+                .bind_argv_mailbox_checked(&request(), &captured, &|| Ok(()))
+                .unwrap();
+            let runtime = store
+                .latest_claim(&bound.subject, Some("runtime.observed"))
+                .unwrap()
+                .unwrap()
+                .id;
+            let mut changed = captured.clone();
+            match edit {
+                "workspace" => changed.workspace = "/different".into(),
+                "cwd" => changed.cwd = "/different".into(),
+                "terminal" => changed.terminal = !captured.terminal,
+                "runtime" => changed.runtime_id.push_str("-replacement"),
+                "raw-argv" => {
+                    let LaunchSpec::Argv(argv) = &mut changed.launch else {
+                        unreachable!()
+                    };
+                    argv[4] = "new.json".into();
+                    // Typed wrappers omit generated settings from their launch
+                    // comparison. An explicit argv transport must not do that.
+                    assert!(changed.launch_changes(&captured).is_empty());
+                }
+                _ => unreachable!(),
+            }
+            update_argv_member(&store, &changed);
+            assert_eq!(
+                store
+                    .latest_claim(&bound.subject, Some("runtime.observed"))
+                    .unwrap()
+                    .unwrap()
+                    .id,
+                runtime
+            );
+            assert_eq!(
+                store.check_mailbox(&bound).unwrap_err().code,
+                "stale-mailbox-session"
+            );
+            let receipt = ClaimInput {
+                subject: "message/argv-launch-edit".into(),
+                kind: "message.read".into(),
+                actor: Some(bound.subject.clone()),
+                fields: BTreeMap::from([("status".into(), json!("read"))]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("argv-launch-edit:{edit}")),
+            };
+            assert_eq!(
+                store
+                    .append_mailbox_receipt_outcome(&receipt, &bound)
+                    .unwrap_err()
+                    .code,
+                "stale-mailbox-session"
+            );
+            assert!(
+                store
+                    .claims_for(&receipt.subject, Some("message.read"))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .bind_argv_mailbox_checked(&bound, &changed, &|| Ok(()))
+                    .is_err()
+            );
+            // Restoring the exact declaration restores this same capability.
+            update_argv_member(&store, &captured);
+            store.check_mailbox(&bound).unwrap();
+        }
     }
 
     #[test]
@@ -1157,8 +1536,13 @@ pub(super) fn check_argv_declaration(
         || current.driver.is_some()
         || current.terminal_binding.is_some()
         || !matches!(&current.launch, LaunchSpec::Argv(argv) if !argv.is_empty())
-        || serde_json::to_value(&current).map_err(internal)?
-            != serde_json::to_value(captured).map_err(internal)?
+        || current.kind != captured.kind
+        || current.terminal_binding != captured.terminal_binding
+        || current.runtime_id != captured.runtime_id
+        || !current.launch_changes(captured).is_empty()
+        // This is an explicit argv transport, not a typed harness wrapper:
+        // every argument remains authoritative, including wrapper-like flags.
+        || current.launch != captured.launch
     {
         return Err(refused("the explicit argv seat declaration was stopped or replaced"));
     }
@@ -1326,23 +1710,24 @@ impl Store {
         episode: &str,
     ) -> Result<Option<(String, bool)>, St3Error> {
         let connection = self.readers.get();
-        let latest: Option<String> = connection
+        connection
             .prepare_cached(&canonical_sql(
-                "SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure'
-             AND json_extract(body,'$.fields.episode')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+                "SELECT id, NOT EXISTS(
+                    SELECT 1 FROM claims AS recovery INDEXED BY claims_subject_kind_index
+                    WHERE recovery.subject=claims.subject
+                    AND recovery.kind='operational.recovered'
+                    AND json_extract(recovery.body,'$.fields.failure')=claims.id)
+                 FROM claims INDEXED BY claims_subject_kind_accepted_index
+                 WHERE subject=?1 AND kind='operational.failure'
+                 AND json_extract(body,'$.fields.episode')=?2
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             ))
             .map_err(internal)?
-            .query_row(params![fence.subject, episode], |row| row.get(0))
+            .query_row(params![fence.subject, episode], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .optional()
-            .map_err(internal)?;
-        let Some(failure) = latest else {
-            return Ok(None);
-        };
-        let recovered: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='operational.recovered'
-             AND json_extract(body,'$.fields.failure')=?2)", params![fence.subject, failure], |row| row.get(0),
-        ).map_err(internal)?;
-        Ok(Some((failure, !recovered)))
+            .map_err(internal)
     }
 
     /// The caller holds the provider ownership lock. Recheck physical/declaration and
@@ -1453,6 +1838,26 @@ impl Store {
         )
     }
 
+    /// Compare replay inputs without allocating another decoded lease. This is
+    /// not report admission: runtime, custody and binding checks still run there.
+    pub(crate) fn mailbox_replay_owner_matches(
+        &self,
+        fence: &Fence,
+        owner: &Authority,
+    ) -> Result<bool, St3Error> {
+        self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_mailbox_leases
+             WHERE subject=?1 AND component=?2 AND incarnation=?3
+             AND token=?4 AND epoch=?5 AND provider=?6 AND session=?7
+             AND sequence=?8 AND pid=?9 AND process_token=CAST(?10 AS TEXT)
+             AND revoked=0)",
+            params![fence.subject, fence.component, fence.incarnation, fence.token,
+                fence.epoch, owner.provider, owner.session, owner.sequence,
+                owner.pid, owner.process_token],
+            |row| row.get(0),
+        ).map_err(internal)
+    }
+
     /// A transient physical query may retry only a still-current canonical capability.
     /// An absent owner row can be repaired; a foreign owner or retired binding is terminal.
     pub(crate) fn check_mailbox_custody_fence(&self, fence: &Fence) -> Result<(), St3Error> {
@@ -1492,66 +1897,50 @@ impl Store {
     }
 
     /// Captured public-card fault source, bounded to the selected subjects and cut.
+    /// Keep the capture on one blocking worker: its CPU budget belongs to that thread.
     pub(crate) fn mailbox_faults_for(
         &self,
         subjects: &[String],
         index: u64,
     ) -> Result<BTreeMap<String, String>> {
         if subjects.is_empty() { return Ok(BTreeMap::new()); }
-        // One captured statement, rather than up to three round trips per actor. This
-        // local query bound also applies to non-HTTP captures and never extends a parent.
+        let _capture = smallclaims::profile::span("mailbox_faults/capture");
+        // Admission and result cleanup remain within the enclosing wall deadline.
+        // Captures without a request retain their existing finite wall bound.
         let duration = std::time::Duration::from_millis(25);
-        let budget = smallclaims::read_budget::current().map_or_else(
+        #[cfg(test)]
+        let duration = CARD_FAULT_DEADLINES.with(|remaining| {
+            let count = remaining.get();
+            remaining.set(count.saturating_sub(1));
+            if count == 0 { duration } else { std::time::Duration::ZERO }
+        });
+        let budget = smallclaims::read_budget::current().unwrap_or_else(
             || smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", duration),
-            |parent| parent.child(duration),
         );
         let checked = budget.clone();
         smallclaims::read_budget::with(Some(budget), || {
             checked.check()?;
+            #[cfg(test)]
+            BEFORE_FAULT_READER.with(|pause| {
+                if let Some(pause) = pause.borrow_mut().take() { pause(); }
+            });
             let read = || -> Result<BTreeMap<String, String>> {
-            let connection = self.readers.get();
-            let query = canonical_sql(
-                "WITH selected(subject) AS (SELECT DISTINCT value FROM json_each(?1)),
-                 failures AS MATERIALIZED (
-                   SELECT subject, (SELECT id FROM claims INDEXED BY claims_subject_kind_accepted_index
-                     WHERE claims.subject=selected.subject AND kind='operational.failure'
-                     AND +store_index<=?2
-                     AND json_extract(body,'$.fields.condition')='mailbox-channel-lost'
-                     ORDER BY CANONICAL_DESC(claims) LIMIT 1) AS failure FROM selected
-                 ), unresolved AS MATERIALIZED (
-                   SELECT subject,failure FROM failures WHERE failure IS NOT NULL
-                   AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
-                     WHERE claims.subject=failures.subject AND kind='operational.recovered'
-                     AND store_index<=?2 AND json_extract(body,'$.fields.failure')=failures.failure)
-                 )
-                 SELECT unresolved.subject, fault.body,
-                   (SELECT body FROM claims INDEXED BY claims_subject_kind_accepted_index
-                    WHERE claims.subject=unresolved.subject AND kind='runtime.observed'
-                    AND +store_index<=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1)
-                 FROM unresolved JOIN claims fault ON fault.id=unresolved.failure",
-            );
-            let mut statement = connection.prepare_cached(&query)?;
-            let rows = statement.query_map(params![serde_json::to_string(subjects)?, index], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
-            })?;
-            let mut faults = BTreeMap::new();
-            for row in rows {
-                smallclaims::read_budget::check()?;
-                let (subject, fault, runtime) = row?;
-                let body: Value = serde_json::from_str(&fault)?;
-                let runtime: Value = runtime.map(|body| serde_json::from_str(&body))
-                    .transpose()?.unwrap_or(Value::Null);
-                let fields = runtime.get("fields").unwrap_or(&runtime);
-                // A fault's exact runtime must still be the running one at this same cut.
-                if fields["status"] == "running"
-                    && fields["incarnation_id"] == body["fields"]["incarnation"]
-                {
-                    faults.insert(subject, body["fields"]["reason"].as_str()
-                        .unwrap_or("mailbox channel lost").into());
-                }
-            }
-            smallclaims::read_budget::check()?;
-            Ok(faults)
+                let acquisition = smallclaims::profile::span("mailbox_faults/acquisition");
+                let connection = self.readers.get();
+                drop(acquisition);
+                let work = checked.child_work(duration)?;
+                let measured = work.clone();
+                smallclaims::read_budget::with(Some(work), || {
+                    match capture_mailbox_faults(&connection, subjects, index) {
+                        Ok(faults) => Ok(faults),
+                        Err(error) => {
+                            // SQLite can interrupt before the first row. Normalize its
+                            // error before leaving the worker's authoritative work scope.
+                            measured.check()?;
+                            Err(error)
+                        }
+                    }
+                })
             };
             // Keep the authoritative existing snapshot; otherwise acquire cancellable
             // admission before the fallible reader checkout.
@@ -1563,8 +1952,8 @@ impl Store {
             AFTER_FAULT_ACQUISITION.with(|pause| {
                 if let Some(pause) = pause.borrow_mut().take() { pause(); }
             });
-            // Preserve the typed retryable deadline after restoring the parent scope,
-            // including SQLite interruption before the first row could be decoded.
+            // Only the enclosing request can expire after successful reader work. Also
+            // preserve its typed cancellation when admission or acquisition failed.
             checked.check()?;
             result
         })

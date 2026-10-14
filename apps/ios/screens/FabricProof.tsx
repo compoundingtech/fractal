@@ -26,7 +26,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
       const native = await fabricStats();
       samples.current = [...samples.current.slice(-31), { phase, at: new Date().toISOString(), native }];
       // No pairing link, bearer, listener URL, member address, message content or NodeID.
-      const text = JSON.stringify({ wirePin: 'v0.2.30 / 8bd9017', iroh: '1.0.2', mode: input.mode ?? 'auto',
+      const text = JSON.stringify({ wirePin: 'v0.2.41 / 84c3208', iroh: '1.0.2', mode: input.mode ?? 'auto',
         events: latest.current?.events ?? [], samples: samples.current,
         batteryLimit: 'Coarse device battery fraction, not energy attribution; charging samples cannot establish battery cost.' }, null, 2);
       setReport(text);
@@ -68,7 +68,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
           }).catch(() => {});
         },
       });
-      if (state.ready) setResult(`Capabilities received\nUnpaired client: refused\nAPI: ${API_VERSION}\nActor: ${state.actor}\nWire pin: v0.2.30 / 8bd9017\nIroh: 1.0.2`);
+      if (state.ready) setResult(`Capabilities received\nUnpaired client: refused\nAPI: ${API_VERSION}\nActor: ${state.actor}\nWire pin: v0.2.41 / 84c3208\nIroh: 1.0.2`);
       else setResult(state.issue || 'Fabric session is stopped or connecting.');
     });
     held.record('input', { pairing: !!input.id, fullClient: !!input.fullClient });
@@ -79,7 +79,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
         setNode(own);
         console.info(`Fabric proof public node: ${own}`);
         if (!input.id || !input.code) {
-          setResult('Grant this public node ID only the test gateway service, then open a proof pairing link. Add client=1 to use Home and conversations.');
+          setResult('Grant this public node ID only the test gateway service, then open a proof pairing link. Add client=1 to use Now and conversations.');
           return;
         }
         const before = await fabricStats();
