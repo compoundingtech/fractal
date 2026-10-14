@@ -556,8 +556,18 @@ writes the record id to the job summary. The wiring is deliberately conservative
   never started cannot skip the required check: its output is empty, which is not `'true'`, and the steps run.
 - The checkout is never skipped, and a step that already had an `if` keeps it, combined with the skip
   condition. A step that does not know about the skip runs.
-- The observer refuses to record a check whose gate job ran `evidence skip taken`, and the in-job producers
-  refuse to sign for a stage that did not run, so a skip never produces a fresh note for itself.
+- The skip decision the check jobs read is the output of the `evidence skip taken` step itself, written as its last
+  command, not of the earlier decision step. So `skip=true` cannot exist unless that marker step already ran: a gate
+  job that dies between deciding and marking leaves no output and the check runs. The observer refuses to record a
+  check whose gate job ran the marker (and should also refuse one whose own job ran `evidence covered by a trusted
+  note`, the step a wired job runs only when it skipped its work), and the in-job producers refuse to sign for a
+  stage that did not run, so a skip never produces a fresh note for itself.
+- A skip of `genie-freshness` skips the tests of this machinery too (`ci-evidence-gate-test`,
+  `evidence-verify-test`, `genie --check`) for that tree. That is accepted because the note is for the same tree and
+  a change to those files is a protected path that always runs in full; a reader must not assume they ran.
+- The skip rests on a note of kind `observed`, which the central observer records only for a `merge_group`
+  run, so a pull request can skip only a tree an earlier queue run already passed. Do not expect a saving at
+  pull-request time from these two checks.
 - Until a producer writes a note for a check, that check never skips. At the time of writing no note exists for
   these two, so both run in full; the first skip needs a producer.
 
