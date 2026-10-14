@@ -779,7 +779,7 @@ mod tests {
             "sinceMs":now, "writtenAtMs":written
         });
         assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await);
-        let mut writer = Writer::new(dir.path(), "worker", "claude", None).with_session("current");
+        let mut writer = Writer::new(dir.path(), "worker", "claude", Some("test-pty".into())).with_session("current");
         for ask in [Ask::Permission, Ask::Question, Ask::Review] {
             writer.observe(Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)
                 .with_ask(ask)).unwrap();
