@@ -51,8 +51,12 @@ class Failure(Exception):
 
 
 def git(*args, stdin=None, check=True, env_extra=None):
-    done = subprocess.run(['git', *args], input=stdin, capture_output=True, timeout=600,
-                          env=dict(os.environ, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C', **(env_extra or {})))
+    # Runs with the signing HOME in a job whose checkout holds code under test: no GIT_* variable of
+    # the job reaches git, and the checkout's fsmonitor, hooks and pager cannot name a program.
+    clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    done = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat', *args],
+                          input=stdin, capture_output=True, timeout=600,
+                          env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C', **(env_extra or {})))
     if check and done.returncode != 0:
         raise Failure(f'git {args[0]} failed: {done.stderr.decode(errors="replace").strip()[-500:]}')
     return done
@@ -60,6 +64,11 @@ def git(*args, stdin=None, check=True, env_extra=None):
 
 def dirty():
     return git('status', '--porcelain').stdout.decode().strip()
+
+
+def tracked_dirty():
+    """Tracked files that differ from the commit. Untracked build output does not count."""
+    return git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
 
 
 def toolchain_digest(override):
@@ -131,10 +140,15 @@ def main(argv):
             output_sha256 = facts.get('output_sha256') or hashlib.sha256(
                 json.dumps(facts['output'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
             inputs.update(facts.get('inputs', {}))
-            inputs['workspace_clean'] = 'true' if clean else 'false'
+            # The job ran code under test in this checkout and the note names HEAD's tree. If that code
+            # changed a tracked file, the tree that was tested is not the tree being signed.
+            if tracked_dirty():
+                raise Failure('tracked files differ from the commit, so the tree that was tested is not the one named; nothing was signed')
+            inputs['workspace_clean'] = 'true'  # tracked files are exactly the commit's
+            inputs['untracked_files'] = 'false' if clean else 'true'
         else:
             exit_code, output_sha256 = run_command(command)
-        if git('rev-parse', 'HEAD').stdout.decode().strip() != commit or (dirty() and not args.aggregate):
+        if git('rev-parse', 'HEAD').stdout.decode().strip() != commit or (tracked_dirty() if args.aggregate else dirty()):
             raise Failure('the checkout changed while the command ran; nothing was signed')
         request = {'commit': commit, 'check': args.check, 'command': command, 'exit_code': exit_code,
                    'output_sha256': output_sha256, 'change_id': args.change_id or f'local:{commit}', 'inputs': inputs}

@@ -290,8 +290,15 @@ export const evidenceStageNames = [
   'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries',
 ] as const
 const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
+/**
+ * Only the merge queue and main reach the `evidence-signing` environment (and so the key). On any other
+ * event the expression is empty and the job runs without an environment, exactly as before. The
+ * environment's own deployment-branch policy comes after this conditional exists.
+ */
+export const evidenceEnvironment =
+  "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}"
 export const evidenceStageJob = (name: string) =>
-  (evidenceStageNames as readonly string[]).includes(name) ? { environment: 'evidence-signing' } : {}
+  (evidenceStageNames as readonly string[]).includes(name) ? { environment: evidenceEnvironment } : {}
 
 /**
  * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness,
@@ -299,7 +306,7 @@ export const evidenceStageJob = (name: string) =>
  * not run (for example because the job was covered by a trusted note) makes no note.
  */
 export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
-export const evidenceStepJob = () => ({ environment: 'evidence-signing' })
+export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
 
 const signingCore = (
   name: string,
@@ -336,7 +343,8 @@ git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
       id: 'evidence-configure',
       if: "${{ always() && steps.evidence-guard.outcome == 'success' }}",
       env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
-      run: `python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+      run: `set -o pipefail
+python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
     },
     {
       ...soft,

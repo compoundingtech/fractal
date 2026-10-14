@@ -118,8 +118,14 @@ def main(argv):
         summary = json.loads(written[0].read_text())
         assert summary['check'] == 'linux-tests' and summary['tree'] == git(repo, 'rev-parse', 'HEAD^{tree}')
         inputs = json.loads(git(tmp / 'scratch.git', 'cat-file', 'blob', git(tmp / 'scratch.git', 'ls-tree', '-r', summary['record']).split()[2]))['predicate']['observed']['inputs']
-        assert inputs['workspace_clean'] == 'false' and inputs['stage'] == 'tests'
+        assert inputs['workspace_clean'] == 'true' and inputs['untracked_files'] == 'true' and inputs['stage'] == 'tests', inputs
         assert git(repo, 'for-each-ref', f'refs/notes/evidence/{summary["record"]}') == '', '--out must not create a ref in the checkout'
+        # A job that changed a tracked file signs a tree it did not test: refused, however the facts look.
+        (repo / 'a').write_text('changed by the code under test\n')
+        modified = run([sys.executable, str(WRAP), '--check', 'linux-tests', '--toolchain-sha256', toolchain, '--signer', signer,
+                        '--aggregate', str(stage_facts), '--out', str(tmp / 'notes-modified')], repo, home)
+        assert modified.returncode == 1 and b'tracked files differ' in modified.stderr and not (tmp / 'notes-modified').exists()
+        git(repo, 'checkout', '--', 'a')
         (repo / 'untracked-build-output').unlink()
         facts.write_text(json.dumps({'command': ['x'], 'exit_code': 0, 'output': 1, 'output_sha256': 'a' * 64}))
         assert run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
@@ -127,7 +133,7 @@ def main(argv):
         facts.write_text(json.dumps({'command': ['x'], 'exit_code': 0, 'output': 1, 'tier': 'full'}))
         assert run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
                     '--signer', signer, '--aggregate', str(facts)], repo, home).returncode == 1
-        print('passed: an aggregate gate records its verdict, canonical output digest and extra run inputs, stage facts go to --out with workspace_clean, and unknown keys are refused')
+        print('passed: an aggregate gate records its verdict, canonical output digest and extra run inputs, stage facts go to --out, untracked build output is recorded, a modified tracked file is refused, and unknown keys are refused')
 
         # The push token reaches git through the environment, never an argument.
         sink = tmp / 'sink.git'

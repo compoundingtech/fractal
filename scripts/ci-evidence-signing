@@ -10,8 +10,8 @@
   cleanup           overwrite and remove the key and everything configure made (run it always)
 
 The key arrives only as the environment secret EVIDENCE_SIGNING_KEY of the `evidence-signing`
-environment, which the repository restricts to main, the merge-queue refs and same-repository
-branches. This script adds the checks that do not depend on that setting. The signer script and
+environment. The jobs reach that environment only for merge_group and push to main (their
+`environment:` is conditional), and this script refuses anything else in code. The signer script and
 this one must come from the base commit of the change, never from the tree under test; the
 workflow that calls them takes them from there.
 
@@ -45,19 +45,13 @@ def env(name, default=''):
 
 
 def guard():
-    """Event and ref the key may be used for; a fork's pull request never."""
-    event, ref, repository = env('GITHUB_EVENT_NAME'), env('GITHUB_REF'), env('GITHUB_REPOSITORY')
-    if event == 'pull_request':
-        head = env('PR_HEAD_REPOSITORY')
-        if not head or head != repository:
-            raise Refused(f'refusing a pull request from {head or "an unknown repository"!r}: forks never get the signing key')
-        if not ref.startswith('refs/pull/'):
-            raise Refused(f'unexpected ref {ref!r} for a pull request')
-        return 'same-repository pull request'
+    """Event and ref the key may be used for. Only the merge queue and main sign: a pull request, even
+    one from this repository, never reaches the key (a same-repository author controls the workflow
+    file its own pull request runs)."""
+    event, ref = env('GITHUB_EVENT_NAME'), env('GITHUB_REF')
     patterns = ALLOWED_REFS.get(event)
     if patterns is None:
-        raise Refused(f'refusing event {event!r}: the signing key is for merge_group, push to main, '
-                      'manual runs on main and same-repository pull requests')
+        raise Refused(f'refusing event {event!r}: the signing key is for merge_group, push to main and manual runs on main only')
     if not any(fnmatch.fnmatchcase(ref, pattern) for pattern in patterns):
         raise Refused(f'refusing ref {ref!r} for {event}: expected one of {patterns}')
     return f'{event} on {ref}'

@@ -379,6 +379,20 @@ the principal it claims, it is a full-tier single-note commit about this commit 
 is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
 accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
 
+### What reaches the signing environment
+
+Only the merge queue and `main` reach the `evidence-signing` environment: every signing job's
+`environment:` is the expression `merge_group` or push to `main` ? `evidence-signing` : empty, and the
+aggregate note job does not run for pull requests at all. A pull request, including one from this
+repository, runs the same jobs without the environment, gets no key, and the guard step refuses it again
+in code. **The environment must not gain required reviewers or a wait timer:** eleven required check jobs
+carry it in the merge queue, so a protection rule that waits would block every required check. A
+deployment-branch policy comes only after this conditional is on main (a policy that excludes the queue
+refs would otherwise fail those jobs at start). Signing jobs also refuse to sign when tracked files
+differ from the commit (`git status --porcelain --untracked-files=no`): the code under test ran in that
+checkout, and the note names `HEAD`'s tree. Untracked build output is recorded (`untracked_files`) and
+does not stop the note.
+
 ## Fresh CI re-attestation
 
 The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors
