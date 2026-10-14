@@ -9,6 +9,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     (
         "Everyday use",
         &[
+            "ui",
             "now",
             "agents",
             "conversations",
@@ -16,6 +17,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "missions",
             "alerts",
             "usage",
+            "slo",
             "terminals",
             "machines",
             "launch",
@@ -27,11 +29,12 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Inside an agent seat",
-        &["work", "gh", "claim", "diagnostic", "trace", "skill"],
+        &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
     ),
     (
         "Running st on a machine or fleet",
         &[
+            "setup",
             "up",
             "service",
             "fleet",
@@ -90,7 +93,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
 pub(super) fn root_help(all: bool) -> String {
     let command = Cli::command();
     let mut output = String::from(
-        "See what needs you:\n  st now\n\nStart an agent and talk to it:\n  st agents new NAME --harness claude --attach\n\nSee what is running:\n  st missions ls\n  st agents ls\n\nFrom an agent seat:\n  st skill\n  st work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or st work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: st [OPTIONS] <COMMAND>\n",
+        "See what needs you:\n  st now\n\nRun st in a terminal to open the interface:\n  st\n  st ui --space NAME\n\nStart an agent and talk to it:\n  st agents new NAME --harness claude --attach\n\nSee what is running:\n  st missions ls\n  st agents ls\n\nFrom an agent seat:\n  st skill\n  st work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or st work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: st [OPTIONS] <COMMAND>\n",
     );
     for (heading, names) in GROUPS {
         if *heading == "Plumbing" && !all {
@@ -138,6 +141,7 @@ pub(super) fn agent_state(
             fault.unwrap_or("the agent process failed")
         ),
         "stopped" => "Stopped — the agent is no longer running.".into(),
+        "down" => "Down — st sees no running session for the agent; `st agents show` says since when.".into(),
         "suspended" => {
             "Suspended — the agent stopped at a quiet moment; `st agents resume` brings back its session.".into()
         }
@@ -343,6 +347,7 @@ mod tests {
             ("starting", Some("starting"), "initializing"),
             ("waiting", Some("needs-login"), "Waiting for you"),
             ("failed", None, "Could not start"),
+            ("down", None, "Down — st sees no running session"),
         ] {
             let state = agent_state(state, harness, None, "reachable");
             assert!(state.contains(expected), "{state}");

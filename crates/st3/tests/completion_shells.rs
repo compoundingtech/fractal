@@ -1,7 +1,7 @@
 #![cfg(unix)]
 //! `st completions <shell>` installs a stub that asks st for candidates on every TAB. These tests
 //! serve an in-process daemon with known terminals and drive the stub in real bash, fish, and zsh
-//! (docs/st3/cli-completion/spec.md, R01-R08). The shells are test inputs: the Nix check and the
+//! (docs/st3/cli-completion/spec.md). The shells are test inputs: the Nix check and the
 //! dev shell provide them, and a missing shell fails the test rather than skipping it.
 
 use std::collections::BTreeMap;

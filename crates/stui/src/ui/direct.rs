@@ -57,7 +57,16 @@ pub(super) struct Terminal<'a> {
 pub(super) const RESTARTED: &str = "the terminal restarted; Ctrl+] attaches the new one";
 
 pub(super) async fn open(client: &Client, terminal: &Terminal<'_>) -> Result<Opened, String> {
-    open_in(client, terminal, state_dir().as_deref()).await
+    if client.is_local_socket() {
+        super::slo::METRICS.add("direct_attach_attempts", 1);
+    }
+    let outcome = open_in(client, terminal, state_dir().as_deref()).await;
+    match &outcome {
+        Ok(Opened::Stream { .. }) => super::slo::METRICS.add("direct_attach_success", 1),
+        Ok(Opened::UseGateway { .. }) => super::slo::METRICS.add("gateway_attach", 1),
+        Err(_) => {}
+    }
+    outcome
 }
 
 /// Why Fabric did not carry a terminal; only owner-level unavailability is remembered.

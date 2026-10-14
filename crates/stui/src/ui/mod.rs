@@ -17,6 +17,7 @@ pub mod conversation;
 pub mod demo;
 mod direct;
 pub mod doc;
+pub mod checklist;
 mod edit;
 mod glass;
 mod hover;
@@ -26,11 +27,13 @@ mod hyperlinks;
 mod terminal_tab;
 pub use glass::set_glasses_version;
 pub use lastrun::log_panics as lastrun_log_panics;
+pub use lastrun::note_exit as lastrun_note_exit;
 mod glass_store;
 mod lastrun;
 pub(crate) mod open_timing;
 pub mod layout;
 pub mod live;
+pub(crate) mod slo;
 pub mod pane;
 mod drafts_store;
 mod prefs;
@@ -380,6 +383,7 @@ pub struct Ui {
     quit: bool,
     /// Live: actions become `effects` for the live loop instead of demo edits.
     live: bool,
+    quality: slo::Draw,
     effects: Vec<Effect>,
     /// Updates marked read from here, so each is sent once.
     updates_read: HashSet<String>,
@@ -579,6 +583,44 @@ impl Ui {
         })
     }
 
+    fn quality_visible(&self) -> u8 {
+        let frame = self.frame.borrow();
+        let mut visible =
+            if self.glasses.is_none() && frame.area.width >= 20 && frame.area.height >= 6 {
+                1
+            } else {
+                0
+            };
+        for pane in &frame.panes {
+            if !pane.entry_visible(pane.top, pane.total, &frame.covers) {
+                continue;
+            }
+            if pane.key == "list:home" || pane.key.starts_with("home:") {
+                visible |= 1;
+            }
+            if pane.key == "list:agents"
+                || pane.key == "agent-header"
+                || pane.key.starts_with("agent:")
+                || pane.key.starts_with("details:agent/")
+            {
+                visible |= 2;
+            }
+        }
+        visible
+    }
+
+    fn terminal_ready_visible(&self, target: &str) -> bool {
+        let ready = self
+            .terminal_view(target)
+            .and_then(|view| view.native.as_ref())
+            .is_some_and(|native| native.presented());
+        ready
+            && self.frame.borrow().panes.iter().any(|pane| {
+                pane.key.strip_prefix("terminal:") == Some(target)
+                    && pane.entry_visible(pane.top, pane.total, &self.frame.borrow().covers)
+            })
+    }
+
     /// Call only after the terminal successfully presented this frame.
     pub(crate) fn visible_messages(&self) -> HashSet<String> {
         if self.help
@@ -677,6 +719,7 @@ impl Ui {
             demo: None,
             quit: false,
             live: false,
+            quality: slo::Draw::new(Instant::now()),
             effects: Vec::new(),
             updates_read: HashSet::new(),
             acted: HashSet::new(),
@@ -1084,6 +1127,14 @@ impl Ui {
         shown.then_some(self.usage_hours)
     }
 
+    pub(crate) fn inventories_wanted(&self) -> crate::feed::Inventories {
+        self.glasses.as_ref().map_or_else(|| crate::feed::Inventories {
+            clients: self.clients_wanted(), usage_hours: self.usage_wanted(),
+            machines: self.tab == 3, devices: self.tab == 3,
+            sessions: self.tab == 1 || self.tab == 3, terminals: false,
+        }, |glasses| glasses.inventories_wanted(self.tab, self.usage_hours))
+    }
+
     /// Details beside the conversation, or in its place when the pane is too narrow for both;
     /// for the agent shown, not every agent (Nathan, 2026-10-03).
     fn toggle_details(&mut self) {
@@ -1107,6 +1158,28 @@ impl Ui {
 
     pub(crate) fn conversation_failed(&mut self, target: &str, error: &str) {
         self.stalled.insert(target.to_owned(), error.to_owned());
+    }
+
+    /// What is on screen, as kinds and counts only, for a slow-turn note: which pane has focus,
+    /// whether Home or the palette floats over it, and how much st has sent.
+    pub(crate) fn slow_context(&self) -> String {
+        let pane = self
+            .focused_pane()
+            .map(|pane| pane.key())
+            .map(|key| key.split(':').next().unwrap_or("").to_owned())
+            .unwrap_or_else(|| "none".to_owned());
+        let area = self.frame.borrow().area;
+        format!(
+            "pane {pane}, {}x{}, home {}, palette {}, terminal {}, agents {}, missions {}, attention {}",
+            area.width,
+            area.height,
+            self.home_open(),
+            self.palette_open(),
+            self.native_terminal().is_some(),
+            self.world.agents.items().len(),
+            self.world.missions.items().len(),
+            self.world.attention.items().len(),
+        )
     }
 
     /// The agent whose message box has the keyboard: the selected agent while the Agents tab
@@ -2672,7 +2745,7 @@ impl Ui {
         };
         // What waits on the person in this conversation is one line above the box, a card only
         // when asked for. The box keeps its place and its size either way: the band takes its
-        // rows from the conversation and never more than half of the pane.
+        // rows from the conversation and never more than three fifths of the pane.
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
@@ -2681,7 +2754,7 @@ impl Ui {
         let room = area
             .height
             .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize / 2).max(1)));
+        band.truncate(room.min((area.height as usize * 3 / 5).max(1)));
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -2829,13 +2902,13 @@ impl Ui {
                 },
                 Hit::Composer,
             );
-            // Where this stui can listen, the box offers it: a click or Ctrl+R.
+            // Where this stui can listen, the box offers it: a click or Ctrl+Y.
             if crate::voice::available()
                 && y + 1 + strip < bottom
                 && self.composing(&agent.id)
                 && self.voice_for(&agent.id).is_none()
             {
-                let label = " ◉ ctrl+r speak ";
+                let label = " ◉ ctrl+y speak ";
                 let width = text::width(label) as u16;
                 // Only beside the text, never over it.
                 let typed = composer.first().map_or(0, |line| line.width()) as u16;
@@ -3613,8 +3686,8 @@ impl Ui {
                 ("ctrl+w  ctrl+u", "delete a word; clear the box"),
                 ("ctrl+v", "attach the clipboard's image"),
                 (
-                    "ctrl+r",
-                    "speak instead of typing (a Mac with SmallTalk.app's speech helper)",
+                    "ctrl+y",
+                    "speak instead of typing, with the box open or not (a Mac with SmallTalk.app's speech helper)",
                 ),
                 ("esc", "stop writing; the keys above work again"),
             ],
@@ -3683,6 +3756,20 @@ impl Ui {
         }
     }
 
+    /// An answer that asks for changes needs them in words: open the box for them at once, with
+    /// the answer remembered, so a person who chose it can type (Nathan, 2026-10-12: "it says it
+    /// needs my words but I can't type anywhere"). False for an answer that needs none.
+    fn ask_for_words(&mut self, answer: &st3_client::RequestAnswerOption) -> bool {
+        if answer.outcome.as_deref() != Some("request_changes") {
+            return false;
+        }
+        self.changes_answer = Some(answer.id.clone());
+        self.answering = None;
+        self.editing = true;
+        self.flash(format!("“{}”: write the changes, then Enter", answer.label));
+        true
+    }
+
     fn answer_key(&mut self, key: KeyEvent) -> bool {
         let Some(index) = self.answering else {
             return false;
@@ -3702,10 +3789,7 @@ impl Ui {
                     return true;
                 };
                 // Requesting changes needs the changes in words: write them, then Enter sends both.
-                if answer.outcome.as_deref() == Some("request_changes") {
-                    self.changes_answer = Some(answer.id.clone());
-                    self.editing = true;
-                    self.flash(format!("“{}”: write the changes, then Enter", answer.label));
+                if self.ask_for_words(answer) {
                     return true;
                 }
                 if self.live {
@@ -3722,6 +3806,16 @@ impl Ui {
                         answer.label
                     ));
                 }
+            }
+            // An option that needs the person's words has its box on the card: the first letter
+            // typed opens it and goes into it, whatever the letter is (Nathan, 2026-10-12: the
+            // box should appear when the option is selected).
+            KeyCode::Char(_)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && request.answers.get(index).is_some_and(|answer| self.ask_for_words(answer)) =>
+            {
+                return false;
             }
             // The other ways to answer or set the card aside are always reachable: write in
             // words (c), chat about it (t), dismiss it (x), go to the agent (g).
@@ -3841,6 +3935,16 @@ impl Ui {
 
     /// Dispatch the outer terminal's decoded input, shared by the live and demo loops.
     fn input_event(&mut self, event: Event) -> bool {
+        if self.live
+            && matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release)
+            && (self.editing
+                || self.chat.as_ref().is_some_and(|chat| chat.editing)
+                || self.new_mission.is_some()
+                || self.find.is_some()
+                || self.palette_open())
+        {
+            self.quality.key();
+        }
         if let Event::Mouse(mouse) = event
             && mouse.kind == MouseEventKind::Moved
         {
@@ -4264,8 +4368,8 @@ impl Ui {
                     self.changes_answer = None;
                 }
                 KeyCode::Enter => self.submit(),
-                // Ctrl+R speaks into the input instead of typing.
-                KeyCode::Char('r') if control => self.start_voice(),
+                // Ctrl+Y speaks into the input instead of typing.
+                KeyCode::Char('y') if control => self.start_voice(),
                 // Ctrl+V while writing to an agent attaches the clipboard's image.
                 KeyCode::Char('v') if control && self.tab == 1 => self.attach_clipboard(),
                 // Backspace in an empty box takes back the last image.
@@ -6080,7 +6184,15 @@ impl Ui {
                 }
             }
             Hit::Help => self.help = !self.help,
-            Hit::Answer(index) => self.answering = Some(index),
+            Hit::Answer(index) => {
+                self.answering = Some(index);
+                // A click chooses; one that needs words opens its box too, ready to type in.
+                if let Some((_, request)) = self.structured_request()
+                    && let Some(answer) = request.answers.get(index)
+                {
+                    self.ask_for_words(answer);
+                }
+            }
             Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
             Hit::Alert(id, AlertTap::Answer(answer)) => self.answer_alert(&id, &answer),
             Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
@@ -7896,6 +8008,31 @@ mod tests {
             ui.flash
         );
         assert!(ui.effects.is_empty());
+        // Choosing it with a click opens the box for the words at once, and the person can type
+        // (Nathan, 2026-10-12: "it says it needs my words but I can't type anywhere").
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!ui.editing);
+        ui.click(Hit::Answer(0));
+        assert!(ui.editing, "a click on an answer that needs words opens its box");
+        for letter in "keep the brief".chars() {
+            ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+        }
+        assert_eq!(ui.conversation_state.drafts["attention/decide"], "keep the brief");
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("in your own words") && screen.contains("◉ Follow the brief"), "{screen}");
+        // Selected with the keys, its box is already on the card, and the first letter typed
+        // opens it and goes into it (even one that is otherwise a command).
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        ui.conversation_state.drafts.remove("attention/decide");
+        ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(ui.answering, Some(0));
+        assert!(!ui.editing);
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("in your own words") && screen.contains("Start typing"), "{screen}");
+        ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(ui.editing && ui.confirm.is_none(), "x typed into the box, not a dismissal");
+        assert_eq!(ui.conversation_state.drafts["attention/decide"], "xy");
     }
 
     #[test]

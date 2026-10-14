@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@smalltalk/st3-client": "workspace:^",
-    "effect": "4.0.0-rc.118"
+    "effect": "4.0.0"
   },
   "$genie": {
     "source": "package.json.genie.ts",
