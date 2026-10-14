@@ -126,11 +126,12 @@ python3 scripts/ci-perf-cache pack`,
     },
     // The same daemon beside a CPU and disk hog at seat priority, reported against slo/targets.toml.
     // Not a required check and not a failing one until it is stable: continue-on-error keeps the
-    // run green while the result lands in the step summary and the retained logs.
+    // run green while the result lands in the step summary and the retained logs. Hosted runner
+    // minutes are scarce, so it runs on pushes to main and manual dispatch, not on every PR.
     'perf-load-hog': {
       name: 'perf-load-hog',
       needs: ['scope'],
-      if: `!cancelled() && (${relevantEvent}) && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')`,
+      if: `!cancelled() && (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')`,
       'runs-on': performanceRunner,
       'timeout-minutes': 45,
       'continue-on-error': true,

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Run the seat-priority hog load test as a non-required job in the Performance workflow.",
+  "summary": "Run the seat-priority hog load test as a non-required job in the Performance workflow on pushes to main and manual dispatch.",
   "replay": {
     "status": "none",
     "detail": "Performance test addition only; no projection or replay changes."
