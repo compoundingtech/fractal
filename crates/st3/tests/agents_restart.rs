@@ -128,6 +128,7 @@ struct Fixture {
 #[derive(Clone, Copy, PartialEq)]
 enum Shape {
     TopLevel,
+    Owned,
     /// In the mission body, materialized once per generation.
     Mission,
     /// Inside the step it works, materialized on every pass while the step is active.
@@ -168,7 +169,7 @@ impl Fixture {
         restart: &str,
         make_router: impl FnOnce(AppState) -> axum::Router,
     ) -> (Self, String) {
-        let mission = shape != Shape::TopLevel;
+        let mission = matches!(shape, Shape::Mission | Shape::Step);
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), "restart-test").unwrap());
         let notify = Arc::new(Notify::new());
@@ -205,7 +206,7 @@ impl Fixture {
                 "version 2\nmission \"example/restart\" state=\"ready\" {{\ngoal \"Exercise a seat restart.\"\nstep \"work\" {{\nassigned-to \"agent/${{ST_MISSION_RUN}}/worker\"\ngoal \"Keep the run open.\"\n{}\n}}\n}}",
                 member.replace("example/worker", "worker")
             ),
-            Shape::TopLevel => format!("version 2\n{member}"),
+            Shape::TopLevel | Shape::Owned => format!("version 2\n{member}"),
         };
         let intent = st3::parse_intent(&source, "restart-test").unwrap();
         let preview = store
@@ -225,6 +226,18 @@ impl Fixture {
                 Some("person/avery"),
             )
             .unwrap();
+        if shape == Shape::Owned {
+            use st3::store::owned_sets::{Options, Source};
+            let mut options = Options {
+                set: "example/runtime".into(),
+                source: Source { repository: "acme/example".into(), r#ref: "refs/heads/main".into(), sha: "a".repeat(40), sequence: 1 },
+                expected_set: "absent".into(), rollout: None,
+                adopt: std::collections::BTreeSet::from(["agent/example/worker".into()]),
+                allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+            };
+            options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
+            store.apply_owned_set(&intent, &options, "own-fixture", "person/avery").unwrap();
+        }
         let subject = if mission {
             let run = store
                 .create_mission_run(&MissionRunRequest {
@@ -2914,6 +2927,22 @@ async fn self_restart_raises_one_attention_after_thirty_minutes_and_never_forces
             .iter()
             .any(|a| a.item.title == "A self-restart is still waiting for its turn to end")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_retirement_stops_running_root_and_mission_seats_without_rematerializing() {
+    for shape in [Shape::TopLevel, Shape::Owned, Shape::Mission, Shape::Step] {
+        let (fixture,subject)=Fixture::shaped(shape).await;
+        assert_eq!(fixture.runtime.starts.lock().unwrap().len(),1);
+        let output=st(&fixture.root.path().join("st3.sock"),&["agents","retire",&subject,"--as","person/avery","--reason","Work finished","--idempotency-key","runtime-retirement-operation"]).await;
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+        fixture.reconciler.reconcile_once().unwrap();
+        fixture.reconciler.reconcile_once().unwrap();
+        fixture.reconciler.reconcile_once().unwrap();
+        assert_eq!(fixture.runtime.stops.lock().unwrap().len(),1);
+        assert_eq!(fixture.runtime.starts.lock().unwrap().len(),1,"retirement must survive mission materialization");
+        assert!(fixture.store.desired_subjects().unwrap().iter().all(|desired|desired.subject!=subject || desired.member.is_none()));
+    }
 }
 
 /// A seat writes its handoff and reads it back through the CLI; a later write replaces it and the

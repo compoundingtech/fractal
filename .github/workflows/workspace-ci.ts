@@ -235,8 +235,8 @@ for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
 done`,
   },
   nixDevelopStep({ name: 'Build selected test targets first (no debug info)', command: ['bash', 'scripts/ci-nextest', 'run', '--no-run'] }),
-  // The integration target already built st2 with the workspace's unified features. Running it
-  // directly avoids a separate cargo run build before those features are unified.
+  // The integration targets already built the driver library's matching hook installer.
+  // Run it directly without the legacy runner CLI or a separate cargo run build.
   nixDevelopStep({ name: 'Install matching rendered hooks', command: ['bash', 'scripts/ci-install-built-hooks'] }),
 ]
 

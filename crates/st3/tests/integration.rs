@@ -78,6 +78,7 @@ mod hermetic;
 mod hook_telemetry;
 mod human_gates;
 mod idle_budget;
+mod invariants;
 mod log_diet;
 mod message_send_once;
 mod message_wait;
