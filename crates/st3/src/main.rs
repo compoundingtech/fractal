@@ -6572,6 +6572,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(convert_envelope_payloads(store.clone()));
     tokio::spawn(migrate_event_payloads(store.clone()));
     tokio::spawn(catch_up_coordination_counts(store.clone()));
+    tokio::spawn(copy_stop_deferral_history(store.clone()));
     spawn_response_expiry(store.clone());
     tokio::spawn(trim_local_observations(
         store.clone(),
@@ -25695,6 +25696,29 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
                 eprintln!("st3: coordination count bootstrap failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
+/// One paced scan of the claims that predate the stop-deferral trigger, read on a reader
+/// connection. Until it commits, retained-stop reads look those claims up directly.
+async fn copy_stop_deferral_history(store: Arc<Store>) {
+    loop {
+        let scan_store = store.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            st3::profile::task("task stop-deferral-history", || {
+                scan_store.backfill_stop_deferral_history(|| {
+                    std::thread::sleep(Duration::from_millis(10))
+                })
+            })
+        })
+        .await;
+        match result {
+            Ok(Ok(_)) => return,
+            error => {
+                eprintln!("st3: stop-deferral history copy failed: {error:?}");
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
