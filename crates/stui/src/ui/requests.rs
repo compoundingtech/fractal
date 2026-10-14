@@ -50,7 +50,7 @@ pub struct Request {
     /// The file's name without its extension; time ordered.
     #[serde(skip)]
     pub id: String,
-    /// What to show: `agent/…`, `mission/…`, `mission-run/…` or `machine/…`.
+    /// What to show: `agent/…`, `mission/…`, `mission-run/…`, `machine/…` or `doc/…`.
     pub subject: String,
     #[serde(default)]
     pub place: Place,
@@ -71,6 +71,9 @@ pub enum Answer {
     Opened { focused: bool },
     /// st has no such agent, mission or machine.
     NotFound,
+    /// st knows it, but this layout cannot show it without moving the person's focus: the classic
+    /// layout has no tabs or splits, and the person is typing or asked to keep their focus.
+    NotShown,
 }
 
 /// The pane a subject names, or why it cannot be asked for.
@@ -83,11 +86,12 @@ pub fn pane_for(subject: &str) -> Result<Pane, String> {
     }
     if let Some(run) = subject.strip_prefix("mission-run/") {
         // `mission-run/NAME/RUN` is a run of `mission/NAME`; the mission view follows its runs.
-        let name = run.rsplit_once('/').map_or(run, |(name, _)| name);
-        if name.is_empty() {
-            return Err("a mission run is mission-run/NAME/RUN".into());
-        }
-        return Ok(Pane::Mission(Some(format!("mission/{name}"))));
+        return match run.rsplit_once('/') {
+            Some((name, run)) if !name.is_empty() && !run.is_empty() => {
+                Ok(Pane::Mission(Some(format!("mission/{name}"))))
+            }
+            _ => Err("a mission run is mission-run/NAME/RUN".into()),
+        };
     }
     for (prefix, make) in [
         ("agent/", Pane::Agent as fn(Option<String>) -> Pane),
@@ -353,7 +357,6 @@ mod tests {
             pane("mission-run/garden/notes/2026-10-08"),
             Ok("mission:mission/garden/notes".into())
         );
-        assert_eq!(pane("mission-run/solo"), Ok("mission:mission/solo".into()));
         // A document opens as the version named, as `st documents put` prints it.
         assert_eq!(
             pane("doc/garden/notes@4f2a"),
@@ -368,6 +371,9 @@ mod tests {
             "agent/with space",
             "agent/with\nnewline",
             "mission-run/",
+            "mission-run/solo",
+            "mission-run/garden/",
+            "mission-run//2026-10-13",
         ] {
             assert!(pane(refused).is_err(), "{refused:?}");
         }

@@ -858,6 +858,10 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
             );
             Ok(())
         }
+        Some(Answer::NotShown) => anyhow::bail!(
+            "{} was not opened: that terminal interface uses the classic layout, or the person is typing or asked to keep their focus. Ask again without --keep-focus when they are not typing",
+            open.subject
+        ),
         Some(Answer::NotFound) => anyhow::bail!(
             "st has no {}: nothing was opened. Check the name with st agents ls or st missions ls",
             open.subject
