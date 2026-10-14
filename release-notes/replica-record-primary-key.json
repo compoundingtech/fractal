@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Existing point and collection response fields and missing-record behavior are preserved. A corrupt unrelated row no longer prevents looking up a different record; selected-row decode errors still propagate."
+    "detail": "Existing point and collection response fields and missing-record behavior are preserved. A corrupt unrelated row no longer prevents looking up a different record; selected-row decode errors still propagate. The route leaves the known-growth exceptions and is checked by the default fixed-work cost rule."
   },
   "downtime": {
     "status": "none",
