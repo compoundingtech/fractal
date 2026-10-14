@@ -1889,7 +1889,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             *last = Some(now);
         }
-        for fault in self.store.fault_snapshot(now)? {
+        let faults = {
+            let mut phase = crate::reconcile_telemetry::phase("fault_snapshot");
+            let faults = self.store.fault_snapshot(now)?;
+            phase.items(faults.len());
+            faults
+        };
+        for fault in faults {
             let Some(owner) = fault.owner.as_deref() else {
                 continue;
             };
@@ -2058,7 +2064,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         item: impl FnOnce() -> Result<T>,
     ) -> Option<T> {
-        let _span = crate::profile::span(scope);
+        let _span = crate::reconcile_telemetry::phase(scope);
         let result = caught(|| {
             if let Some(reason) = self
                 .fault_injection
@@ -2419,15 +2425,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .touch(&format!("runtime-observation-drops:{subject}"));
         }
         let _observation_capture = self.store.capture_runtime_observations()?;
-        let observe_span = crate::profile::span("pass/changes");
+        let observe_span = crate::reconcile_telemetry::phase("pass/changes");
         self.incremental.observe(&self.store)?;
         self.incremental.observe_value(
             "publication-launch-evidence",
             format!("{:?}", self.store.publication_cache_epoch()),
         );
         drop(observe_span);
-        let _runners_span = crate::profile::span("pass/gate-runners");
+        let mut _runners_span = crate::reconcile_telemetry::phase("pass/gate-runners");
         let gate_runners = self.gate_runners()?;
+        _runners_span.items(gate_runners.len());
         for runner in &gate_runners {
             if runner.retired && runner.host == self.host {
                 let _ = self.isolate("gate", &runner.subject, || {
@@ -2447,8 +2454,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         drop(_runners_span);
-        let desired_span = crate::profile::span("pass/desired");
+        let mut desired_span = crate::reconcile_telemetry::phase("pass/desired");
         let mut desired = self.store.desired_subjects()?;
+        desired_span.items(desired.len());
         // Eval cleanup can delete desired rows without appending a claim. Watch selection must
         // see those removals through the complete roster this pass already reads, not only the
         // claim/local-observation feed or the host/authority-filtered active member list.
@@ -2476,8 +2484,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind = "stop".into();
             }
         }
-        let pty_span = crate::profile::span("pass/pty-snapshot");
+        let mut pty_span = crate::reconcile_telemetry::phase("pass/pty-snapshot");
         let ptys = self.runtime.snapshot_ptys();
+        if let Ok(snapshot) = &ptys { pty_span.items(snapshot.len()); }
         drop(pty_span);
         let ptys = match ptys {
             Ok(snapshot) => Some(
@@ -2662,7 +2671,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .needs(&format!("member:{}", subject.subject), now_ms())
             });
         // A render panic faults this host's members; stops never render, so they still run.
-        let render_span = crate::profile::span("pass/render");
+        let mut render_span = crate::reconcile_telemetry::phase("pass/render");
+        render_span.items(renderable.len());
         let (rendered, render_reads) = if render_needed {
             smallclaims::touched::record(|| {
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -2788,10 +2798,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut deferred_member_faults = BTreeMap::new();
         let mut evaluated_member_wakes = BTreeSet::new();
         let mut diagnostic_errors = Vec::new();
-        let unreadable_span = crate::profile::span("pass/unreadable-members");
+        let unreadable_span = crate::reconcile_telemetry::phase("pass/unreadable-members");
         self.record_unreadable_members(&active, &mut diagnostic_errors);
         drop(unreadable_span);
-        let members_span = crate::profile::span("pass/members");
+        let mut members_span = crate::reconcile_telemetry::phase("pass/members");
+        members_span.items(active.len());
         for subject in &active {
             if !eligible(subject) {
                 continue;
@@ -2837,7 +2848,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     stops.remove(&item);
                     continue;
                 }
-                let _member_span = crate::profile::span("pass/member stop");
+                let _member_span = members_span.member(true);
                 self.reconcile_stop_item(
                     subject,
                     &item,
@@ -2848,7 +2859,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 );
                 continue;
             }
-            let _member_span = crate::profile::span("pass/member live");
+            let _member_span = members_span.member(false);
             if subject
                 .member
                 .as_ref()
@@ -3328,7 +3339,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Mission state is the primary control-plane projection. Evaluate it before
         // wake-message bookkeeping so a large mailbox or work history cannot starve
         // newly-created runs of their first readiness pass.
-        let _work_messages_span = crate::profile::span("pass/work-messages");
+        let _work_messages_span = crate::reconcile_telemetry::phase("pass/work-messages");
         // Earlier stages of this pass can change what a wake reads, such as a step a mission
         // cancelled, so see their changes first.
         self.incremental.observe(&self.store)?;

@@ -48,6 +48,9 @@ pub struct Config {
     /// Daemon GitHub HTTP authentication. Omitted unless an explicit credential source is configured.
     #[serde(skip_serializing_if = "GithubConfig::is_default")]
     pub github: GithubConfig,
+    /// Git change pilot: explicit repositories and one designated discovery owner.
+    #[serde(skip_serializing_if = "crate::changes::config::Config::is_default")]
+    pub changes: crate::changes::config::Config,
     /// Checkpoints that trim replicated history. Written only when it differs from the
     /// default, so a config this build writes still loads in a build without checkpoints.
     #[serde(skip_serializing_if = "CheckpointConfig::is_default")]
@@ -374,6 +377,7 @@ impl Default for Config {
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
             github: GithubConfig::default(),
+            changes: crate::changes::config::Config::default(),
             checkpoint: CheckpointConfig::default(),
             limits: LimitsConfig::default(),
             reconcile: ReconcileConfig::default(),
@@ -516,6 +520,7 @@ impl Config {
         if self.work_root.is_some() {
             self.work_root()?;
         }
+        self.changes.validate()?;
         anyhow::ensure!(
             matches!(
                 self.planner.provider.as_str(),

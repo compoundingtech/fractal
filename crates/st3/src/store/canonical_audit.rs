@@ -66,6 +66,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_idle_messages",
         "coordination_sends",
         "local_coordination_backfill",
+        "stop_deferral_claims",
+        "local_stop_deferral_backfill",
         "local_publication_claims",
         "local_publication_starts",
         "local_publication_pending",

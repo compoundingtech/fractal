@@ -4146,7 +4146,16 @@ fn machine_summary_resources(
     snapshot: &ClientSnapshot,
     session: &ClientSession,
 ) -> anyhow::Result<Vec<Value>> {
-    machine_resources_with_work(state, false, snapshot, session, false)
+    Ok(machine_summary_resources_and_hosts(state, snapshot, session)?.0)
+}
+
+/// The summary's machines and the host each current runtime runs on, by runtime subject.
+fn machine_summary_resources_and_hosts(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+) -> anyhow::Result<(Vec<Value>, BTreeMap<String, String>)> {
+    machine_resources_and_hosts(state, false, snapshot, session, false)
 }
 
 fn machine_resources_with_work(
@@ -4156,6 +4165,16 @@ fn machine_resources_with_work(
     session: &ClientSession,
     include_work: bool,
 ) -> anyhow::Result<Vec<Value>> {
+    Ok(machine_resources_and_hosts(state, history, snapshot, session, include_work)?.0)
+}
+
+fn machine_resources_and_hosts(
+    state: &AppState,
+    history: bool,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    include_work: bool,
+) -> anyhow::Result<(Vec<Value>, BTreeMap<String, String>)> {
     let runtimes = runtime_resources(state, history, snapshot, session)?;
     let mut host_runtime_ids = BTreeMap::<String, BTreeSet<String>>::new();
     let mut host_running_runtimes = BTreeMap::<String, usize>::new();
@@ -4443,7 +4462,7 @@ fn machine_resources_with_work(
         machines.push(machine);
     }
     machines.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    Ok(machines)
+    Ok((machines, runtime_owner_hosts))
 }
 
 /// How long page reads serve the daemon's last diagnostic report before one of them asks for a
@@ -13223,6 +13242,7 @@ mission "queue-parity" state="ready" {
     async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        let mut recorded = crate::api::roster_stage_recorded().subscribe();
         let subject = "agent/fresh-pause";
         let append = |fields: Value| {
             state.store.append_claim(&ClaimInput {
@@ -13295,10 +13315,16 @@ mission "queue-parity" state="ready" {
         assert_eq!(page.items[0]["harness_state"], "idle");
         assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the healthy attempt");
         // The fresh read's wait and page, and the refresher's folds, land in their stage rows.
-        let stages = crate::api::request_latency_snapshot().into_iter()
+        let stages = || crate::api::request_latency_snapshot().into_iter()
             .filter(|row| row["scope"] == "agents-roster")
             .filter_map(|row| row["stage"].as_str().map(str::to_owned))
             .collect::<BTreeSet<_>>();
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| {
+            let stages = stages();
+            ["fresh-wait", "fresh-page"].iter().all(|stage| stages.contains(*stage))
+                && (stages.contains("refresh") || stages.contains("refresh-cold"))
+        })).await.expect("the completed roster stages are recorded").unwrap();
+        let stages = stages();
         for stage in ["fresh-wait", "fresh-page"] {
             assert!(stages.contains(stage), "{stage} recorded: {stages:?}");
         }
@@ -13310,6 +13336,7 @@ mission "queue-parity" state="ready" {
     async fn forgotten_agent_roster_is_refolded_before_any_read_asks() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        let mut recorded = crate::api::roster_stage_recorded().subscribe();
         state.store.append_claim(&ClaimInput {
             subject: "agent/forgotten".into(), kind: "runtime.observed".into(), actor: None,
             fields: serde_json::from_value(json!({"status":"running",
@@ -13326,6 +13353,9 @@ mission "queue-parity" state="ready" {
             .await.expect("the refresher publishes the roster as it starts").unwrap();
         let plain = || client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default()));
+        let cold_folds = || crate::api::request_latency_snapshot().into_iter()
+            .find(|row| row["scope"] == "agents-roster" && row["stage"] == "refresh-cold")
+            .map_or(0, |row| row["count"].as_u64().unwrap());
 
         // A chunked replication projection, a trim or a repair forgets every kept reduction,
         // the published roster with them. Where no agents list was read lately, the roster
@@ -13336,19 +13366,18 @@ mission "queue-parity" state="ready" {
                 .await.is_err(),
             "a forget on a node nobody reads must not refold the roster",
         );
+        let before = cold_folds();
         assert!(plain().await.is_err(), "the first read after that finds no roster yet");
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete.clone()))
+        // Settle this fold's timing before taking the next baseline: publication wakes first.
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| complete(&0) && cold_folds() > before))
             .await.expect("the read's request republishes the roster").unwrap();
 
         // Once agents are being read, the refresher folds it again on its own: no read asks,
         // so none finds the roster missing and waits for a fold from the log.
-        let cold_folds = || crate::api::request_latency_snapshot().into_iter()
-            .find(|row| row["scope"] == "agents-roster" && row["stage"] == "refresh-cold")
-            .map_or(0, |row| row["count"].as_u64().unwrap());
         let before = cold_folds();
         state.store.forget_current_views();
         assert!(state.store.published_agent_roster(state.store.index().unwrap(), false).is_none());
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete))
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| complete(&0) && cold_folds() > before))
             .await.expect("the refresher republishes a forgotten roster unasked").unwrap();
         assert!(cold_folds() > before, "the refold from the log lands in the refresh-cold row");
         let (Extension(_), Json(page)) = plain().await.expect("a plain read after the refold finds a roster");
@@ -22376,7 +22405,7 @@ mission "example/zero-run" state="ready" {
     fn a_declared_seat_with_no_session_past_its_launch_window_is_down_since_it_began_waiting() {
         let started = 1_790_000_000_000_u64;
         let mut card = sessionless_card(Value::Null);
-        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS + 1);
+        overlay_down(&mut card, Some(started), None, None, started + LAUNCH_WINDOW_MS + 1);
         assert_eq!(card["state"], "down");
         assert_eq!(card["down_since"], client_timestamp(u128::from(started)));
         assert_eq!(card["silent_since"], Value::Null, "a dead holder's activity is not shown as activity");
@@ -22388,12 +22417,12 @@ mission "example/zero-run" state="ready" {
     fn a_seat_inside_its_launch_window_is_still_starting() {
         let started = 1_790_000_000_000_u64;
         let mut card = sessionless_card(Value::Null);
-        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS);
+        overlay_down(&mut card, Some(started), None, None, started + LAUNCH_WINDOW_MS);
         assert_eq!(card["state"], "desired");
         assert!(card.get("down_since").is_none());
         assert!(card["current_work"][0].get("holder_down_since").is_none());
         let mut unknown = sessionless_card(Value::Null);
-        overlay_down(&mut unknown, None, "missing", started + 10 * LAUNCH_WINDOW_MS);
+        overlay_down(&mut unknown, None, None, None, started + 10 * LAUNCH_WINDOW_MS);
         assert_eq!(unknown["state"], "desired", "no start time, no claim of how long");
     }
 
@@ -22402,14 +22431,44 @@ mission "example/zero-run" state="ready" {
         let started = 1_790_000_000_000_u64;
         for reported in ["ready", "idle", "working"] {
             let mut card = sessionless_card(json!(reported));
-            overlay_down(&mut card, Some(started), "current", started + 100 * LAUNCH_WINDOW_MS);
+            overlay_down(&mut card, Some(started), Some(5_000), Some(reported), started + 100 * LAUNCH_WINDOW_MS);
             assert_eq!(card["state"], "running", "{reported}");
             assert!(card.get("down_since").is_none());
         }
-        // A report that has gone stale proves nothing: the seat is down, not running.
+    }
+
+    #[test]
+    fn a_seat_that_reports_at_its_idle_heartbeat_is_never_called_down() {
+        // Two seats of the second audit (2026-10-14) had a driver and pty daemon a day old, a
+        // runtime row stuck pending and an idle report every five minutes: older than the 90 s
+        // freshness window nearly all the time, never older than a heartbeat.
+        let started = 1_790_000_000_000_u64;
+        for age in [91_000, 150_000, 299_000, 301_000, HEARTBEAT_MS] {
+            let mut card = sessionless_card(json!("indeterminate"));
+            overlay_down(&mut card, Some(started), Some(age), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], "waiting", "{age}");
+            assert!(card.get("down_since").is_none(), "{age}");
+            assert!(card["current_work"][0].get("holder_down_since").is_none(), "{age}");
+        }
+    }
+
+    #[test]
+    fn a_report_older_than_a_heartbeat_proves_nothing_and_an_ended_harness_is_no_session() {
+        let started = 1_790_000_000_000_u64;
         let mut stale = sessionless_card(json!("indeterminate"));
-        overlay_down(&mut stale, Some(started), "stale", started + 100 * LAUNCH_WINDOW_MS);
+        overlay_down(&mut stale, Some(started), Some(HEARTBEAT_MS + 1), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
         assert_eq!(stale["state"], "down");
+        // The launch report of a replacement incarnation is not a session: `agents restart` waits
+        // for `running`, not for the first line the driver writes.
+        let mut launching = sessionless_card(json!("starting"));
+        overlay_down(&mut launching, Some(started), Some(1_000), Some("starting"), started + 1_000);
+        assert_eq!(launching["state"], "desired");
+        let mut launched_long_ago = sessionless_card(json!("starting"));
+        overlay_down(&mut launched_long_ago, Some(started), Some(1_000), Some("starting"), started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(launched_long_ago["state"], "down");
+        let mut ended = sessionless_card(json!("ended"));
+        overlay_down(&mut ended, Some(started), Some(1_000), Some("ended"), started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(ended["state"], "down");
     }
 
     #[test]
@@ -22418,7 +22477,7 @@ mission "example/zero-run" state="ready" {
         for state in ["running", "waiting", "stopped", "failed", "suspended"] {
             let mut card = sessionless_card(Value::Null);
             card["state"] = json!(state);
-            overlay_down(&mut card, Some(started), "missing", started + 100 * LAUNCH_WINDOW_MS);
+            overlay_down(&mut card, Some(started), None, None, started + 100 * LAUNCH_WINDOW_MS);
             assert_eq!(card["state"], state);
         }
     }

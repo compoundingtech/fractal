@@ -2047,6 +2047,18 @@ signatures, with SVG/HTML/unrecognized bytes returned only as opaque octets.
 
 `message.send` accepts `kind: "silent" | "wake"`; omitted kind means wake. Silent mail stays unread until a real wake offers at most eight held messages, or it is read on demand. Replies default to wake independently of their parent; there is no question tag or per-seat wake policy. Person and system wake events always wake. Signed silent requests carry `st3-silent` in signed tags. Old daemons ignore the kind field and do not hold silent tags; inspect receipt tags in mixed-version fleets. See [silent messages](../silent-messages.md).
 
+Message resources and `GET /v1/messages/delivery/{subject}` expose the existing
+`delivery` projection: `state` (`pending`, `waiting`, or `read`), durable handoff `phase`,
+human-readable `reason`, `age_ms`, and `recipient_delivery`. Native transport acceptance
+(`phase: delivered`) is not recipient read. A `sent` or `staged` message whose recipient's
+current, fresh native harness observation is `blocked_on: human` has `state: waiting`
+and a `reason` explicitly saying it is held outside the native harness for a human answer
+or approval. The durable message remains queued, not delivered; no separate held wire
+state is introduced. The held reason clears when an answer, cancellation, or timeout
+clears that observation, when its runtime incarnation ends or restarts, or when the
+observation is no longer fresh. Old-incarnation observations cannot restore a hold.
+Already delivered, read, and closed messages never acquire this held reason.
+
 ### Submission incarnation
 
 Work detail resources expose optional nullable `submitted_incarnation` for the current
