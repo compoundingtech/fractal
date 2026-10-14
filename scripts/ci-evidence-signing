@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Key handling for a CI job that signs its own result. Testable without GitHub.
+
+  guard             may this job use the signing key? (event and ref, never a fork)
+  configure         write the signer's configuration and the key (mode 0600) and mask the key
+  once CHECK        record that this job signs CHECK, and refuse a second signature for it
+  aggregate FILE    write the facts of an aggregate gate (from the `needs` context) for evidence-wrap
+  cleanup           overwrite and remove the key and everything configure made (run it always)
+
+The key arrives only as the environment secret EVIDENCE_SIGNING_KEY of the `evidence-signing`
+environment, which the repository restricts to main, the merge-queue refs and same-repository
+branches. This script adds the checks that do not depend on that setting. The signer script and
+this one must come from the base commit of the change, never from the tree under test; the
+workflow that calls them takes them from there.
+
+Documented gap (accepted): code under test in a job that holds the key can read it.
+"""
+import fnmatch
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+
+ALLOWED_REFS = {
+    'merge_group': ['refs/heads/gh-readonly-queue/*'],
+    'workflow_dispatch': ['refs/heads/main'],
+    'push': ['refs/heads/main'],
+}
+
+
+class Refused(Exception):
+    pass
+
+
+def env(name, default=''):
+    return os.environ.get(name, default)
+
+
+def guard():
+    """Event and ref the key may be used for; a fork's pull request never."""
+    event, ref, repository = env('GITHUB_EVENT_NAME'), env('GITHUB_REF'), env('GITHUB_REPOSITORY')
+    if event == 'pull_request':
+        head = env('PR_HEAD_REPOSITORY')
+        if not head or head != repository:
+            raise Refused(f'refusing a pull request from {head or "an unknown repository"!r}: forks never get the signing key')
+        if not ref.startswith('refs/pull/'):
+            raise Refused(f'unexpected ref {ref!r} for a pull request')
+        return 'same-repository pull request'
+    patterns = ALLOWED_REFS.get(event)
+    if patterns is None:
+        raise Refused(f'refusing event {event!r}: the signing key is for merge_group, push to main, '
+                      'manual runs on main and same-repository pull requests')
+    if not any(fnmatch.fnmatchcase(ref, pattern) for pattern in patterns):
+        raise Refused(f'refusing ref {ref!r} for {event}: expected one of {patterns}')
+    return f'{event} on {ref}'
+
+
+def configure(root):
+    """Write HOME/.config/st/evidence-sign.json and the key under ROOT; mask the key's lines."""
+    key = env('EVIDENCE_SIGNING_KEY')
+    if not key.strip():
+        raise Refused('EVIDENCE_SIGNING_KEY is empty: the evidence-signing environment secret is not available to this job')
+    if not key.endswith('\n'):
+        key += '\n'
+    for line in key.splitlines():
+        if line.strip():
+            print(f'::add-mask::{line}')
+    home = Path(root) / 'evidence-signer'
+    (home / '.config/st').mkdir(parents=True, exist_ok=True)
+    home.chmod(0o700)
+    (home / '.config/st').chmod(0o700)
+    key_path = home / 'signing-key'
+    descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w') as stream:
+        stream.write(key)
+    scratch = home / 'scratch.git'
+    subprocess.run(['git', 'init', '--quiet', '--bare', str(scratch)], check=True)
+    config_path = home / '.config/st/evidence-sign.json'
+    descriptor = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w') as stream:
+        json.dump({'signer': env('EVIDENCE_SIGNER', 'fleet/ci'), 'ssh_key': str(key_path), 'scratch_repo': str(scratch)}, stream)
+    return home
+
+
+def once(root, check):
+    """One signature per check per job: a retry loop in a job cannot flood the notes."""
+    ledger = Path(root) / 'evidence-signed.json'
+    signed = json.loads(ledger.read_text()) if ledger.exists() else []
+    if check in signed:
+        raise Refused(f'this job already signed {check!r}; a second signature for it is refused')
+    signed.append(check)
+    ledger.write_text(json.dumps(signed))
+
+
+def aggregate(path):
+    """What an aggregate job honestly knows: which jobs it needed, what each reported, its verdict.
+
+    Not the stages' commands, outputs, inventories, timings or toolchains: it did not run them.
+    """
+    needs = json.loads(env('NEEDS_JSON') or '{}')
+    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items())}
+    gate = env('GATE_JOB', 'linux-gate')
+    if gate not in results:
+        raise Refused(f'the {gate!r} job is not among the needed jobs, so there is no verdict to record')
+    facts = {
+        'command': [gate, 'aggregate', *results],
+        'exit_code': 0 if results[gate] == 'success' else 1,
+        'output': {'gate': results[gate], 'needs': results},
+        'inputs': {
+            'run_id': env('GITHUB_RUN_ID'), 'run_attempt': env('GITHUB_RUN_ATTEMPT'), 'event_name': env('GITHUB_EVENT_NAME'),
+            'ref': env('GITHUB_REF'), 'run_started_at': env('RUN_STARTED_AT'), 'workflow': env('GITHUB_WORKFLOW'),
+            'needed_jobs': ','.join(results), 'stage_results': ','.join(f'{n}={r}' for n, r in results.items()),
+        },
+    }
+    facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    Path(path).write_text(json.dumps(facts, sort_keys=True))
+
+
+def cleanup(root):
+    home = Path(root) / 'evidence-signer'
+    key = home / 'signing-key'
+    if key.exists():
+        key.write_bytes(b'\0' * max(1, key.stat().st_size))
+    shutil.rmtree(home, ignore_errors=True)
+
+
+def main(argv):
+    command = argv[0] if argv else ''
+    root = env('RUNNER_TEMP') or tempfile.gettempdir()
+    try:
+        if command == 'guard':
+            print(guard())
+        elif command == 'configure':
+            print(configure(root))
+        elif command == 'once' and len(argv) == 2:
+            once(root, argv[1])
+        elif command == 'aggregate' and len(argv) == 2:
+            aggregate(argv[1])
+        elif command == 'cleanup':
+            cleanup(root)
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
+    except Refused as refusal:
+        print(f'::warning::evidence signing skipped: {refusal}')
+        return 1
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f'::warning::evidence signing step {command} failed: {error}')
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

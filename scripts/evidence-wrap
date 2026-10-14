@@ -15,6 +15,14 @@ The note is imported as refs/notes/evidence/<record> in this checkout. With --pu
 is also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it
 only helps when the commit you push has the tree CI will test (a branch current with main).
 
+With --aggregate FILE nothing is run: FILE is JSON {"command": [...], "exit_code": N, "output": ANY,
+"inputs": {name: string}} written by a job that summarizes other jobs (an aggregate gate). The
+output digest is the sha256 of the canonical JSON of "output" (sorted keys, no spaces), and the
+extra inputs are recorded next to the environment fingerprint. The note then says only what that
+job knows, and the command names it as an aggregate.
+
+With EVIDENCE_PUSH_TOKEN set, --push uses it as an HTTP authorization header (never printed).
+
 Take this script from the accepted base (main), not from the change under test.
 """
 import argparse
@@ -83,11 +91,12 @@ def main(argv):
     parser.add_argument('--keys-from', default='origin/main')
     parser.add_argument('--verifier', default=str(HERE / 'evidence-verify'))
     parser.add_argument('--push', metavar='REMOTE')
+    parser.add_argument('--aggregate', metavar='FILE', help='record the facts in FILE instead of running a command')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
-    if not command:
-        parser.error('give the command after --')
+    if bool(command) == bool(args.aggregate):
+        parser.error('give either the command after -- or --aggregate FILE')
 
     try:
         top = git('rev-parse', '--show-toplevel').stdout.decode().strip()
@@ -105,7 +114,15 @@ def main(argv):
             'system': f'{system[1]}-{system[0]}'.lower() if len(system) == 2 else 'unknown',
             'attempt': args.attempt,
         }
-        exit_code, output_sha256 = run_command(command)
+        if args.aggregate:
+            facts = json.loads(Path(args.aggregate).read_text())
+            if set(facts) - {'command', 'exit_code', 'output', 'inputs'} or not {'command', 'exit_code', 'output'} <= set(facts):
+                raise Failure('--aggregate FILE must hold command, exit_code, output and optionally inputs')
+            command, exit_code = facts['command'], facts['exit_code']
+            output_sha256 = hashlib.sha256(json.dumps(facts['output'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            inputs.update(facts.get('inputs', {}))
+        else:
+            exit_code, output_sha256 = run_command(command)
         if git('rev-parse', 'HEAD').stdout.decode().strip() != commit or dirty():
             raise Failure('the checkout changed while the command ran; nothing was signed')
         request = {'commit': commit, 'check': args.check, 'command': command, 'exit_code': exit_code,
@@ -141,7 +158,15 @@ def main(argv):
         if args.push:
             if exit_code == 0 and not result['verified']:
                 raise Failure('not pushing: the note did not verify locally')
-            git('push', '--quiet', args.push, f'{ref}:{ref}')
+            token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
+            config = []
+            if token:
+                header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+                config = ['-c', f'http.extraheader=Authorization: Basic {header}']
+            pushed = git(*config, 'push', '--quiet', args.push, f'{ref}:{ref}', check=False)
+            if pushed.returncode != 0:
+                text = pushed.stderr.decode(errors='replace').replace(token, '***') if token else pushed.stderr.decode(errors='replace')
+                raise Failure(f'push failed: {text.strip()[-500:]}')
             result['pushed'] = True
         print(json.dumps(result, indent=2), file=sys.stderr)
         return 0 if exit_code == 0 else exit_code

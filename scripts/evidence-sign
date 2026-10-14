@@ -7,7 +7,8 @@ Install it root-owned and hash-pinned behind a narrow sekrets grant; the unprivi
   * the commit, its tree and `flake.lock` are read from the caller's checkout (the current
     directory, read-only), never taken from the request;
   * the observation time and the producer digest are its own;
-  * the request may carry exactly the keys below, with exactly these shapes.
+  * the request may carry exactly the top-level keys below; `inputs` must include the required
+    environment fingerprint and may carry more short string entries.
 
 What it cannot check is that the command really ran and printed what the request says; the
 record states that this machine's wrapper reported it. That is the cooperative v1 boundary
@@ -36,6 +37,8 @@ SHA256 = re.compile(r'^[0-9a-f]{64}$')
 CHECK = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
 REQUEST_KEYS = {'commit', 'check', 'command', 'exit_code', 'output_sha256', 'change_id', 'inputs'}
 INPUT_KEYS = {'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt'}
+# The record's inputs grow over time (the repository policy names the ones a check must carry).
+EXTRA_INPUT = re.compile(r'^[a-z][a-z0-9_]{0,39}$')
 
 
 class Refused(Exception):
@@ -67,8 +70,12 @@ def validate(request):
     if not (isinstance(request['change_id'], str) and request['change_id'].strip() and len(request['change_id']) < 200):
         raise Refused('change_id must be a short nonempty string')
     inputs = request['inputs']
-    if not (isinstance(inputs, dict) and set(inputs) == INPUT_KEYS and all(isinstance(v, str) and v for v in inputs.values())):
-        raise Refused('inputs must have exactly: ' + ', '.join(sorted(INPUT_KEYS)))
+    if not (isinstance(inputs, dict) and INPUT_KEYS <= set(inputs) and len(inputs) <= 40
+            and all(isinstance(v, str) and 0 < len(v) <= 500 for v in inputs.values())):
+        raise Refused('inputs must be short nonempty strings and include: ' + ', '.join(sorted(INPUT_KEYS)))
+    for name in set(inputs) - INPUT_KEYS:
+        if not EXTRA_INPUT.match(name):
+            raise Refused(f'input name {name!r} must be lowercase letters, digits and underscore')
     for key in ('flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256'):
         if not SHA256.match(inputs[key]):
             raise Refused(f'{key} must be 64 lowercase hex digits')

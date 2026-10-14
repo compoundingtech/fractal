@@ -336,6 +336,26 @@ the cooperative boundary (agents with the key's account can lie) and belongs in 
 read it too. A note applies only to the tree it names, so it helps CI only when the pushed commit
 has the tree CI will test.
 
+## A CI job that signs its own result
+
+The machine that ran a check can sign the result itself, with no call to GitHub. The key is the
+`EVIDENCE_SIGNING_KEY` secret of the `evidence-signing` environment (forks never receive it).
+`scripts/ci-evidence-signing` holds the steps that handle it, and all of them are tested without
+GitHub: `guard` allows only merge-queue refs, `main`, manual runs on `main` and same-repository
+pull requests; `configure` writes the signer configuration and key as mode 0600 in a 0700
+directory and masks every key line; `once CHECK` refuses a second signature for a check in one job;
+`cleanup` overwrites and removes the key, and runs even when earlier steps failed. The wrapper and
+signer scripts must come from the base commit of the change, never from the tree under test.
+Accepted gap: code under test in a job that holds the key can read it.
+
+An aggregate job records what it knows: `scripts/ci-evidence-signing aggregate FILE` builds, from
+the `needs` context, the needed jobs, the result each reported and the gate job's own result, and
+`scripts/evidence-wrap --aggregate FILE` signs that. It does not claim the stages' commands,
+outputs, test inventories, timings or toolchains, because it did not run them; those belong in
+notes signed by the stage jobs. The signer accepts extra named string inputs next to the required
+environment fingerprint, so a check's note can carry more over time; the repository policy decides
+which inputs a check must carry.
+
 ## Fresh CI re-attestation
 
 The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors

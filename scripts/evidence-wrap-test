@@ -91,6 +91,24 @@ def main(argv):
         assert statement(failed['record'])['predicate']['observed']['checks']['linux-gate']['exit_code'] == 3
         print('passed: a failing command is recorded with its exit code, and the wrapper returns it')
 
+        facts = tmp / 'facts.json'
+        facts.write_text(json.dumps({'command': ['linux-gate', 'aggregate', 'a', 'b'], 'exit_code': 0,
+                                     'output': {'verdict': 'success', 'needs': {'b': 'success', 'a': 'success'}},
+                                     'inputs': {'run_id': '42', 'event_name': 'merge_group'}}))
+        aggregated = run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
+                          '--signer', signer, '--aggregate', str(facts)], repo, home)
+        assert aggregated.returncode == 0, aggregated.stderr.decode()
+        gate = statement(json.loads(aggregated.stderr.decode()[aggregated.stderr.decode().index('{'):])['record'])
+        gate_check = gate['predicate']['observed']['checks']['linux-gate']
+        canonical = json.dumps({'needs': {'a': 'success', 'b': 'success'}, 'verdict': 'success'}, sort_keys=True, separators=(',', ':'))
+        assert gate_check['command'] == ['linux-gate', 'aggregate', 'a', 'b'] and gate_check['exit_code'] == 0
+        assert gate_check['output_sha256'] == hashlib.sha256(canonical.encode()).hexdigest()
+        assert gate['predicate']['observed']['inputs']['run_id'] == '42' and 'flake_lock_sha256' in gate['predicate']['observed']['inputs']
+        facts.write_text(json.dumps({'command': ['x'], 'exit_code': 0, 'output': 1, 'tier': 'full'}))
+        assert run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
+                    '--signer', signer, '--aggregate', str(facts)], repo, home).returncode == 1
+        print('passed: an aggregate gate records its verdict, canonical output digest and extra run inputs, and refuses unknown keys')
+
         (repo / 'a').write_text('dirty\n')
         assert wrap(['true']).returncode == 1
         git(repo, 'checkout', '--', 'a')
@@ -113,18 +131,22 @@ def main(argv):
                                   capture_output=True, env=dict(ENV, HOME=str(home), EVIDENCE_SIGN_NOW=DATE))
 
         assert sign(good).returncode == 0
+        extended = sign({**good, 'inputs': {**good['inputs'], 'run_id': '123', 'event_name': 'merge_group'}})
+        assert extended.returncode == 0, extended.stderr
         for label, bad in {
             'extra key': {**good, 'tier': 'full'},
             'wrong flake.lock hash': {**good, 'inputs': {**good['inputs'], 'flake_lock_sha256': '2' * 64}},
             'unknown commit': {**good, 'commit': 'f' * 40},
             'bad output digest': {**good, 'output_sha256': 'zz'},
             'empty command': {**good, 'command': []},
-            'extra input': {**good, 'inputs': {**good['inputs'], 'extra': 'x'}},
+            'badly named extra input': {**good, 'inputs': {**good['inputs'], 'Bad-Name': 'x'}},
+            'missing required input': {**good, 'inputs': {k: v for k, v in good['inputs'].items() if k != 'toolchain_sha256'}},
+            'empty extra input': {**good, 'inputs': {**good['inputs'], 'run_id': ''}},
             'check name with a slash': {**good, 'check': 'a/b'},
         }.items():
             refused = sign(bad)
             assert refused.returncode == 1 and b'refused' in refused.stderr, (label, refused.stderr)
-        print('passed: the signer refuses extra keys, a wrong flake.lock hash, an unknown commit and malformed fields')
+        print('passed: the signer accepts extra named inputs, and refuses extra keys, a wrong flake.lock hash, an unknown commit and malformed fields')
 
         if write_fixture:
             write_fixture.mkdir(parents=True, exist_ok=True)
