@@ -975,7 +975,8 @@ pub(super) fn assistant_text(
     }
     let native: crate::external_sessions::NativeLocator =
         serde_json::from_value(locator.native.clone()).map_err(|_| invalidated())?;
-    let _slot = read_slot(&READ_SLOTS)?;
+    let slots = read_slots(&locator.source.transcript);
+    let _slot = read_slot(slots)?;
     let found = source(state, session_id)?;
     if basis(&found)? != locator.basis {
         return Err(invalidated());
