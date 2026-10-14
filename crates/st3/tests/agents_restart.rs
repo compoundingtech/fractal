@@ -2576,6 +2576,24 @@ async fn ready_acknowledges_a_handoff_that_is_already_current() {
     fixture.request(&subject, "restart-1").await;
     pass(&fixture, 3);
     assert!(fixture.runtime.stops.lock().unwrap().is_empty());
+    // Another seat saying this one is ready does not cut its wait short.
+    fixture
+        .store
+        .append_claim(&ClaimInput {
+            subject: st3::handoff::ready_subject(&subject),
+            kind: st3::handoff::READY_KIND.into(),
+            actor: Some("agent/example/other".into()),
+            fields: std::collections::BTreeMap::from([("agent".into(), json!(subject))]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("restart-ready:forged".into()),
+        })
+        .unwrap();
+    pass(&fixture, 3);
+    assert!(
+        fixture.runtime.stops.lock().unwrap().is_empty(),
+        "another seat's readiness claim is not this seat's"
+    );
     let socket = fixture.root.path().join("st3.sock");
     let said = succeeded(
         &st(&socket, &["agents", "handoff", "ready", "--as", &subject]).await,

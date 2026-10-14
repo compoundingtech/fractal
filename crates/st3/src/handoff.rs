@@ -138,7 +138,9 @@ pub fn gather(store: &Store, agent: &str) -> Result<Context> {
     })
 }
 
-/// Whether the seat has written its handoff, or said it is ready, since `since_unix_ms`.
+/// Whether the seat has written its handoff, or said it is ready, since `since_unix_ms`. A readiness
+/// claim counts only when its recorded actor is the seat itself; like other claims, the actor is what
+/// the caller asserted, so this keeps out accidents and other seats, not a determined local caller.
 pub fn acknowledged_since(store: &Store, agent: &str, since_unix_ms: u128) -> Result<bool> {
     // A pass that skips what nothing changed must see either acknowledgement arrive.
     smallclaims::touched::note_read(|| ready_subject(agent));
@@ -156,7 +158,9 @@ pub fn acknowledged_since(store: &Store, agent: &str, since_unix_ms: u128) -> Re
     Ok(store
         .claims_for(&ready_subject(agent), Some(READY_KIND))?
         .into_iter()
-        .any(|claim| claim.accepted_at_unix_ms >= since_unix_ms))
+        .any(|claim| {
+            claim.accepted_at_unix_ms >= since_unix_ms && claim.actor.as_deref() == Some(agent)
+        }))
 }
 
 /// The "prepare for restart" message: why, by when, and what to do.

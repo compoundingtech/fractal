@@ -3250,7 +3250,7 @@ enum HandoffCommand {
     },
     /// Say this seat's handoff is current, so a restart that is waiting for it can go ahead.
     Ready {
-        /// The seat that is ready; only that seat may say so.
+        /// The seat that is ready; a readiness claim counts only when it names that seat as its actor.
         #[arg(long = "as", value_parser = parse_actor_subject)]
         actor: Option<String>,
     },

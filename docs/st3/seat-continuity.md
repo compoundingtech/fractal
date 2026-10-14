@@ -49,7 +49,10 @@ The seat writes its handoff, which acknowledges the request, or runs `st agents 
 the handoff it has is already current. St stops the seat at the acknowledgement or at the deadline,
 whichever comes first, and records which: `runtime.reconcile-decision` claims with key
 `restart-prepare` say `prepare`, then `ready` or `deadline-passed`. A handoff written before the
-request does not acknowledge it.
+request does not acknowledge it. A readiness claim counts only when its recorded actor is the seat; as
+with other claims the actor is what the caller asserted, so this keeps out accidents and other seats,
+not a determined local caller. The handoff document is the stronger acknowledgement: the daemon
+lets only the seat itself write it.
 
 `st agents restart AGENT --now` skips the wait, for a seat that cannot answer (it records `operation: restart-now` on the request). Scripts that restart stub seats use it.
 
