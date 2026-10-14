@@ -22,6 +22,7 @@
       "bundleIdentifier": "com.compoundingtech.smalltalk.starter",
       "supportsTablet": true,
       "infoPlist": {
+        "UIViewControllerBasedStatusBarAppearance": true,
         "NSAppTransportSecurity": {
           "NSExceptionDomains": {
             "100.64.0.0/10": {

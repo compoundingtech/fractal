@@ -38,9 +38,9 @@ export function SystemScreen({ children }: { children: ReactNode }) {
 }
 
 /** Wrapping, inset grouped row. The label carries meaning without a glyph legend. */
-export function GroupedRow({ title, context, onPress }: { title: string; context: string; onPress: () => void }) {
+export function GroupedRow({ title, context, onPress, onLongPress }: { title: string; context: string; onPress: () => void; onLongPress?: () => void }) {
   const colors = useSystemColors();
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${title}. ${context}`} accessibilityHint="Opens alert details" onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${title}. ${context}`} accessibilityHint="Opens alert details" onPress={onPress} onLongPress={onLongPress}
     style={({ pressed }) => ({ marginHorizontal: 16, padding: 16, minHeight: 60, borderRadius: 10, backgroundColor: pressed ? colors.separator : colors.grouped, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator, flexDirection: 'row', alignItems: 'center', gap: 12 })}>
     <View style={{ flex: 1, gap: 6 }}><T bold>{title}</T><T dim>{context}</T></View>
     <Text accessible={false} style={{ color: colors.secondary, fontSize: 22 }}>›</Text>

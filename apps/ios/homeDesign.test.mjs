@@ -160,6 +160,8 @@ test('grouped rows expose readable wrapping button labels and shared buttons exp
   assert.equal(prop(pressable, 'accessibilityRole').text, 'button');
   assert.equal(prop(pressable, 'accessibilityLabel').expression.getText(), '`${title}. ${context}`');
   assert.equal(prop(pressable, 'accessibilityHint').text, 'Opens alert details');
+  assert.equal(prop(pressable, 'onPress').expression.getText(), 'onPress', 'taps retain the detail destination');
+  assert.equal(prop(pressable, 'onLongPress').expression.getText(), 'onLongPress', 'ContextMenu can inject the existing action sheet');
   assert.ok(elements(row, 'T').every(element => !prop(element, 'numberOfLines')), 'titles and context wrap rather than truncate');
   const header = elements(namedFunction(uiSource, 'GroupedHeader'), 'View')[0];
   assert.equal(prop(header, 'accessibilityRole').text, 'header');
@@ -173,4 +175,5 @@ test('grouped rows expose readable wrapping button labels and shared buttons exp
 test('the native app permits the device light and dark appearance', () => {
   const config = JSON.parse(readFileSync(new URL('./app.json', import.meta.url), 'utf8'));
   assert.equal(config.expo.userInterfaceStyle, 'automatic');
+  assert.equal(config.expo.ios.infoPlist.UIViewControllerBasedStatusBarAppearance, true, 'native stacks own status-bar appearance without an RN screens assertion');
 });

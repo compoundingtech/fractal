@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from 'react';
-import { Linking, StatusBar, View, useColorScheme } from 'react-native';
+import { Linking, View, useColorScheme } from 'react-native';
 import { DarkTheme, DefaultTheme, ThemeProvider, NavigationContainer, getFocusedRouteNameFromRoute, type RouteProp } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackNavigationOptions } from '@react-navigation/native-stack';
 import { createNativeBottomTabNavigator } from '@react-navigation/bottom-tabs/unstable';
@@ -52,6 +52,7 @@ const stackOptions: NativeStackNavigationOptions = {
   headerTitleStyle: { color: theme.text },
   headerLargeTitleStyle: { color: theme.text },
   contentStyle: { backgroundColor: theme.base },
+  statusBarStyle: 'light',
   headerBackButtonDisplayMode: 'default',
 };
 
@@ -196,7 +197,6 @@ export default function App() {
   const [fontsLoaded] = useFonts({ IBMPlexMono_400Regular, IBMPlexMono_400Regular_Italic, IBMPlexMono_600SemiBold, IBMPlexMono_700Bold });
   if (!fontsLoaded) return <View onLayout={qualityLayout} style={{ flex: 1, backgroundColor: theme.base }} />;
   return <SafeAreaProvider onLayout={qualityLayout}>
-    <StatusBar barStyle="light-content" />
     {__DEV__ && fabricProof ? <FabricProofScreen key={fabricProof.id ?? `${fabricProof.node}/${fabricProof.service}`} input={fabricProof} onClose={() => setFabricProof(null)} renderClient={proof =>
       <StoreProvider proof={proof}>
         <NavigationContainer ref={navigationRef} theme={navigationTheme}><Main proofSession /></NavigationContainer>
