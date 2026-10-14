@@ -46,8 +46,22 @@ pub struct World {
     /// Peers this host's graph has diverged from: the same envelopes project a different graph
     /// here, so what stui shows can be wrong until the host is repaired.
     pub diverged: Vec<String>,
+    /// Lists st stopped serving after they loaded, each with st's reason: the rows shown are the
+    /// last it sent, and may be out of date until it serves them again. Left out of the shared
+    /// contract while empty: the phone shows this on its own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stale: Vec<String>,
+    /// Whether the missions window is followed now. Not part of the shared contract.
     #[serde(skip)]
-    pub mail_backlog: Load<st3_client::MailBacklog>,
+    pub missions_followed: bool,
+    /// Whether the attention and agents windows are st's own on this run, not a cached copy. The
+    /// top bar prints nothing about them until they are, so it never shows one picture and then
+    /// another. Not part of the shared contract.
+    #[serde(skip)]
+    pub settled: bool,
+    /// The number of active missions st reports, when the mission rows are not followed.
+    #[serde(skip)]
+    pub active_missions: Option<usize>,
     pub attention: Load<Vec<Attention>>,
     pub agents: Load<Vec<Agent>>,
     pub missions: Load<Vec<Mission>>,
@@ -66,8 +80,14 @@ pub struct World {
     /// Each account's freshest limits reading, from the same read.
     #[serde(skip)]
     pub usage_limits: Vec<st3_client::UsageLimit>,
+    #[serde(skip)]
+    pub agent_messages: Option<st3_client::AgentMessageEstimate>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
+    #[serde(skip)]
+    pub inventory_supported: Option<bool>,
+    #[serde(skip)]
+    pub inventory_partial: Vec<String>,
 }
 
 /// A client connected to this member, as it describes itself.
@@ -134,6 +154,35 @@ pub struct Attention {
     pub related: Vec<(String, Option<String>)>,
     /// Who raised it, when st says.
     pub raised_by: Option<String>,
+    /// The mission step waiting on this ask, on an ask a mission step made.
+    pub blocked: Option<Blocked>,
+    /// Every agent conversation this item shows in, as st names them: the item is an alert in
+    /// each. Empty when st does not name one (an older st), and then `agent` is the guess.
+    pub conversations: Vec<String>,
+}
+
+impl Attention {
+    /// Whether it blocks or waits on the person. An update asks nothing and a message stays in
+    /// its conversation; every other card waits on an answer.
+    pub fn is_alert(&self) -> bool {
+        self.kind.is_alert()
+    }
+
+    /// Whether it shows in the conversation of `agent`.
+    pub fn is_in(&self, agent: &str) -> bool {
+        if self.conversations.is_empty() {
+            self.agent.as_deref() == Some(agent)
+        } else {
+            self.conversations.iter().any(|conversation| conversation == agent)
+        }
+    }
+}
+
+/// The mission step that asked and waits for the answer.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Blocked {
+    pub step: String,
+    pub goal: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -179,6 +228,25 @@ pub enum AttentionKind {
         from: String,
         body: String,
     },
+    /// A native prompt a seat's harness shows in its terminal and waits on: a permission, a
+    /// question or a review. It clears when the harness reports it gone, however it was answered.
+    Prompt {
+        /// The seat, and its graph id.
+        seat: String,
+        seat_id: String,
+        /// What st says it is about; the call it would make is in the seat's conversation.
+        text: String,
+        /// Answers a client may send (`allow`, `deny`); empty when the prompt is answered in
+        /// the seat's terminal.
+        answers: Vec<String>,
+        /// The harness observation that opened it, which an answer names.
+        episode: String,
+    },
+    /// A harness not signed in to its provider; one sign-in answers every seat that shares it.
+    Login {
+        text: String,
+        seats: Vec<String>,
+    },
     /// An agent is stopped until the person decides or answers something.
     Request {
         /// Who asks, named, and its graph id to reply to.
@@ -202,6 +270,11 @@ pub enum AttentionKind {
 }
 
 impl AttentionKind {
+    /// Whether a card of this kind blocks or waits on the person.
+    pub fn is_alert(&self) -> bool {
+        !matches!(self, AttentionKind::Update { .. } | AttentionKind::Message { .. })
+    }
+
     pub fn word(&self) -> &'static str {
         match self {
             AttentionKind::Review { .. } => "review",
@@ -210,6 +283,8 @@ impl AttentionKind {
             AttentionKind::Revision { .. } => "revision",
             AttentionKind::Fault { .. } => "fault",
             AttentionKind::Message { .. } => "message",
+            AttentionKind::Prompt { .. } => "prompt",
+            AttentionKind::Login { .. } => "login",
             AttentionKind::Request { .. } => "request",
             AttentionKind::Update { .. } => "update",
         }
@@ -274,8 +349,14 @@ pub enum AgentState {
     NeedsLogin,
     Fault,
     Working,
+    /// Its harness is compacting its conversation. A status of the seat, not work and never an
+    /// alert: nothing waits on the person.
+    Compacting,
     Idle,
     Starting,
+    /// Declared, with no running session after its launch window (st's `down` state): the
+    /// details say since when. Never shown as starting or working.
+    Down,
     Stopped,
     Unknown,
 }
@@ -336,6 +417,9 @@ pub struct AgentDetails {
     /// The next step queued for it, as "mission › step".
     pub next: Option<String>,
     pub queue: Vec<String>,
+    /// The mission each of `next` and `queue` belongs to, by the same place, for opening it.
+    pub next_mission: Option<String>,
+    pub queue_missions: Vec<String>,
     pub queued: u64,
     pub harness_state: Option<String>,
     pub runtime: Option<String>,
@@ -343,6 +427,11 @@ pub struct AgentDetails {
     pub under: Option<String>,
     /// The model its harness last reported using, as reported ("claude-sonnet-5-5").
     pub model: Option<String>,
+    /// The effort level its seat is configured to run at ("high"), when it names one.
+    pub effort: Option<String>,
+    /// What the step it holds last reported (`st work progress`): the status a person reads first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
 }
 
 // ---------------------------------------------------------------- fleet, trees

@@ -103,16 +103,20 @@ fn capture_within(timeout: Duration) -> Result<Environment> {
     st_runtime::login_environment_within(timeout)
 }
 
+/// Forget the captured environment, so the next use reads the login shell again. Setup does this
+/// when the person asks to look for an agent they have just installed.
+pub fn refresh() {
+    if let Ok(mut cache) = cache().lock() {
+        cache.captured = None;
+    }
+}
+
 /// The environment the daemon starts with, captured patiently (see [`STARTUP_ATTEMPTS`]).
 pub fn snapshot_at_startup() -> Result<Environment> {
     cache()
         .lock()
         .map_err(|_| anyhow::anyhow!("daemon environment cache is poisoned"))?
-        .start(
-            capture_within,
-            &STARTUP_ATTEMPTS,
-            STARTUP_BACKOFF,
-        )
+        .start(capture_within, &STARTUP_ATTEMPTS, STARTUP_BACKOFF)
         .context(
             "capture the daemon login-shell environment; check the account's shell startup files",
         )
@@ -126,6 +130,18 @@ pub fn snapshot() -> Result<Environment> {
         .context(
             "capture the daemon login-shell environment; check the account's shell startup files",
         )
+}
+
+pub const HARNESSES: &[&str] = &["claude", "codex", "opencode", "pi", "omp"];
+
+/// The same login PATH that the daemon resolves before starting a seat.
+pub fn available_harnesses() -> Result<Vec<String>> {
+    let environment = snapshot()?;
+    Ok(HARNESSES
+        .iter()
+        .filter(|name| st_runtime::resolve_executable(name, &environment).is_ok())
+        .map(|name| (*name).into())
+        .collect())
 }
 
 /// What building and gating this repository needs on the login PATH. The repository selects

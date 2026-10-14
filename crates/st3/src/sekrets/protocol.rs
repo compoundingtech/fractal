@@ -11,10 +11,22 @@ use serde::{Deserialize, Serialize};
 
 use super::policy::Policy;
 
+/// A closed peer is an error, not SIGPIPE; received descriptors close on exec. Linux sets both
+/// per call; elsewhere SIGPIPE stays the process's own concern and descriptors are marked after.
+#[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+#[cfg(not(target_os = "linux"))]
+const SEND_FLAGS: libc::c_int = 0;
+#[cfg(target_os = "linux")]
+const RECV_FLAGS: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const RECV_FLAGS: libc::c_int = 0;
+
 /// The largest frame either side accepts.
-const MAX_FRAME: usize = 1 << 20;
+/// Big enough for an authorized request's largest response, in base64.
+const MAX_FRAME: usize = 96 << 20;
 /// The most descriptors one frame carries.
-pub const MAX_FDS: usize = 8;
+pub const MAX_FDS: usize = 16;
 
 /// The terminal size a caller's terminal has, for a command that runs on a terminal.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +59,10 @@ pub struct RunRequest {
     /// then the git directories it uses.
     #[serde(default)]
     pub directories: usize,
+    /// How many files the command reads follow the checkout directories; the arguments name
+    /// them with placeholders the gateway turns into `/dev/fd/N`. See `files`.
+    #[serde(default)]
+    pub files: usize,
     /// The working directory, relative to the first checkout directory.
     #[serde(default)]
     pub cwd_within: Option<String>,
@@ -66,6 +82,8 @@ pub enum Request {
         attestation: Option<Attestation>,
     },
     Run(RunRequest),
+    /// An API request with the profile's credential; see `authorized`.
+    Authorized(super::authorized::AuthorizedCall),
     /// Forward a signal to a running command.
     Signal {
         signal: i32,
@@ -151,6 +169,11 @@ pub enum CallerView {
         agent: String,
         person: String,
     },
+    /// An st daemon or st command, signed with the node key its person registered.
+    Host {
+        node: String,
+        person: String,
+    },
     /// A process of a known person's Unix user that is neither in a login session nor attested.
     Unidentified {
         person: String,
@@ -163,6 +186,7 @@ impl CallerView {
         match self {
             Self::Person { person } => Some(person),
             Self::Agent { agent, .. } => Some(agent),
+            Self::Host { node, .. } => Some(node),
             Self::Unidentified { .. } => None,
         }
     }
@@ -183,6 +207,12 @@ pub enum Reply {
         /// Something the caller should know, such as where the command runs.
         #[serde(default)]
         note: Option<String>,
+    },
+    /// The response to an authorized request; the body is base64.
+    Response {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
     },
     Exited {
         #[serde(default)]
@@ -265,7 +295,7 @@ fn sendmsg(socket: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<usize> {
         }
     }
     loop {
-        let sent = unsafe { libc::sendmsg(socket, &message, libc::MSG_NOSIGNAL) };
+        let sent = unsafe { libc::sendmsg(socket, &message, SEND_FLAGS) };
         if sent >= 0 {
             return Ok(sent as usize);
         }
@@ -290,7 +320,7 @@ fn recvmsg(socket: RawFd, buffer: &mut [u8]) -> io::Result<(usize, Vec<OwnedFd>)
     message.msg_control = control.as_mut_ptr().cast();
     message.msg_controllen = control.len() as _;
     let read = loop {
-        let read = unsafe { libc::recvmsg(socket, &mut message, libc::MSG_CMSG_CLOEXEC) };
+        let read = unsafe { libc::recvmsg(socket, &mut message, RECV_FLAGS) };
         if read >= 0 {
             break read as usize;
         }
@@ -309,6 +339,9 @@ fn recvmsg(socket: RawFd, buffer: &mut [u8]) -> io::Result<(usize, Vec<OwnedFd>)
                     / std::mem::size_of::<RawFd>();
                 for index in 0..count {
                     let fd = std::ptr::read_unaligned(data.cast::<RawFd>().add(index));
+                    if RECV_FLAGS == 0 {
+                        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    }
                     fds.push(OwnedFd::from_raw_fd(fd));
                 }
             }

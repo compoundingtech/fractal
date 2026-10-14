@@ -1,14 +1,18 @@
-import { buildSnapshotSave } from './build-snapshot.ts'
+import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
-import { defaultActionlintConfig, githubWorkflow, nixDevelopStep } from '../../repos/effect-utils/genie/external.ts'
+import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import {
   buildEnv,
   cargoCacheStep,
   commonSetupSteps,
+  fractalWebStoreCache,
+  linuxRunner,
   linuxStageJob,
   linuxStageRunner,
   nixCacheStep,
   perfStoresCache,
+  pnpmStoreEnv,
+  readOnlyBinaryCaches,
   workspacePreparationSteps,
 } from './workspace-ci.ts'
 
@@ -23,7 +27,7 @@ const whenMissing = (steps: readonly unknown[], conditionMissing = missing) => s
 // exact entries before provisioning Nix or restoring gigabytes; fill only missing entries.
 const warmJob = (stage: string, setup: readonly unknown[], nixOnly = false) => ({
   name: `warm-${stage}`,
-  'runs-on': linuxStageRunner,
+  'runs-on': stage === 'genie' ? 'ubuntu-latest' : linuxStageRunner,
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, CI_CACHE_DEV_SHELL: stage === 'genie' ? 'genie' : 'default' },
@@ -45,18 +49,18 @@ if ${nixOnly ? '[ \"$NIX_HIT\" != true ]' : '[ \"$CARGO_HIT\" != true ] || [ \"$
 fi`,
     },
     ...whenMissing([
-      ...setup,
+      ...(stage === 'genie' ? setup.filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup),
       nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
       { name: 'Save Nix outputs', run: 'bash scripts/ci-nix-cache save' },
-      // A snapshot can supply a warm build after an Actions entry was evicted. Fill
-      // that missing main entry directly; do not overwrite the snapshot with a fallback.
+      // PR/merge builds restore these entries and retain exact-source artifacts. Only
+      // protected main fills the shared dependency quota, including after eviction.
       ...(nixOnly ? [nixCacheStep] : [cargoCacheStep, nixCacheStep]).map((step) => ({
-        name: `Refill ${step.id} from the restored snapshot`,
-        if: `env.CI_BUILD_SNAPSHOT_HIT == '1' && steps.${step.id === 'cargo-cache' ? 'cargo-probe' : 'nix-probe'}.outputs.cache-hit != 'true'`,
+        name: `Save the missing main ${step.id}`,
+        if: `github.ref == 'refs/heads/main' && steps.${step.id === 'cargo-cache' ? 'cargo-probe' : 'nix-probe'}.outputs.cache-hit != 'true'`,
         uses: 'actions/cache/save@v4',
         with: { path: step.with.path, key: step.with.key },
       })),
-      ...buildSnapshotSave,
+      ...(stage === 'genie' ? [] : buildSnapshotSave),
     ], nixOnly ? "steps.nix-probe.outputs.cache-hit != 'true'" : missing),
   ],
 })
@@ -65,11 +69,14 @@ export default githubWorkflow(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
-  // Every main SHA keeps its upkeep run; a later merge must not cancel cache saves or cost checks.
-  concurrency: { group: 'main-upkeep-${{ github.run_id }}', 'cancel-in-progress': false },
+  // Fill caches for current main; keep pinned manual runs independent.
+  concurrency: {
+    group: "main-upkeep-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}",
+    'cancel-in-progress': "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+  },
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
   },
   jobs: {
     'main-checks': {
@@ -101,27 +108,44 @@ export default githubWorkflow(auditCaches({
     'isolation-vm': warmJob('isolation-vm', commonSetupSteps),
     'typescript-cache': {
       name: 'warm-typescript',
-      'runs-on': linuxStageRunner,
+      'runs-on': 'ubuntu-latest',
       'timeout-minutes': 10,
+      env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
         { uses: 'actions/setup-node@v4', with: { 'node-version': '24.18.0' } },
         {
           name: 'Fingerprint locked dependencies', id: 'lockfiles',
-          run: `lockfiles_hash=$(sha256sum apps/ios/package-lock.json clients/typescript/st3-client/package-lock.json clients/typescript/st3-views/package-lock.json | sha256sum | cut -d ' ' -f1)
+          run: `lockfiles_hash=$(sha256sum pnpm-lock.yaml | cut -d ' ' -f1)
 printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         },
         {
           name: 'Cache locked TypeScript dependencies', id: 'typescript-cache', uses: 'actions/cache@v5',
           with: {
-            path: 'apps/ios/node_modules\nclients/typescript/st3-client/node_modules\nclients/typescript/st3-views/node_modules',
-            key: 'typescript-client-${{ runner.os }}-node24.18.0-${{ steps.lockfiles.outputs.hash }}',
+            path: pnpmStoreEnv.pnpm_config_store_dir,
+            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}',
           },
         },
         {
-          name: 'Fill missing dependencies', if: "steps.typescript-cache.outputs.cache-hit != 'true'",
-          run: 'npm ci --prefix clients/typescript/st3-client --ignore-scripts --no-audit --no-fund\nnpm ci --prefix clients/typescript/st3-views --ignore-scripts --no-audit --no-fund\nnpm ci --prefix apps/ios --ignore-scripts --no-audit --no-fund',
+          name: 'Fill missing dependencies', if: "steps.typescript-cache.outputs.cache-hit != 'true'", env: pnpmStoreEnv,
+          run: 'corepack enable\npnpm fetch',
         },
+      ],
+    },
+    // Fractal-web runs on GitHub-hosted capacity, whose cache is separate from Namespace's.
+    'fractal-web-cache': {
+      name: 'warm-fractal-web',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 15,
+      defaults: { run: { shell: 'bash' } },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        { name: 'Probe the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: { ...fractalWebStoreCache, 'lookup-only': true } },
+        ...[
+          ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
+          { ...nixDevelopStep({ name: 'Fetch the locked packages', flake: '.#web', command: ['pnpm', 'fetch'] }), env: pnpmStoreEnv },
+          { name: 'Save the pnpm store', uses: 'actions/cache/save@v4', with: fractalWebStoreCache },
+        ].map((step) => ({ ...step, if: "steps.pnpm-store.outputs.cache-hit != 'true'" })),
       ],
     },
     // This check never ran in merge_group; keep its main measurements and generated-store cache.

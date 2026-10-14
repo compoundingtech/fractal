@@ -406,6 +406,13 @@ fn channel_loop(
     // `agent_start` also precedes that write; the first `idle` lifecycle edge proves the boot turn
     // and transcript have both completed. Startup mail then begins a clean provider turn.
     let mut delivery_ready = false;
+    // Whether this channel saw a compaction start and not yet its end. pi reports only the end,
+    // so it never shows as compacting rather than showing a status it cannot clear.
+    let mut compacting = false;
+    // The activity this channel last recorded, which a compaction's end restores: omp compacts
+    // mid-turn too, and says a turn is active only when it starts.
+    let mut activity = None;
+    let mut activity_before_compaction = None;
     let label = kind.label;
     let mut next_heartbeat = Instant::now() + heartbeat_every;
     loop {
@@ -438,13 +445,29 @@ fn channel_loop(
                 {
                     delivery_ready = true;
                 }
-                if let Some(observation) = state.or_else(|| turn.as_ref().and_then(turn_observation))
+                let mut observation = state.or_else(|| turn.as_ref().and_then(turn_observation));
+                if let Some(observation) = &mut observation {
+                    observation.provider_auth = turn
+                        .as_ref()
+                        .and_then(provider_auth_edge)
+                        .map(|edge| edge == ProviderAuthEdge::Accepted);
+                }
+                if observation
+                    .as_ref()
+                    .is_some_and(|o| o.provider_auth.is_some())
+                {
+                    writer.interrupt();
+                }
+                if let Some(observation) = observation {
+                    activity = Some(observation.state);
                     // A queued live frame must never overwrite the wrapper's terminal record:
                     // the channel and the wrapper are separate processes, so the flock alone
                     // serializes but does not order their writes.
-                    && let Err(error) = writer.observe_unless_ended(observation)
-                {
-                    tracing::warn!("st {label} channel: recording observed state failed: {error}");
+                    if let Err(error) = writer.observe_unless_ended(observation) {
+                        tracing::warn!(
+                            "st {label} channel: recording observed state failed: {error}"
+                        );
+                    }
                 }
                 // The credential axis is a third record, independent of the numbers and of the
                 // categorical state: a rejection stands until a turn reaches its ordinary end,
@@ -458,31 +481,61 @@ fn channel_loop(
                 // a producer holding no fresh reading must write nothing at all, so the record
                 // ages visibly through `ageMs` instead of looking refreshed. Every frame is handed
                 // to the guard, which decides bucket, compaction edge, or heartbeat.
-                if let Some(context) = frame.as_ref().and_then(context_frame)
+                let context = frame.as_ref().and_then(context_frame);
+                let compaction_ended =
+                    compacting && context.as_ref().is_some_and(|(_, edge)| edge.is_some());
+                if let Some(context) = context
                     && let Some(context_writer) = context_writer.as_deref_mut()
                     && let Err(error) = write_context(context_writer, context)
                 {
                     tracing::warn!("st {label} channel: recording harness context failed: {error}");
                 }
-                if frame.as_ref().is_some_and(|frame| {
+                // A compaction is the seat's status from its start to its end. A start whose
+                // context recovery failed says so instead: that is what someone must act on.
+                let compaction = if frame.as_ref().is_some_and(|frame| {
                     frame.get("type").and_then(Value::as_str) == Some("pre_compact")
-                }) && let Err(error) = ensure_pre_compact_context(agent_dir)
-                {
-                    tracing::warn!(
-                        "st {label} channel: writing pre-compact context stub failed: {error}"
-                    );
-                    let actionable = harness_state::Observation::new(
-                        harness_state::Activity::Active,
+                }) {
+                    if !compacting {
+                        activity_before_compaction = activity;
+                    }
+                    compacting = true;
+                    Some(match ensure_pre_compact_context(agent_dir) {
+                        Ok(_) => harness_state::Observation::new(
+                            harness_state::Activity::Active,
+                            harness_state::BlockedOn::None,
+                            harness_state::InputBuffer::Unknown,
+                        )
+                        .with_reason("compaction"),
+                        Err(error) => {
+                            tracing::warn!(
+                                "st {label} channel: writing pre-compact context stub failed: {error}"
+                            );
+                            harness_state::Observation::new(
+                                harness_state::Activity::Active,
+                                harness_state::BlockedOn::None,
+                                harness_state::InputBuffer::Unknown,
+                            )
+                            .with_reason(PRE_COMPACT_ERROR_REASON)
+                        }
+                    })
+                } else if compaction_ended {
+                    compacting = false;
+                    // Back to what the seat was doing: a turn that compacted mid-way still
+                    // works, and a `/compact` from idle is idle again.
+                    Some(harness_state::Observation::new(
+                        activity_before_compaction
+                            .take()
+                            .unwrap_or(harness_state::Activity::Idle),
                         harness_state::BlockedOn::None,
                         harness_state::InputBuffer::Unknown,
-                    )
-                    .with_reason(PRE_COMPACT_ERROR_REASON);
-                    if let Err(state_error) = writer.observe_unless_ended(actionable) {
-                        tracing::warn!(
-                            "st {label} channel: recording pre-compact recovery failure failed: \
-                             {state_error}"
-                        );
-                    }
+                    ))
+                } else {
+                    None
+                };
+                if let Some(observation) = compaction
+                    && let Err(error) = writer.observe_unless_ended(observation)
+                {
+                    tracing::warn!("st {label} channel: recording compaction failed: {error}");
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -562,6 +615,16 @@ impl EventObserver {
         if matches!(frame["type"].as_str(), Some("session" | "ready")) {
             self.native_session = frame["sessionId"].as_str()
                 .filter(|id| !id.is_empty()).map(str::to_owned);
+        }
+        // A subagent's runs go to the ledger the seat's driver records on the seat. Only a bound
+        // native session vouches for them.
+        if frame["type"] == "subagent" {
+            return match self.native_session.as_deref() {
+                Some(parent) if self.driver == "omp" => {
+                    crate::subagents::observe_omp(&self.agent_dir, frame, parent)
+                }
+                _ => Ok(()),
+            };
         }
         if let Some(fields) = todo_observation(
             frame, self.driver, self.native_session.as_deref(), &self.runtime,
@@ -701,8 +764,32 @@ fn turn_result(frame: &Value) -> Option<TurnResult<'_>> {
     };
     Some(TurnResult::ProviderError {
         reason: error.get("reason").and_then(Value::as_str),
-        classification: error.get("errorId").and_then(Value::as_u64),
+        classification: error.get("errorId").and_then(Value::as_u64).or_else(|| {
+            (error["driver"] == "pi"
+                && error
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(pi_login_reply))
+            .then_some(omp_error::CLASSIFIED | omp_error::AUTH_FAILED)
+        }),
     })
+}
+
+/// Pi 0.84.2's native missing-key error (auth-guidance.js). The OAuth failure text also
+/// says the network may be unavailable, so it is deliberately not credential evidence.
+pub fn pi_login_reply(text: &str) -> bool {
+    let line = text.lines().next().unwrap_or_default().trim();
+    let Some(provider) = line
+        .strip_prefix("No API key found for ")
+        .and_then(|s| s.strip_suffix('.'))
+    else {
+        return false;
+    };
+    !provider.is_empty()
+        && provider.len() <= 80
+        && provider
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' '))
 }
 
 /// Whether omp's classification of the error that ended a turn names a REJECTED CREDENTIAL.
@@ -734,7 +821,14 @@ fn turn_observation(result: &TurnResult<'_>) -> Option<harness_state::Observatio
         classification,
     } = result
     else {
-        return None;
+        return Some(
+            harness_state::Observation::new(
+                harness_state::Activity::Active,
+                harness_state::BlockedOn::None,
+                harness_state::InputBuffer::Unknown,
+            )
+            .with_provider_auth(true),
+        );
     };
     let observation = harness_state::Observation::new(
         harness_state::Activity::Active,
@@ -949,6 +1043,28 @@ fn message_frame(msg: message::Message, identity: &str) -> Value {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pi_native_login_errors_exclude_ambiguous_network_errors_and_content() {
+        assert!(pi_login_reply(
+            "No API key found for anthropic.\n\nUse /login"
+        ));
+        for text in [
+            "Credentials may have expired or network is unavailable",
+            "tool: No API key found for anthropic.",
+            "Invalid API key",
+            "No API key found for .",
+        ] {
+            assert!(!pi_login_reply(text));
+        }
+        let rejected = serde_json::json!({"type":"turn","error":{"driver":"pi","reason":"No API key found for anthropic."}});
+        assert_eq!(
+            provider_auth_edge(&turn_result(&rejected).unwrap()),
+            Some(ProviderAuthEdge::Rejected)
+        );
+        let ambiguous = serde_json::json!({"type":"turn","error":{"driver":"pi","reason":"Credentials may have expired or network is unavailable"}});
+        assert_eq!(provider_auth_edge(&turn_result(&ambiguous).unwrap()), None);
+    }
+
     fn todo_frame() -> Value {
         serde_json::json!({
             "type":"todo", "session":"native-a", "observed_at":"2026-10-03T15:00:00Z",
@@ -999,6 +1115,28 @@ mod tests {
         assert!(observer.observe(&todo_frame()).is_err());
         assert_eq!(crate::harness_events::pending(root.path(), 100).unwrap()
             .iter().filter(|event| event.kind == "harness-todo").count(), 1);
+    }
+
+    #[test]
+    fn omp_subagent_frames_reach_the_ledger_only_from_a_bound_session() {
+        let root = tempfile::tempdir().unwrap();
+        crate::harness_events::enable(root.path(), "runtime-a").unwrap();
+        let seq = harness_state::claim(root.path(), "agent/example", "omp", "provider-a").unwrap();
+        let mut observer = EventObserver::new(
+            root.path(), "agent/example", "omp", "provider-a", seq, "runtime-a",
+        ).unwrap();
+        let start = serde_json::json!({"type":"subagent","event":"start","id":"0-Review","name":"task"});
+        observer.observe(&start).unwrap();
+        assert!(crate::subagents::read(root.path()).running.is_empty());
+        observer.observe(&serde_json::json!({"type":"ready","sessionId":"native-a"})).unwrap();
+        observer.observe(&start).unwrap();
+        let ledger = crate::subagents::read(root.path());
+        assert_eq!(ledger.session_id.as_deref(), Some("native-a"));
+        assert_eq!(ledger.running["0-Review"].subagent_type.as_deref(), Some("task"));
+        observer.observe(&serde_json::json!({"type":"subagent","event":"end","id":"0-Review"})).unwrap();
+        let ledger = crate::subagents::read(root.path());
+        assert!(ledger.running.is_empty());
+        assert_eq!(ledger.ended[0].outcome, "completed");
     }
 
     #[test]
@@ -1266,6 +1404,13 @@ mod tests {
             "the recovery edge must never replace authored state"
         );
 
+        // A successful recovery edge marks the seat compacting. Each run here is a new session,
+        // and a session never replaces another's record, so the next one starts on a fresh record.
+        let state_path = harness_state::harness_state_path(agent_dir);
+        let compacting: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(compacting["reason"], "compaction");
+        std::fs::remove_file(&state_path).unwrap();
+
         std::fs::remove_file(context_dir.join("now.md")).unwrap();
         std::fs::write(context_dir.join("now.md"), [0xff]).unwrap();
         run_frame();
@@ -1280,6 +1425,63 @@ mod tests {
         .unwrap();
         assert_eq!(raw["state"], "active");
         assert_eq!(raw["reason"], PRE_COMPACT_ERROR_REASON);
+    }
+
+    /// Compacting is the seat's status from omp's compaction start to its end, and a channel that
+    /// saw no start (pi reports only the end) leaves the status alone.
+    #[test]
+    fn compacting_runs_from_the_start_edge_to_the_end_edge() {
+        let run = |frames: &[&str]| -> Option<Value> {
+            let tmp = tempfile::tempdir().unwrap();
+            let agent_dir = tmp.path();
+            let inbox = message::inbox_dir(agent_dir);
+            std::fs::create_dir_all(&inbox).unwrap();
+            context::write_now(&context::context_dir(agent_dir), "Authored state.\n").unwrap();
+            let mut writer =
+                harness_state::Writer::new(agent_dir, "h.worker", "omp", Some("h.worker".into()));
+            let mut timeline = crate::harness_timeline::Writer::new(agent_dir, "omp", "test");
+            let (tx, rx) = mpsc::channel();
+            for frame in frames {
+                tx.send(Ok((*frame).to_string())).unwrap();
+            }
+            drop(tx);
+            channel_loop(
+                &rx,
+                &mut Vec::new(),
+                &inbox,
+                agent_dir,
+                &mut writer,
+                None,
+                &mut timeline,
+                "h.worker",
+                &OMP_KIND,
+                Duration::from_millis(1),
+                Duration::from_secs(60),
+            )
+            .unwrap();
+            std::fs::read(harness_state::harness_state_path(agent_dir))
+                .ok()
+                .map(|raw| serde_json::from_slice(&raw).unwrap())
+        };
+        let start = r#"{"type":"pre_compact"}"#;
+        let end = r#"{"type":"context","compaction":{"trigger":null,"count":1}}"#;
+        let compacting = run(&[start]).unwrap();
+        assert_eq!(compacting["state"], "active");
+        assert_eq!(compacting["reason"], "compaction");
+        // A `/compact` with nothing running before it ends idle.
+        let done = run(&[start, end]).unwrap();
+        assert_eq!(done["state"], "idle");
+        assert!(done["reason"].is_null(), "{done}");
+        assert!(run(&[end]).is_none(), "an end alone writes no status");
+        // A compaction inside a working turn ends with the turn still working: omp says a turn is
+        // active only when it starts.
+        let working = r#"{"type":"state","state":"active"}"#;
+        let idle = r#"{"type":"state","state":"idle"}"#;
+        let mid_turn = run(&[working, start, end]).unwrap();
+        assert_eq!(mid_turn["state"], "active", "{mid_turn}");
+        assert!(mid_turn["reason"].is_null(), "{mid_turn}");
+        let from_idle = run(&[idle, start, end]).unwrap();
+        assert_eq!(from_idle["state"], "idle", "{from_idle}");
     }
 
     /// The stdio connection is the evidence. While it lives, the record's heartbeat advances
@@ -1848,8 +2050,8 @@ mod tests {
         let ordinary_frame = json!({"type": "turn"});
         let ordinary = turn_result(&ordinary_frame).expect("an ordinary end decodes");
         assert!(
-            turn_observation(&ordinary).is_none(),
-            "the sampled idle poll still owns the settle edge"
+            turn_observation(&ordinary).unwrap().state == harness_state::Activity::Active,
+            "the credential edge must not invent idle before the sampled settle"
         );
         assert_eq!(
             provider_auth_edge(&ordinary),

@@ -442,17 +442,19 @@ mod gateway_tests {
     async fn raw_capability_stays_single_use_and_detaches_when_its_viewer_drops() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
-        let (session, _) = viewer_attachment(&state);
+        let (mut session, _) = viewer_attachment(&state);
+        // PEEK opens without a durable capability claim; ATTACH is the raw mode that consumes one.
+        session.scopes.insert("terminal.control".into());
         let Json(attachment) = raw_terminal::attachment(
             State(state.clone()), Extension(session.clone()),
             AxumPath("agent/terminal-owner".into()),
             Json(serde_json::from_value(json!({
-                "runtime_incarnation": "terminal-runtime:i1", "mode": "peek",
+                "runtime_incarnation": "terminal-runtime:i1", "mode": "attach",
             })).unwrap()),
         ).await.unwrap();
         let consume = || consume_terminal_attachment_mode(
             &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
-            attachment["stream_capability"].as_str(), Some("peek"),
+            attachment["stream_capability"].as_str(), Some("attach"),
         );
         let viewer = consume().unwrap();
         let subject = viewer.subject.clone();

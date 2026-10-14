@@ -13,6 +13,13 @@ use serde_json::Value;
 
 use crate::harness_timeline::{Operation, Record};
 
+#[cfg(test)]
+#[path = "harness_output_model_controls.rs"]
+mod output_model;
+#[cfg(test)]
+#[path = "harness_events_output_controls.rs"]
+mod output_controls;
+
 pub const WAKE_PIPE: &str = ".st-harness-events-wake";
 pub const DATABASE: &str = "st-harness-events.sqlite";
 const MAX_PENDING_BYTES: u64 = 64 * 1024 * 1024;
@@ -211,6 +218,52 @@ pub fn read_snapshot(agent_dir: &Path, kind: &str) -> Result<Option<Vec<u8>>> {
             row.get(0)
         })
         .optional()?)
+}
+
+/// Read saved provider state only when its producer belongs to `runtime`.
+/// A new runtime retains its predecessor's snapshot for durable history, but must not use it
+/// as evidence that its own provider has launched. A driver re-exec keeps the same runtime.
+pub fn read_runtime_state(agent_dir: &Path, runtime: &str) -> Result<Option<Vec<u8>>> {
+    let mut connection = open(agent_dir)?;
+    let tx = connection.transaction()?;
+    let raw: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT body FROM snapshots WHERE kind='harness-state'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else { return Ok(None) };
+    let state: Value = serde_json::from_slice(&raw)?;
+    let Some(token) = state["incarnation"].as_str() else {
+        return Ok(None);
+    };
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            [format!("provider-runtime:{token}")],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok((owner.as_deref() == Some(runtime)).then_some(raw))
+}
+
+/// Capture the provider snapshot and its physical runtime binding together. Unlike a
+/// filtered read, this distinguishes a retained predecessor from missing/corrupt authority.
+pub fn read_bound_provider_state(agent_dir: &Path) -> Result<Option<(String, Vec<u8>)>> {
+    let mut connection = open(agent_dir)?;
+    let tx = connection.transaction()?;
+    let raw: Option<Vec<u8>> = tx.query_row(
+        "SELECT body FROM snapshots WHERE kind='harness-state'", [], |row| row.get(0),
+    ).optional()?;
+    let Some(raw) = raw else { return Ok(None); };
+    let state: Value = serde_json::from_slice(&raw)?;
+    let token = state["incarnation"].as_str().filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("provider snapshot has no ownership token"))?;
+    let runtime: String = tx.query_row(
+        "SELECT value FROM metadata WHERE key=?1", [format!("provider-runtime:{token}")], |row| row.get(0),
+    )?;
+    Ok(Some((runtime, raw)))
 }
 
 fn current_token(connection: &Connection) -> Result<Option<String>> {
@@ -495,6 +548,21 @@ pub(crate) fn write_timeline(
         current_token(&tx)?.as_deref() == Some(&record.incarnation_id),
         "harness timeline owner was superseded"
     );
+    append_timeline_operations(&tx, record, new_operations)?;
+    tx.commit()?;
+    signal_wake(agent_dir);
+    Ok(())
+}
+
+// Append within an already admitted writer transaction. Each caller keeps its
+// own ownership checks and is responsible for commit and wake; this helper does
+// not acquire a connection or admit an owner. The test-only output prototype
+// shares this body so its timeline SQL cannot drift from the production writer.
+fn append_timeline_operations(
+    tx: &rusqlite::Transaction<'_>,
+    record: &Record,
+    new_operations: &[Operation],
+) -> Result<()> {
     tx.execute(
         "INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![
@@ -511,14 +579,12 @@ pub(crate) fn write_timeline(
                 serde_json::to_string(operation)?
             ],
         )?;
-        append_event(&tx, "harness-timeline", &serde_json::to_value(operation)?)?;
+        append_event(tx, "harness-timeline", &serde_json::to_value(operation)?)?;
     }
     tx.execute("DELETE FROM timeline WHERE id NOT IN (SELECT id FROM timeline ORDER BY id DESC LIMIT 4096)", [])?;
     tx.execute("DELETE FROM timeline WHERE id IN (
         SELECT id FROM (SELECT id, SUM(length(CAST(body AS BLOB))) OVER (ORDER BY id DESC) AS retained FROM timeline)
         WHERE retained > 2097152)", [])?;
-    tx.commit()?;
-    signal_wake(agent_dir);
     Ok(())
 }
 

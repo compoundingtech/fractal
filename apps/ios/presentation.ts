@@ -1,4 +1,4 @@
-import { ago } from '@smalltalk/st3-views';
+import { ago, alertsHeading } from '@smalltalk/st3-views';
 export { ago } from '@smalltalk/st3-views';
 import type { Agent, Attention, ClientConnection, Device, Mission, MissionStep, WorkState } from '../../clients/typescript/st3-client';
 
@@ -16,12 +16,14 @@ export function words(slug: string): string {
 function titleCase(text: string): string { return text.charAt(0).toUpperCase() + text.slice(1); }
 
 export function attentionHeadline({ count, loaded, error }: { count: number; loaded: boolean; error?: string }): { text: string; warning: boolean } {
-  if (error) return count ? { text: `${count} actionable items from the last load · refresh failed: ${error}`, warning: true } : { text: `Attention could not be loaded: ${error}`, warning: true };
-  if (!loaded) return { text: 'Attention has not loaded yet.', warning: true };
-  return { text: count ? `${count} actionable items` : 'Nothing needs your attention.', warning: false };
+  if (error) return count ? { text: `${alertsHeading(count)} from the last load · refresh failed: ${error}`, warning: true } : { text: `Alerts could not be loaded: ${error}`, warning: true };
+  if (!loaded) return { text: 'Alerts have not loaded yet.', warning: true };
+  return { text: alertsHeading(count), warning: false };
 }
 
 const actionLabels: Record<Attention['actions'][number], string> = {
+  'custom.reply': 'Reply with the declared fields',
+  'prompt.respond': 'Answer the prompt',
   'work.done': 'Complete step',
   'review.approve': 'Approve review',
   'review.reject': 'Reject review',
@@ -129,6 +131,13 @@ export function deviceTitle(device: DeviceView, connectedActor: string | undefin
 }
 export function deviceDetail(device: DeviceView, now = Date.now()): string {
   return `${device.state} · paired ${ago(device.updated_at, now)} ago · expires ${device.expires_at.slice(0, 10)}`;
+}
+
+// The mission step waiting on an ask a mission step made, and what it is for.
+export function blockedLine(item: { blocked?: { step: string; goal: string } | null }): string | null {
+  if (!item.blocked) return null;
+  const goal = item.blocked.goal.trim();
+  return `waits ${item.blocked.step}${goal ? ` · ${goal}` : ''} — it continues once you answer`;
 }
 
 // A connected client as it describes itself: its reported name and build, never identity.

@@ -23,8 +23,82 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Run only by the cleanup regression's disposable Rust test process.
+#[test]
+#[ignore = "subprocess fixture for the cleanup regression"]
+fn cleanup_fixture() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let evidence = std::env::var_os("ST3_CLEANUP_FIXTURE").expect("regression fixture directory");
+    let mode = std::env::var("ST3_CLEANUP_FIXTURE_MODE").unwrap();
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut fixture = Command::new("python3")
+        .arg(repo.join("scripts/st3-test-process-test"))
+        .arg("--boot-fixture")
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(&evidence)
+        .arg(&mode)
+        .spawn()
+        .unwrap();
+    if mode == "panic" {
+        let ready = PathBuf::from(evidence).join("ready.json");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cleanup fixture did not start"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("injected Rust panic before fixture cleanup");
+    }
+    let status = fixture.wait().unwrap();
+    assert!(status.success(), "injected cleanup fixture: {status}");
+}
+
+#[test]
+fn every_exit_reaps_the_daemon_even_when_the_rust_test_is_killed() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("python3")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .arg(repo.join("scripts/st3-test-process-test"))
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(std::env::current_exe().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn interrupted_tests_keep_logs_and_pending_observations() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = Command::new("python3")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .arg(repo.join("scripts/st3-test-evidence-test"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn canary(harness: &str, scenario: &str) {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let in_ci = std::env::var_os("CI_RUN_ID").is_some();
     let path = std::env::var_os("PATH").unwrap_or_default();
     let on_path =
@@ -60,13 +134,14 @@ fn canary(harness: &str, scenario: &str) {
     // it goes on the target directory's disk, not the small tmpfs the daemon's sockets live on.
     let scratch = tempfile::Builder::new()
         .prefix("boot-canary-scratch-")
-        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
     // Double-fork out of the calling seat's ancestry: the isolated daemon binds a caller to the
     // nearest ST_AGENT above it, and the canary acts as person/eval.
     let output = Command::new("setsid")
         .args([
             "-f",
+            "--wait",
             "env",
             "-u",
             "ST_AGENT",
@@ -75,8 +150,12 @@ fn canary(harness: &str, scenario: &str) {
             "PYTHONDONTWRITEBYTECODE=1",
             "python3",
         ])
-        .arg(repo.join("scripts/st3-boot-canaries/run"))
-        .arg(env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(repo.join(if scenario == "when-idle" {
+            "scripts/st3-rollout-binding-canary/run"
+        } else {
+            "scripts/st3-boot-canaries/run"
+        }))
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(&evidence)
         .args([harness, scenario, "--bound", "180", "--scratch"])
         .arg(scratch.path())
@@ -87,9 +166,18 @@ fn canary(harness: &str, scenario: &str) {
         .as_ref()
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-        .is_some_and(|result| result["verdict"] == "pass");
+        .is_some_and(|result| result["verdict"] == "pass")
+        && output.status.success();
+    if matches!(scenario, "when-idle" | "idle-hold") {
+        eprintln!(
+            "{}",
+            result.as_ref().map(String::as_str).unwrap_or_default()
+        );
+    }
     if !passed {
         eprintln!("boot canary evidence: {}", evidence.display());
+        let _ = evidence_root.keep();
+    } else if keep && (scenario.starts_with("access-") || scenario == "claim-socket-denied") {
         let _ = evidence_root.keep();
     } else if keep {
         // Passing runs are not worth uploading.
@@ -97,18 +185,29 @@ fn canary(harness: &str, scenario: &str) {
     }
     assert!(
         passed,
-        "{}\n{}\n{}",
+        "canary runner {}: {}\n{}\n{}",
+        output.status,
         result.unwrap_or_default(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn first_claim_socket_denial_names_cause_and_recovers_on_an_isolated_daemon() {
+    if st3::test_support::supervise_test() { return; }
+    canary("codex", "claim-socket-denied");
+}
+
 /// The canary's private root is redrawn until its name avoids "st2": the fresh-seat boundary check
 /// rejects any launch path that mentions it, and a random name holds those letters by chance.
 #[test]
 fn the_canary_never_names_its_root_after_st2() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(repo.join("scripts/st3-boot-canaries/run"))
@@ -134,26 +233,44 @@ macro_rules! harness {
         mod $module {
             #[test]
             fn a_fresh_seat_boots() {
+                if st3::test_support::supervise_test() {
+                return;
+            }
                 super::canary($harness, "fresh");
             }
             #[test]
             fn a_restarted_seat_boots() {
+                if st3::test_support::supervise_test() {
+                return;
+            }
                 super::canary($harness, "restart");
             }
             #[test]
             fn a_seat_boots_after_the_daemon_restarts_with_its_predecessor_still_observed() {
+                if st3::test_support::supervise_test() {
+                return;
+            }
                 super::canary($harness, "daemon-restart");
             }
             #[test]
             fn a_driver_re_execs_into_a_new_binary_and_still_takes_a_message() {
+                if st3::test_support::supervise_test() {
+                return;
+            }
                 super::canary($harness, "reexec");
             }
             #[test]
             fn five_seats_launching_at_once_all_boot() {
+                if st3::test_support::supervise_test() {
+                return;
+            }
                 super::canary($harness, "concurrent");
             }
             #[test]
             fn a_suspended_seat_resumes_its_own_native_session() {
+                if st3::test_support::supervise_test() {
+                return;
+            }
                 super::canary($harness, "suspend");
             }
         }
@@ -167,6 +284,76 @@ harness!(omp, "omp");
 harness!(opencode, "opencode");
 
 #[test]
+fn claude_missing_channel_blocks_and_recovers_early_mail_without_replay() {
+    canary("claude", "channel-missing");
+}
+
+#[test]
+fn claude_uninitialized_channel_blocks_until_native_attachment() {
+    canary("claude", "channel-uninitialized");
+}
+
+#[test]
+fn claude_permanent_channel_failure_parks_after_three_attempts_without_a_restart_loop() {
+    canary("claude", "channel-parked");
+}
+
+#[test]
+fn omp_when_idle_replacement_binds_its_original_native_session() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    canary("omp", "when-idle");
+}
+
+#[test]
 fn codex_transcript_utf8_and_discovery_failures_preserve_delivery_and_private_warnings() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     canary("codex", "utf8");
+}
+
+#[test]
+fn an_imported_codex_session_binds_exactly_on_first_launch_and_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    canary("codex", "import");
+}
+
+#[test]
+fn codex_idle_minute_makes_no_hold_calls_then_delivers_with_hold_release_and_expiry() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    canary("codex", "idle-hold");
+}
+
+#[test]
+fn opencode_idle_minute_makes_no_hold_calls_then_delivers_with_hold_release_and_expiry() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    canary("opencode", "idle-hold");
+}
+
+#[test]
+fn plain_codex_legacy_config_boots_and_resumes_with_driver_bypass_defaults() {
+    canary("codex", "access-bypass");
+}
+
+#[test]
+fn plain_codex_auto_config_boots_and_resumes_with_a_workspace_socket_profile() {
+    canary("codex", "access-auto");
+}
+
+#[test]
+fn plain_claude_legacy_config_boots_and_resumes_with_driver_bypass_defaults() {
+    canary("claude", "access-bypass");
+}
+
+#[test]
+fn plain_claude_auto_config_boots_and_resumes_with_auto_permissions() {
+    canary("claude", "access-auto");
 }
