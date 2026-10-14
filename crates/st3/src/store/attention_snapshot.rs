@@ -69,6 +69,7 @@ impl Store {
     pub(super) fn harness_prompt_attention_items(
         &self,
         person: Option<&str>,
+        as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let seats = connection
@@ -149,6 +150,7 @@ impl Store {
                 .as_str()
                 .filter(|reason| !reason.is_empty())
                 .unwrap_or("its terminal shows a prompt");
+            let answerable = answerable(&harness, as_of);
             items.push(AttentionItemView {
                 episode: claim,
                 priority: "high".into(),
@@ -160,30 +162,34 @@ impl Store {
                 launch_id: None,
                 variant_id: None,
                 message_id: None,
-                answers: prompt_answers(&harness),
+                answers: prompt_answers(&harness, as_of),
                 conversation: Some(seat.clone()),
                 title: format!("{seat} is waiting for {what}"),
                 // Codex names what its request asks to do, not the call: that is the pending
                 // request in the seat's conversation.
-                detail: if answerable(&harness) && harness["driver"] == "codex" {
+                detail: if answerable && harness["driver"] == "codex" {
                     format!(
                         "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.",
                         codex_approval_words(prompt)
                     )
                 } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
                     "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
-                } else if answerable(&harness) && subagent_prompt(&harness) {
+                } else if answerable && subagent_prompt(&harness) {
                     format!(
                         "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (Ctrl+] in stui), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
                         prompt.trim_start_matches(st_drivers::claude_prompts::SUBAGENT_PREFIX)
                     )
-                } else if answerable(&harness) && plan_approval(&harness) {
+                } else if answerable && plan_approval(&harness) {
                     "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
-                } else if answerable(&harness) && ask == "question" {
+                } else if answerable && ask == "question" {
                     "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
-                } else if answerable(&harness) {
+                } else if answerable {
                     format!(
                         "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
+                    )
+                } else if answerable_kind(&harness) {
+                    format!(
+                        "Claude asks to use {prompt}. It has waited longer than st can answer it from here: answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
                     )
                 } else {
                     format!(
@@ -195,7 +201,14 @@ impl Store {
                 mission_run: None,
                 step: None,
                 targets: vec![seat.clone()],
-                requested_at_unix_ms: at,
+                // Since the prompt opened, not since its latest restatement: a prompt that has
+                // waited for hours must not read as minutes old. An opening time of zero or after
+                // the restatement is not one, so the restatement's time stands.
+                requested_at_unix_ms: harness["observed_since_ms"]
+                    .as_u64()
+                    .map(u128::from)
+                    .filter(|since| (1..=at).contains(since))
+                    .unwrap_or(at),
                 actions: vec![attention_action(
                     "Attach to answer",
                     &["st", "terminals", "attach", &seat],
@@ -1691,7 +1704,14 @@ fn native_prompt_gone_operation(observation: &str) -> String {
     smallclaims::store::operation_id_for_key(&native_prompt_gone_key(observation))
 }
 
-/// Whether st can answer the prompt `harness` reports from a client: a permission prompt of
+/// How long a Claude permission hook waits for a person's answer from a client. The hook is
+/// Claude's only way to receive it, so a prompt that has waited longer is answered in the
+/// terminal: an answer recorded later would reach nobody. Claude ends the hook at its registered
+/// timeout (`hooks::claude_settings_registration`, a minute longer), which is part of every Claude
+/// seat's declaration: changing it restarts every seat on upgrade.
+pub(crate) const CLAUDE_PROMPT_ANSWER_WAIT_MS: u128 = 10 * 60 * 1000;
+
+/// Whether the prompt `harness` reports is of a kind st answers from a client: a permission prompt of
 /// Claude, whose hook waits for the answer, that names its tool; or of Codex, whose control
 /// connection sends it, that names the request it saw (`commandExecution`, `fileChange`,
 /// `permissions`). A Codex wait known only from its thread's `waitingOnApproval` flag has no
@@ -1701,7 +1721,7 @@ fn native_prompt_gone_operation(observation: &str) -> String {
 ///
 /// A Claude question (`AskUserQuestion`) is answered too: its hook returns the person's choices
 /// as the tool's answers (measured on Claude Code 2.1.296, multi-select included).
-fn answerable(harness: &Value) -> bool {
+fn answerable_kind(harness: &Value) -> bool {
     let reason = harness["reason"].as_str().unwrap_or_default();
     harness["blocked_on"] == "human"
         && match (harness["driver"].as_str(), harness["ask"].as_str()) {
@@ -1724,8 +1744,8 @@ fn answerable(harness: &Value) -> bool {
 /// which Claude reads as the person's feedback, but its allow does not approve one (measured on
 /// Claude Code 2.1.296), so st approves it with the dialog's own keys (see
 /// `Reconciler::reconcile_plan_approval`).
-fn prompt_answers(harness: &Value) -> Vec<String> {
-    if !answerable(harness) {
+fn prompt_answers(harness: &Value, now: u128) -> Vec<String> {
+    if !answerable(harness, now) {
         return Vec::new();
     }
     // A subagent's call is not in the seat's conversation, where a client shows the call beside
@@ -1795,6 +1815,18 @@ fn subagent_prompt(harness: &Value) -> bool {
         && harness["reason"]
             .as_str()
             .is_some_and(|reason| reason.starts_with(st_drivers::claude_prompts::SUBAGENT_PREFIX))
+}
+
+/// Whether st can answer the prompt `harness` reports from a client at `now`: one of a kind it
+/// answers ([`answerable_kind`]) whose answer can still be delivered. A Claude prompt is answered
+/// through its permission hook, which waits [`CLAUDE_PROMPT_ANSWER_WAIT_MS`] from when the prompt
+/// opened (`observed_since_ms`, kept while the seat stays blocked on it).
+fn answerable(harness: &Value, now: u128) -> bool {
+    answerable_kind(harness)
+        && (harness["driver"] != "claude"
+            || harness["observed_since_ms"].as_u64().is_none_or(|since| {
+                now.saturating_sub(u128::from(since)) < CLAUDE_PROMPT_ANSWER_WAIT_MS
+            }))
 }
 
 /// The idempotency key of the person's answer to the native prompt `observation` opened.
@@ -1872,6 +1904,7 @@ impl Store {
         ownership: u64,
         transition: u64,
     ) -> Result<NativePromptState> {
+        let now = now_ms();
         let connection = self.readers.get();
         // The hook's observation is among the seat's last few: it is published moments after the
         // hook writes it, and a hook that waited past a few later observations has nothing left.
@@ -1908,7 +1941,7 @@ impl Store {
         for (claim, body) in &recent[..=own] {
             let body: Value = serde_json::from_str(body)?;
             let fields = body.get("fields").unwrap_or(&body);
-            if !answerable(fields) {
+            if !answerable(fields, now) {
                 return Ok(NativePromptState::Gone);
             }
             if let Some(newer) = &newer
@@ -2015,6 +2048,7 @@ impl Store {
         actor: &str,
     ) -> std::result::Result<ClaimRecord, St3Error> {
         let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+        let now = now_ms();
         if self.agent_person(seat).map_err(internal)?.as_deref() != Some(actor) {
             return Err(St3Error::new(
                 "forbidden",
@@ -2037,7 +2071,7 @@ impl Store {
                 "that prompt is no longer waiting: it was answered or replaced",
             ));
         };
-        if !answerable(&harness) {
+        if !answerable(&harness, now) {
             return Err(St3Error::new(
                 "stale-fence",
                 "that prompt can only be answered in the seat's terminal",
