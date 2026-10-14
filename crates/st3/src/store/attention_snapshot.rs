@@ -1534,12 +1534,16 @@ fn native_prompt_sequence_resolution(
            AND json_extract(claims.body,'$.fields.transition_sequence')=?4
          ORDER BY CANONICAL_DESC(claims)",
     ))?;
+    // Native closure is terminal for this episode. A delayed answer request
+    // cannot supersede Gone, even when it arrives later in canonical order.
     let mut resolutions = connection.prepare_cached(&canonical_sql(
         "SELECT json_extract(body, '$.fields.status'), accepted_at_unix_ms
          FROM claims INDEXED BY claims_operation_index
          WHERE json_extract(body, '$._operation.id') IS NOT NULL
            AND json_extract(body, '$._operation.id') IN (?1,?2)
-           AND store_index<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+           AND store_index<=?3
+         ORDER BY (json_extract(body, '$._operation.id')=?1) DESC,
+           CANONICAL_DESC(claims) LIMIT 1",
     ))?;
     let mut requested_answer = None;
     for claim in observations.query_map(params![subject, index, ownership, transition], |row| row.get::<_, String>(0))? {

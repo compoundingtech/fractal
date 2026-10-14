@@ -57006,6 +57006,16 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             }), Some(native_prompt_gone_key(&asked.id)));
             assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone, "{ask}");
             assert_eq!(store.observed_harness_at(seat, before).unwrap().unwrap().blocked_on.as_deref(), Some("human"));
+            if ask == "permission" {
+                // A replicated answer request can arrive after native closure.
+                // It must not resurrect the sender's held projection.
+                append("harness.diagnostic", json!({
+                    "code":"native-prompt-answered", "status":"allow",
+                    "driver":"claude", "incarnation_id":"one"
+                }), Some(format!("native-prompt-answer:{}", asked.id)));
+                assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
+                assert!(store.observed_harness_at(seat, store.index().unwrap()).unwrap().unwrap().blocked_on.is_none());
+            }
             for _ in 0..20 {
                 append("harness.observed", blocked(3), None);
             }
