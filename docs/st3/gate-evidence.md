@@ -354,7 +354,10 @@ pull requests; `configure` writes the signer configuration and key as mode 0600 
 directory and masks every key line; `once CHECK` refuses a second signature for a check in one job;
 `cleanup` overwrites and removes the key, and runs even when earlier steps failed. The wrapper and
 signer scripts must come from the base commit of the change, never from the tree under test.
-Accepted gap: code under test in a job that holds the key can read it.
+Accepted gap: code under test in a job that holds the key can read it. That now includes every pull
+request from this repository: its author controls the workflow file the run executes, so a person or agent with
+write access can read the key and sign any note. Forks never get it. Narrowing the `evidence-signing`
+environment back to the merge queue and main undoes this.
 
 An aggregate job records what it knows: `scripts/ci-evidence-signing aggregate FILE` builds, from
 the `needs` context, the needed jobs, the result each reported and the gate job's own result, and

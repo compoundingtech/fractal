@@ -33,6 +33,8 @@ ALLOWED_REFS = {
     'merge_group': ['refs/heads/gh-readonly-queue/*'],
     'workflow_dispatch': ['refs/heads/main'],
     'push': ['refs/heads/main'],
+    # Same-repository pull requests only; the check on the head repository is in guard().
+    'pull_request': ['refs/pull/*/merge'],
 }
 
 
@@ -45,15 +47,19 @@ def env(name, default=''):
 
 
 def guard():
-    """Event and ref the key may be used for. Only the merge queue and main sign: a pull request, even
-    one from this repository, never reaches the key (a same-repository author controls the workflow
-    file its own pull request runs)."""
+    """Event and ref the key may be used for: the merge queue, main, and pull requests from this repository
+    (never a fork). A same-repository author controls the workflow file its own pull request runs, so for a
+    pull request the key is exposed to that author's code: known defect, recorded in the gate-evidence docs."""
     event, ref = env('GITHUB_EVENT_NAME'), env('GITHUB_REF')
     patterns = ALLOWED_REFS.get(event)
     if patterns is None:
-        raise Refused(f'refusing event {event!r}: the signing key is for merge_group, push to main and manual runs on main only')
+        raise Refused(f'refusing event {event!r}: the signing key is for merge_group, push to main, manual runs on main and same-repository pull requests only')
     if not any(fnmatch.fnmatchcase(ref, pattern) for pattern in patterns):
         raise Refused(f'refusing ref {ref!r} for {event}: expected one of {patterns}')
+    if event == 'pull_request':
+        head, repository = env('PR_HEAD_REPOSITORY'), env('GITHUB_REPOSITORY')
+        if not head or not repository or head != repository:
+            raise Refused(f'refusing pull request from {head or "an unknown repository"!r}: only pull requests from {repository or "this repository"} may use the key')
     return f'{event} on {ref}'
 
 

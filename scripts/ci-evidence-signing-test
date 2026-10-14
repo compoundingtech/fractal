@@ -47,7 +47,9 @@ cases = [
     ('manual run on main', dict(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/main'), True),
     ('manual run on a branch', dict(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/topic'), False),
     ('same-repository pull request', dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/9/merge',
-                                          GITHUB_REPOSITORY='example/repo', PR_HEAD_REPOSITORY='example/repo'), False),
+                                          GITHUB_REPOSITORY='example/repo', PR_HEAD_REPOSITORY='example/repo'), True),
+    ('same-repository pull request on a branch ref', dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/heads/topic',
+                                                          GITHUB_REPOSITORY='example/repo', PR_HEAD_REPOSITORY='example/repo'), False),
     ('fork pull request', dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/9/merge',
                                GITHUB_REPOSITORY='example/repo', PR_HEAD_REPOSITORY='someone/repo'), False),
     ('pull request with no head repository', dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/9/merge',
@@ -59,7 +61,7 @@ cases = [
 for label, env, allowed in cases:
     done = helper('guard', env=env)
     assert (done.returncode == 0) == allowed, (label, done.stdout, done.stderr)
-print('passed: the key is for merge-queue refs and main only; every pull request (fork or same repository) and every other event is refused')
+print('passed: the key is for merge-queue refs, main and same-repository pull requests; a fork pull request and every other event is refused')
 
 with tempfile.TemporaryDirectory() as directory:
     tmp = Path(directory)
@@ -221,12 +223,12 @@ print(f'passed: all {pushes} push triggers in the generated workflows are filter
 
 # --- lint: every job that reaches the evidence-signing environment does so only for the merge queue and main
 text = (ROOT / '.github/workflows/fleet.yml').read_text()
-expression = "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}"
+expression = "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}"
 environments = [line.strip() for line in text.splitlines() if re.match(r'\s+environment:', line)]
 assert environments, 'no job names an environment, so the lint checked nothing'
 assert all(line == f'environment: {expression}' for line in environments), [l for l in environments if l != f'environment: {expression}']
 assert "'evidence-signing'" not in text.replace(expression, ''), 'the environment name must appear only inside the conditional expression'
 assert 'environment: evidence-signing' not in text, 'an unconditional environment would block every required check if it gains reviewers'
 note = re.search(r'  evidence-note-linux-gate:\n(?:    .*\n)*?    if: (.*)\n', text)
-assert note and "(always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')))" in note.group(1), 'the aggregate note job must run only for the merge queue and main (the generator adds its own draft guard in front)'
-print(f'passed: all {len(environments)} jobs reach the signing environment only for merge_group, push to main and manual runs on main; the aggregate note job skips pull requests')
+assert note and "(always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))" in note.group(1), 'the aggregate note job must run only for the merge queue, main and same-repository pull requests (the generator adds its own draft guard in front)'
+print(f'passed: all {len(environments)} jobs reach the signing environment only for merge_group, push to main and same-repository pull requests; the aggregate note job skips forks')
