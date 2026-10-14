@@ -644,6 +644,11 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             get(client_v0::collection_stream),
         )
         .route("/v1/client/actions", post(client_v0::action))
+        .route("/v1/client/assistant/propose", post(client_v0::assistant::propose))
+        .route("/v1/client/assistant/attention-content", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/attention-rich", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/missions-rich", get(client_v0::assistant::read_projection))
+        .route("/v1/client/assistant/agents-rich", get(client_v0::assistant::read_projection))
         .route(
             "/v1/client/blobs",
             post(client_blobs::upload).layer(DefaultBodyLimit::max(client_blobs::UPLOAD_BODY_LIMIT)),

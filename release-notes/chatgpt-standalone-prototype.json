@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "summary": "Local standalone ChatGPT prototype: official rmcp HTTP/stdio adapter, consent-at-grant reads, native owner-approved answers, and allowlisted low-risk messages",
+  "commits": [],
+  "replay": {"status": "none", "detail": "Scratch-only prototype. Existing assistant claim namespaces are reused; no graph replay or live migration is performed."},
+  "schema": {"status": "changed", "detail": "Assistant contracts add caller-bound-allow, low-risk message/custom-reply scopes, optional recipient policy and a 30-day maximum. Rust, Swift and TypeScript clients are regenerated from schema and templates."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or fleet projection digest changes."},
+  "compatibility": {"status": "changed", "detail": "The prototype selects consent-at-grant mode explicitly. Legacy proof-gated branch APIs remain available but are not used by the adapter. New rich projections preserve the original ID-only projections."},
+  "downtime": {"status": "none", "detail": "Only the isolated API harness is exercised; no real daemon is paired, granted or mutated."},
+  "manual": {"status": "required", "detail": "Run the documented scratch script first. Real ChatGPT connection requires human-started Secure MCP Tunnel and human-created dev-mode app. No-auth loopback tunnel is an explicit dogfood exception; public distribution requires OAuth next."},
+  "recovery": {"status": "none", "detail": "The script terminates its own processes and retains scratch evidence. The adapter has no approval signing key or daemon-control socket access."}
+}

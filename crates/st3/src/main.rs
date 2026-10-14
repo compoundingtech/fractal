@@ -2601,7 +2601,7 @@ const READ_ONLY_PAIRING_SCOPES: &[&str] = &["read.projections", "read.glasses", 
 /// Grant lifetime when `--expires-in` is omitted; never renewed automatically.
 const ASSISTANT_GRANT_DEFAULT_SECONDS: u64 = 3_600;
 /// Hard maximum grant lifetime.
-const ASSISTANT_GRANT_MAX_SECONDS: u64 = 86_400;
+const ASSISTANT_GRANT_MAX_SECONDS: u64 = 2_592_000;
 
 #[derive(Subcommand)]
 enum DevicesCommand {
@@ -2670,7 +2670,7 @@ enum DevicesCommand {
 /// Grant terms sealed when the configured owning person begins or changes an assistant grant.
 #[derive(Args)]
 struct AssistantGrantTerms {
-    /// Positive grant lifetime such as 30m or 1h; at most 24h. Defaults to 1h.
+    /// Positive grant lifetime such as 30m or 1h; at most 30d. Defaults to 1h.
     #[arg(long, value_parser = parse_assistant_grant_expiry)]
     expires_in: Option<u64>,
     /// One exact assistant scope; repeat for each scope. Nothing is granted implicitly.
@@ -2695,11 +2695,14 @@ enum AssistantGrantCommand {
         grant: String,
         #[command(flatten)]
         terms: AssistantGrantTerms,
+        /// Exact agent IDs permitted as low-risk assistant message recipients.
+        #[arg(long = "allow-recipient")]
+        recipients: Vec<String>,
     },
     /// Extend the grant with its current scopes; requires consent again and increments revision.
     Renew {
         grant: String,
-        /// Positive lifetime from now such as 1h; at most 24h. Defaults to 1h.
+        /// Positive lifetime from now such as 1h; at most 30d. Defaults to 1h.
         #[arg(long, value_parser = parse_assistant_grant_expiry)]
         expires_in: Option<u64>,
         #[arg(long)]
@@ -9478,11 +9481,11 @@ async fn run_devices(
                 AssistantGrantCommand::Revoke { grant } => {
                     client.assistant_grant_revoke(&grant).await?
                 }
-                AssistantGrantCommand::Policy { grant, terms } => {
+                AssistantGrantCommand::Policy { grant, terms, recipients } => {
                     let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
-                    client
-                        .assistant_grant_policy(&grant, &terms.into_policy())
-                        .await?
+                    let mut policy = terms.into_policy();
+                    policy.recipient_allowlist = Some(recipients);
+                    client.assistant_grant_policy(&grant, &policy).await?
                 }
                 AssistantGrantCommand::Renew {
                     grant,
@@ -9506,9 +9509,9 @@ async fn run_devices(
                             consent_evidence,
                         },
                     )?;
-                    client
-                        .assistant_grant_policy(&grant, &terms.into_policy())
-                        .await?
+                    let mut policy = terms.into_policy();
+                    policy.recipient_allowlist = Some(current.value.recipient_allowlist);
+                    client.assistant_grant_policy(&grant, &policy).await?
                 }
                 AssistantGrantCommand::ReadTrust { grant, issuer, key_id, attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes } => {
                     client.assistant_grant_read_trust(&grant, &AssistantReadTrustRequest {
@@ -9608,8 +9611,8 @@ impl SealedAssistantGrantTerms {
             expires_in_seconds: Some(self.expires_in_seconds),
             disclosure_consent: true,
             consent_evidence: self.consent_evidence,
-            // `caller-bound-allow` awaits a recorded caller-binding decision.
-            minimal_read_mode: AssistantMinimalReadMode::ApprovalOnce,
+            minimal_read_mode: AssistantMinimalReadMode::CallerBoundAllow,
+            recipient_allowlist: None,
         }
     }
 }
@@ -9642,7 +9645,7 @@ fn parse_assistant_grant_expiry(value: &str) -> std::result::Result<u64, String>
         return Err("a grant lifetime must be a positive whole number of seconds".into());
     }
     if seconds > ASSISTANT_GRANT_MAX_SECONDS {
-        return Err("a grant lifetime must be at most 24h".into());
+        return Err("a grant lifetime must be at most 30d".into());
     }
     Ok(seconds)
 }
@@ -31676,7 +31679,7 @@ mod tests {
 
         for rejected in [
             argv(&["--expires-in", "0"]),
-            argv(&["--expires-in", "25h"]),
+            argv(&["--expires-in", "721h"]),
             argv(&["--expires-in", "1500ms"]),
             argv(&["--scope", "read.everything"]),
             argv(&["--full-control"]),

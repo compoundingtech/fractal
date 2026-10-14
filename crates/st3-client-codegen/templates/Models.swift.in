@@ -631,9 +631,10 @@ public enum PairedSession: Codable, Sendable {
 public struct PersonPairedSession: Codable, Sendable { public let kind: String; public let deviceID: String; public let personID: String; public let sessionActor: String; public let credential: String; public let scopes: [String]; public let expiresAt: String; public let deviceKeyChain: [String]?; public let deviceKeyProofs: [JSONValue]?; public let personRootKeyProof: JSONValue?; enum CodingKeys: String, CodingKey { case kind, deviceID = "device_id", personID = "person_id", sessionActor = "session_actor", credential, scopes, expiresAt = "expires_at", deviceKeyChain = "device_key_chain", deviceKeyProofs = "device_key_proofs", personRootKeyProof = "person_root_key_proof" } }
 public enum AssistantPrincipal: String, Codable, Sendable { case chatgpt = "assistant/chatgpt" }
 public enum AssistantSenderClass: String, Codable, Sendable { case externalAssistant = "external-assistant" }
-public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalOnce = "approval-once" }
+public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalOnce = "approval-once", callerBoundAllow = "caller-bound-allow" }
 public enum AssistantScope: String, Codable, Sendable {
     case summary = "read.assistant.summary", attention = "read.assistant.attention", missions = "read.assistant.missions", agents = "read.assistant.agents", conversation = "read.assistant.conversation", terminal = "read.assistant.terminal"
+    case messages = "write.assistant.messages", customReply = "write.assistant.custom-reply"
 }
 public struct AssistantPairingBegin: Codable, Sendable {
     public let apiVersion, deviceName: String; public let assistantID: AssistantPrincipal; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let consentEvidence: String
@@ -652,9 +653,9 @@ public struct AssistantGrant: Codable, Sendable {
     enum CodingKeys: String, CodingKey { case kind, id, sessionActor = "session_actor", deviceID = "device_id", keyID = "key_id", issuer, expiresAt = "expires_at", consentEvidence = "consent_evidence", principal, senderClass = "sender_class", scopes, policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode", recipientAllowlist = "recipient_allowlist", disclosureConsent = "disclosure_consent", revoked, readTrust = "read_trust" }
 }
 public struct AssistantGrantPolicy: Codable, Sendable {
-    public let apiVersion, consentEvidence: String; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let minimalReadMode: AssistantMinimalReadMode
-    public init(apiVersion: String, scopes: [AssistantScope], expiresInSeconds: UInt64? = nil, disclosureConsent: Bool, consentEvidence: String, minimalReadMode: AssistantMinimalReadMode = .approvalOnce) { self.apiVersion = apiVersion; self.scopes = scopes; self.expiresInSeconds = expiresInSeconds; self.disclosureConsent = disclosureConsent; self.consentEvidence = consentEvidence; self.minimalReadMode = minimalReadMode }
-    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", consentEvidence = "consent_evidence", scopes, expiresInSeconds = "expires_in_seconds", disclosureConsent = "disclosure_consent", minimalReadMode = "minimal_read_mode" }
+    public let apiVersion, consentEvidence: String; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let minimalReadMode: AssistantMinimalReadMode; public let recipientAllowlist: [String]?
+    public init(apiVersion: String, scopes: [AssistantScope], expiresInSeconds: UInt64? = nil, disclosureConsent: Bool, consentEvidence: String, minimalReadMode: AssistantMinimalReadMode = .callerBoundAllow, recipientAllowlist: [String]? = nil) { self.apiVersion = apiVersion; self.scopes = scopes; self.expiresInSeconds = expiresInSeconds; self.disclosureConsent = disclosureConsent; self.consentEvidence = consentEvidence; self.minimalReadMode = minimalReadMode; self.recipientAllowlist = recipientAllowlist }
+    enum CodingKeys: String, CodingKey { case apiVersion = "api_version", consentEvidence = "consent_evidence", scopes, expiresInSeconds = "expires_in_seconds", disclosureConsent = "disclosure_consent", minimalReadMode = "minimal_read_mode", recipientAllowlist = "recipient_allowlist" }
 }
 /// Public pins only; attestor and shim keys differ. Budgets only lower 4096/16384, default <= maximum.
 public struct AssistantReadTrust: Codable, Sendable, Equatable {

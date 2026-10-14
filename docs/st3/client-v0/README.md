@@ -1146,7 +1146,7 @@ wire fields and historical claims are unchanged; typed person clients use `Perso
 and `PersonPairedSession`. Assistant begin names only `assistant/chatgpt`, seals explicit
 assistant read scopes, requires disclosure consent and its evidence, and uses the same
 five-minute single-use challenge. Grant duration defaults to one hour and cannot exceed
-24 hours; it is independent of challenge expiry. Completion returns `assistant-paired-session`,
+30 days; it is independent of challenge expiry. Completion returns `assistant-paired-session`,
 not a person session, and never creates a person signing chain. Assistant credentials and keys
 are retained in a separate owner-only client profile.
 
@@ -1156,18 +1156,19 @@ fails closed. Deployment owner identity is external configuration, never a hardc
 identity; public examples and tests use `person/operator`. Management routes are
 `GET /v1/client/assistant/grants/{id}`, `POST .../{id}/revoke`, and `POST .../{id}/policy`.
 Responses use the normal snapshot envelope with an `AssistantGrant` value. Policy updates
-increment the policy revision. Only `minimal_read_mode=approval-once` is supported;
-caller-bound allow is not silently enabled. Grant projections include exact scope, consent,
-issuer as a concrete `PersonId` and revoked status, never the bearer or credential digest.
-`key_id` is the public-key SHA-256 digest. The recipient allowlist remains empty; A does not
-authorize any mutation.
+increment the policy revision. The standalone ChatGPT prototype explicitly sets
+`minimal_read_mode=caller-bound-allow`: the scoped bearer grant and its disclosure consent
+authorize reads without a per-read signature or approval key. Grant projections include exact
+scope, consent, issuer as a concrete `PersonId` and revoked status, never the bearer or credential
+digest. `key_id` is the public-key SHA-256 digest. The owner may configure exact agent recipient
+IDs and `write.assistant.messages` / `write.assistant.custom-reply` scopes for low-risk writes.
 
 The issuer is sealed from the configured owner at trusted-local begin and preserved through
 gateway completion; remote callers cannot select or replace it. Assistant clients validate
 the issuer's concrete person shape from that gateway response without person grant proofs
 or a fixed named-owner check. The baseline fixture scopes are exactly
 `read.assistant.summary`, `read.assistant.attention`, `read.assistant.missions`, and
-`read.assistant.agents`; disclosure consent and `consent_evidence: "axe:igubz7"` remain required.
+`read.assistant.agents`; disclosure consent and nonempty durable consent evidence are required.
 
 Pairing completion, authenticated assistant requests, renewal/policy change and revocation
 must reach the authoritative grant-issuer member. A replicated claim on another member
@@ -1177,17 +1178,42 @@ carry principal, sender class and grant metadata, without a synthetic `person_id
 Capability discovery advertises `assistant.grants.v1` to the trusted-local configured owner
 and does not substitute ordinary person grants on older servers.
 
-Slice B adds six proof-gated reads under `/v1/client/assistant/`: `summary`, `attention`,
-`missions`, `agents`, `conversation-content`, and `terminal-content`, each requiring its exact
-`read.assistant.*` scope and an approval-once `x-st3-scg-read-authorization` proof. Every read is
-denied until the configured owner pins an attestor key and a different shim key with
-`POST /v1/client/assistant/grants/{id}/read-trust`, which increments the policy revision.
-Responses default to 4096 and never exceed 16384 bytes for the entire envelope; pins may only
-lower these. The person is always the grant issuer and no `person` query is accepted.
-Assistant principals are denied every other route, stream, and mutation. Generated clients
-expose `assistant_*` methods that send the caller-supplied proof exactly once and never sign or
-retry. See [External assistants](../external-assistants.md#read-wire-contract) for the query,
-proof, digest, budget, and error contract.
+The original slice-B proof-gated mode remains a legacy branch capability; the standalone
+prototype does not use it, does not send its proof header, and has no SCG dependency.
+In consent-at-grant mode, the same six scoped reads authorize against the current grant on
+every request and revalidate it immediately before returning the response. Envelope budgets
+default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
+`response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
+
+The prototype adds `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
+under `/v1/client/assistant/`. Rich pages include titles and alert question/options/evidence;
+the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only
+closed typed actions. `work.done` creates a daemon-owned structured owner ask whose digest
+binds the whole request, including alert ID, episode, option, fence and idempotency key. The
+owner answers with `st work done <approval-id> --as person/ada --answer approve --episode ...`;
+an identical MCP retry executes through the existing fenced, idempotent action path.
+`message.send` is low-risk: it requires its explicit grant scope, an exact owner-allowlisted
+agent recipient, and the ChatGPT confirmation card; it does not create another st approval.
+`custom.reply` is likewise grant-scoped at the daemon boundary.
+
+`crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
+Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.
+The adapter holds only a scoped bearer, never an approval key. The current HTTP frontend is
+loopback/no-auth for the recorded personal-tunnel dogfood exception; OAuth is the next
+frontend-auth boundary and does not alter tool arguments or daemon grants. No generic command
+runner, daemon-control socket, or terminal scraping is exposed. `GET /mcp` is 405; unknown
+paths return an empty 404.
+
+Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
+
+```sh
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p st3-client-codegen && cargo build -j 2 -p st-chatgpt -p st3 --bin st-chatgpt --bin st3 --example chatgpt_fixture && python3 scripts/chatgpt-prototype-e2e.py'
+```
+
+The script starts the repository API harness with its own persistent store, paired gateway,
+and invented `person/ada` owner; it writes evidence to `tmp/chatgpt-e2e-results.json` and
+terminates its processes. Real ChatGPT access remains human-gated: start the Secure MCP Tunnel
+with the intended personal Platform org/workspace association, then create the dev-mode app.
 
 
 ### Person declaration access

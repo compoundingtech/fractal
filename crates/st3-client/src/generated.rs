@@ -3794,6 +3794,8 @@ pub enum AssistantSenderClass {
 pub enum AssistantMinimalReadMode {
     #[serde(rename = "approval-once")]
     ApprovalOnce,
+    #[serde(rename = "caller-bound-allow")]
+    CallerBoundAllow,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum AssistantScope {
@@ -3809,6 +3811,10 @@ pub enum AssistantScope {
     Conversation,
     #[serde(rename = "read.assistant.terminal")]
     Terminal,
+    #[serde(rename = "write.assistant.messages")]
+    Messages,
+    #[serde(rename = "write.assistant.custom-reply")]
+    CustomReply,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -3869,6 +3875,8 @@ pub struct AssistantGrantPolicy {
     pub disclosure_consent: bool,
     pub consent_evidence: String,
     pub minimal_read_mode: AssistantMinimalReadMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_allowlist: Option<Vec<String>>,
 }
 
 /// Public pins only: the attestor and shim Ed25519 keys (base64url, 32 bytes) MUST differ.

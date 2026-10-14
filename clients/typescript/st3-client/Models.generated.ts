@@ -462,7 +462,7 @@ export type AssistantConversationContentRequest = {
 };
 
 export type AssistantGrant = {
-  consent_evidence: "axe:igubz7";
+  consent_evidence: string;
   device_id: Id;
   disclosure_consent: boolean;
   expires_at: Timestamp;
@@ -483,14 +483,15 @@ export type AssistantGrant = {
 
 export type AssistantGrantPolicy = {
   api_version: "st3.client.v0";
-  consent_evidence: "axe:igubz7";
+  consent_evidence: string;
   disclosure_consent: true;
   expires_in_seconds?: number;
   minimal_read_mode: AssistantMinimalReadMode;
+  recipient_allowlist?: Array<string>;
   scopes: Array<AssistantScope>;
 };
 
-export type AssistantMinimalReadMode = "approval-once";
+export type AssistantMinimalReadMode = "approval-once" | "caller-bound-allow";
 
 export type AssistantMissionItem = {
   agent_ids: Array<string>;
@@ -539,7 +540,7 @@ export type AssistantPairedSession = {
 export type AssistantPairingBegin = {
   api_version: "st3.client.v0";
   assistant_id: AssistantPrincipal;
-  consent_evidence: "axe:igubz7";
+  consent_evidence: string;
   device_name: string;
   disclosure_consent: true;
   expires_in_seconds?: number;
@@ -571,7 +572,7 @@ export type AssistantReadTrustRequest = {
 
 export type AssistantResponseBytes = number;
 
-export type AssistantScope = "read.assistant.summary" | "read.assistant.attention" | "read.assistant.missions" | "read.assistant.agents" | "read.assistant.conversation" | "read.assistant.terminal";
+export type AssistantScope = "read.assistant.summary" | "read.assistant.attention" | "read.assistant.missions" | "read.assistant.agents" | "read.assistant.conversation" | "read.assistant.terminal" | "write.assistant.messages" | "write.assistant.custom-reply";
 
 export type AssistantSenderClass = "external-assistant";
 
