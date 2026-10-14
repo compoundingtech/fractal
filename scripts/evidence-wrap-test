@@ -109,6 +109,27 @@ def main(argv):
                     '--signer', signer, '--aggregate', str(facts)], repo, home).returncode == 1
         print('passed: an aggregate gate records its verdict, canonical output digest and extra run inputs, and refuses unknown keys')
 
+        # The push token reaches git through the environment, never an argument.
+        sink = tmp / 'sink.git'
+        git(tmp, 'init', '-q', '--bare', str(sink))
+        git(repo, 'remote', 'add', 'sink', str(sink))
+        log = tmp / 'push-argv.log'
+        real_git = next(str(Path(d) / 'git') for d in ENV['PATH'].split(':') if 'recorder' not in d and (Path(d) / 'git').exists())
+        shim = tmp / 'push-shim'
+        shim.mkdir()
+        (shim / 'git').write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {log}\nprintf "ENV %s\\n" "$GIT_CONFIG_VALUE_0" >> {log}\nexec {real_git} "$@"\n')
+        (shim / 'git').chmod(0o755)
+        header = base64.b64encode(b'x-access-token:secret-token-xyz').decode()
+        pushed = subprocess.run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain, '--signer', signer,
+                                 '--push', 'sink', '--', 'sh', '-c', 'exit 3'], cwd=repo, capture_output=True,
+                                env=dict(ENV, HOME=str(home), EVIDENCE_SIGN_NOW=DATE, EVIDENCE_PUSH_TOKEN='secret-token-xyz', PATH=f'{shim}:{ENV["PATH"]}'))
+        assert pushed.returncode == 3 and 'secret-token-xyz' not in pushed.stderr.decode(), pushed.stderr.decode()
+        lines = log.read_text().splitlines()
+        assert not any('secret-token-xyz' in l or header in l for l in lines if not l.startswith('ENV ')), 'token in an argument'
+        assert any(header in l for l in lines if l.startswith('ENV ')), 'token reaches git through the environment'
+        assert git(sink, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').startswith('refs/notes/evidence/')
+        print('passed: --push sends the token through the environment, not an argument, and never prints it')
+
         (repo / 'a').write_text('dirty\n')
         assert wrap(['true']).returncode == 1
         git(repo, 'checkout', '--', 'a')
@@ -146,24 +167,40 @@ def main(argv):
         }.items():
             refused = sign(bad)
             assert refused.returncode == 1 and b'refused' in refused.stderr, (label, refused.stderr)
-        # A caller's environment cannot move the clock, redirect git, or smuggle a program through the repository.
+        # A hostile caller: its PATH holds look-alike tools, its environment names programs for git, and its
+        # checkout's own configuration names programs. None of them may run in the signer, and the clock is the signer's.
         production = tmp / 'production-home'
         (production / '.config/st').mkdir(parents=True)
         (production / '.config/st/evidence-sign.json').write_text(json.dumps(
             {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'production.git')}))
         marker = tmp / 'ran'
+        shims = tmp / 'shims'
+        shims.mkdir()
+        for tool in ('git', 'ssh-keygen', 'git-upload-pack', 'sh-evil'):
+            (shims / tool).write_text(f'#!/bin/sh\ntouch {marker}\nexit 1\n')
+            (shims / tool).chmod(0o755)
         program = tmp / 'evil-ssh-keygen'
         program.write_text(f'#!/bin/sh\ntouch {marker}\nexec ssh-keygen "$@"\n')
         program.chmod(0o755)
+        hooks = tmp / 'hooks'
+        hooks.mkdir()
+        (hooks / 'reference-transaction').write_text(f'#!/bin/sh\ntouch {marker}\n')
+        (hooks / 'reference-transaction').chmod(0o755)
+        for name, value in (('core.fsmonitor', f'{shims}/sh-evil'), ('core.hooksPath', str(hooks)), ('core.pager', f'{shims}/sh-evil'),
+                            ('uploadpack.packObjectsHook', f'{shims}/sh-evil'), ('core.sshCommand', f'{shims}/sh-evil'),
+                            ('gpg.ssh.program', f'{shims}/ssh-keygen')):
+            git(repo, 'config', name, value)
         hostile = subprocess.run([sys.executable, str(SIGN)], cwd=repo, input=json.dumps(good).encode(), capture_output=True,
-                                 env=dict(ENV, HOME=str(production), EVIDENCE_SIGN_NOW='1999-01-01T00:00:00Z',
+                                 env=dict(ENV, HOME=str(production), PATH=f'{shims}:{ENV["PATH"]}', EVIDENCE_SIGN_NOW='1999-01-01T00:00:00Z',
                                           GIT_DIR=str(tmp / 'elsewhere'), GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='gpg.ssh.program',
                                           GIT_CONFIG_VALUE_0=str(program)))
         assert hostile.returncode == 0, hostile.stderr
         stamped = json.loads(hostile.stdout)
         shown = git(tmp / 'production.git', 'cat-file', 'blob', git(tmp / 'production.git', 'ls-tree', '-r', stamped['record']).split()[2])
         assert json.loads(shown)['predicate']['observed_at'] != '1999-01-01T00:00:00Z', 'a caller cannot set the signer clock'
-        assert not marker.exists(), 'a caller\'s GIT_CONFIG_* must not be able to name the program that signs'
+        assert not marker.exists(), 'no program named by the caller\'s PATH, GIT_CONFIG_* or checkout configuration may run in the signer'
+        for name in ('core.fsmonitor', 'core.hooksPath', 'core.pager', 'uploadpack.packObjectsHook', 'core.sshCommand', 'gpg.ssh.program'):
+            git(repo, 'config', '--unset', name)
         print('passed: the signer accepts extra named inputs, and refuses extra keys, a wrong flake.lock hash, an unknown commit and malformed fields')
 
         if write_fixture:
