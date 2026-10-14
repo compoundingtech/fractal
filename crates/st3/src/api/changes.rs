@@ -196,14 +196,20 @@ pub(super) async fn work_binding(
     let binding = blocking_store(move || {
         Ok(state
             .store
-            .git_change_work_binding(&actor, &query.step, &query.incarnation)
-            .map_err(|error| error.to_string()))
+            .git_change_work_binding(&actor, &query.step, &query.incarnation))
     })
     .await?
-    .map_err(client_v0::validation)?;
+    .map_err(work_binding_error)?;
     Ok(Json(
         serde_json::to_value(binding).map_err(ApiError::internal)?,
     ))
+}
+
+fn work_binding_error(error: anyhow::Error) -> ApiError {
+    tracing::warn!(error=%error, "Git change work binding refused or unavailable");
+    client_v0::validation(
+        "Git change work binding is unavailable; verify current local work authority",
+    )
 }
 
 fn mutation_error(error: anyhow::Error) -> ApiError {
@@ -460,6 +466,49 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(unavailable.code, "validation-failed");
+    }
+    #[tokio::test]
+    async fn missing_work_binding_returns_a_fixed_error_without_store_details() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests::state(root.path());
+        let agent = Extension(client_v0::ClientSession::for_tests_scoped(
+            "agent/fixture/worker",
+            "agent/fixture/worker",
+            &["control.work"],
+        ));
+        let error = work_binding(
+            State(state),
+            agent,
+            Query(BindingQuery {
+                step: "step-run/fixture/missing".into(),
+                incarnation: "fixture:one".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let expected = json!({
+            "code": "validation-failed",
+            "message": "Git change work binding is unavailable; verify current local work authority",
+            "details": {}
+        });
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
+
+        // A different internal failure must not change the public response or
+        // expose its operator-only text through the message or details.
+        let response = work_binding_error(anyhow::anyhow!(
+            "fixture-token /fixture/private/database: database is locked"
+        ))
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), expected);
     }
     #[test]
     fn mutation_outcomes_keep_reconciliation_coordinates_and_hide_operator_details() {
