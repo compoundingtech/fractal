@@ -466,6 +466,8 @@
             pkgs.fish
             pkgs.zsh
             pkgs.jq
+            # The evidence tests sign and verify records with a real ssh-keygen.
+            pkgs.openssh
             pkgs.rustfmt
             pkgs.which
             pkgs.cargo-nextest

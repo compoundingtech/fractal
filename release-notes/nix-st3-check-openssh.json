@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Give the sandboxed st3 check a real ssh-keygen so the evidence tests can run there",
+  "replay": {
+    "status": "none",
+    "detail": "Runtime claims and replay behavior are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, schema version or claim registration changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint and admission rule versions are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Only the test inputs of the Nix check change; installed binaries are identical."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No daemon interruption or restart is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the previous check inputs."
+  }
+}
