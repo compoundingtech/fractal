@@ -184,6 +184,16 @@ class QueueTest(unittest.TestCase):
         self.assertFalse(self.w.ref(f'refs/queue/claim/{tree}'))
         self.assertEqual(git(self.w.origin, 'rev-list', '--count', 'main'), '2')
 
+    def test_a_landed_marker_counts_whatever_its_contents(self):
+        c, tree = self.publish(self.a, 'tomb.txt')
+        blob = subprocess.run(['git', '-C', str(self.a), 'hash-object', '-w', '--stdin'],
+                              input='landed\n', text=True, capture_output=True, env=ENV).stdout.strip()
+        git(self.a, 'push', '-q', 'origin', f'{blob}:refs/queue/landed/{tree}')
+        self.assertRegex(gq(self.b, 'ls')[1], r'^landed\s')
+        code, out = gq(self.b, 'land', tree)
+        self.assertEqual(code, 12, out)
+        self.assertNotIn('tomb.txt', self.w.files_on_main())
+
     def test_stale_advertisement_withdrawn_before_claim(self):
         c, tree = self.publish(self.a, 'gone.txt')
         gq(self.b, 'ls')

@@ -34,14 +34,9 @@ Two details that matter:
 - A push of a value the ref already has is a silent no-op ("Everything up-to-date"). That is
   harmless for bundles, but it means a *claim* must carry a unique value (it has a random
   nonce), or two claimers could both think they won.
-- **GitHub: not verified.** I did not push to GitHub, because that would mean creating a
-  repository or touching a real one. Evidence so far: `gate-evidence.md` already
-  expects `refs/notes/evidence/*` to be pushed to a remote, which relies on non-branch refs
-  being accepted, but those point at commits, and I have not seen GitHub accept a
-  *blob-pointing* one. The check is ten lines against a throwaway
-  repository and needs Nathan's say-so (open question 1). If GitHub refuses blob refs, commit
-  form still works everywhere and range form falls back to a commit carrying the range in a
-  file.
+- **GitHub: verified** on 2026-10-14, on a throwaway private repository under the myobie
+  account (results in the section "GitHub result" below). Blob-pointing refs under
+  `refs/queue/` are accepted.
 
 ## 2. The advertisement: how the queue learns what is ready
 
@@ -142,9 +137,47 @@ Does not: merge commits or root commits in a bundle, speculative batches, call
 `st evidence verify`, prune old `landed` tombstones, notice a stuck queue, or touch GitHub
 in any way.
 
+## GitHub result (throwaway private repository, 2026-10-14)
+
+Tested on `myobie/git-queue-scratch-20261014` (private, no rulesets, default settings):
+
+| Try | Result |
+| --- | --- |
+| push a ref to a **blob** under `refs/queue/ready/...` | accepted |
+| push a ref to a **tree** under `refs/queue/tree/...` | accepted |
+| push a ref to a commit under `refs/queue/keep/...` | accepted |
+| push a blob to `refs/heads/...` | **refused** ("remote rejected") |
+| claim: create with expect-absent (`--force-with-lease=REF:`) | accepted when absent; refused when present |
+| 6 clones push a claim for the same name at once | exactly **one** succeeded, five refused |
+| atomic push: move `main` + delete a claim (leased on its value) + create a tombstone | accepted as one unit |
+| `ls-remote origin 'refs/queue/*'`; fresh `fetch` of `refs/queue/*` | returns blob, tree and commit refs; blobs and trees fetch fine |
+
+Cheap numbers (one run from this machine, so only indicative): with 1,005 queue refs on the
+remote, `ls-remote 'refs/queue/*'` took 0.86 s (the same as listing one ref, 0.85 s, so it is
+all round trip), a fresh `fetch` of all of them 1.2 s, and one push creating 1,000 blob refs
+3.6 s. The prototype's `gq` also ran end to end against it: a two-machine race over GitHub
+had one winner, and a range-form (blob) bundle landed through the atomic push.
+
+Not tested: refs under rulesets, very large ref counts (tens of thousands), GitHub's
+behaviour when many pushes arrive in the same millisecond beyond the 6-way race above, and
+whether GitHub eventually garbage-collects objects held only by a blob ref (it holds them
+while the ref exists). The repository could not be deleted with the available token (it
+lacks `delete_repo`), so it still exists, private and empty of anything but test refs.
+
+Found along the way: a `landed` marker with unexpected contents was not counted as landed
+(fixed, with a test). Nothing was wrong with git or GitHub.
+
+## Who would push to `main` in a real rollout
+
+Not decided here; nothing was changed. If the queue lands directly, the pusher must be an
+identity that can write `main`. Today `main` accepts changes only through the GitHub merge
+queue, so a real rollout would need one of: a dedicated machine user or GitHub App for the
+queue with a **ruleset bypass** for it (the simplest, and the setting Nathan has to approve),
+or leaving the queue's result as a PR it opens and the GitHub queue merges. Without such a
+setting the push to `main` is refused, and the atomic landing push fails whole. That
+rejection is safe: nothing else in it is applied.
+
 ## Questions for Nathan
 
-1. May I verify blob refs against a throwaway GitHub repository (create, push, delete)?
-2. If this goes further: which identity pushes to `main`, and is a ruleset bypass for it
-   acceptable?
-3. Is `refs/queue/` the namespace you want, or should it sit under something st owns?
+1. Which identity pushes to `main`, and is a ruleset bypass for it acceptable? (Not touched.)
+2. `refs/queue/` is fine for the prototype (confirmed).

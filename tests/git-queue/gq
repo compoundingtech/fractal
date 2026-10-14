@@ -163,7 +163,8 @@ class Queue:
     def landed_info(self, tree):
         for rest, typ, sha in self.seen_refs(self.target, 'landed'):
             if rest == tree and typ == 'blob':
-                return dict(l.split('=', 1) for l in self.read_blob(sha).splitlines() if '=' in l)
+                kv = dict(l.split('=', 1) for l in self.read_blob(sha).splitlines() if '=' in l)
+                return kv or {'tombstone': 'unreadable'}   # the ref's existence is what counts
         return None
 
     def state_of(self, b):
@@ -296,6 +297,8 @@ class Queue:
                 return 0, f'landed {tree} as {candidate[:12]}{note}'
             # Main moved, or our claim was taken over. Look again; only the first is retryable.
             self.refresh(self.target)
+            if self.landed_info(tree):
+                return EXIT_DONE, f'already landed {tree}'
             held = self.claim_info(tree)
             if not held or held[0] != mine:
                 return EXIT_LOST, f'lost {tree}: our claim was replaced before landing'
