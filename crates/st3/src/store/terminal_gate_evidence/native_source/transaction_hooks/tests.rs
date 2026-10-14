@@ -92,6 +92,7 @@ impl Fixture {
             run: Box::new(job),
             profile: None,
             wait: None,
+            holder: smallclaims::windows::holds::Holder::current(),
             enqueued: Instant::now(),
             done,
         });

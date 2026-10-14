@@ -229,6 +229,31 @@ impl PtyRuntime {
         self.spawn_guarded(id, launch, cwd, env, display_name, tags, size, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_checked(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        self.spawn_guarded(
+            id,
+            launch,
+            cwd,
+            env,
+            display_name,
+            tags,
+            size,
+            None,
+            Some(guard),
+        )
+    }
+
     /// Start a cutover only after its predecessor exited. A replay can reuse only the exact
     /// operation's tagged replacement; an unrelated live incarnation is never adopted.
     #[allow(clippy::too_many_arguments)]
@@ -345,6 +370,10 @@ impl PtyRuntime {
                 }
         }
         if before.as_ref().is_some_and(observation_is_live) {
+            anyhow::ensure!(
+                guard.is_none() || cutover.is_some(),
+                "guarded start cannot attribute an existing incarnation to a new launch"
+            );
             return Ok(());
         }
         // What the previous incarnation left running ends before its replacement starts. Each
@@ -361,9 +390,6 @@ impl PtyRuntime {
             let recorded = self.spawn_state_path(id, "scope");
             std::fs::write(&recorded, &unit)
                 .with_context(|| format!("record PTY scope {}", recorded.display()))?;
-        }
-        if let Some(guard) = guard {
-            guard()?;
         }
         let previous_incarnation = before.as_ref().and_then(observation_incarnation);
         std::fs::write(&fence, previous_incarnation.as_deref().unwrap_or_default())
@@ -419,7 +445,7 @@ impl PtyRuntime {
             ]);
         }
         arguments.push(OsString::from("--"));
-        arguments.extend(crate::work_prefix().into_iter().map(OsString::from));
+        arguments.extend(crate::work_prefix(env).into_iter().map(OsString::from));
         match launch {
             Launch::Shell(source) => {
                 arguments.extend([OsString::from("sh"), OsString::from("-c"), source.into()]);
@@ -439,7 +465,25 @@ impl PtyRuntime {
                 command.env_clear().envs(environment);
             }
             command.env("PTY_ROOT", &self.root);
-            let output = match output_within(command, self.command_timeout) {
+            // A later failed attempt cannot close a producer created by an earlier
+            // attempt. Only failure to create the first launcher proves rejection.
+            let operation = (attempt == 0)
+                .then(|| env.get("ST3_START_OPERATION").map(String::as_str))
+                .flatten();
+            if let Some(guard) = guard
+                && let Err(error) = guard()
+            {
+                let _ = std::fs::remove_file(&fence);
+                // Only rejection before the first launcher proves there is no
+                // producer. An earlier launcher may still publish after returning.
+                return Err(match operation {
+                    Some(operation) => error.context(crate::StartRejected {
+                        operation: Some(operation.to_owned()),
+                    }),
+                    None => error,
+                });
+            }
+            let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = std::fs::remove_file(&fence);
@@ -902,12 +946,29 @@ impl PtyRuntime {
 }
 
 /// A wedged PTY command must not stall the reconciler indefinitely.
-pub(crate) fn output_within(mut command: Command, timeout: Duration) -> Result<Output> {
+pub(crate) fn output_within(command: Command, timeout: Duration) -> Result<Output> {
+    output_for_start(command, timeout, None)
+}
+
+fn output_for_start(
+    mut command: Command,
+    timeout: Duration,
+    operation: Option<&str>,
+) -> Result<Output> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| {
+            let error = anyhow::Error::from(error);
+            match operation {
+                Some(operation) => error.context(crate::StartRejected {
+                    operation: Some(operation.to_owned()),
+                }),
+                None => error,
+            }
+        })?;
     let pid = child.id();
     let (sender, receiver) = std::sync::mpsc::channel();
     fn drain(mut reader: impl std::io::Read) -> std::io::Result<Vec<u8>> {
@@ -2290,5 +2351,99 @@ exit 0
         assert!(process_runs(replacement), "the replacement ended");
         session.runtime.stop(&session.id).unwrap();
         assert_gone_soon(replacement, "replacement harness");
+    }
+
+    /// The installed `pty`, with or without systemd user scopes.
+    fn installed_pty() -> Option<PathBuf> {
+        let environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").ok()?)]);
+        crate::resolve_executable("pty", &environment).ok()
+    }
+
+    fn parent_of(pid: u32) -> u32 {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        // The fields after the parenthesized name: state, then the parent.
+        let after_name = &stat[stat.rfind(')').unwrap() + 2..];
+        after_name
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn nice_of(pid: u32) -> i32 {
+        unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) }
+    }
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// A seat's parent is its PTY server, never the process that asked for it, so the priority
+    /// prefix leaves its lifetime alone: after the asking process is gone and a new one takes over
+    /// the registry, the background harness and what it started are still running.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_background_seat_and_its_children_outlive_the_process_that_started_them() {
+        let Some(pty) = installed_pty() else {
+            assert!(std::env::var_os("CI").is_none(), "CI must provide pty");
+            eprintln!("skipped: no pty binary");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("r");
+        let pid_file = root.path().join("harness.pid");
+        let child_file = root.path().join("child.pid");
+        let launch = Launch::Argv(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "echo $$ > '{}'; sleep 60 & echo $! > '{}'; wait",
+                pid_file.display(),
+                child_file.display()
+            ),
+        ]);
+        let environment = BTreeMap::from([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            (crate::PRIORITY_ENV.into(), "background".into()),
+        ]);
+        let starter = PtyRuntime::new(registry.clone()).with_binary(pty.to_string_lossy());
+        starter
+            .spawn(
+                "background-survivor",
+                &launch,
+                root.path(),
+                &environment,
+                None,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        let harness = read_pid(&pid_file);
+        let child = read_pid(&child_file);
+        let base = nice_of(std::process::id());
+        assert_eq!(nice_of(harness), (base + 10).min(19));
+        assert_eq!(nice_of(child), (base + 10).min(19));
+        let server = starter.session("background-survivor").unwrap().pid.unwrap() as u32;
+        assert_ne!(parent_of(harness), std::process::id());
+        assert_eq!(
+            nice_of(server),
+            base,
+            "the PTY server keeps normal priority"
+        );
+
+        // The daemon restarts: nothing of the old one remains, and a new one reads the registry.
+        drop(starter);
+        let restarted = PtyRuntime::new(registry).with_binary(pty.to_string_lossy());
+        let seat = restarted
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|seat| seat.name == "background-survivor")
+            .unwrap();
+        assert_eq!(seat.status, "running");
+        assert!(alive(harness) && alive(child));
+
+        restarted.stop("background-survivor").unwrap();
     }
 }

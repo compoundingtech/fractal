@@ -19,6 +19,8 @@ mod mailbox_changes;
 mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
+#[cfg(test)]
+mod message_thread_legacy_rank_dependency_tests;
 pub mod owned_sets;
 #[cfg(test)]
 mod owned_sets_tests;
@@ -29,7 +31,10 @@ mod github_workflow_failures;
 pub mod git_changes;
 pub(crate) mod message_subscriptions;
 mod rollouts;
+pub(crate) mod publication;
+mod publication_facts;
 mod seat_status;
+mod stop_deferral;
 mod card_fold;
 #[cfg(test)]
 mod card_fold_tests;
@@ -121,6 +126,8 @@ pub use smallclaims::store::{
 
 
 mod accounts;
+mod runtime_starts;
+pub use runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeStartLock};
 mod roster_admission;
 pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
@@ -140,6 +147,7 @@ pub(crate) mod summary_list;
 pub(crate) mod attention_ivm;
 mod backup;
 mod checkpoint_rules;
+mod checkpoint_status;
 mod mission_eligibility;
 pub(crate) use mission_eligibility::MISSING_AGENT_CONDITION;
 mod revision_seats;
@@ -191,6 +199,8 @@ pub(crate) mod mission_list;
 pub(crate) mod work_list;
 #[cfg(test)]
 mod tombstones_tests;
+#[cfg(test)]
+mod step_wait_tests;
 #[cfg(test)]
 mod work_renew_tests;
 pub use runtime::SmalltalkRuntime;
@@ -525,6 +535,19 @@ pub struct AgentWorkQueue {
 const AGENT_WORK_PREVIEW_LIMIT: usize = 5;
 /// The most one `work extend` adds to a step attempt's execution budget.
 const MAX_STEP_EXTENSION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+/// The longest one `work wait` stops the execution clock. A wait past it must be declared again,
+/// so a seat that stopped answering cannot hide behind a wait.
+pub const MAX_STEP_WAIT_MS: u64 = 12 * 60 * 60 * 1000;
+
+/// A wait span as hours and minutes, for the budget error and the step view.
+pub fn format_wait_span(milliseconds: u128) -> String {
+    let minutes = milliseconds / 60_000;
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes}m"),
+        (hours, 0) => format!("{hours}h"),
+        (hours, minutes) => format!("{hours}h{minutes:02}m"),
+    }
+}
 
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
@@ -2046,6 +2069,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         || version == 16
         || version == 17
         || version == 18
+        || version == smallclaims::store::CURRENT_SCHEMA_VERSION
     {
         return Ok(());
     }
@@ -3227,6 +3251,9 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 
@@ -3239,6 +3266,9 @@ impl Store {
     ) -> Result<Self> {
         let smalltalk = Arc::new(SmalltalkRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, smalltalk.clone())?;
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 
@@ -3254,6 +3284,9 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 
@@ -3466,6 +3499,65 @@ impl Store {
         self.cached_agent_resources_for(index, history, None, build)
     }
 
+    pub(crate) fn begin_agent_roster_fault_retries(&self, history: bool) {
+        let mut retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let mode = usize::from(history);
+        let mut pending = std::mem::take(&mut retries.pending[mode]);
+        retries.due[mode].append(&mut pending);
+    }
+
+    pub(crate) fn agent_roster_fault_retries(&self, history: bool) -> BTreeSet<String> {
+        self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned")
+            .due[usize::from(history)].clone()
+    }
+
+    fn agent_roster_faults_pending(&self, history: bool) -> bool {
+        let retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let mode = usize::from(history);
+        !retries.due[mode].is_empty() || !retries.pending[mode].is_empty()
+    }
+
+    pub(crate) fn record_agent_roster_fault_read(
+        &self, history: bool, subjects: &[String], deadline: bool,
+        selected: Option<&BTreeSet<String>>,
+    ) {
+        let mut retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let mode = usize::from(history);
+        let answered = |subject: &String| selected.is_none_or(|selected| selected.contains(subject));
+        // Even a deadline answers this attempt: retry only on the next refresh, otherwise
+        // a chunked roster would refold the same degraded cards forever and never publish.
+        retries.due[mode].retain(|subject| !answered(subject));
+        if deadline {
+            retries.pending[mode].extend(subjects.iter().cloned());
+        } else {
+            retries.pending[mode].retain(|subject| !answered(subject));
+        }
+    }
+
+    /// Only a failed latest attempt with no newer attempt in flight permits immediate fallback.
+    pub(crate) fn agent_roster_refresh_failed(&self) -> bool {
+        self.smalltalk.agent_roster_attempt.load(std::sync::atomic::Ordering::Acquire) == 2
+    }
+
+    pub(crate) fn previous_agent_faults(
+        &self, index: u64, history: bool, subjects: &[String],
+    ) -> BTreeMap<String, Value> {
+        let subjects = subjects.iter().map(String::as_str).collect::<HashSet<_>>();
+        let cache = self.smalltalk.agent_resources_cache.lock().expect("agent resources cache poisoned");
+        let mut faults = BTreeMap::new();
+        for entry in cache.iter().rev().filter(|entry| entry.index <= index && entry.history == history) {
+            for card in entry.items.iter() {
+                if let Some(id) = card["id"].as_str()
+                    && subjects.contains(id)
+                    && !faults.contains_key(id) {
+                    faults.insert(id.to_owned(), card["fault"].clone());
+                }
+            }
+            if faults.len() == subjects.len() { break; }
+        }
+        faults
+    }
+
     /// An agents WS window inherits the queue deadline from its selected or complete projection.
     pub(crate) fn agent_roster_valid_until(&self, index: u64) -> Option<u128> {
         self.smalltalk.agent_resources_cache.lock()
@@ -3500,9 +3592,12 @@ impl Store {
         // one, still completes in one bounded fold.
         let (changed, membership) = match &previous {
             None => (0, true),
-            Some(previous) if previous.index == index => (0, false),
+            Some(previous) if previous.index == index => (self.agent_roster_fault_retries(history).len(), false),
             Some(previous) => match self.changed_agent_resources(previous.index, index, &previous.items)? {
-                AgentResourcesChange::Delta(delta) => (delta.subjects.len(), delta.membership),
+                AgentResourcesChange::Delta(mut delta) => {
+                    delta.subjects.extend(self.agent_roster_fault_retries(history));
+                    (delta.subjects.len(), delta.membership)
+                }
                 AgentResourcesChange::Invalidated { detail, .. } => return Ok(Some(detail)),
             },
         };
@@ -3541,6 +3636,7 @@ impl Store {
     /// Whether the newest complete roster already is the one at `index`: same graph cut,
     /// same local activity, and no queue deadline passed since. A refresh would fold nothing.
     pub(crate) fn agent_roster_current(&self, index: u64, history: bool) -> Result<bool> {
+        if self.agent_roster_faults_pending(history) { return Ok(false); }
         let local = roster_local_frontier(&self.readers.get(), index)?;
         let now = now_ms();
         Ok(self.smalltalk.agent_resources_cache.lock()
@@ -3560,7 +3656,8 @@ impl Store {
         index: u64,
         history: bool,
     ) -> Result<bool> {
-        if self.smalltalk.agent_roster_refresh.get().is_none() {
+        if self.smalltalk.agent_roster_refresh.get().is_none()
+            || self.agent_roster_faults_pending(history) {
             return Ok(false);
         }
         let Some((cut, local, valid_until, items)) = self.smalltalk.agent_resources_cache.lock()
@@ -3641,9 +3738,20 @@ impl Store {
 
     /// Run one refresh, answering the requests made before it began only if it publishes.
     pub(crate) fn answer_agent_roster_requests<T>(&self, refresh: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.smalltalk.agent_roster_attempt.fetch_or(1, std::sync::atomic::Ordering::AcqRel);
+        struct Attempt<'a>(&'a SmalltalkRuntime, bool);
+        impl Drop for Attempt<'_> {
+            fn drop(&mut self) {
+                self.0.agent_roster_attempt.store(if self.1 { 0 } else { 2 }, std::sync::atomic::Ordering::Release);
+                // Failure (including an unwind) must also wake readers waiting for publication.
+                self.0.agent_roster_published.send_modify(|_| {});
+            }
+        }
+        let mut attempt = Attempt(&self.smalltalk, false);
         let requested = &self.smalltalk.agent_roster_requested_at;
         let pending = requested.swap(0, std::sync::atomic::Ordering::AcqRel);
         let result = refresh();
+        attempt.1 = result.is_ok();
         if result.is_err() && pending != 0 {
             // Still unanswered: keep the oldest request time unless a newer request is waiting.
             let _ = requested.compare_exchange(0, pending, std::sync::atomic::Ordering::AcqRel,
@@ -3868,11 +3976,13 @@ impl Store {
         let select = |items: &[Value]| items.iter().filter(|item| {
             selected.is_none_or(|names| names.contains(item["id"].as_str().unwrap_or_default()))
         }).cloned().collect::<Vec<_>>();
+        let fault_retries = self.agent_roster_fault_retries(history);
         let cache = self.smalltalk.agent_resources_cache.lock()
             .expect("agent resources cache poisoned");
-        if let Some(entry) = cache.iter().filter(valid).find(|entry| {
-            agent_resources_entry_hits(entry, now, index, local, history, selected)
-        }) {
+        if let Some(entry) = cache.iter().rev().filter(valid)
+            .find(|entry| entry.index == index && entry.local == local && entry.history == history)
+            && agent_resources_entry_hits(entry, now, index, local, history, selected)
+            && selected.map_or(fault_retries.is_empty(), |names| names.is_disjoint(&fault_retries)) {
             let items = Arc::clone(&entry.items);
             drop(cache);
             return crate::performance::task("roster/cache-hit", || {
@@ -3910,6 +4020,7 @@ impl Store {
                 crate::otel::roster_attribute("st.roster.invalidation", reason);
                 }
                 let mut changed = delta.subjects;
+                changed.extend(fault_retries.iter().cloned());
                 if delta.membership {
                     crate::otel::roster_phase("membership", || -> Result<()> {
                     let connection = self.readers.get();
@@ -4056,12 +4167,17 @@ impl Store {
             .expect("agent resources cache poisoned");
         // All endpoint callers hold admission. Direct internal readers may still race; never
         // replace a complete published projection with a partial one.
-        let published = cache.iter().filter(valid).find(|entry| {
-            agent_resources_entry_hits(entry, now, index, local, history, selected)
-        }).map(|entry| Arc::clone(&entry.items));
+        let published = cache.iter().rev().filter(valid)
+            .find(|entry| entry.index == index && entry.local == local && entry.history == history)
+            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, selected)
+                && selected.map_or(fault_retries.is_empty(), |names| names.is_disjoint(&fault_retries)))
+            .map(|entry| Arc::clone(&entry.items));
         let complete = entry.covered.is_none();
         let items = if let Some(published) = published { published } else {
-            cache.retain(|entry| entry.index != index || entry.local != local || entry.history != history);
+            // Fault retries can assemble partial chunks at the publication's exact cut.
+            // Keep that complete publication readable until the replacement is complete.
+            cache.retain(|old| old.index != index || old.local != local || old.history != history
+                || (!complete && old.covered.is_none()));
             let items = Arc::clone(&entry.items);
             cache.push_back(entry);
             if cache.len() > 8 {
@@ -4104,6 +4220,10 @@ impl Store {
         history: bool,
         selected: Option<&BTreeSet<String>>,
     ) -> Result<Option<(Arc<Vec<Value>>, u128)>> {
+        let fault_retries = self.agent_roster_fault_retries(history);
+        if selected.map_or(!fault_retries.is_empty(), |names| !names.is_disjoint(&fault_retries)) {
+            return Ok(None);
+        }
         if index < current_index(&self.readers.get())? {
             return Ok(None);
         }
@@ -4113,8 +4233,9 @@ impl Store {
         })?;
         let cache = self.smalltalk.agent_resources_cache.lock()
             .expect("agent resources cache poisoned");
-        let hit = cache.iter()
-            .find(|entry| agent_resources_entry_hits(entry, now, index, local, history, selected))
+        let hit = cache.iter().rev()
+            .find(|entry| entry.index == index && entry.local == local && entry.history == history)
+            .filter(|entry| agent_resources_entry_hits(entry, now, index, local, history, selected))
             .map(|entry| (Arc::clone(&entry.items), entry.published_at_unix_ms));
         drop(cache);
         Ok(hit.map(|hit| crate::performance::task("roster/cache-hit", || {
@@ -7953,11 +8074,21 @@ impl Store {
     /// are intentionally too expensive for the daemon's inner control loop.
     pub fn work_for_reconcile(&self, actor: &str) -> Result<Vec<StepRunView>> {
         let work = self.work_at_snapshot_internal(Some(actor), true, now_ms(), false)?;
-        // A step joins a seat's work when a generation creates it or another seat lets it go;
-        // after that its changes are written on the step and its run.
+        // A generation can add steps this seat has not read yet. Existing steps already
+        // register their own subjects below; their state changes must not invalidate every
+        // seat. Handoffs mark the new recipient's actor key in incremental::change_keys.
         smallclaims::touched::note_read(|| format!("actor:{actor}"));
         smallclaims::touched::note_read(|| "kind:run-generation.created".to_owned());
-        smallclaims::touched::note_read(|| "kind:step-run.state".to_owned());
+        // Proposals enter and leave revision-draining on the proposal subject,
+        // not the run subject. Approval and cancellation receipts do not carry
+        // the run, so retain these collection dependencies without another query.
+        for kind in [
+            "revision-proposal.created",
+            "revision-proposal.approved",
+            "revision-proposal.cancelled",
+        ] {
+            smallclaims::touched::note_read(|| format!("kind:{kind}"));
+        }
         for step in &work {
             smallclaims::touched::note_read(|| step.subject.clone());
             smallclaims::touched::note_read(|| step.run.clone());
@@ -8335,6 +8466,14 @@ impl Store {
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
         let mut visible = Vec::with_capacity(views.len());
         for mut view in views {
+            if actor.is_some() && !detailed {
+                // A pending available-to step or a draining run can become visible
+                // without joining a new generation. Record every candidate before
+                // filtering, so its own transition invalidates the seat's work.
+                smallclaims::touched::note_read(|| view.subject.clone());
+                smallclaims::touched::note_read(|| view.run.clone());
+                smallclaims::touched::note_read(|| view.generation.clone());
+            }
             if detailed {
                 enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
             } else {
@@ -8746,6 +8885,7 @@ impl Store {
             subject,
             "release",
             &WorkRequest {
+                wait_ms: None,
                 actor: Some(input.actor.clone()),
                 incarnation: input.incarnation.clone(),
                 summary: Some(input.note.clone()),
@@ -8787,6 +8927,32 @@ impl Store {
             return Err(St3Error::new(
                 "invalid-work-action",
                 "only an extension adds time",
+            ));
+        }
+        if action == "wait" {
+            if !request
+                .wait_ms
+                .is_some_and(|by| (1..=MAX_STEP_WAIT_MS).contains(&by))
+            {
+                return Err(St3Error::new(
+                    "invalid-wait",
+                    "a wait stops the execution clock for between 1 millisecond and 12 hours",
+                ));
+            }
+            if request
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err(St3Error::new(
+                    "wait-needs-reason",
+                    "a wait records what the step waits for; pass --reason",
+                ));
+            }
+        } else if request.wait_ms.is_some() {
+            return Err(St3Error::new(
+                "invalid-work-action",
+                "only a wait stops the execution clock",
             ));
         }
         let subject = normalize_step_run(subject);
@@ -9047,6 +9213,27 @@ impl Store {
                     .clone()
                     .or_else(|| Some(requested_incarnation.to_owned()));
                 let actor_incarnation = effective_incarnation.clone();
+                if action == "wait" {
+                    // Waits draw on one budget per attempt, so a seat that keeps declaring them
+                    // cannot hide a hung step from the execution timeout. The budget is time
+                    // spent waiting, not time declared: a resumed wait gives back what it did
+                    // not use.
+                    let spent = step_execution_clock_at(transaction, &subject, current.attempt, now, true)
+                        .map_err(internal)?
+                        .waited;
+                    let left = u128::from(MAX_STEP_WAIT_MS).saturating_sub(spent);
+                    if u128::from(request.wait_ms.unwrap_or_default()) > left {
+                        return Err(St3Error::new(
+                            "wait-budget-exhausted",
+                            format!(
+                                "this attempt has waited {} of its {} wait budget; {} is left",
+                                format_wait_span(spent),
+                                format_wait_span(u128::from(MAX_STEP_WAIT_MS)),
+                                format_wait_span(left),
+                            ),
+                        ));
+                    }
+                }
                 let (status, worker_reported, claimant, claim_incarnation, claim_expiry) = match action {
                     "claim" => {
                         if current.status != "ready" && current.status != "claimed" {
@@ -9079,6 +9266,14 @@ impl Store {
                     ),
                     "extend" => (
                         current.status.as_str(),
+                        current.worker_reported,
+                        Some(actor.clone()),
+                        effective_incarnation,
+                        Some(now + 600_000),
+                    ),
+                    // A wait or a resume is a progress record that moves the execution clock.
+                    "wait" | "resume" => (
+                        "working",
                         current.worker_reported,
                         Some(actor.clone()),
                         effective_incarnation,
@@ -9154,13 +9349,23 @@ impl Store {
                 if let Some(extend_ms) = extend_ms {
                     body["fields"]["extend_ms"] = json!(extend_ms);
                 }
+                match action {
+                    "wait" => {
+                        body["fields"]["clock"] = json!("paused");
+                        body["fields"]["wait_until_unix_ms"] = json!(
+                            now.saturating_add(u128::from(request.wait_ms.unwrap_or_default()))
+                        );
+                    }
+                    "resume" => body["fields"]["clock"] = json!("running"),
+                    _ => {}
+                }
                 if let Some(input) = handoff {
                     adhoc_work::transfer_tx(transaction, &self.origin, &current, input, &mut body)?;
                 }
                 let claim_kind = match action {
                     "claim" => "work.claimed",
                     "renew" => "work.renewed",
-                    "progress" => "work.progress",
+                    "progress" | "wait" | "resume" => "work.progress",
                     "complete" => "work.submitted",
                     "fail" => "work.failed",
                     "release" => "work.released",
@@ -9442,11 +9647,23 @@ impl Store {
         intent: &NormalizedIntent,
         key: &str,
     ) -> Result<ApplyResponse, St3Error> {
+        self.apply_internal_with_declared_agents(intent, key, &BTreeSet::new())
+    }
+
+    /// A reconciler may defer an agent it parsed from an owned mission declaration.
+    /// Messages can still address that declared seat before it enters the desired graph.
+    /// This evidence is local to admission; it adds no field to any persisted intent.
+    pub(crate) fn apply_internal_with_declared_agents(
+        &self,
+        intent: &NormalizedIntent,
+        key: &str,
+        declared_agents: &BTreeSet<String>,
+    ) -> Result<ApplyResponse, St3Error> {
         let source = IntentInput {
             kdl: String::new(),
             source_name: Some("st reconciler".into()),
         };
-        let mission = self.mission(intent, source)?;
+        let mission = self.mission_at_with_declared_agents(intent, source, None, declared_agents)?;
         if !mission.blockers.is_empty() {
             return Err(St3Error::new(
                 "internal-mission-blocked",
@@ -9483,6 +9700,16 @@ impl Store {
         intent: &NormalizedIntent,
         resolved_intent: IntentInput,
         at_index: Option<u64>,
+    ) -> Result<MissionResponse, St3Error> {
+        self.mission_at_with_declared_agents(intent, resolved_intent, at_index, &BTreeSet::new())
+    }
+
+    fn mission_at_with_declared_agents(
+        &self,
+        intent: &NormalizedIntent,
+        resolved_intent: IntentInput,
+        at_index: Option<u64>,
+        declared_agents: &BTreeSet<String>,
     ) -> Result<MissionResponse, St3Error> {
         let connection = self.readers.get();
         let current_index = current_index(&connection).map_err(internal)?;
@@ -9544,7 +9771,7 @@ impl Store {
         }
 
         let known = |subject: &str| -> Result<bool, St3Error> {
-            if intent.subjects.contains_key(subject) {
+            if intent.subjects.contains_key(subject) || declared_agents.contains(subject) {
                 return Ok(true);
             }
             connection
@@ -9750,20 +9977,23 @@ impl Store {
                 subject.clone(),
                 intent_leaves_at(&connection, subject, at_index).map_err(internal)?,
             );
-            if current.as_ref().is_some_and(|row| row.revision == revision) {
+            let changed = current.as_ref().is_none_or(|row| row.revision != revision);
+            if changed {
+                changes.push(SubjectChange {
+                    subject: subject.clone(),
+                    change: if current.is_some() {
+                        "update"
+                    } else {
+                        "create"
+                    }
+                    .into(),
+                    old_revision: current.as_ref().map(|row| row.revision.clone()),
+                    new_revision: revision,
+                });
+            }
+            if !changed && desired.member.is_none() {
                 continue;
             }
-            changes.push(SubjectChange {
-                subject: subject.clone(),
-                change: if current.is_some() {
-                    "update"
-                } else {
-                    "create"
-                }
-                .into(),
-                old_revision: current.as_ref().map(|row| row.revision.clone()),
-                new_revision: revision,
-            });
             if let Some(action) = crate::suspension::publication_action(self, desired, false, || {
                 Ok(current.as_ref().and_then(|row| row.member.as_deref())
                     .map(serde_json::from_str::<crate::model::MemberSpec>)
@@ -9771,39 +10001,20 @@ impl Store {
             })
                 .map_err(internal)?
             {
-                actions.push(action);
+                if changed || action.action == "restart" {
+                    actions.push(action);
+                }
             } else if desired.kind == "stop" {
                 actions.push(PlannedAction {
                     subject: subject.clone(),
                     action: "stop".into(),
                     reason: "the desired state explicitly stops this member".into(),
                 });
-            } else if let Some(member) = &desired.member {
-                // A seat restarts when its declared launch changes; say so before it does.
-                let changes = current
-                    .as_ref()
-                    .filter(|row| row.kind == "agent")
-                    .and_then(|row| row.member.as_deref())
-                    .and_then(|launched| {
-                        serde_json::from_str::<crate::model::MemberSpec>(launched).ok()
-                    })
-                    .map(|launched| member.launch_changes(&launched))
-                    .unwrap_or_default();
-                actions.push(if changes.is_empty() {
-                    PlannedAction {
-                        subject: subject.clone(),
-                        action: "observe-or-start".into(),
-                        reason: "the desired member is active".into(),
-                    }
-                } else {
-                    PlannedAction {
-                        subject: subject.clone(),
-                        action: "restart".into(),
-                        reason: format!(
-                            "the declared {} changed; a running seat restarts on its last session",
-                            changes.join(" and ")
-                        ),
-                    }
+            } else if desired.member.is_some() && changed {
+                actions.push(PlannedAction {
+                    subject: subject.clone(),
+                    action: "observe-or-start".into(),
+                    reason: "the desired member is active".into(),
                 });
             }
         }
@@ -10008,7 +10219,38 @@ impl Store {
         idempotency_key: &str,
         actor: Option<&str>,
     ) -> Result<ApplyResponse, St3Error> {
-        self.apply_as_impl(intent, expected, idempotency_key, actor, None, None)
+        self.apply_as_impl(
+            intent,
+            expected,
+            idempotency_key,
+            actor,
+            None,
+            publication::CommitChecks::default(),
+        )
+    }
+
+    /// Internal commit-time guard. Runs after subject CAS checks, before publication writes,
+    /// using the writer's current runtime and incarnation rather than preview evidence.
+    #[cfg_attr(not(test), expect(dead_code, reason = "The following refusal slice exposes this tested commit-time guard."))]
+    pub(crate) fn apply_as_checked(
+        &self,
+        intent: &NormalizedIntent,
+        expected: &BTreeMap<String, Vec<String>>,
+        key: &str,
+        actor: Option<&str>,
+        guard: &publication::Guard,
+    ) -> Result<ApplyResponse, St3Error> {
+        self.apply_as_impl(
+            intent,
+            expected,
+            key,
+            actor,
+            None,
+            publication::CommitChecks {
+                owned: None,
+                guard: Some(guard),
+            },
+        )
     }
 
     /// Atomically commit the declaration and its caller-facing completed response. Exact retries
@@ -10027,8 +10269,8 @@ impl Store {
             expected,
             key,
             None,
-            None,
             Some((response_key, &value)),
+            publication::CommitChecks::default(),
         )
     }
 
@@ -10038,9 +10280,10 @@ impl Store {
         expected: &BTreeMap<String, Vec<String>>,
         idempotency_key: &str,
         actor: Option<&str>,
-        owned: Option<&owned_sets::Options>,
         local_receipt: Option<(&str, &Value)>,
+        checks: publication::CommitChecks<'_>,
     ) -> Result<ApplyResponse, St3Error> {
+        let publication::CommitChecks { owned, guard } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, St3Error> {
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
@@ -10382,6 +10625,13 @@ impl Store {
                 }
                 for repair in &intent.replica_repairs {
                     operations_changed |= validate_replica_repair(transaction, repair)?;
+                }
+                if let Some(guard) = guard {
+                    let at = current_index_tx(transaction).map_err(internal)?;
+                    for desired in intent.subjects.values().filter(|desired| matches!(desired.kind.as_str(), "agent" | "stop")) {
+                        let check = publication::check(transaction, desired, at, &self.origin).map_err(internal)?;
+                        guard(desired, &check)?;
+                    }
                 }
                 let changed = desired_changed || missions_changed || operations_changed || owned_plan.is_some();
                 if !changed {
@@ -11325,6 +11575,7 @@ impl Store {
                 "DELETE FROM local_observations WHERE id IN (
                     SELECT id FROM local_observations AS old
                     WHERE observed_at_unix_ms < ?1
+                      AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
                       AND EXISTS (SELECT 1 FROM local_observations AS newer
                                   WHERE newer.subject=old.subject AND newer.kind=old.kind
                                     AND newer.id>old.id)
@@ -11374,7 +11625,9 @@ impl Store {
                 let removed = connection.execute(
                     "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
-                        WHERE subject=?1 AND kind=?2 AND id<=?3 ORDER BY id LIMIT ?4
+                        WHERE subject=?1 AND kind=?2 AND id<=?3
+                          AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
+                        ORDER BY id LIMIT ?4
                      )",
                     params![subject, kind, boundary, chunk],
                 )?;
@@ -24500,30 +24753,6 @@ fn attention_request_view_tx(
     }))
 }
 
-fn pending_attention_requests_tx(
-    connection: &Connection,
-    person: Option<&str>,
-) -> Result<Vec<AttentionRequestView>> {
-    let mut statement = connection.prepare(&canonical_sql(
-        "SELECT request.subject FROM claims request
-         WHERE request.kind='attention.requested'
-           AND (?1 IS NULL OR json_extract(request.body, '$.fields.reviewer')=?1)
-           AND NOT EXISTS (
-             SELECT 1 FROM claims resolution
-             WHERE resolution.subject=request.subject
-               AND resolution.kind='attention.resolved'
-           )
-         ORDER BY CANONICAL_ASC(request)",
-    ))?;
-    let subjects = statement
-        .query_map([person], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    subjects
-        .iter()
-        .filter_map(|subject| attention_request_view_tx(connection, subject).transpose())
-        .collect()
-}
-
 const MESSAGE_CANONICAL_KEY_BATCH_SIZE: usize = 128;
 
 fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
@@ -25163,10 +25392,6 @@ fn attention_item_from_revision(
         ],
         request: None,
     }
-}
-
-pub(crate) fn agent_attention_requester(actor: &str) -> bool {
-    actor.starts_with("agent/") && actor != "agent/st3/reconciler"
 }
 
 fn attention_item_from_failure(request: AttentionRequestView) -> AttentionItemView {
@@ -26773,6 +26998,7 @@ mission "garden" state="ready" {
                     subject,
                     "claim",
                     &WorkRequest {
+                        wait_ms: None,
                         actor: Some(actor.into()),
                         incarnation: Some(incarnation.into()),
                         summary: None,
@@ -26789,6 +27015,7 @@ mission "garden" state="ready" {
                 step,
                 "complete",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(actor.into()),
                     incarnation: Some(incarnation.into()),
                     summary: None,
@@ -26911,6 +27138,146 @@ mission "garden" state="ready" {
                 .submitted_incarnation
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_step_wait_waits_on_older_members_and_converges_after_they_upgrade() {
+        let anchor_key = key();
+        let older_key = key();
+        let current = node("current", Some(&anchor_key), Some(&anchor_key));
+        admit(&current, "current", &anchor_key, "anchor", None);
+        admit(&current, "older", &older_key, "invite", None);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("older.sqlite3");
+        let older = Store::open(&path, "older").unwrap();
+        older.bind_fleet(FLEET).unwrap();
+        older.pin_fleet_anchor(anchor_key.public()).unwrap();
+        older.set_member_key(Some(older_key.clone())).unwrap();
+        // A build from before the wait: work.progress has neither new field.
+        let mut registry = st3_schema::registry().clone();
+        for field in ["clock", "wait_until_unix_ms"] {
+            registry
+                .claims
+                .get_mut("work.progress")
+                .unwrap()
+                .fields
+                .remove(field)
+                .unwrap();
+        }
+        older.set_claim_registry(registry.clone());
+        sync(&current, &older);
+        let intent = crate::graph::parse_test_intent(
+            r#"version 2
+agent "garden/worker" { workspace "/tmp"; command "true" }
+mission "garden" state="ready" {
+  goal "Wait for a build slot without spending the execution clock."
+  step "review" timeout="30m" { assigned-to "agent/garden/worker" }
+}
+"#,
+            "current",
+        )
+        .unwrap();
+        current.apply_internal(&intent, "garden").unwrap();
+        let run = current
+            .create_mission_run(&MissionRunRequest {
+                mission: "garden".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/ada".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "garden-run".into(),
+            })
+            .unwrap();
+        let step = run.steps[0].subject.clone();
+        let request = |key: &str, wait_ms: Option<u64>, reason: Option<&str>| WorkRequest {
+            wait_ms,
+            actor: Some("agent/garden/worker".into()),
+            incarnation: Some("garden:one".into()),
+            summary: None,
+            reason: reason.map(Into::into),
+            evidence: vec![],
+            idempotency_key: key.into(),
+        };
+        current.set_step_state(&step, "ready", None).unwrap();
+        current
+            .work_action(&step, "claim", &request("claim", None, None))
+            .unwrap();
+        current
+            .work_action(
+                &step,
+                "wait",
+                &request("wait", Some(60 * 60 * 1000), Some("build slot")),
+            )
+            .unwrap();
+        let waiting = current
+            .latest_claim(&step, Some("work.progress"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.body["fields"]["clock"], "paused");
+        let fields = schema_fields_for_body(&waiting.kind, &waiting.body).unwrap();
+        assert_eq!(
+            registry
+                .validate_claim(&step, "work.progress", &fields)
+                .unwrap_err()
+                .code,
+            "unknown-claim-field"
+        );
+        assert!(matches!(
+            classify_replicated_claim_with_registry(&waiting, &registry).unwrap(),
+            ReplicatedClaimAdmission::UnknownField
+        ));
+        assert!(
+            current
+                .step_run(&step)
+                .unwrap()
+                .unwrap()
+                .execution_paused_until_unix_ms
+                .is_some()
+        );
+
+        // The older member keeps every claim it knows, holds the wait as an unknown record, and
+        // never applies it, so it does not stop the clock until it is upgraded.
+        let later = note(&current, "A known claim after the wait");
+        let admission = sync(&current, &older);
+        assert_eq!(admission.unknown, 1);
+        assert_eq!(admission.invalid, 0);
+        assert!(!admitted(&older, &waiting));
+        assert!(admitted(&older, &later));
+        let held = older.step_run(&step).unwrap().unwrap();
+        assert_eq!(held.execution_paused_until_unix_ms, None);
+        assert_eq!(held.execution_waited_ms, 0);
+        let local = note(&older, "The older member can still write known claims");
+        sync(&older, &current);
+        assert!(admitted(&current, &local));
+        let before = older.replication_status(true, Some(FLEET), &[]).unwrap();
+        let source = current.replication_status(true, Some(FLEET), &[]).unwrap();
+        assert_eq!(before.waiting_claims, 1);
+        assert_eq!(before.invalid_records, 0);
+        assert_eq!(before.unhealthy_projections, 0);
+        assert_eq!(before.authority_digest, source.authority_digest);
+        assert_eq!(
+            older.replica_records(true).unwrap()[0].error_code.as_deref(),
+            Some("unknown-claim-field")
+        );
+        drop(older);
+
+        // Upgrading retries the held claim with the new registry and converges on the same graph.
+        let upgraded = Store::open(&path, "older").unwrap();
+        upgraded.set_member_key(Some(older_key)).unwrap();
+        upgraded.validate_replication_backlog().unwrap();
+        upgraded.apply_replication_repairs().unwrap();
+        upgraded.project_replication_backlog().unwrap();
+        let after = upgraded.replication_status(true, Some(FLEET), &[]).unwrap();
+        assert_eq!(after.waiting_claims, 0);
+        assert_eq!(after.authority_digest, before.authority_digest);
+        assert_eq!(after.graph_digest, source.graph_digest);
+        assert_eq!(after.projection_digests, source.projection_digests);
+        let learned = upgraded.claim_by_id(&waiting.id).unwrap().unwrap();
+        assert_eq!(learned.body, waiting.body);
+        let view = upgraded.step_run(&step).unwrap().unwrap();
+        assert!(view.execution_paused_until_unix_ms.is_some());
+        assert_eq!(view.blocked_reason.as_deref(), Some("build slot"));
     }
 
     #[test]
@@ -29471,18 +29838,30 @@ fn try_project_simple_replication_tx(
         }
     }
     // Event-only claims do not change the structural graph. Their operation
-    // registry can advance with the frontier, but ambiguous IDs still use the
-    // canonical full replay so conflict selection remains deterministic.
+    // registry can advance with the frontier. Message sends reconcile an ambiguous
+    // receipt from that operation's indexed history, using the full replay's reducer.
+    // Other kinds retain the full replay guard for ambiguous IDs.
+    let mut reconciled_message_operations = BTreeSet::new();
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
         };
+        if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
+            continue;
+        }
         if let Some((stored_digest, _, state)) =
             operation_tx(transaction, operation_id).map_err(|error| {
                 incremental_claim_error(internal(error), claim, "operation-registry")
             })?
             && (stored_digest != request_digest || state != "active")
         {
+            if claim.kind == "message.sent" {
+                repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
+                    incremental_claim_error(internal(error), claim, "operation-registry")
+                })?;
+                reconciled_message_operations.insert(operation_id.to_owned());
+                continue;
+            }
             crate::profile::note("replay: operation-conflict");
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason: "operation-conflict",
@@ -29854,6 +30233,7 @@ fn replay_graph_from_nothing_with_progress_tx(
     stage("full-replay/arrangements");
     arrangements::rebuild(transaction).map_err(internal)?;
     stage("full-replay/flush");
+    publication_facts::reset(transaction).map_err(internal)?;
     Ok(())
 }
 
@@ -32392,6 +32772,8 @@ fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
         claim_expires_at_unix_ms: lease.and_then(|value| value.parse().ok()),
         carried_claimant: None,
         execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
         execution_elapsed_ms: 0,
         timeout_ms: None,
         timeout_extension_ms: 0,
@@ -32451,15 +32833,17 @@ fn enrich_step_queue_at(
     #[cfg(test)]
     STEPS_ENRICHED.with(|enriched| enriched.set(enriched.get() + 1));
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
-    let (execution_started_at_unix_ms, execution_elapsed_ms) = step_execution_timing_at(
+    let timing = step_execution_clock_at(
         connection,
         &view.subject,
         view.attempt,
         snapshot_unix_ms,
         matches!(view.status.as_str(), "claimed" | "working"),
     )?;
-    view.execution_started_at_unix_ms = execution_started_at_unix_ms;
-    view.execution_elapsed_ms = execution_elapsed_ms;
+    view.execution_started_at_unix_ms = timing.started;
+    view.execution_paused_until_unix_ms = timing.paused_until;
+    view.execution_waited_ms = timing.waited;
+    view.execution_elapsed_ms = timing.elapsed;
     view.timeout_extension_ms =
         step_timeout_extension_at(connection, &view.subject, view.attempt, snapshot_unix_ms)?;
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
@@ -32943,6 +33327,7 @@ fn harness_incarnation_for_key_at(
     Ok(None)
 }
 
+#[cfg(test)]
 fn step_execution_timing_at(
     connection: &Connection,
     subject: &str,
@@ -32951,6 +33336,21 @@ fn step_execution_timing_at(
     currently_active: bool,
 ) -> rusqlite::Result<(Option<u128>, u128)> {
     Ok(fold_step_timing(
+        &step_timing_events(connection, subject)?,
+        attempt,
+        snapshot_unix_ms,
+        currently_active,
+    ))
+}
+
+fn step_execution_clock_at(
+    connection: &Connection,
+    subject: &str,
+    attempt: u32,
+    snapshot_unix_ms: u128,
+    currently_active: bool,
+) -> rusqlite::Result<StepTiming> {
+    Ok(fold_step_clock(
         &step_timing_events(connection, subject)?,
         attempt,
         snapshot_unix_ms,
@@ -33006,6 +33406,32 @@ fn step_timing_events(
         .collect())
 }
 
+/// A step's execution timing as of one snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StepTiming {
+    /// The start of the interval that is running now.
+    pub started: Option<u128>,
+    /// What earlier intervals and the running one have used.
+    pub elapsed: u128,
+    /// When a declared wait ends on its own, while the clock is stopped for one.
+    pub paused_until: Option<u128>,
+    /// The time this attempt has spent in declared waits so far, a wait still running included.
+    pub waited: u128,
+}
+
+/// Close the wait that began at `pause_started` and add what it spent to `waited`.
+fn end_wait(
+    waited: &mut u128,
+    pause_started: &mut Option<u128>,
+    paused_until: &mut Option<u128>,
+    at: u128,
+) {
+    if let Some(began) = pause_started.take() {
+        *waited = waited.saturating_add(at.saturating_sub(began));
+    }
+    *paused_until = None;
+}
+
 /// Fold a step's execution timing from its step and work events in canonical order: the active
 /// interval of `attempt` as of `snapshot_unix_ms`, and the time elapsed in earlier intervals.
 /// An interval closes when the next event arrives after its lease expiry. The checkpoint
@@ -33016,8 +33442,28 @@ pub(crate) fn fold_step_timing(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> (Option<u128>, u128) {
-    let (mut started, mut elapsed, lease_expires) =
-        fold_step_timing_open(events, attempt, snapshot_unix_ms);
+    let timing = fold_step_clock(events, attempt, snapshot_unix_ms, currently_active);
+    (timing.started, timing.elapsed)
+}
+
+/// [`fold_step_timing`] with the end of a declared wait. A `work.progress` record with
+/// `clock: "paused"` closes the running interval and stops the clock until a record with
+/// `clock: "running"` reopens it, or until its `wait_until_unix_ms`, whichever comes first, so a
+/// seat that never resumes cannot hide a hung step. Renewals and ordinary progress during a wait
+/// keep the lease and leave the clock stopped.
+pub(crate) fn fold_step_clock(
+    events: &[(String, Value, u128)],
+    attempt: u32,
+    snapshot_unix_ms: u128,
+    currently_active: bool,
+) -> StepTiming {
+    let ClockFold {
+        mut started,
+        mut elapsed,
+        lease_expires,
+        paused_until,
+        waited,
+    } = fold_step_clock_open(events, attempt, snapshot_unix_ms);
     if let Some(interval_start) = started {
         let interval_end =
             lease_expires.map_or(snapshot_unix_ms, |expiry| snapshot_unix_ms.min(expiry));
@@ -33029,7 +33475,12 @@ pub(crate) fn fold_step_timing(
             started = None;
         }
     }
-    (started, elapsed)
+    StepTiming {
+        started,
+        elapsed,
+        paused_until: paused_until.filter(|_| currently_active),
+        waited,
+    }
 }
 
 /// [`fold_step_timing`]'s events folded up to `snapshot_unix_ms`: the open interval's start,
@@ -33039,9 +33490,30 @@ fn fold_step_timing_open(
     attempt: u32,
     snapshot_unix_ms: u128,
 ) -> (Option<u128>, u128, Option<u128>) {
+    let fold = fold_step_clock_open(events, attempt, snapshot_unix_ms);
+    (fold.started, fold.elapsed, fold.lease_expires)
+}
+
+/// The events folded up to the snapshot, before the interval that is running is settled.
+struct ClockFold {
+    started: Option<u128>,
+    elapsed: u128,
+    lease_expires: Option<u128>,
+    paused_until: Option<u128>,
+    waited: u128,
+}
+
+fn fold_step_clock_open(
+    events: &[(String, Value, u128)],
+    attempt: u32,
+    snapshot_unix_ms: u128,
+) -> ClockFold {
     let mut elapsed = 0_u128;
     let mut started = None;
     let mut lease_expires = None;
+    let mut paused_until: Option<u128> = None;
+    let mut pause_started: Option<u128> = None;
+    let mut waited = 0_u128;
     for (kind, body, accepted) in events {
         let accepted = *accepted;
         if accepted > snapshot_unix_ms {
@@ -33054,6 +33526,13 @@ fn fold_step_timing_open(
             continue;
         }
 
+        // A wait ends at its deadline whether or not anyone resumed.
+        if let Some(deadline) = paused_until
+            && accepted > deadline
+        {
+            started = Some(deadline);
+            end_wait(&mut waited, &mut pause_started, &mut paused_until, deadline);
+        }
         if let (Some(interval_start), Some(expiry)) = (started, lease_expires)
             && accepted > expiry
         {
@@ -33072,12 +33551,15 @@ fn fold_step_timing_open(
                 // Agentless execution has no `work.claimed` event. Its reconciler-owned
                 // `working` transition is therefore the authoritative opening edge. Worker
                 // claims may also carry this projection; keeping the earliest edge is
-                // idempotent and their following work event supplies the lease.
-                if started.is_none() {
+                // idempotent and their following work event supplies the lease. A declared
+                // wait keeps the clock stopped.
+                if started.is_none() && paused_until.is_none() {
                     started = Some(accepted);
                 }
             }
             "work.claimed" => {
+                // A new claim ends any wait the previous holder declared.
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
                 if started.is_none() {
                     started = Some(accepted);
                 }
@@ -33096,6 +33578,7 @@ fn fold_step_timing_open(
                         .get("claimant")
                         .is_some_and(|claimant| !claimant.is_null()) =>
             {
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
                 if started.is_none() {
                     started = Some(accepted);
                 }
@@ -33104,7 +33587,40 @@ fn fold_step_timing_open(
                     .and_then(Value::as_u64)
                     .map(u128::from);
             }
-            "work.renewed" | "work.progress" | "work.extended" if started.is_some() => {
+            "work.renewed" | "work.progress" | "work.extended"
+                if started.is_some() || paused_until.is_some() =>
+            {
+                let clock = if kind == "work.progress" {
+                    fields.get("clock").and_then(Value::as_str)
+                } else {
+                    None
+                };
+                let wait_until = fields
+                    .get("wait_until_unix_ms")
+                    .and_then(Value::as_u64)
+                    .map(u128::from)
+                    .filter(|deadline| *deadline > accepted);
+                match (clock, wait_until) {
+                    (Some("paused"), Some(deadline)) => {
+                        // Declaring again while a wait runs spends the time so far and starts
+                        // the next span, so chained declarations draw on one budget.
+                        end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
+                        pause_started = Some(accepted);
+                        if let Some(interval_start) = started {
+                            let interval_end =
+                                lease_expires.map_or(accepted, |expiry| accepted.min(expiry));
+                            elapsed = elapsed
+                                .saturating_add(interval_end.saturating_sub(interval_start));
+                        }
+                        started = None;
+                        paused_until = Some(deadline);
+                    }
+                    (Some("running"), _) if paused_until.is_some() => {
+                        end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
+                        started = Some(accepted);
+                    }
+                    _ => {}
+                }
                 lease_expires = fields
                     .get("claim_expires_at_unix_ms")
                     .and_then(Value::as_u64)
@@ -33118,6 +33634,7 @@ fn fold_step_timing_open(
                 }
                 started = None;
                 lease_expires = None;
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
             }
             "step-run.state"
                 if fields
@@ -33132,11 +33649,28 @@ fn fold_step_timing_open(
                 }
                 started = None;
                 lease_expires = None;
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
             }
             _ => {}
         }
     }
-    (started, elapsed, lease_expires)
+
+    if let Some(deadline) = paused_until
+        && snapshot_unix_ms > deadline
+    {
+        started = Some(deadline);
+        end_wait(&mut waited, &mut pause_started, &mut paused_until, deadline);
+    }
+    if let Some(began) = pause_started {
+        waited = waited.saturating_add(snapshot_unix_ms.saturating_sub(began));
+    }
+    ClockFold {
+        started,
+        elapsed,
+        lease_expires,
+        paused_until,
+        waited,
+    }
 }
 
 fn apply_effective_step_state(
@@ -34154,15 +34688,17 @@ fn mission_run_view_with_enrichment_tx(
             enrich_step_queue(connection, step)?;
         } else {
             enrich_step_queue_for_reconcile_at(connection, step, now_ms())?;
-            let (started, elapsed) = step_execution_timing_at(
+            let timing = step_execution_clock_at(
                 connection,
                 &step.subject,
                 step.attempt,
                 now_ms(),
                 matches!(step.status.as_str(), "claimed" | "working"),
             )?;
-            step.execution_started_at_unix_ms = started;
-            step.execution_elapsed_ms = elapsed;
+            step.execution_started_at_unix_ms = timing.started;
+            step.execution_paused_until_unix_ms = timing.paused_until;
+            step.execution_waited_ms = timing.waited;
+            step.execution_elapsed_ms = timing.elapsed;
             step.timeout_extension_ms =
                 step_timeout_extension_at(connection, &step.subject, step.attempt, now_ms())?;
         }
@@ -39729,6 +40265,7 @@ version 2
             );
         }
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -41662,6 +42199,7 @@ version 2
                     &step,
                     action,
                     &WorkRequest {
+                        wait_ms: None,
                         actor: Some("agent/worker.one".into()),
                         incarnation: Some("worker-generation".into()),
                         summary: Some("the remote work is complete".into()),
@@ -41749,6 +42287,7 @@ version 2
                 step,
                 action,
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/worker.one".into()),
                     incarnation: Some("worker-generation".into()),
                     summary: summary.map(str::to_owned),
@@ -41766,6 +42305,7 @@ version 2
                 step,
                 "extend",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/worker.one".into()),
                     incarnation: Some("worker-generation".into()),
                     summary: None,
@@ -42480,7 +43020,7 @@ version 2
         // here. Retain the real v5 rule identity when constructing its historical certificate.
         plan.rules_digest = legacy_digest;
         for node in [&controller, &worker] {
-            node.publish_verification(&checkpoint, &terms, &plan, &proof)
+            node.publish_verification(&checkpoint, &terms, &smallclaims::store::checkpoint_staging::StagedPlan::of(&plan), &proof)
                 .unwrap();
         }
         assert!(!projection_replayed(&controller, "worker", &worker));
@@ -42763,6 +43303,7 @@ version 2
         for working in [false, true] {
             let (controller, worker, step) = replicated_step_pair();
             let request = |reason: Option<&str>, key: &str| WorkRequest {
+                wait_ms: None,
                 actor: Some("agent/worker.one".into()),
                 incarnation: Some("worker-generation".into()),
                 summary: None, reason: reason.map(str::to_owned), evidence: Vec::new(),
@@ -46549,7 +47090,7 @@ version 2
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, smallclaims::store::CURRENT_SCHEMA_VERSION);
         assert_eq!(planner_column, 1);
     }
 
@@ -48004,6 +48545,7 @@ version 2
             "a closed wake must not leave an overdue reconcile deadline"
         );
         let request = |incarnation: &str, key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some(incarnation.into()),
             summary: None,
@@ -48013,6 +48555,7 @@ version 2
         };
 
         let missing = WorkRequest {
+            wait_ms: None,
             incarnation: None,
             ..request("one", "claim-without-incarnation")
         };
@@ -48165,6 +48708,7 @@ version 2
         assert_eq!(waiting.timeout_ms, Some(3_600_000));
 
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/source.worker".into()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -48269,6 +48813,7 @@ mission "external-blocker" state="ready" {
         let subject = run.steps[0].subject.clone();
         store.set_step_state(&subject, "ready", None).unwrap();
         let request = |key: &str, reason: Option<&str>| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/source.ios-owner".into()),
             incarnation: Some("ios-owner-one".into()),
             summary: None,
@@ -48388,6 +48933,7 @@ version 2
             .map(|step| (step.step.clone(), step.subject.clone()))
             .collect::<BTreeMap<_, _>>();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/source.worker".into()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -48759,6 +49305,7 @@ version 2
                 &step,
                 "claim",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.worker".into()),
                     incarnation: Some("worker-one".into()),
                     summary: None,
@@ -49126,6 +49673,7 @@ mission "dispatch-repair" state="ready" {
             .find(|step| step.step == "compile/work/publish")
             .unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.planner".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -49221,6 +49769,7 @@ mission "nested-work" state="ready" {
             .find(|step| step.step == "outer/work/first")
             .unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -49295,6 +49844,7 @@ mission "nested-work" state="ready" {
         let subject = &run.steps[0].subject;
         store.set_step_state(subject, "ready", None).unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -51109,6 +51659,7 @@ mission "retry" state="ready" {
             .unwrap();
         let subject = &run.steps[0].subject;
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -51499,6 +52050,7 @@ mission "takeover" state="ready" {
                 &step,
                 "renew",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/worker.one".into()),
                     incarnation: Some("worker-generation".into()),
                     summary: None,
@@ -52860,6 +53412,7 @@ mission "summaries" state="ready" {
             .unwrap();
         let subject = &run.steps[0].subject;
         let request = |key: &str, summary: Option<&str>| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: summary.map(str::to_owned),
@@ -53086,6 +53639,7 @@ version 2
             .clone();
         store.set_step_state(&submitted, "ready", None).unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some(worker.clone()),
             incarnation: Some("worker-one".into()),
             summary: Some("the result is ready for verification".into()),
@@ -53188,6 +53742,7 @@ version 2
             .clone();
         store.set_step_state(&active, "ready", None).unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some(worker.clone()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -53296,6 +53851,7 @@ version 2
         assert_eq!(carried.claimant.as_deref(), Some(worker.as_str()));
         assert_eq!(carried.claim_incarnation.as_deref(), Some("worker-one"));
         let stranger = WorkRequest {
+            wait_ms: None,
             actor: Some(format!("agent/{}/stranger", run.id)),
             ..request("stale-generation-complete")
         };
@@ -53425,6 +53981,7 @@ version 2
 
     fn carry_request(incarnation: &str, key: &str) -> WorkRequest {
         WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some(incarnation.into()),
             summary: None,
@@ -53987,6 +54544,7 @@ version 2
             .set_step_state(&waiting.subject, "ready", None)
             .unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some(worker.clone()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -53995,6 +54553,7 @@ version 2
             idempotency_key: key.into(),
         };
         let child_request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -54216,6 +54775,7 @@ version 2
                     .subject,
                 "claim",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.worker".into()),
                     incarnation: Some("worker-incarnation".into()),
                     summary: None,
@@ -56590,6 +57150,90 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         );
     }
 
+    /// A driver writes each prompt as its own transition, so a later prompt for the same tool is
+    /// another prompt: an answer to it never reaches the earlier prompt's waiter. A restatement
+    /// of the same transition, or a credential edge, is still the same prompt.
+    #[test]
+    fn a_later_prompt_for_the_same_tool_is_another_prompt() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "two-prompts", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "harness.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let waiting = |transition: u64, auth: Value| {
+            json!({"state":"working", "driver":"codex", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"permission", "reason":"commandExecution",
+                "provider_auth": auth, "ownership_sequence":1, "transition_sequence":transition})
+        };
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: serde_json::from_value(json!({"status":"running", "incarnation_id":"one"}))
+                    .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        append(waiting(3, Value::Null));
+        // Restated: the same prompt.
+        append(waiting(3, Value::Null));
+        assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Open);
+        // A credential edge moves the transition without a new prompt.
+        let restated = append(waiting(4, json!(true)));
+        store
+            .answer_native_prompt(seat, &restated.id, "allow", "person/avery")
+            .unwrap();
+        assert_eq!(
+            store.native_prompt_state(seat, 1, 3).unwrap(),
+            NativePromptState::Answered {
+                answer: "allow".into()
+            }
+        );
+        // The next request is its own transition: its answer is never the earlier waiter's.
+        let next = append(waiting(5, json!(true)));
+        store
+            .answer_native_prompt(seat, &next.id, "deny", "person/avery")
+            .unwrap();
+        assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
+        assert_eq!(
+            store.native_prompt_state(seat, 1, 5).unwrap(),
+            NativePromptState::Answered {
+                answer: "deny".into()
+            }
+        );
+    }
+
     /// A Codex approval prompt is answered the same way. The answer names the Codex driver, whose
     /// control connection reads it and answers the app-server; a Codex question stays terminal-only.
     #[test]
@@ -56635,18 +57279,35 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
                 .find(|item| item.kind == "harness-prompt")
         };
         append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
-        // The driver waits on the observation its approval wrote, named by the record's sequences.
-        let asked = append(
+        // A wait the driver knows only from the thread's flag has no request st could answer.
+        let flagged = append(
             "harness.observed",
             json!({"state":"working", "driver":"codex", "incarnation_id":"one",
                 "blocked_on":"human", "ask":"permission", "reason":"waitingOnApproval",
+                "ownership_sequence":1, "transition_sequence":2}),
+        );
+        assert!(prompt().unwrap().answers.is_empty());
+        assert!(prompt().unwrap().detail.contains("did not see requested"));
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &flagged.id, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "stale-fence"
+        );
+        // The driver waits on the observation its approval wrote, named by the record's sequences,
+        // and the observation names what the request asks to do.
+        let asked = append(
+            "harness.observed",
+            json!({"state":"working", "driver":"codex", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"permission", "reason":"commandExecution",
                 "ownership_sequence":1, "transition_sequence":3}),
         );
         assert_eq!(
             prompt().unwrap().answers,
             vec!["allow".to_owned(), "deny".to_owned()]
         );
-        assert!(prompt().unwrap().detail.starts_with("Codex asks for approval;"));
+        assert!(prompt().unwrap().detail.starts_with("Codex asks to run a command;"));
         assert_eq!(
             store.native_prompt_state(seat, 1, 3).unwrap(),
             NativePromptState::Open
@@ -56671,9 +57332,10 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         append(
             "harness.observed",
             json!({"state":"working", "driver":"codex", "incarnation_id":"one",
-                "blocked_on":"human", "ask":"permission", "reason":"waitingOnApproval",
+                "blocked_on":"human", "ask":"permission", "reason":"fileChange",
                 "ownership_sequence":1, "transition_sequence":5}),
         );
+        assert!(prompt().unwrap().detail.starts_with("Codex asks to change files;"));
         assert_eq!(
             store.native_prompt_state(seat, 1, 3).unwrap(),
             NativePromptState::Gone

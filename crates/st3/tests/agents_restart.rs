@@ -26,6 +26,15 @@ struct Runtime {
     snapshot_unavailable: Mutex<bool>,
 }
 impl RuntimeControl for Runtime {
+    fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.starts.lock().unwrap().iter().enumerate()
+            .find(|(index, member)| member.runtime_id == id && incarnation == format!("fixture:{}", index + 1))
+            .and_then(|(_, member)| member.tags.get("st3.start-operation").cloned()))
+    }
+    fn start_operation_closed(&self, _: &MemberSpec) -> anyhow::Result<bool> {
+        // Rejected fixture starts create neither a runtime nor a detached producer.
+        Ok(true)
+    }
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<RuntimeObservation>> {
         anyhow::ensure!(!*self.snapshot_unavailable.lock().unwrap(), "fixture snapshot unavailable");
         Ok(self
@@ -283,10 +292,13 @@ impl Fixture {
         })
     }
     async fn request(&self, subject: &str, key: &str) -> ClaimRecord {
+        self.request_as(subject, key, "person/avery").await
+    }
+    async fn request_as(&self, subject: &str, key: &str, actor: &str) -> ClaimRecord {
         self.client()
             .post(
                 "/v1/agents/restart",
-                &json!({"subject": subject, "actor":"person/avery", "idempotency_key":key}),
+                &json!({"subject": subject, "actor":actor, "idempotency_key":key}),
             )
             .await
             .unwrap()
@@ -1250,7 +1262,20 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     let starts = fixture.runtime.starts.lock().unwrap().clone();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[0].workspace, starts[1].workspace);
-    assert_eq!(starts[0].environment, starts[1].environment);
+    let environments: Vec<_> = starts
+        .iter()
+        .map(|member| {
+            let mut environment = member.environment.clone();
+            let operation = environment.remove("ST3_START_OPERATION").unwrap();
+            assert_eq!(member.tags.get("st3.start-operation"), Some(&operation));
+            environment
+        })
+        .collect();
+    assert_ne!(
+        starts[0].environment["ST3_START_OPERATION"], starts[1].environment["ST3_START_OPERATION"],
+        "each physical launch must retain its own operation identity"
+    );
+    assert_eq!(environments[0], environments[1]);
     // Once started again, the seat is the run's own: a restarted daemon keeps it running.
     let daemon = restarted_daemon(&fixture);
     for _ in 0..3 {
@@ -1946,7 +1971,7 @@ fn reconcile_ready(fixture: &Fixture, daemon: &Reconciler<Runtime>, subject: &st
     }
 }
 
-async fn parked_retry_succeeds(driver: &str) {
+async fn parked_retry_succeeds(driver: &str, actor: &str) {
     let (fixture, subject) = Fixture::launching(
         Shape::TopLevel,
         &format!("harness {driver:?} {{ model \"example-model\"; }}"),
@@ -1963,7 +1988,7 @@ async fn parked_retry_succeeds(driver: &str) {
     let daemon = restarted_daemon(&fixture);
     reconcile_ready(&fixture, &daemon, &subject);
     assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1);
-    let first = fixture.request(&subject, "parked-first").await;
+    let first = fixture.request_as(&subject, "parked-first", actor).await;
     reconcile_ready(&fixture, &daemon, &subject);
     assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
     let result = restart_result(&fixture, &first);
@@ -1983,12 +2008,12 @@ async fn parked_retry_succeeds(driver: &str) {
         );
     }
     // Neither API replay nor another daemon grants the first request a second attempt.
-    assert_eq!(fixture.request(&subject, "parked-first").await.id, first.id);
+    assert_eq!(fixture.request_as(&subject, "parked-first", actor).await.id, first.id);
     hang_up(&fixture);
     let daemon = restarted_daemon(&fixture);
     reconcile_ready(&fixture, &daemon, &subject);
     assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
-    let second = fixture.request(&subject, "parked-second").await;
+    let second = fixture.request_as(&subject, "parked-second", actor).await;
     reconcile_ready(&fixture, &daemon, &subject);
     assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 3);
     assert_eq!(
@@ -2003,17 +2028,17 @@ async fn parked_retry_succeeds(driver: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_explicit_person_restart_retries_a_parked_omp_seat_once() {
-    parked_retry_succeeds("omp").await;
+    parked_retry_succeeds("omp", "person/avery").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parked_restart_keeps_the_native_session() {
-    parked_retry_succeeds("claude").await;
+    parked_retry_succeeds("claude", "person/avery").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_explicit_person_restart_retries_a_parked_codex_seat_once() {
-    parked_retry_succeeds("codex").await;
+    parked_retry_succeeds("codex", "person/avery").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2100,27 +2125,150 @@ async fn a_failed_explicit_retry_is_completed_parked_and_visible_until_a_new_req
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_agent_restart_request_cannot_bypass_an_automatic_park() {
-    let (fixture, subject) = Fixture::launching(
-        Shape::TopLevel,
-        r#"harness "omp" { model "example-model"; }"#,
-        "always",
-    )
-    .await;
-    hang_up(&fixture);
-    park(&fixture, &subject, "omp");
-    let _: ClaimRecord = fixture.client().post("/v1/agents/restart", &json!({
-        "subject": subject, "actor": "agent/example/operator", "idempotency_key": "agent-retry",
-    })).await.unwrap();
-    reconcile_ready(&fixture, &fixture.reconciler, &subject);
-    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1);
-    let person = fixture.request(&subject, "person-retry").await;
-    reconcile_ready(&fixture, &fixture.reconciler, &subject);
-    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
-    assert_eq!(
-        restart_result(&fixture, &person).kind,
-        "runtime.action.succeeded"
-    );
+async fn distinct_failed_agent_restarts_each_spend_one_attempt_and_stay_parked() {
+    for driver in ["codex", "omp"] {
+        for actor in ["agent/example/operator", "agent/example/worker"] {
+            let (fixture, subject) = Fixture::launching(
+                Shape::TopLevel,
+                &format!("harness {driver:?} {{ model \"example-model\"; }}"),
+                "always",
+            )
+            .await;
+            hang_up(&fixture);
+            park(&fixture, &subject, driver);
+            *fixture.runtime.refuse_start.lock().unwrap() = true;
+            for attempt in 1..=3 {
+                let key = format!("agent-refused-{attempt}");
+                let request = fixture.request_as(&subject, &key, actor).await;
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                let failed = restart_result(&fixture, &request);
+                assert_eq!(failed.kind, "runtime.action.failed");
+                assert_eq!(failed.actor.as_deref(), Some(actor));
+                assert_eq!(failed.body["evidence"][0], request.id);
+                assert!(
+                    failed.body["fields"]["reason"]
+                        .as_str()
+                        .unwrap()
+                        .contains("parked again")
+                );
+                assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempt + 1);
+                assert!(
+                    fixture
+                        .store
+                        .member_reconcile_fault(&subject, None)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    fixture
+                        .store
+                        .fault_snapshot(smallclaims::store::now_ms())
+                        .unwrap()
+                        .iter()
+                        .any(|fault| fault.item.subject == subject),
+                    "a failed retry must retain its actionable parked-seat fault"
+                );
+                // Quiet passes and replay have no new operation identity to spend.
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                assert_eq!(
+                    fixture.request_as(&subject, &key, actor).await.id,
+                    request.id
+                );
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                let daemon = restarted_daemon(&fixture);
+                reconcile_ready(&fixture, &daemon, &subject);
+                assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempt + 1);
+                assert_eq!(restart_result(&fixture, &request).id, failed.id);
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_agent_can_explicitly_retry_itself_once() {
+    parked_retry_succeeds("codex", "agent/example/worker").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_agent_restart_retries_a_parked_omp_seat_once() {
+    parked_retry_succeeds("omp", "agent/example/operator").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_agent_restart_retries_a_parked_codex_seat_once() {
+    parked_retry_succeeds("codex", "agent/example/operator").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_agent_restart_keeps_the_parked_native_session() {
+    parked_retry_succeeds("claude", "agent/example/operator").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_agent_restart_reports_refusal_promptly_and_retries_after_correction() {
+    for driver in ["codex", "omp"] {
+        let (fixture, subject) = Fixture::launching(
+            Shape::TopLevel,
+            &format!("harness {driver:?} {{ model \"example-model\"; }}"),
+            "always",
+        )
+        .await;
+        let declaration = fixture.store.desired_subject_with_writer(&subject).unwrap();
+        hang_up(&fixture);
+        park(&fixture, &subject, driver);
+        *fixture.runtime.refuse_start.lock().unwrap() = true;
+        let drive = fixture.drive();
+        // A refused explicit operation must settle by its own outcome, not by the
+        // long caller timeout or an old incarnation's fault. All paths are private.
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            cli(
+                &fixture.root.path().join("st3.sock"),
+                &subject,
+                "agent/example/operator",
+                "30s",
+            ),
+        )
+        .await
+        .expect("the refused restart waited for its 30-second timeout");
+        drive.abort();
+        let _ = drive.await;
+        assert!(!output.status.success(), "{output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("fixture rejected launch"), "{error}");
+        assert!(!error.contains("within 30s"), "{error}");
+        let request = fixture
+            .store
+            .claims_for(&subject, Some("runtime.action.requested"))
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body["fields"]["action"] == "restart")
+            .unwrap();
+        let failed = restart_result(&fixture, &request);
+        assert_eq!(failed.kind, "runtime.action.failed");
+        assert_eq!(failed.actor, request.actor);
+        assert_eq!(failed.body["evidence"][0], request.id);
+        assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+        *fixture.runtime.refuse_start.lock().unwrap() = false;
+        // Repairing setup alone is not an automatic retry or a second attempt.
+        reconcile_ready(&fixture, &fixture.reconciler, &subject);
+        assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+        let retry = fixture
+            .request_as(&subject, "fixed", "agent/example/operator")
+            .await;
+        reconcile_ready(&fixture, &fixture.reconciler, &subject);
+        assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 3);
+        assert_eq!(
+            restart_result(&fixture, &retry).kind,
+            "runtime.action.succeeded"
+        );
+        assert_eq!(
+            serde_json::to_value(declaration).unwrap(),
+            serde_json::to_value(fixture.store.desired_subject_with_writer(&subject).unwrap())
+                .unwrap()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2303,4 +2451,51 @@ agent "example/worker" {{
             .unwrap(),
         None
     );
+}
+
+/// A seat writes its handoff and reads it back through the CLI; a later write replaces it and the
+/// first version stays in the document's history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_writes_and_reads_its_handoff_through_the_cli() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::new(false).await;
+    let socket = fixture.root.path().join("st3.sock");
+    let none = st(&socket, &["agents", "handoff", "show", &subject]).await;
+    assert!(!none.status.success());
+    assert!(String::from_utf8_lossy(&none.stderr).contains("has written no handoff"));
+
+    let file = fixture.root.path().join("handoff.md");
+    std::fs::write(&file, "PR 12 is open.\n").unwrap();
+    let written = succeeded(
+        &st(
+            &socket,
+            &["agents", "handoff", "write", file.to_str().unwrap(), "--as", &subject],
+        )
+        .await,
+    );
+    assert!(written.starts_with("doc/agents/example/worker/handoff@"), "{written}");
+    assert_eq!(
+        succeeded(&st(&socket, &["agents", "handoff", "show", &subject]).await),
+        "PR 12 is open.\n"
+    );
+
+    std::fs::write(&file, "PR 12 merged.\n").unwrap();
+    succeeded(
+        &st(
+            &socket,
+            &["agents", "handoff", "write", file.to_str().unwrap(), "--as", &subject],
+        )
+        .await,
+    );
+    assert_eq!(
+        succeeded(&st(&socket, &["agents", "handoff", "show", &subject]).await),
+        "PR 12 merged.\n"
+    );
+    let versions = fixture
+        .store
+        .list_documents(Some("doc/agents/example/worker/handoff"), true, 10)
+        .unwrap();
+    assert_eq!(versions.len(), 2, "{versions:?}");
 }

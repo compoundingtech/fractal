@@ -149,16 +149,16 @@ pub fn run_controlled_paths(
         "Claude driver '{runtime_id}' has no provider argv"
     );
     let mut claude_argv = claude_argv;
+    let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     if let Some(mode) = crate::access::AccessMode::from_environment()? {
         let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
         let explicit_permissions = claude_argv[1..boundary].iter().any(|arg| {
             matches!(arg.as_str(), "--dangerously-skip-permissions" | "--permission-mode")
                 || arg.starts_with("--permission-mode=")
         });
-        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions));
+        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions, &workspace));
     }
     let claude_argv = prepare_st3_channel_argv(&paths.root, &identity, claude_argv)?;
-    let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
     install_signal_handler();
@@ -1401,11 +1401,17 @@ fn observe_payload(
         // Responses are read from the transcript at Stop, so the account is read here too: the
         // one this Claude config is signed in to when its responses are recorded.
         timeline.set_account(crate::account::claude_account_cached(agent_dir));
-        if let Some(home) = var("HOME") {
+        // The transcripts live in the config directory the session runs on, which a seat on a
+        // declared account's login sets itself.
+        let claude_config = var("CLAUDE_CONFIG_DIR")
+            .filter(|directory| !directory.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| var("HOME").map(|home| Path::new(&home).join(".claude")));
+        if let Some(claude_config) = claude_config {
             if let Err(error) = crate::harness_timeline::observe_claude_stop_transcript(
                 &mut timeline,
                 &payload,
-                Path::new(&home),
+                &claude_config,
             ) {
                 tracing::warn!("st claude-observe: native answer publication failed: {error:#}");
             }
@@ -2103,6 +2109,33 @@ mod tests {
             &development[3..],
             &["--channels", "plugin:other@other", "boot prompt"]
         );
+    }
+
+    #[test]
+    fn the_auto_read_rules_merge_with_authored_permission_settings() {
+        let argv = vec![
+            "claude".into(),
+            "--permission-mode".into(),
+            "auto".into(),
+            "--settings".into(),
+            crate::access::auto_read_settings(Path::new("/home/example/src/github.com/org/repo"), Some(Path::new("/home/example"))),
+            "--settings".into(),
+            serde_json::json!({"permissions":{"allow":["Bash(git status)"],"deny":["Read(./.env)"]}}).to_string(),
+            "boot".into(),
+        ];
+        let merged = merge_claude_json_settings(argv).unwrap();
+        let settings: Vec<serde_json::Value> = merged
+            .windows(2)
+            .filter(|pair| pair[0] == "--settings")
+            .map(|pair| serde_json::from_str(&pair[1]).unwrap())
+            .collect();
+        assert_eq!(settings.len(), 1, "{merged:?}");
+        assert_eq!(
+            settings[0]["permissions"]["allow"],
+            serde_json::json!(["Read(~/src/**)", "Read(//var/tmp/**)", "Read(//private/var/tmp/**)", "Read(//nix/store/**)", "Bash(git status)"])
+        );
+        let deny = settings[0]["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.contains(&serde_json::json!("Read(./.env)")) && deny.contains(&serde_json::json!("Read(~/.ssh/**)")), "{deny:?}");
     }
 
     #[test]
