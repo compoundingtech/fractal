@@ -75,6 +75,9 @@ pub struct ErrorEnvelope {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
+    RecipientRetired,
+    LifecycleUnavailable,
+    RetirementUpgradeRequired,
     NotFound,
     Forbidden,
     UnsupportedCapability,
@@ -2441,6 +2444,8 @@ pub enum ActionType {
     AgentCreate,
     #[serde(rename = "agent.stop")]
     AgentStop,
+    #[serde(rename = "agent.retire")]
+    AgentRetire,
     #[serde(rename = "agent.start")]
     AgentStart,
     #[serde(rename = "agent.suspend")]
@@ -2554,6 +2559,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::AgentResume,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn agent_retire(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: AgentRetireParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::AgentRetire,
             idempotency_key,
             fence,
             &parameters,
@@ -3436,6 +3455,13 @@ pub struct PersonAnswerRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRetireParameters {
+    pub agent: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentStopParameters {

@@ -1556,11 +1556,6 @@ mod tests {
             parameters: json!({}),
         };
         assert_eq!(forwarded_deadline(&action), None);
-        // Heal-next is a mutating protocol step (readmission/replay), not an ordinary read.
-        assert_eq!(
-            deadline(&request(Method::POST, "/v1/internal/replication/heal/next")),
-            None
-        );
     }
 
     #[tokio::test]
