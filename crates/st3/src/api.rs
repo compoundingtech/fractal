@@ -1039,6 +1039,7 @@ async fn response_envelope_unbounded(
         format!("{} {request_route}", request.method()),
         Some(caller.clone()),
     );
+    let origin = smallclaims::sqlite::telemetry::route_origin(request_method.as_str(), &request_route);
     let observation_report = request_route == "/v1/client/observations";
     // These point readers admit snapshot metadata inside their pinned read before
     // formatting it. Authentication still runs here; their response extension
@@ -1081,6 +1082,7 @@ async fn response_envelope_unbounded(
         let auth_state = state.clone();
         let transport = transport.as_str();
         let auth_profile = profile.clone();
+        let auth_origin = origin.clone();
         let admission_queue = profile.as_ref().map(|op| op.wall_span("admission/queue"));
         let mut diagnostic_queue =
             crate::relay_trace::span(crate::relay_trace::Phase::AdmissionQueue);
@@ -1092,6 +1094,7 @@ async fn response_envelope_unbounded(
             let queue_ms = admission_enqueued.elapsed().as_millis() as i64;
             let _server = server_trace.as_ref().map(|span| span.enter());
             let _entered = crate::profile::enter(auth_profile.as_ref());
+            let _origin = smallclaims::sqlite::telemetry::enter_origin(auth_origin);
             let authentication_span = crate::profile::span("admission/authenticate");
             let authenticate_started = Instant::now();
             let authentication =
@@ -1185,7 +1188,7 @@ async fn response_envelope_unbounded(
                 let queue_ms = handler_enqueued.elapsed().as_millis() as i64;
                 let _server = server_trace.as_ref().map(|span| span.enter());
                 let writer_wait = server_trace.as_ref().map(|_| {
-                    Arc::new(smallclaims::sqlite::telemetry::WriterWait::default())
+                    Arc::new(smallclaims::sqlite::telemetry::WriterWait::with_origin(origin))
                 });
                 let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait.clone());
                 if let Some(profile) = &handler_profile {

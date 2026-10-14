@@ -909,6 +909,7 @@ impl Telemetry {
             installed && telemetry.tracer_provider.is_some(),
             Ordering::Relaxed,
         );
+        smallclaims::sqlite::telemetry::init(export_enabled());
         if matches!(unit, Unit::ReplicationWorker) {
             smallclaims::sync::telemetry::init(export_enabled(), crate::otel::metrics_enabled());
         }
