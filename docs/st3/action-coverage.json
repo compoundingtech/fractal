@@ -1348,7 +1348,7 @@
     },
     {
       "command": "st missions check",
-      "description": "Run each exec gate in a mission file once, now, the way a run would, and report its answer: pass (exit 0), not yet (exit 1), broken (anything else), or unchecked",
+      "description": "Check mission and step exec gates once and report pass, not yet, broken, or unchecked; loop until scripts are listed as unchecked and run after each round",
       "tests": [
         "crates/st3/tests/broken_gates.rs::a_check_answers_for_each_gate_and_publish_refuses_a_broken_one"
       ],
@@ -1372,7 +1372,7 @@
     },
     {
       "command": "st missions publish",
-      "description": "Publish exact authored mission KDL after preview, once its exec gates pass a check",
+      "description": "Publish exact authored mission KDL after preview and check mission and step exec gates; loop until scripts run after each round",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
       ],
