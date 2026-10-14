@@ -135,6 +135,9 @@ enum Command {
     Note(directive_note::NoteArgs),
     /// Show token spend over a period, with the largest spenders first.
     Usage(UsageArgs),
+    /// List every objective and budget with its target, current value and what is left, and
+    /// explain one in plain words.
+    Slo(SloArgs),
     /// Inspect and control missions.
     ///
     /// A mission records an authorized goal, its plan, owners, verification and result.
@@ -1311,6 +1314,10 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
     Ok(())
 }
 
+fn directory_is_empty(path: &Path) -> bool {
+    fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
 async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -1339,6 +1346,7 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         .flatten()
         .filter_map(|path| path.as_str().map(PathBuf::from))
         .collect::<Vec<_>>();
+    let work_root = config.work_root().ok();
     let st2_state = state_home.join("st2");
     let st2_only_hooks = fs::read_dir(&st2_state)
         .is_ok_and(|entries| entries.flatten().all(|entry| entry.file_name() == "hooks"));
@@ -1375,13 +1383,30 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
             root.display(),
             paths.iter().filter(|path| !path.starts_with(&root)).collect::<Vec<_>>()
         );
-        paths = vec![root];
+        // The work root can lie inside the instance but holds the person's work: everything
+        // else in the instance goes and the work root stays.
+        let work = work_root.clone().unwrap_or_else(|| instance.work_dir());
+        paths = fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| !work.starts_with(path))
+                    .collect()
+            })
+            .unwrap_or_default();
     }
     paths.sort();
     paths.dedup();
     if args.dry_run {
         for path in &paths {
             println!("remove\t{}", path.display());
+        }
+        if let Some(work) = work_root.as_ref().filter(|work| !directory_is_empty(work)) {
+            println!(
+                "keep\t{}\tthe work folder: what your agents made there stays",
+                work.display()
+            );
         }
         if let Some(instance) = &instance {
             println!(
@@ -1457,12 +1482,25 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
             eprintln!("could not remove {}: {error}", path.display());
         }
     }
+    // The work folder setup created goes only while nothing is in it; `remove_dir` refuses a
+    // folder that holds anything.
+    if let Some(work) = &work_root {
+        let _ = fs::remove_dir(work.join("agents"));
+        let _ = fs::remove_dir(work);
+    }
     if let Some(instance) = &instance {
         // The directory that holds instances goes with the last one; `remove_dir` leaves it alone
         // while another instance, or anything else, is inside.
+        let _ = fs::remove_dir(instance.root());
         if let Some(parent) = instance.root().parent() {
             let _ = fs::remove_dir(parent);
         }
+    }
+    if let Some(work) = work_root.as_ref().filter(|work| work.exists()) {
+        println!(
+            "kept\t{}\tthe work folder: what your agents made there stays; remove it yourself if you want it gone",
+            work.display()
+        );
     }
     let remaining = paths
         .iter()
@@ -2276,11 +2314,17 @@ enum PtyCommand {
     Attach(PtyAttachArgs),
     /// Let fleet peers attach this host's terminals PTY to PTY over Fabric.
     ///
-    /// Fabric keeps the exposure in its own configuration and runs `st terminals serve-fabric`
-    /// for each tunnel, so an attach works while st's daemon is busy or down. Each peer also needs
-    /// a grant for the printed protocol in this machine's Fabric `peers.toml`.
+    /// Fabric keeps the exposure in its own configuration and forwards each tunnel to the st
+    /// daemon's terminal socket, which serves it on its own thread, so a busy daemon does not
+    /// delay an attach. While the daemon is stopped or restarting, as during every deploy, it
+    /// refuses new tunnels and its live remote attaches drop; `st terminals attach` reconnects
+    /// once it is back. `--exec` instead has Fabric run `st terminals serve-fabric` for each
+    /// tunnel, which works without the daemon at the cost of a process and pipes per attach.
+    /// Each peer also needs a grant for the printed protocol in this machine's Fabric
+    /// `peers.toml`.
     ExposeFabric(PtyExposeFabricArgs),
-    /// Serve one Fabric tunnel to a PTY session on stdin and stdout. Fabric runs this.
+    /// Serve one Fabric tunnel to a PTY session on stdin and stdout, as `expose-fabric --exec`
+    /// has Fabric run it.
     #[command(hide = true)]
     ServeFabric(PtyServeFabricArgs),
     /// Read one terminal's current screen without taking control.
@@ -2391,9 +2435,13 @@ struct PtyAttachArgs {
 
 #[derive(Args)]
 struct PtyExposeFabricArgs {
-    /// The st executable Fabric runs for each tunnel; defaults to this one. Name a stable path,
-    /// since Fabric keeps it after this build is replaced.
+    /// Have Fabric run `st terminals serve-fabric` for each tunnel instead of forwarding it to the
+    /// daemon's terminal socket, so attaches keep working while the daemon is down.
     #[arg(long)]
+    exec: bool,
+    /// With `--exec`, the st executable Fabric runs; defaults to this one. Name a stable path,
+    /// since Fabric keeps it after this build is replaced.
+    #[arg(long, requires = "exec")]
     st: Option<PathBuf>,
 }
 
@@ -2532,6 +2580,23 @@ struct UsageArgs {
     /// Show only this grouping; the default shows them all.
     #[arg(long, value_enum)]
     by: Option<UsageBy>,
+}
+
+#[derive(Args)]
+struct SloArgs {
+    #[command(subcommand)]
+    command: Option<SloCommand>,
+}
+
+#[derive(Subcommand)]
+enum SloCommand {
+    /// List every objective and budget: target, current value, window and what is left.
+    Ls,
+    /// Explain one objective or budget in plain words.
+    Explain {
+        /// An id from `st slo ls`, or the start of one.
+        id: String,
+    },
 }
 
 #[derive(Args)]
@@ -4004,6 +4069,16 @@ enum WorkCommand {
     Progress(WorkActionArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
+    /// Stop the execution clock while claimed work waits for something outside this seat.
+    ///
+    /// A build slot or the merge queue is waiting, not execution: the step's timeout counts
+    /// only the time it runs. The clock restarts at `work resume`, or after `--for` at the
+    /// latest, so a seat that stops answering cannot hide behind a wait. The lease still
+    /// needs its renewals.
+    Wait(WorkWaitArgs),
+    /// Start the execution clock again after `work wait`.
+    #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
+    Resume(WorkActionArgs),
     /// Finish claimed work and attach its durable evidence.
     ///
     /// Include the result, exact revision, verification and material limits. Gates can keep
@@ -4218,6 +4293,23 @@ struct WorkExtendArgs {
     #[arg(long)]
     by: String,
     /// Why the step needs more time.
+    #[arg(long)]
+    reason: String,
+}
+
+#[derive(Args)]
+struct WorkWaitArgs {
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))]
+    subject: String,
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as")]
+    actor: Option<String>,
+    #[arg(long, env = "ST3_INCARNATION")]
+    incarnation: Option<String>,
+    /// The longest the clock stays stopped, such as 30m or 4h; at most 12h.
+    #[arg(long = "for")]
+    wait_for: String,
+    /// What the step waits for, such as "build slot" or "merge queue".
     #[arg(long)]
     reason: String,
 }
@@ -5406,6 +5498,7 @@ async fn run(cli: Cli) -> Result<()> {
             directive_note::run(&endpoint, config.person.as_deref(), args, cli.json).await
         }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
+        Command::Slo(args) => run_slo(&immediate, args, cli.json).await,
         Command::Launch { command } => {
             run_launch(&client, &endpoint, command, &config.planner, cli.json).await
         }
@@ -6221,6 +6314,20 @@ mod private_gateway_tests {
     }
 }
 
+fn daemon_start_version(machine_version: &str) -> Result<&str> {
+    anyhow::ensure!(
+        machine_version.len() <= 128,
+        "daemon build identity exceeds 128 bytes; correct the compile-time build stamp"
+    );
+    Ok(
+        if machine_version == concat!(env!("CARGO_PKG_VERSION"), "+dev") {
+            env!("CARGO_PKG_VERSION")
+        } else {
+            machine_version
+        },
+    )
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let args_config = args.config.clone();
     let private_state = args.state_dir.is_some();
@@ -6377,7 +6484,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ("pid".into(), Value::from(std::process::id())),
             (
                 "version".into(),
-                Value::String(env!("CARGO_PKG_VERSION").into()),
+                Value::String(daemon_start_version(&st_drivers::version::machine_version())?.into()),
             ),
             (
                 "schema".into(),
@@ -6450,7 +6557,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_access_mode(config.active_access_mode()).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_access_mode(config.active_access_mode()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup.phase("start-services");
@@ -6541,6 +6648,28 @@ async fn run_up(args: UpArgs) -> Result<()> {
     st3::api::start_published_lists(&state);
     startup.phase("bind-listeners");
     startup_telemetry.phase("bind-listeners");
+    // Fabric forwards each terminal tunnel to this socket once `st terminals expose-fabric` names
+    // it. Without it the daemon still serves everything else, and attaches use the gateway.
+    let terminal_socket = st3::config::terminal_socket(&config.state_dir);
+    let _terminal_socket = match std::path::absolute(&state.pty_root)
+        .map_err(anyhow::Error::from)
+        .and_then(|pty_root| st3::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root))
+    {
+        Ok(service) => {
+            eprintln!(
+                "st: Fabric terminal socket listening at {}",
+                terminal_socket.display()
+            );
+            Some(service)
+        }
+        Err(error) => {
+            eprintln!(
+                "st: Fabric terminal socket {} is unavailable, so attaches from other hosts use the client gateway: {error:#}",
+                terminal_socket.display()
+            );
+            None
+        }
+    };
     let bound = std::sync::atomic::AtomicUsize::new(0);
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
@@ -6578,6 +6707,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     run_checkpoints(activation_store, context).await;
                 }
             });
+            spawn_publication_evidence(store.clone());
             startup_telemetry.serving();
             startup.serving();
             eprintln!("st: local API listening at {}", config.socket.display());
@@ -8710,34 +8840,45 @@ fn configured_fabric() -> Result<(Option<st3::fleet::transport::Fabric>, Option<
     Ok((fabric, config.fleet_id))
 }
 
-/// `st terminals expose-fabric`: have this machine's Fabric serve the fleet's PTY sessions.
+/// `st terminals expose-fabric`: have this machine's Fabric forward the fleet's PTY protocol to
+/// the st daemon's terminal socket, or with `--exec` run `st terminals serve-fabric` for each
+/// tunnel.
 async fn expose_fabric(config: &Config, args: PtyExposeFabricArgs) -> Result<()> {
     let (fabric, fleet_id) = configured_fabric()?;
     let fleet_id =
         fleet_id.context("this machine is in no fleet, so no peer can attach its terminals")?;
     let fabric = fabric.context("`fabric` is not on PATH")?;
-    let st = match args.st {
-        Some(st) => std::path::absolute(st)?,
-        None => std::env::current_exe().context("find this st executable")?,
-    };
-    let pty_root = std::path::absolute(
-        config
-            .pty_root
-            .clone()
-            .unwrap_or_else(|| config.state_dir.join("pty")),
-    )?;
     let protocol = st3::terminal_fabric::protocol(&fleet_id);
-    let (st, pty_root) = (st.display().to_string(), pty_root.display().to_string());
-    let argv = [
-        st.as_str(),
-        "terminals",
-        "serve-fabric",
-        "--stdio",
-        "--pty-root",
-        pty_root.as_str(),
-    ];
-    fabric.expose_exec(&protocol, &argv).await?;
-    println!("Fabric serves the PTY sessions under {pty_root} as `{protocol}`, with `{st}`.");
+    if args.exec {
+        let st = match args.st {
+            Some(st) => std::path::absolute(st)?,
+            None => std::env::current_exe().context("find this st executable")?,
+        };
+        let pty_root = std::path::absolute(
+            config
+                .pty_root
+                .clone()
+                .unwrap_or_else(|| config.state_dir.join("pty")),
+        )?;
+        let (st, pty_root) = (st.display().to_string(), pty_root.display().to_string());
+        let argv = [
+            st.as_str(),
+            "terminals",
+            "serve-fabric",
+            "--stdio",
+            "--pty-root",
+            pty_root.as_str(),
+        ];
+        fabric.expose_exec(&protocol, &argv).await?;
+        println!("Fabric serves the PTY sessions under {pty_root} as `{protocol}`, with `{st}`.");
+    } else {
+        let socket = std::path::absolute(st3::config::terminal_socket(&config.state_dir))?;
+        fabric.expose_socket(&protocol, &socket).await?;
+        println!(
+            "Fabric forwards `{protocol}` to the st daemon's terminal socket {}.",
+            socket.display()
+        );
+    }
     println!(
         "Add `{protocol}` to the `allow` list of each peer in this machine's Fabric peers.toml, then run `fabric reload-peers`."
     );
@@ -10076,6 +10217,111 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
     }
     print!("{}", render_usage_report(&report, args.hours, args.by));
     Ok(())
+}
+
+async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()> {
+    let report: Value = client.get("/v1/slo").await?;
+    let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    match args.command.unwrap_or(SloCommand::Ls) {
+        SloCommand::Ls => {
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", render_slo_list(rows));
+            }
+        }
+        SloCommand::Explain { id } => {
+            let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(row)?);
+            } else {
+                print!("{}", render_slo_explanation(row));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_slo_list(rows: &[Value]) -> String {
+    use std::fmt::Write as _;
+
+    let text = |row: &Value, field: &str| row[field].as_str().unwrap_or_default().to_owned();
+    let left = |row: &Value| {
+        row["remaining_percent"]
+            .as_f64()
+            .map_or_else(|| "-".to_owned(), |left| format!("{left:.0}%"))
+    };
+    let mut output = String::new();
+    for (kind, heading) in [
+        ("objective", "OBJECTIVES  a target with windows and an error budget"),
+        ("budget", "BUDGETS  an allowance that resets"),
+    ] {
+        let group = rows.iter().filter(|row| row["kind"] == kind).collect::<Vec<_>>();
+        if group.is_empty() {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        let _ = writeln!(output, "{heading} · {}", group.len());
+        let table = group
+            .iter()
+            .map(|row| {
+                [
+                    text(row, "status"),
+                    text(row, "id"),
+                    text(row, "target"),
+                    text(row, "current"),
+                    text(row, "window"),
+                    left(row),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT"].map(str::to_owned);
+        let widths: Vec<usize> = (0..6)
+            .map(|column| {
+                std::iter::once(&header)
+                    .chain(&table)
+                    .map(|line| line[column].chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        for line in std::iter::once(&header).chain(&table) {
+            let cells = line
+                .iter()
+                .zip(&widths)
+                .map(|(cell, width)| format!("{cell:<width$}"))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let _ = writeln!(output, "{}", cells.trim_end());
+        }
+    }
+    if output.is_empty() {
+        output.push_str("No objectives or budgets.\n");
+    }
+    output
+}
+
+fn render_slo_explanation(row: &Value) -> String {
+    use std::fmt::Write as _;
+
+    let text = |field: &str| row[field].as_str().unwrap_or_default();
+    let mut output = String::new();
+    let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
+    let _ = writeln!(output, "TARGET   {}", text("target"));
+    let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
+    if let Some(left) = row["remaining_percent"].as_f64() {
+        let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
+    }
+    if let Some(at) = row["resets_at_unix_ms"]
+        .as_u64()
+        .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+    {
+        let _ = writeln!(output, "RESETS   {}", at.format("%Y-%m-%d %H:%M UTC"));
+    }
+    let _ = writeln!(output, "\n{}", text("explain"));
+    output
 }
 
 /// A limits row's account: the declared name beside the provider's label, or the label alone.
@@ -11876,17 +12122,22 @@ fn render_replication_peers(
                     "  same envelopes (measured {}); projection comparison waits for a settled exchange or a compatible build",
                     relative_time(sync.measured_at_unix_ms, now)
                 );
-            } else if peer.graph_digest.as_deref() == Some(local_graph_digest) {
+                if let Some(reason) = peer.projection_comparison_waiting_reason.as_deref() {
+                    let _ = writeln!(output, "  waiting because {reason}");
+                }
+            } else if peer_graphs_equal(peer, local_graph_digest) {
                 let _ = writeln!(
                     output,
-                    "  in sync: the same envelopes and the same graph (measured {})",
-                    relative_time(sync.measured_at_unix_ms, now)
+                    "  in sync: the same envelopes and the same graph (measured {}, graphs compared {})",
+                    relative_time(sync.measured_at_unix_ms, now),
+                    compared_ago(peer, now)
                 );
             } else {
                 let _ = writeln!(
                     output,
-                    "  same envelopes (measured {}), but the graphs differ ({digests}); the next exchange compares them",
-                    relative_time(sync.measured_at_unix_ms, now)
+                    "  same envelopes (measured {}), but the graphs differ ({digests}; compared {}); the next exchange compares them",
+                    relative_time(sync.measured_at_unix_ms, now),
+                    compared_ago(peer, now)
                 );
             }
             continue;
@@ -11917,6 +12168,22 @@ fn render_replication_peers(
         }
     }
     output
+}
+
+/// Whether the comparison the status reports for a peer found its projections equal. An older
+/// daemon reports no result, and its digests are compared as they were before.
+fn peer_graphs_equal(peer: &ReplicationPeerStatus, local_graph_digest: &str) -> bool {
+    peer.projection_graphs_equal
+        .unwrap_or_else(|| peer.graph_digest.as_deref() == Some(local_graph_digest))
+}
+
+/// When the reported comparison was made, so one held from an earlier exchange is never
+/// presented as current.
+fn compared_ago(peer: &ReplicationPeerStatus, now: u128) -> String {
+    peer.projection_compared_at_unix_ms
+        .or(peer.sync.as_ref().and_then(|sync| sync.graph_compared_at_unix_ms))
+        .map(|at| relative_time(at, now))
+        .unwrap_or_else(|| "at the last exchange".into())
 }
 
 /// The first 12 characters of a digest, enough to tell two apart in a status line.
@@ -12070,7 +12337,9 @@ async fn run_replication(
                 "graph": {
                     "local": status.graph_digest,
                     "remote": remote.graph_digest,
-                    "equal": if remote.projection_digests.is_empty() || remote.projection_comparison_waiting { None } else { Some(remote.graph_digest.as_deref() == Some(status.graph_digest.as_str())) },
+                    "waiting_reason": remote.projection_comparison_waiting_reason,
+                    "equal": if remote.projection_digests.is_empty() || remote.projection_comparison_waiting { None } else { Some(peer_graphs_equal(remote, &status.graph_digest)) },
+                    "compared_at_unix_ms": remote.projection_compared_at_unix_ms,
                     "coverage": if remote.projection_digests.is_empty() { "legacy-only" } else if remote.projection_comparison_waiting { "pending" } else { "all-shared-projections" },
                 },
             });
@@ -12097,7 +12366,7 @@ async fn run_replication(
                     "unverified (legacy peer)"
                 } else if remote.projection_comparison_waiting {
                     "pending comparison"
-                } else if remote.graph_digest.as_deref() == Some(status.graph_digest.as_str()) {
+                } else if peer_graphs_equal(remote, &status.graph_digest) {
                     "equal"
                 } else {
                     "different"
@@ -12225,6 +12494,13 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
         );
     }
     output.push_str(&format!("participants  {}\n", names(&status.participants)));
+    output.push_str("last daemon start (advertised build)\n");
+    for member in &status.participants {
+        output.push_str(&format!(
+            "  machine_version  {member}: {}\n",
+            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
+        ));
+    }
     if !status.excused.is_empty() {
         output.push_str(&format!("excused       {}\n", names(&status.excused)));
     }
@@ -12233,6 +12509,9 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
     }
     if let Some(pending) = &status.pending {
         output.push_str(&format!("pending       {}\n", pending.checkpoint));
+        for (member, build) in &pending.builds {
+            output.push_str(&format!("  seal build  {member}: {build}\n"));
+        }
         output.push_str(&format!("  sealed      {}\n", names(&pending.sealed)));
         output.push_str(&format!("  unsealed    {}\n", names(&pending.unsealed)));
         for (writer, difference) in &pending.disagreeing {
@@ -14992,7 +15271,14 @@ fn render_client_agent(
     let mut output = String::new();
     let _ = writeln!(output, "AGENT  {}", agent.header.id);
     let _ = writeln!(output, "NAME         {}", agent.name);
-    let _ = writeln!(output, "STATE        {}", agent.state);
+    match agent.down_since.as_deref().filter(|_| agent.state == "down") {
+        Some(since) => {
+            let _ = writeln!(output, "STATE        down · no session since {since}");
+        }
+        None => {
+            let _ = writeln!(output, "STATE        {}", agent.state);
+        }
+    }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
     let _ = writeln!(
         output,
@@ -15115,6 +15401,19 @@ fn render_client_agent(
     if let Some(incarnation) = &agent.incarnation_id {
         let _ = writeln!(output, "INCARNATION  {incarnation}");
     }
+    if let Some(operation) = agent.extra.get("runtime_start") {
+        let phase = operation["phase"].as_str().unwrap_or("unknown");
+        let id = operation["operation_id"].as_str().unwrap_or("unknown");
+        let running = operation["worker_running"] == true;
+        let _ = writeln!(output, "START        {phase} · {id}{}",
+            if running && phase == "revoked" { " · launch worker still running" } else { "" });
+        let _ = writeln!(output, "START JOBS   {} running · {} revoked and still running",
+            operation["running_jobs"].as_u64().unwrap_or(0),
+            operation["revoked_running_jobs"].as_u64().unwrap_or(0));
+        let _ = writeln!(output, "START OPEN   {} unresolved · {} revoked and unresolved",
+            operation["unresolved_jobs"].as_u64().unwrap_or(0),
+            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0));
+    }
     if let Some(owner) = &agent.owner_run_id {
         let _ = writeln!(output, "MISSION      {owner}");
     }
@@ -15136,9 +15435,16 @@ fn render_client_agent(
         let Some(step) = current_steps.iter().find(|step| step.subject == *current) else {
             continue;
         };
+        let held_down = agent
+            .current_work
+            .iter()
+            .find(|label| label.id == *current)
+            .and_then(|label| label.holder_down_since.as_deref())
+            .map(|since| format!(" · held by a seat with no session since {since}"))
+            .unwrap_or_default();
         let _ = writeln!(
             output,
-            "CURRENT STEP {} · {}",
+            "CURRENT STEP {} · {}{held_down}",
             step.title.as_deref().unwrap_or(&step.step),
             step.status
         );
@@ -16267,6 +16573,46 @@ async fn run_work(
         WorkCommand::Complete(args) => post_work(client, "complete", args, json_output).await,
         WorkCommand::Fail(args) => post_work(client, "fail", args, json_output).await,
         WorkCommand::Release(args) => post_work(client, "release", args, json_output).await,
+        WorkCommand::Resume(args) => post_work(client, "resume", args, json_output).await,
+        WorkCommand::Wait(args) => {
+            let actor = args.actor.context("a work wait needs explicit --as")?;
+            reject_foreign_agent_actor(&actor)?;
+            let wait_ms = st3::graph::parse_duration(&args.wait_for, true)?;
+            let subject = if args.subject.starts_with("step-run/") {
+                args.subject.clone()
+            } else {
+                format!("step-run/{}", args.subject)
+            };
+            let incarnation = match args.incarnation {
+                Some(incarnation) => Some(incarnation),
+                None => current_agent_incarnation(client, &actor).await?,
+            };
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let response: StepRunView = client
+                .post(
+                    &format!("/v1/work/wait/{}", urlencoding::encode(&subject)),
+                    &WorkRequest {
+                        actor: Some(actor.clone()),
+                        incarnation,
+                        summary: Some(format!(
+                            "Waiting for {}; the execution clock is stopped for at most {}.",
+                            args.reason.trim(),
+                            args.wait_for
+                        )),
+                        reason: Some(args.reason),
+                        evidence: Vec::new(),
+                        wait_ms: Some(wait_ms),
+                        idempotency_key: format!("work:wait:{subject}:{actor}:{nonce}"),
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&response, true)
+            } else {
+                println!("{}\t{}", response.status, response.subject);
+                Ok(())
+            }
+        }
         WorkCommand::Extend(args) => {
             let actor = args.actor.context("a work extension needs explicit --as")?;
             reject_foreign_agent_actor(&actor)?;
@@ -16644,6 +16990,7 @@ async fn post_work(
             .post(
                 &format!("/v1/work/{action}/{}", urlencoding::encode(&args.subject)),
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(actor.clone()),
                     incarnation,
                     summary: args.summary,
@@ -16846,6 +17193,8 @@ async fn wait_for_agent_incarnation_from(
                     outage_logged = true;
                 }
                 deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                tokio::time::sleep(st3::client::driver_retry_pause()).await;
+                continue;
             }
             Err(error) => return Err(error),
         }
@@ -22943,7 +23292,7 @@ where
             Ok(value) => return Ok(value),
             Err(error) => tolerate_driver_api_outage(subject, error, &mut last_warning)?,
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(st3::client::driver_retry_pause()).await;
     }
 }
 
@@ -23004,6 +23353,7 @@ async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Resu
             .post(
                 &format!("/v1/work/renew/{}", urlencoding::encode(&step.subject)),
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(subject.into()),
                     incarnation: step.claim_incarnation,
                     summary: None,
@@ -25351,6 +25701,51 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
     }
 }
 
+/// Commit notifications drive exact-delta maintenance after the API has bound.
+/// Each bootstrap page yields the FIFO writer; malformed source stops the job and
+/// leaves a durable incomplete state for doctor, rather than retrying a local defect.
+fn spawn_publication_evidence(store: Arc<Store>) {
+    let (changed, mut receiver) = tokio::sync::watch::channel(());
+    let observer = store.observe_commits(move |connection| {
+        if connection.is_autocommit() {
+            changed.send_replace(());
+        }
+    });
+    tokio::spawn(async move {
+        let _observer = observer;
+        loop {
+            receiver.borrow_and_update();
+            let read_store = store.clone();
+            match tokio::task::spawn_blocking(move || read_store.publication_evidence_ready()).await
+            {
+                Ok(Ok(true)) => {
+                    if receiver.changed().await.is_err() {
+                        return;
+                    }
+                }
+                Ok(Ok(false)) => {
+                    let page_store = store.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        page_store.advance_publication_evidence()
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => tokio::task::yield_now().await,
+                        error => {
+                            eprintln!("st3: publication evidence bootstrap stopped: {error:?}");
+                            return;
+                        }
+                    }
+                }
+                error => {
+                    eprintln!("st3: publication evidence status failed: {error:?}");
+                    return;
+                }
+            }
+        }
+    });
+}
+
 async fn migrate_event_payloads(store: Arc<Store>) {
     match st3::maintenance::migrate_event_payloads(store).await {
         Ok(report) if report.pending_at_start => {
@@ -25975,6 +26370,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
+        let rows = vec![
+            json!({"id": "person-read", "kind": "objective", "status": "met", "target": "p99 ≤ 100 ms",
+                "current": "p99 80 ms over 200 samples", "window": "1h", "remaining_percent": 50.0,
+                "explain": "Reads a person waits on."}),
+            json!({"id": "ada/claude/weekly", "kind": "budget", "status": "stale", "target": "100% allowance",
+                "current": "40% used", "window": "weekly", "remaining_percent": 60.0,
+                "resets_at_unix_ms": 86_400_000u64, "explain": "An allowance that resets."}),
+            json!({"id": "cpu", "kind": "objective", "status": "no-data", "target": "≤ 2 cores",
+                "current": "not measured", "window": "1h", "remaining_percent": null, "explain": "x"}),
+        ];
+        let list = render_slo_list(&rows);
+        let lines = list.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "OBJECTIVES  a target with windows and an error budget · 2");
+        assert!(lines[1].starts_with("STATUS   ID           TARGET"), "{}", lines[1]);
+        assert!(lines[2].starts_with("met      person-read  p99 ≤ 100 ms"), "{}", lines[2]);
+        assert!(lines[2].ends_with("1h      50%"), "{}", lines[2]);
+        assert!(lines[3].ends_with("1h      -"), "{}", lines[3]);
+        assert_eq!(lines[5], "BUDGETS  an allowance that resets · 1");
+        assert!(lines[7].contains("ada/claude/weekly") && lines[7].ends_with("60%"), "{}", lines[7]);
+        assert_eq!(render_slo_list(&[]), "No objectives or budgets.\n");
+
+        let explained = render_slo_explanation(&rows[1]);
+        assert!(explained.starts_with("ada/claude/weekly  budget · stale\n"));
+        assert!(explained.contains("LEFT     60% of the allowance"));
+        assert!(explained.contains("RESETS   1970-01-02 00:00 UTC"));
+        assert!(explained.ends_with("An allowance that resets.\n"));
+    }
+
+    #[test]
+    fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
+        let unstamped = concat!(env!("CARGO_PKG_VERSION"), "+dev");
+        assert_eq!(
+            daemon_start_version(unstamped).unwrap(),
+            env!("CARGO_PKG_VERSION")
+        );
+        for version in ["0.1.0+abc1234-dirty", "0.1.0+local.abc1234.dirty"] {
+            assert_eq!(daemon_start_version(version).unwrap(), version);
+        }
+        assert!(daemon_start_version(&"x".repeat(128)).is_ok());
+        assert!(daemon_start_version(&"x".repeat(129)).is_err());
+        assert!(daemon_start_version(&"é".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
+        let status = st3::store::CheckpointStatusView {
+            node: "alder".into(),
+            newest_stable: None,
+            trimmed: None,
+            halted: false,
+            pending: None,
+            participants: ["alder".into(), "birch".into()].into(),
+            excused: Default::default(),
+            left: Default::default(),
+            machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
+        };
+        let output = render_checkpoint_status(&status);
+        assert!(output.contains("last daemon start (advertised build)"));
+        assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
+        assert!(output.contains("machine_version  birch: not advertised"));
+    }
+
+    #[test]
     fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
         let seats: Vec<String> = (0..120).map(|n| format!("agent/example/seat-{n}")).collect();
         let mut renewals_per_second = [0usize; 60];
@@ -26278,6 +26737,9 @@ mod tests {
             projection_digests: Default::default(),
             differing_tables: Vec::new(),
             projection_comparison_waiting: false,
+            projection_comparison_waiting_reason: None,
+            projection_graphs_equal: None,
+            projection_compared_at_unix_ms: None,
             peer: peer.into(),
             status: "up".into(),
             last_success_at_unix_ms: None,
@@ -26353,12 +26815,35 @@ mod tests {
         let mut peer = peer_status("alder", Some("log-digest"));
         peer.graph_digest = Some("another-graph".into());
         peer.projection_comparison_waiting = true;
+        peer.projection_comparison_waiting_reason = Some("sample reason".into());
         peer.sync = Some(Default::default());
         let rendered = render_replication_peers(&[peer], "local-graph", 0);
         assert!(rendered.contains("same envelopes"));
+        assert!(rendered.contains("waiting because sample reason"));
         assert!(rendered.contains("projection comparison waits for a settled exchange or a compatible build"));
         assert!(!rendered.contains("graphs differ"));
         assert!(!rendered.contains("diverged"));
+    }
+
+    #[test]
+    fn a_held_comparison_decides_in_sync_and_shows_its_age() {
+        let held = |equal: bool| {
+            let mut peer = peer_status("alder", Some("log-digest"));
+            peer.projection_digests = [("documents".to_string(), "x".to_string())].into();
+            peer.graph_digest = Some("older-graph".into());
+            peer.projection_graphs_equal = Some(equal);
+            peer.projection_compared_at_unix_ms = Some(60_000);
+            peer.sync = Some(Default::default());
+            render_replication_peers(&[peer], "local-graph", 240_000)
+        };
+        let equal = held(true);
+        assert!(equal.contains("in sync"), "{equal}");
+        assert!(equal.contains("graphs compared 3m ago"), "{equal}");
+        assert!(!equal.contains("graphs differ"), "{equal}");
+        let different = held(false);
+        assert!(different.contains("graphs differ"), "{different}");
+        assert!(different.contains("compared 3m ago"), "{different}");
+        assert!(!different.contains("in sync"), "{different}");
     }
 
     #[test]
@@ -27496,6 +27981,45 @@ mod tests {
     }
 
     #[test]
+    fn a_down_agent_card_says_since_when_and_marks_the_step_its_holder_cannot_work() {
+        let resource: st3_client::Resource = serde_json::from_value(serde_json::json!({
+            "kind": "agent", "id": "agent/worker", "revision": "one",
+            "updated_at": "2026-09-24T09:00:00Z", "name": "Worker",
+            "state": "down", "down_since": "2026-09-23T21:00:00.000Z",
+            "reachability": "reachable", "runtime_ids": [],
+            "current_work_ids": ["step-run/one/build"], "active_work_count": 1,
+            "current_work": [{
+                "id": "step-run/one/build", "mission_id": "mission/demo",
+                "mission_run_id": "mission-run/demo", "path": "build", "state": "claimed",
+                "since": "2026-09-23T20:00:00.000Z",
+                "holder_down_since": "2026-09-23T21:00:00.000Z"
+            }]
+        }))
+        .unwrap();
+        let st3_client::Resource::Agent(agent) = resource else {
+            panic!("agent resource")
+        };
+        let step = serde_json::from_value::<StepRunView>(serde_json::json!({
+            "subject": "step-run/one/build", "run": "mission-run/demo",
+            "generation": "run-generation/one", "step": "build", "definition_hash": "hash",
+            "status": "working", "attempt": 1, "assigned_to": "agent/worker",
+            "agentless": false, "title": "Build the parser", "worker_reported": false,
+            "claimant": "agent/worker", "claim_incarnation": "worker:1",
+            "claim_expires_at_unix_ms": 900_000, "readiness_epoch": 1,
+            "blocked_reason": null, "not_before_unix_ms": null,
+            "created_at_unix_ms": 0, "updated_at_unix_ms": 0,
+            "progress_summary": "Tests pass", "progress_at_unix_ms": 60_000,
+        }))
+        .unwrap();
+        let card = render_client_agent(&agent, &[step], 360_000);
+        assert!(card.contains("STATE        down · no session since 2026-09-23T21:00:00.000Z\n"), "{card}");
+        assert!(
+            card.contains("CURRENT STEP Build the parser · working · held by a seat with no session since 2026-09-23T21:00:00.000Z\n"),
+            "{card}"
+        );
+    }
+
+    #[test]
     fn agent_queue_view_lists_the_claim_then_runs_in_order_and_moves() {
         let queue: st3_client::AgentQueue = serde_json::from_value(serde_json::json!({
             "kind": "agent-queue", "agent_id": "agent/example/worker",
@@ -28096,6 +28620,9 @@ mod tests {
                     projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
                     differing_tables: Vec::new(),
                     projection_comparison_waiting: false,
+                    projection_comparison_waiting_reason: None,
+                    projection_graphs_equal: None,
+                    projection_compared_at_unix_ms: None,
                     peer: name.into(),
                     status: "up".into(),
                     last_success_at_unix_ms: Some(now - 2_000),
@@ -28167,11 +28694,11 @@ mod tests {
              \x20 receiving 142.5 envelopes/s, caught up in about 15m (measured 2s ago)\n\
              peer\tQuiet\tup\t\n\
              \x20 last seen 2s ago\n\
-             \x20 in sync: the same envelopes and the same graph (measured now)\n\
+             \x20 in sync: the same envelopes and the same graph (measured now, graphs compared now)\n\
              peer\tMoved\tup\t\n\
              \x20 last seen 2s ago\n\
              \x20 same envelopes (measured now), but the graphs differ (this node \
-             111111111111, Moved 444444444444); the next exchange compares them\n\
+             111111111111, Moved 444444444444; compared now); the next exchange compares them\n\
              peer\tSettling\tup\t\n\
              \x20 last seen 2s ago\n\
              \x20 graphs differ: the same envelopes project different graphs since 10s ago \
@@ -29808,6 +30335,49 @@ mod tests {
             pty_observation_incarnation("agent/run/other", &observations),
             None
         );
+    }
+
+    /// A deploy re-executes every driver while the daemon restarts, and each one then waits for its
+    /// incarnation. Through the outage a driver retries after its spread pause, not the 50 ms poll
+    /// that would bring every driver to the new daemon in the instant it starts to listen.
+    #[tokio::test]
+    async fn an_incarnation_wait_retries_an_outage_after_a_spread_pause() {
+        use axum::{Json, Router, routing::get};
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("st3.sock");
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = requests.clone();
+        let app = Router::new().route(
+            "/v1/status",
+            get(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Json(json!({"api_version": "st3.v1", "value": {
+                        "store_index": 1,
+                        "pending_actions": [],
+                        "subjects": [{
+                            "subject": "agent/example/cedar",
+                            "actual": {"fields": {"incarnation_id": "cedar-1"}},
+                            "conflicts": [],
+                            "claims": [],
+                            "reachability": "reachable",
+                        }],
+                    }}))
+                }
+            }),
+        );
+        let client = Client::new(Endpoint::Unix(socket.clone()));
+        let started = std::time::Instant::now();
+        let wait = tokio::spawn(async move {
+            wait_for_agent_incarnation_from(&client, "agent/example/cedar", false).await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let server = tokio::spawn(async move { serve_unix(&socket, app).await.unwrap() });
+
+        assert_eq!(wait.await.unwrap().unwrap(), "cedar-1");
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        server.abort();
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig, readOnlyBinaryCaches } from './workspace-ci.ts'
+import { linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
@@ -29,7 +29,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "build.rs",
+        "crates/st-drivers/build.rs",
         "crates/st-drivers/src/version.rs",
         "install.sh",
         "scripts/download-install-test",
@@ -47,6 +47,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         "scripts/install-release*",
         "scripts/install-macos*",
         "docs/st3/binary-releases.md",
+        ".github/workflows/workspace-ci.ts",
+        "scripts/ci-pick-runner",
         "flake.lock"
       ]
     }
@@ -60,6 +62,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
+    "pick-runner": priorityRunnerJob,
     "installer": {
       "name": "installer (${{ matrix.runner }})",
       "strategy": {
@@ -87,7 +90,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ]
     },
     "build": {
-      "if": "${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request' }}",
+      "needs": ["pick-runner"],
+      "if": "${{ !cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request') }}",
       "name": "release-build (${{ matrix.target }})",
       "strategy": {
         "fail-fast": false,
@@ -104,7 +108,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
           ]
         }
       },
-      "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && 'ci1-priority' || matrix.runner }}",
+      "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1 && fromJSON(needs['pick-runner'].outputs.ci1)[0] || 'ci1-priority') || matrix.runner }}",
       "timeout-minutes": 90,
       "env": {
         "MACOSX_DEPLOYMENT_TARGET": "15.0",
@@ -253,4 +257,4 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       ]
     }
   }
-}, {"installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))
+}, {"pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))

@@ -64,6 +64,7 @@ pub mod native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub mod native_seed;
 pub mod node_identity;
+pub mod objectives;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -110,6 +111,7 @@ pub mod store;
 pub mod subagents;
 /// Suspends a quiet seat and resumes its own native session.
 pub mod suspension;
+pub(crate) mod publication;
 pub mod seat_snapshot;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]
@@ -123,5 +125,3 @@ pub use model::{NormalizedIntent, St3Error};
 
 /// Shared authentication and transport for daemon GitHub callers.
 mod github_http;
-
-pub mod evidence_url;

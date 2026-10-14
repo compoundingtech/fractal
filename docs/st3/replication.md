@@ -79,8 +79,8 @@ production digest registry in the same change. A new shared claim-derived view m
 its answer at the same explicit time and recipients. Local pagination metadata may order by
 local arrival; shared winner selection must remain independent of that order.
 
-The [canonical projections audit](canonical-projections-audit.md) records the original gaps and
-local exceptions. Modern status reports a graph digest over the complete projection registry,
+The [data-authority reference](data-authority.md) classifies shared projections and local
+exceptions. Status reports a graph digest over the complete projection registry,
 plus one digest for every table. The original six-table hash remains a compatibility field on
 the peer protocol; it cannot prove that every shared outcome agrees.
 
@@ -100,8 +100,7 @@ compare all shared rows and digests through creation, review, draining, cancella
 
 Documents record a sortable encoding of the complete binding claim key at admission.
 `document_canonical_latest(name,binding_key DESC)` serves latest selection and history order;
-readers never sort a name's entire claim history for each returned version. Schema 15 backfills
-the keys once, choosing the earliest canonical binding for each repeated name/hash. The key is
+readers never sort a name's entire claim history for each returned version. The earliest canonical binding is retained for each repeated name/hash. The key is
 a shared derived column and is digested with the document row. The fleet-size regression builds
 260,000 claims and 10,000 document versions, then requires latest listings, history pages,
 lookup and cursor reads to finish within two seconds and verifies the indexed latest query plan.
@@ -119,6 +118,11 @@ unknown claim alone does not degrade its envelope or mark a projection unhealthy
 as a fault. At daemon startup, admission retries those original records using the upgraded
 registry, then the canonical projector rebuilds their shared rows. An earlier claim learned
 on upgrade must sort by its original canonical key, never its new local arrival index.
+That admission seals and signs this node's new local batches first, so local membership claims
+decide it, but it builds no replication snapshot and skips the once-per-process search for
+batches skipped behind the sealing frontier. Both read every envelope or batch, about 15 s on a
+two-million-envelope store, and the daemon listens only after admission. The first export or
+replication activation after the daemon serves runs them on a read connection.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
@@ -149,7 +153,7 @@ means unknown, and validators must never accept unknown as a matching incarnatio
 `model::work_submission_matches` compares the claim's subject, attempt, actor, nonempty
 incarnation and evidence references together.
 
-This changes the claim registry digest. An older member rejects the field at schema admission
+An older member without this registry field rejects it at schema admission
 with `unknown-claim-field`, retains the original signed submission as a waiting unknown record,
 and continues projecting known claims. Its work projection cannot establish that submission's
 completion or incarnation until upgrade. Upgrade completion validators' members before relying
@@ -161,13 +165,19 @@ and graph/table convergence after upgrading the older registry.
 
 ## Projection digest coverage and cost
 
-`store/projection_digest.rs::TABLES` lists the shared tables: operations, blobs, documents,
-desired, message_index, mission_revisions, mission_definitions, mission_runs,
-mission_run_deadlines, mission_run_after, run_generations, step_runs, revision_proposals,
-planning_sessions, planning_candidates and planning_previews. Every column joins the digest
-by default. Only document/message/mission-revision arrival indexes and the effective step lease
-expiry/change timestamps are excluded. Those step timestamps include member-local renewals;
-the original durable lease facts remain covered through their authenticated claim identity.
+`store/projection_digest.rs::TABLES` lists 24 shared tables:
+
+`operations`, `blobs`, `documents`, `desired`, `arrangements`, `arrangement_registers`,
+`message_index`, `resource_observations`, `glass_heads`, `person_directive_notes`,
+`custom_registrations`, `custom_sources`, `custom_dependencies`, `mission_revisions`,
+`mission_definitions`, `mission_runs`, `mission_run_deadlines`, `mission_run_after`,
+`run_generations`, `step_runs`, `revision_proposals`, `planning_sessions`,
+`planning_candidates`, `planning_previews`.
+
+Every column joins the digest by default. Only document, message and mission-revision
+arrival indexes, `arrangements.changed_index`, and the effective step lease expiry/change
+timestamps are excluded. Those step timestamps include member-local renewals; the original
+durable lease facts remain covered through their authenticated claim identity.
 `planning_previews.store_index` is an originating preview input and is covered.
 
 The `claim_sources` digest covers admitted claim identities and immutable acceptance times,
@@ -221,10 +231,9 @@ peer. `st replication diff PEER` and `st doctor` also name them. Table differenc
 only when inventories and claim registries agree, no claims wait for a newer build, projection
 is current and local committed batches are sealed. Old peers omit `projection_digests`;
 exchanges and heals then compare their unchanged six-table compatibility hash. Old peers cannot
-verify full projection coverage. Modern peers compare complete maps. SQLite schema 14 adds the
-transactional digest machinery and rebuilds shared projections once, correcting older stored
-creation/change dates from claim facts. New writer connections must register the projection
-functions, including isolated checkpoint proof connections.
+verify full projection coverage. Modern peers compare complete maps. The transactional digest machinery derives creation/change dates from claim facts.
+New writer connections must register the projection functions, including isolated
+checkpoint proof connections.
 
 The indexed `resource_observations` projection participates in the complete shared table digest
 and canonical replay audit. The projection version identifying its layout is included in the
@@ -232,13 +241,13 @@ runtime schema compatibility identity alongside the claim vocabulary digest. Mix
 without this projection continue exchanging admitted claim authority, but do not compare their
 incompatible projection maps as if they represented the same graph. After upgrade, the table is
 backfilled from retained admitted `resource.observed` claims and projection comparisons resume.
-This changes no claim or resource vocabulary and requires no new replication payload fields.
+This projection is independent of the claim/resource vocabulary and replication payload fields.
 
 
 ## Add any machine
 
 Install st on the new machine and configure the person who operates it, as described in the
-[README](../getting-started.md#3-start-the-daemon). On an existing listening member, invite the new name:
+[README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
 
 ```sh
 st fleet invite beacon
@@ -607,7 +616,8 @@ other kind only add events and operations, whose order does not matter.
 The graph is replayed from nothing only in these cases:
 
 - a stale or unhealthy projection;
-- an operation whose digests conflict;
+- an operation whose digests conflict, except `message.sent` receipts, which reconcile
+  only the affected operation from its indexed claims and checkpoint tombstones;
 - an operation claim without a digest;
 - a work claim that carries an operation;
 - a heal;

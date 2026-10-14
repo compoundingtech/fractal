@@ -1199,9 +1199,16 @@ as the configured person. The CLI checks that the gateway grants that person `te
 `terminal.control`, and reads the owner, PTY session, and runtime incarnation from its local daemon.
 It then dials the owner's Fabric NodeID, which the owner's member record advertises or, in a
 config-peer fleet, the one trusted Fabric peer with the owner's name, ignoring case. The protocol is
-`st3/pty/FLEET_ID`, which `st terminals expose-fabric` has the owner's Fabric serve by running
-`st terminals serve-fabric --stdio` for each tunnel, so no st daemon on either host takes part. The
-CLI sends one line, the `pty remote-serve` route line plus the subject and incarnation:
+`st3/pty/FLEET_ID`, which `st terminals expose-fabric` has the owner's Fabric forward to the owner
+daemon's terminal socket, `STATE_DIR/run/terminals.sock`: one connection per tunnel, with no process
+or pipe per attach. The daemon serves that socket on a thread and runtime of its own, and an attach
+reads only the PTY registry and the kernel's socket peer, so a daemon busy with its store or other
+requests does not delay it. A stopped, crashed or restarting daemon refuses new tunnels, and each
+daemon restart, including every deploy, ends its live remote attaches; the CLI reconnects with the
+same incarnation once the daemon answers again. `st terminals expose-fabric --exec`, and any
+exposure made before the terminal socket existed, has Fabric run `st terminals serve-fabric
+--stdio` for each tunnel instead, which needs no daemon and behaves the same otherwise; running
+`st terminals expose-fabric` again replaces either kind. The CLI sends one line, the `pty remote-serve` route line plus the subject and incarnation:
 `{"op":"route","name":RUNTIME_ID,"subject":SUBJECT,"incarnation":INCARNATION}`. The owner refuses
 a name that is not one file under its PTY root and a session that is not tagged as the subject's.
 It refuses a session whose kernel-reported socket peer and PTY record do not match the incarnation.
@@ -1790,13 +1797,24 @@ background refresher last published; no read folds the roster itself. Each page 
 that roster's own cut in its `snapshot` (`store_index`, `created_at`) and when it was folded
 (`published_at`). That cut can be older than the request, by about a second plus one fold.
 
-A first page answers at once. A client that must see what was written before its request
-passes `fresh=true`: the daemon waits up to two seconds for a roster at least as new as the
-request before answering. `st agents ls` and `st agents tree` ask for it; Rust exposes
-`agents_list_fresh`. While no roster is published yet, a read answers a retryable 503 (the
-stream sends `resync`) and the refresher is asked for one. A continuation reads the roster
-published at its first page's cut; once that roster is gone it answers `page-cursor-expired`.
-A stream rereads when a newer roster is published.
+A first page answers at once. A client that prefers to see what was written before its request
+passes `fresh=true`. The daemon requests a refresh and waits up to two seconds for a publication
+at or after the request's cut, including while the refresher is idle. It returns the newest
+publication at once only if the latest attempt failed and no newer attempt is in flight.
+A failure while the read waits also wakes it. The retained publication's original `store_index`
+and `published_at` show its age. `st agents ls` and `st agents tree` ask for this fresh read;
+Rust exposes `agents_list_fresh`.
+
+A read returns a retryable 503 (the stream sends `resync`) only before a usable roster of
+the requested mode has been published, or after a full projection reset clears it. Current
+and history rosters remain separate: a history read never substitutes current-only membership.
+A continuation reads the roster published at its first page's cut; once that roster is gone
+it answers `page-cursor-expired`. A stream rereads on a new publication.
+
+A card-faults read that reaches its deadline does not stop publication. Other card fields
+are current; each affected card keeps its previous `fault`, including a known null value.
+A card with no previous value reports `"fault status unknown"` in that same field. The next
+refresh retries those faults even if no claim changed.
 
 ## Missions and work window freshness
 

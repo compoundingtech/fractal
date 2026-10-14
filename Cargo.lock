@@ -4208,6 +4208,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-storage-version",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -4232,13 +4233,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "st-decision-fold"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4298,6 +4292,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "st-storage-version"
+version = "0.1.0"
+
+[[package]]
 name = "st-wire"
 version = "0.1.0"
 dependencies = [
@@ -4315,11 +4313,6 @@ dependencies = [
  "clap_complete",
  "kdl",
  "libc",
- "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "parking_lot",
  "serde",
  "serde_json",
@@ -4330,12 +4323,7 @@ dependencies = [
  "st2-resource-providers",
  "st2-resource-wasip2",
  "tempfile",
- "toml 0.9.12+spec-1.1.0",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "tungstenite 0.30.0",
- "wat",
 ]
 
 [[package]]
@@ -4596,6 +4584,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-storage-version",
  "toml 0.9.12+spec-1.1.0",
 ]
 

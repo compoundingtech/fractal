@@ -147,7 +147,11 @@ Epochs are allocated by the daemon, independently of wall-clock time. An initial
 request token; a lost acknowledgement retries that same epoch, and retired tokens cannot allocate
 another epoch after replacement. Reexec carries the returned epoch and token. Only an explicit
 `stale-mailbox-session` ends a subscription as fenced. Store/read worker failures close its socket
-and the current owner reconnects after one second without creating a receipt or replaying old mail.
+and the current owner reconnects without creating a receipt or replaying old mail. A driver waits
+between half a second and a second and a half, at random, before it reconnects or retries a call
+the daemon could not take. A deploy re-executes every driver and restarts the daemon in the same
+few seconds. With a fixed pause, every driver would reach the new daemon in the instant it starts
+to listen.
 
 Claude's MCP handshake is local to its stdio child and does not wait for the daemon. Previously,
 the child discovered the runtime incarnation and bound its mailbox before answering `initialize`.

@@ -2918,6 +2918,7 @@ mission "reported-work" state="ready" {
     let (docs, build) = (step("docs"), step("build"));
     let seat = build.assigned_to.clone().unwrap();
     let request = |key: &str, summary: &str| st3::model::WorkRequest {
+        wait_ms: None,
         actor: Some(seat.clone()),
         incarnation: Some("reporter:1".into()),
         summary: Some(summary.into()),
