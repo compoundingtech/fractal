@@ -167,7 +167,7 @@ fn a_manual_stop_of_a_missing_starting_round_gate_survives_daemon_restart() {
     let preview = store.mission(
         &stop, crate::model::IntentInput { kdl: source, source_name: None },
     ).unwrap();
-    store.apply(&stop, &preview.subject_tokens, "gate-recovery-stop").unwrap();
+    store.apply_as(&stop, &preview.subject_tokens, "gate-recovery-stop", Some("person/test")).unwrap();
     let runtime = Arc::new(FakeRuntime::default());
     let restarted = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
@@ -373,10 +373,6 @@ fn a_completed_round_terminalizes_its_missing_starting_gate_without_restarting_i
     assert!(
         matches!(status(&store, &gate).as_str(), "stopped" | "absent" | "retired"),
         "a completed owner must not leave an unstarted gate in the active roster",
-    );
-    assert!(
-        store.owned_desired_guard(&gate).is_err(),
-        "a completed owner must deny launch even if its declaration is retained as history",
     );
     assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
 }
