@@ -35,7 +35,10 @@ let
     fi
     if test -e /run/st-sekrets/bind-control/pause; then
       touch /run/st-sekrets/bind-control/ready
-      cat /run/st-sekrets/bind-control/resume >/dev/null
+      ${pkgs.coreutils}/bin/timeout 60 cat /run/st-sekrets/bind-control/resume >/dev/null || {
+        echo "VM bind barrier was not released within 60s" >&2
+        exit 124
+      }
     fi
     exec ${pkgs.bubblewrap}/bin/bwrap "$@"
   '';
@@ -213,7 +216,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_for_file("/run/st-sekrets/bind-control/ready")
         # The caller namespace sees a replacement at /w/smalltalk. The verified descriptor
         # still names the original directory, now renamed beneath the same backing root.
-        machine.succeed("mv /var/cache/evidence/work/smalltalk /var/cache/evidence/work/verified-original && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/smalltalk && printf swapped-directory > /var/cache/evidence/work/smalltalk/checkout-marker && printf resume > /run/st-sekrets/bind-control/resume")
+        machine.succeed("mv /var/cache/evidence/work/smalltalk /var/cache/evidence/work/verified-original && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/smalltalk && printf swapped-directory > /var/cache/evidence/work/smalltalk/checkout-marker && timeout 10 sh -c 'printf resume > /run/st-sekrets/bind-control/resume'")
         machine.wait_for_unit("ci-evidence-caller.service")
         assert machine.succeed("systemctl show --value -p ExecMainStatus ci-evidence-caller.service").strip() == "0"
         swapped = machine.succeed("cat /var/cache/evidence/swap-output")

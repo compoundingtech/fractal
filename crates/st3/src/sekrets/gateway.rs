@@ -1730,9 +1730,21 @@ fn program_checkout_directory(
         .or_else(|_| path.strip_prefix(&checkout.backing_root))
         .context("passed checkout is outside this runner's configured roots")?;
     let opened = open_checkout_beneath(&checkout.backing_root, relative, uid)?;
+    verified_program_directory(fd, opened, checkout.mount_root.join(relative))
+}
+
+fn verified_program_directory(
+    received: &OwnedFd,
+    opened: OwnedFd,
+    path: PathBuf,
+) -> Result<BoundDirectory> {
     let expected = fs::metadata(format!("/proc/self/fd/{}", opened.as_raw_fd()))?;
-    let received = fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
-    if !received.is_dir() || expected.dev() != received.dev() || expected.ino() != received.ino() {
+    let received = fs::metadata(format!("/proc/self/fd/{}", received.as_raw_fd()))?;
+    if !expected.is_dir()
+        || !received.is_dir()
+        || expected.dev() != received.dev()
+        || expected.ino() != received.ino()
+    {
         bail!("passed checkout does not match the configured runner backing directory");
     }
     // Bubblewrap resolves --ro-bind-fd through realpath before mounting it. A descriptor
@@ -1740,10 +1752,7 @@ fn program_checkout_directory(
     // Keep the descriptor opened beneath the configured backing root instead, after proving
     // that it identifies exactly the same directory as the caller's descriptor. Bubblewrap
     // also compares the mounted inode to this retained descriptor, refusing replacement races.
-    Ok(BoundDirectory {
-        fd: opened,
-        path: checkout.mount_root.join(relative),
-    })
+    Ok(BoundDirectory { fd: opened, path })
 }
 
 fn check_policy(policy: &Policy) -> Result<(), String> {
@@ -1814,6 +1823,63 @@ fn open_pty(size: protocol::Winsize) -> Result<(OwnedFd, OwnedFd)> {
 #[cfg(test)]
 mod program_tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn program_checkout_directory_retains_verified_inode_after_path_replacement() {
+        // /tmp is the existing root-controlled parent; /usr is only a read-only anchor
+        // for path validation here. This test never mounts or changes either directory.
+        let fixture = tempfile::tempdir_in("/tmp").unwrap();
+        let root = fixture.path();
+        let uid = fs::metadata(root).unwrap().uid();
+        fs::create_dir(root.join("repo")).unwrap();
+        fs::write(root.join("repo/marker"), "verified").unwrap();
+        let caller = open_checkout_beneath(root, Path::new("repo"), uid).unwrap();
+        let checkout = ProgramCheckout {
+            backing_root: root.into(),
+            mount_root: "/usr".into(),
+        };
+        let bound = program_checkout_directory(&caller, uid, &checkout).unwrap();
+        assert_eq!(bound.path, Path::new("/usr/repo"));
+        assert_ne!(bound.fd.as_raw_fd(), caller.as_raw_fd());
+        fs::rename(root.join("repo"), root.join("verified-original")).unwrap();
+        fs::create_dir(root.join("repo")).unwrap();
+        fs::write(root.join("repo/marker"), "replacement").unwrap();
+        drop(caller);
+        assert_eq!(
+            fs::read_to_string(format!("/proc/self/fd/{}/marker", bound.fd.as_raw_fd())).unwrap(),
+            "verified"
+        );
+        assert_ne!(
+            fs::metadata(format!("/proc/self/fd/{}", bound.fd.as_raw_fd()))
+                .unwrap()
+                .ino(),
+            fs::metadata(root.join("repo")).unwrap().ino()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn program_checkout_directory_refuses_wrong_inode_or_non_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        let uid = fs::metadata(root).unwrap().uid();
+        for name in ["authorized", "other"] {
+            fs::create_dir(root.join(name)).unwrap();
+        }
+        fs::write(root.join("file"), "not a directory").unwrap();
+        for received in [
+            open_checkout_beneath(root, Path::new("other"), uid).unwrap(),
+            fs::File::open(root.join("file")).unwrap().into(),
+        ] {
+            let opened = open_checkout_beneath(root, Path::new("authorized"), uid).unwrap();
+            let result = verified_program_directory(&received, opened, "/usr/repo".into());
+            assert_eq!(
+                result.err().unwrap().to_string(),
+                "passed checkout does not match the configured runner backing directory"
+            );
+        }
+    }
 
     struct TestKernel(String);
     impl Kernel for TestKernel {
