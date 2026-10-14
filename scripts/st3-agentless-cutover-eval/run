@@ -90,6 +90,27 @@ mission "orchid-cutover" state="ready" revision-cutover="{policy}" {{
                 assert not any(step['step'] == 'sorter' for step in value['steps'])
                 time.sleep(0.25)
             checks['draining_samples'] = samples
+            # Corroborate the independent carry-clock safety boundary through the ordinary
+            # restart-active API in another private run; never change the held witness.
+            clock_source = source().replace('"orchid-cutover"', '"orchid-clock"').replace(
+                'revision-cutover="when-idle"', 'revision-cutover="restart-active"')
+            cli('apply', write('clock-initial.kdl', clock_source), '--as', 'person/lichen')
+            cli('missions', 'start', 'orchid-clock', '--id', 'orchid/clock',
+                '--workspace', str(output), '--as', 'person/lichen')
+            def clock_run():
+                return cli('missions', 'show', 'mission-run/orchid/clock')
+            before = until(lambda: (value if hold(value := clock_run())['status'] == 'working' else None),
+                           30, 'private clock hold is active')
+            assert hold(before).get('execution_started_at_unix_ms') is not None
+            clock_added = source(True).replace('"orchid-cutover"', '"orchid-clock"')
+            cli('work', 'revise', 'mission-run/orchid/clock', write('clock-added.kdl', clock_added),
+                '--as', 'person/lichen', '--reason', 'Observe ordinary unchanged hold carry timing')
+            after = clock_run()
+            assert after['generation'] != before['generation']
+            assert hold(after)['status'] == 'working' and not hold(after).get('claimant')
+            assert hold(after).get('execution_started_at_unix_ms') is None
+            assert hold(after).get('execution_elapsed_ms', 0) == 0
+            checks['carry_clock_gap'] = {'before': before, 'after': after}
             result = {'verdict': 'baseline-confirmed', 'checks': checks}
         else:
             current = until(lambda: (value if (value := run())['generation'] != initial['generation'] else None),
@@ -100,6 +121,8 @@ mission "orchid-cutover" state="ready" revision-cutover="{policy}" {{
                           'claim_expires_at_unix_ms', 'worker_reported']:
                 assert carried.get(field) == original.get(field), field
             assert not carried.get('claimant')
+            assert carried.get('execution_started_at_unix_ms') == original.get('execution_started_at_unix_ms')
+            assert carried.get('execution_elapsed_ms', 0) >= original.get('execution_elapsed_ms', 0)
             until(lambda: any(step['step'] == 'sorter' and step['status'] == 'ready' for step in run()['steps']),
                   30, 'independent added work is admitted without releasing the hold')
             checks['carried'] = current
