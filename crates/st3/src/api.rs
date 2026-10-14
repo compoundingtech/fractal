@@ -11384,7 +11384,7 @@ struct AgentRestartRequest {
     actor: String,
     idempotency_key: String,
     #[serde(default)]
-    incarnation_id: String,
+    incarnation_id: Option<String>,
     #[serde(default)]
     fresh_context: bool,
     #[serde(default)]
@@ -11495,7 +11495,7 @@ fn request_agent_restart(
         .and_then(|fields| fields.get("incarnation_id"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    if request.incarnation_id != incarnation {
+    if request.incarnation_id.as_deref().is_some_and(|expected| expected != incarnation) {
         return Err(ApiError::bad(St3Error::new(
             "stale-incarnation",
             "the seat's runtime incarnation changed",

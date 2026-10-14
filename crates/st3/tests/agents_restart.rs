@@ -775,26 +775,34 @@ async fn cli_reports_a_replacement_channel_refusal_without_waiting_for_recovery(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn empty_or_omitted_incarnation_cannot_restart_a_running_seat() {
+async fn empty_incarnation_cannot_restart_a_running_seat() {
     let (fixture, subject) = Fixture::new(false).await;
-    for (key, incarnation) in [("empty", Some("")), ("omitted", None)] {
-        let mut body = json!({
-            "subject": subject, "actor": "person/avery", "idempotency_key": key,
-        });
-        if let Some(incarnation) = incarnation {
-            body["incarnation_id"] = json!(incarnation);
-        }
-        let error = fixture.client().post::<_, ClaimRecord>("/v1/agents/restart", &body)
-            .await.unwrap_err();
-        assert_eq!(st3::client::api_error_code(&error), Some("stale-incarnation"));
-    }
+    let body = json!({
+        "subject": subject, "actor": "person/avery", "idempotency_key": "empty",
+        "incarnation_id": "",
+    });
+    let error = fixture.client().post::<_, ClaimRecord>("/v1/agents/restart", &body)
+        .await.unwrap_err();
+    assert_eq!(st3::client::api_error_code(&error), Some("stale-incarnation"));
     fixture.reconciler.reconcile_once().unwrap();
     assert!(fixture.runtime.stops.lock().unwrap().is_empty());
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn empty_or_omitted_incarnation_retries_only_a_seat_without_an_incarnation() {
+async fn omitted_incarnation_restarts_the_current_seat_for_existing_callers() {
+    let (fixture, subject) = Fixture::new(false).await;
+    let request: ClaimRecord = fixture.client().post(
+        "/v1/agents/restart",
+        &json!({"subject": subject, "actor": "person/avery", "idempotency_key": "legacy"}),
+    ).await.unwrap();
+    assert_eq!(request.body["fields"]["incarnation_id"], "fixture:1");
+    reconcile_ready(&fixture, &fixture.reconciler, &subject);
+    assert_eq!(restart_result(&fixture, &request).kind, "runtime.action.succeeded");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_or_omitted_incarnation_retries_a_seat_without_an_incarnation() {
     for incarnation in [None, Some("")] {
         let (fixture, subject) = Fixture::launching(
             Shape::TopLevel,

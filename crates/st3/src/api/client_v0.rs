@@ -11271,7 +11271,7 @@ async fn dispatch_action(
             let parameters: st3_client::AgentRestartParameters =
                 serde_json::from_value(p.clone())
                     .map_err(|error| validation(error.to_string()))?;
-            let incarnation_id = request.fence.runtime_incarnation.clone().unwrap_or_default();
+            let incarnation_id = request.fence.runtime_incarnation.clone();
             let agent = client_detail_id("agent", &parameters.agent);
             request_agent_restart(state, AgentRestartRequest {
                 subject: agent.clone(),
@@ -15436,7 +15436,7 @@ subscription "watch/source" {
         let claim = request_agent_restart(&state, AgentRestartRequest {
             subject: agent.into(), actor: "person/alex".into(),
             idempotency_key: "restart-new-unsaved-key".into(),
-            incarnation_id: "current".into(), fresh_context: false, desired_revision: None,
+            incarnation_id: Some("current".into()), fresh_context: false, desired_revision: None,
         }).unwrap();
         assert_eq!(claim.body["fields"]["native_session_id"], Value::Null);
         append("runtime.observed", json!({

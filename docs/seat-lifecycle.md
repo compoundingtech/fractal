@@ -351,9 +351,9 @@ works for top-level and mission seats under any restart policy, fences the curre
 and waits for a new running incarnation. It resumes the current saved native conversation by
 default; `--fresh-context` deliberately starts a new conversation. Clients can inspect
 `Agent.restart_will_resume` before a restart that may lose context.
-The `/v1/agents/restart` incarnation fence may be omitted or empty only when the seat has
-no incarnation (for example, after a failed parked retry). An empty fence never matches
-a running incarnation; a supplied stale incarnation is refused.
+The `/v1/agents/restart` incarnation fence is optional, so existing callers can omit it.
+When supplied, it must match the current incarnation or the daemon refuses the restart.
+An empty fence matches only a seat with no incarnation, such as after a failed parked retry.
 If a running runtime cannot prove its incarnation, restart completes with a visible refusal
 instead of waiting indefinitely or issuing an unfenced stop. Correct the runtime identity
 before making a new restart request.

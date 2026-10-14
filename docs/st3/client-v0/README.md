@@ -975,7 +975,7 @@ The v0 action discriminators are:
 | Lanes | `lane.join`, `lane.leave`, `lane.move`, `lane.mark`, `lane.approve` | snapshot; the lane must be open and a named entry or anchor must be in it |
 | Runtimes | `runtime.stop`, `runtime.restart`, `runtime.reset`, `runtime.context-clear`, `runtime.signal` | runtime incarnation; stop, restart, and reset also require `runtime_desired_revision` from the runtime resource |
 | Agent desired state | `agent.stop`, `agent.start` | snapshot and `runtime_desired_revision`, the agent's selected desired claim ID; no runtime incarnation required |
-| Agent restart | `agent.restart` | snapshot and current `runtime_incarnation`; `runtime_desired_revision` is checked when supplied |
+| Agent restart | `agent.restart` | snapshot; optional `runtime_incarnation` and `runtime_desired_revision` are enforced when supplied |
 | Terminals | `terminal.input`, `terminal.resize`, `terminal.attach`, `terminal.detach` | runtime incarnation; resize and a line of input (`mode` `line`) also require the screen sequence; raw and key input do not |
 | Pairing | `pairing.begin`, `pairing.complete`, `pairing.revoke` | pairing/device revision where applicable |
 
@@ -1016,9 +1016,13 @@ All generated clients' `Fence` models also carry the desired revision required b
 `agent.restart` takes `{ "agent": "agent/NAME", "fresh_context": false }`. It uses the same
 authority as agent creation, preserves the person audit actor, and appends a durable
 `runtime.action.requested` restart without changing the declaration. It works for standing
-and mission seats under every restart policy, including `never`. The required incarnation
-fence rejects an old seat observation; an optional desired revision fence also guards
-declaration changes. Exact retries retain the original accepted request and captured session.
+and mission seats under every restart policy, including `never`. The incarnation fence is
+optional for existing callers; when supplied, a mismatch refuses the restart. An empty
+incarnation matches only a seat with no incarnation, never a running incarnation. An optional
+desired revision fence also guards declaration changes. Exact retries retain the original
+accepted request and captured session. The legacy `POST /v1/agents/restart` schema likewise
+accepts an omitted `incarnation_id`, enforces a supplied value, and rejects an empty value
+unless the seat has no incarnation.
 By default it captures the native session ID bound to this exact incarnation before stopping,
 then resumes that conversation. `fresh_context: true` explicitly starts a new conversation.
 The Agent resource's `restart_will_resume` is true only for a supported driver with a current
@@ -1040,7 +1044,8 @@ restart override. Missing current native evidence makes `restart_will_resume` fa
 Other providers may publish a null `harness.session-file.path` when they can resume by exact ID.
 Rust exposes `ActionRequest::agent_restart`; Swift and TypeScript expose `agentRestart`.
 The CLI equivalent is `st agents restart NAME --as person/NAME [--fresh-context]`; it obtains
-the current incarnation and declaration fences before submitting `/v1/agents/restart`.
+the current incarnation and declaration fences before submitting `/v1/agents/restart`,
+using an empty incarnation when none exists. No caller is required to supply an incarnation.
 
 Managed wrappers publish that evidence through `POST /v1/claims/harness-session-binding`,
 with fields `agent`, `harness`, `session_id`, boolean `resume_available`, nullable `path`,
