@@ -197,6 +197,31 @@ impl PtyRuntime {
         self.spawn_guarded(id, launch, cwd, env, display_name, tags, size, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_checked(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        self.spawn_guarded(
+            id,
+            launch,
+            cwd,
+            env,
+            display_name,
+            tags,
+            size,
+            None,
+            Some(guard),
+        )
+    }
+
     /// Start a cutover only after its predecessor exited. A replay can reuse only the exact
     /// operation's tagged replacement; an unrelated live incarnation is never adopted.
     #[allow(clippy::too_many_arguments)]
@@ -313,6 +338,10 @@ impl PtyRuntime {
                 }
         }
         if before.as_ref().is_some_and(observation_is_live) {
+            anyhow::ensure!(
+                guard.is_none() || cutover.is_some(),
+                "guarded start cannot attribute an existing incarnation to a new launch"
+            );
             return Ok(());
         }
         // What the previous incarnation left running ends before its replacement starts. Each
@@ -329,9 +358,6 @@ impl PtyRuntime {
             let recorded = self.spawn_state_path(id, "scope");
             std::fs::write(&recorded, &unit)
                 .with_context(|| format!("record PTY scope {}", recorded.display()))?;
-        }
-        if let Some(guard) = guard {
-            guard()?;
         }
         let previous_incarnation = before.as_ref().and_then(observation_incarnation);
         std::fs::write(&fence, previous_incarnation.as_deref().unwrap_or_default())
@@ -407,7 +433,25 @@ impl PtyRuntime {
                 command.env_clear().envs(environment);
             }
             command.env("PTY_ROOT", &self.root);
-            let output = match output_within(command, self.command_timeout) {
+            // A later failed attempt cannot close a producer created by an earlier
+            // attempt. Only failure to create the first launcher proves rejection.
+            let operation = (attempt == 0)
+                .then(|| env.get("ST3_START_OPERATION").map(String::as_str))
+                .flatten();
+            if let Some(guard) = guard
+                && let Err(error) = guard()
+            {
+                let _ = std::fs::remove_file(&fence);
+                // Only rejection before the first launcher proves there is no
+                // producer. An earlier launcher may still publish after returning.
+                return Err(match operation {
+                    Some(operation) => error.context(crate::StartRejected {
+                        operation: Some(operation.to_owned()),
+                    }),
+                    None => error,
+                });
+            }
+            let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = std::fs::remove_file(&fence);
@@ -863,12 +907,29 @@ impl PtyRuntime {
 }
 
 /// A wedged PTY command must not stall the reconciler indefinitely.
-pub(crate) fn output_within(mut command: Command, timeout: Duration) -> Result<Output> {
+pub(crate) fn output_within(command: Command, timeout: Duration) -> Result<Output> {
+    output_for_start(command, timeout, None)
+}
+
+fn output_for_start(
+    mut command: Command,
+    timeout: Duration,
+    operation: Option<&str>,
+) -> Result<Output> {
     let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| {
+            let error = anyhow::Error::from(error);
+            match operation {
+                Some(operation) => error.context(crate::StartRejected {
+                    operation: Some(operation.to_owned()),
+                }),
+                None => error,
+            }
+        })?;
     let pid = child.id();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

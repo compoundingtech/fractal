@@ -1210,6 +1210,7 @@ mod tests {
             socket: "/run/user/1000/st3.sock".into(),
             client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
             peer_listen: Some("0.0.0.0:31313".into()),
+            work_root: None,
             peer_listen_allow_plain_http: true,
             peers: vec![PeerConfig {
                 name: "node-b".into(),
@@ -1221,6 +1222,7 @@ mod tests {
             checkpoint: crate::config::CheckpointConfig::default(),
             limits: crate::config::LimitsConfig::default(),
             reconcile: crate::config::ReconcileConfig::default(),
+            codex_work_without_asking: None,
             fleet: None,
         };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;

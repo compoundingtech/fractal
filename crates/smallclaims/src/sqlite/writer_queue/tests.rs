@@ -17,7 +17,7 @@ fn loan() -> (WriterJob, Loan) {
     let (lent, receives) = mpsc::sync_channel(1);
     let (gives, returned) = mpsc::sync_channel(1);
     (
-        WriterJob::Lend { lent, returned, enqueued: Instant::now(), origin: None },
+        WriterJob::Lend { lent, returned, holder: crate::windows::holds::Holder::current(), enqueued: Instant::now(), origin: None },
         Loan {
             lent: receives,
             returned: gives,
@@ -189,13 +189,14 @@ fn hook_configuration_fence_drains_prior_background_but_not_later_background() {
         .unwrap();
     let through = queue.watermark();
     let (job, fence) = loan();
-    let WriterJob::Lend { lent, returned, enqueued, origin } = job else {
+    let WriterJob::Lend { lent, returned, holder, enqueued, origin } = job else {
         unreachable!()
     };
     sent.send(WriterJob::FenceLend {
         through,
         lent,
         returned,
+        holder,
         enqueued,
         origin,
     })
@@ -289,6 +290,7 @@ fn foreground_only_fifo_and_batched_durable_answers_are_unchanged() {
         }),
         profile: None,
         wait: None,
+        holder: crate::windows::holds::Holder::current(),
         done,
         enqueued: Instant::now(),
     });

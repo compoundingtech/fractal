@@ -347,6 +347,8 @@ pub enum WriterJob {
         profile: Option<crate::profile::Op>,
         /// When profiling, when its caller began to wait and who held the writer then.
         wait: Option<crate::profile::WriterWait>,
+        /// Who asked for this write, charged for the hold when it runs longest in its batch.
+        holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         done: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
@@ -359,6 +361,7 @@ pub enum WriterJob {
         through: u64,
         lent: std::sync::mpsc::SyncSender<Connection>,
         returned: std::sync::mpsc::Receiver<Connection>,
+        holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
     },
@@ -366,6 +369,8 @@ pub enum WriterJob {
     Lend {
         lent: std::sync::mpsc::SyncSender<Connection>,
         returned: std::sync::mpsc::Receiver<Connection>,
+        /// Who borrows the writer, charged for the hold.
+        holder: crate::windows::holds::Holder,
         enqueued: std::time::Instant,
         origin: Option<telemetry::Origin>,
     },
@@ -505,6 +510,18 @@ impl WriterConnection {
         self.install_transaction_hooks(|_| Ok(()), callback)
     }
 
+    /// Install the runtime's bounded source maintenance without occupying the explicit
+    /// adapter slot. It runs before the adapter's finalizer, inside the same outer commit;
+    /// either callback failing rolls back both source and derived writes. Only one runtime
+    /// owns this slot. The lifetime, coverage and work bounds of the adapter also apply.
+    pub fn install_transaction_maintenance(
+        &self,
+        callback: impl Fn(&Transaction<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        let _writer = self.write_fence();
+        self.finalizers.install_maintenance(callback)
+    }
+
     /// Install one paired adapter. Prepare runs INSIDE the newly begun outer transaction
     /// before any managed source job/helper; finalize runs before its commit. An adapter can
     /// reject/fence preexisting raw capture and set/clear its transaction-owned scope marker.
@@ -541,6 +558,7 @@ impl WriterConnection {
     /// Borrow the foreground writer. Foreground jobs retain their arrival order and can
     /// overtake explicitly background loans. Nothing preempts a loan already in progress.
     /// A panic rolls back its open transaction while its guard returns the connection.
+    #[track_caller]
     pub fn write(&self) -> WriterGuard<'_> {
         self.lend_writer(writer_queue::LoanClass::Foreground)
     }
@@ -550,25 +568,30 @@ impl WriterConnection {
     /// turns. A turn is one loan or one bounded group-commit batch, not a wall-time guarantee.
     /// Background callers must release the guard between pages and revalidate captured source,
     /// authority and prepared CAS evidence after acquisition. No operator work belongs here.
+    #[track_caller]
     pub fn write_background(&self) -> WriterGuard<'_> {
         self.lend_writer(writer_queue::LoanClass::Background)
     }
 
+    #[track_caller]
     fn write_fence(&self) -> WriterGuard<'_> {
         self.lend_writer(writer_queue::LoanClass::Fence)
     }
 
+    #[track_caller]
     fn lend_writer(&self, class: writer_queue::LoanClass) -> WriterGuard<'_> {
         debug_assert_no_pinned_read();
         let wait = crate::profile::writer_waiting();
+        let holder = crate::windows::holds::Holder::current();
+        let waiting = crate::windows::holds::Waiting::writer();
         let (lent, lent_here) = std::sync::mpsc::sync_channel(1);
         let (give_back, returned) = std::sync::mpsc::sync_channel(1);
         let enqueued = std::time::Instant::now();
         let origin = telemetry::current_origin();
         match class {
-            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, enqueued, origin }),
+            writer_queue::LoanClass::Foreground => self.send(WriterJob::Lend { lent, returned, holder, enqueued, origin }),
             writer_queue::LoanClass::Background => {
-                self.enqueue_background(WriterJob::Lend { lent, returned, enqueued, origin });
+                self.enqueue_background(WriterJob::Lend { lent, returned, holder, enqueued, origin });
             }
             writer_queue::LoanClass::Fence => {
                 // Hold the admission lock while recording the barrier and enqueueing it.
@@ -580,12 +603,13 @@ impl WriterConnection {
                     .get()
                     .map_or(0, |queue| queue.watermark());
                 let job = if through == 0 {
-                    WriterJob::Lend { lent, returned, enqueued, origin }
+                    WriterJob::Lend { lent, returned, holder, enqueued, origin }
                 } else {
                     WriterJob::FenceLend {
                         through,
                         lent,
                         returned,
+                        holder,
                         enqueued,
                         origin,
                     }
@@ -599,6 +623,7 @@ impl WriterConnection {
         let connection = lent_here
             .recv()
             .expect("the writer thread lends its connection");
+        drop(waiting);
         telemetry::acknowledged(enqueued.elapsed(), false);
         WriterGuard {
             changes_at_lend: connection.total_changes(),
@@ -640,6 +665,7 @@ impl WriterConnection {
     /// queued with it, and answer once that transaction commits. An `Err` from `job` rolls back
     /// only its own savepoint. The outer `Err` is a commit that failed, which undid every write in
     /// the batch.
+    #[track_caller]
     pub fn batched<'job, T: Send + 'job, E: Send + 'job>(
         &self,
         job: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send + 'job,
@@ -653,7 +679,10 @@ impl WriterConnection {
         let capture = crate::touched::recording_wrote();
         let wrote_rows = Mutex::new(Vec::new());
         let wrote = &wrote_rows;
+        // Counts this caller until its write begins, or the writer drops it unrun.
+        let waiting = crate::windows::holds::Waiting::writer();
         let run: Box<dyn FnOnce(&Transaction<'_>) -> bool + Send + '_> = Box::new(move |tx| {
+            drop(waiting);
             let before = tx.total_changes();
             let (result, written) = if capture {
                 crate::touched::record_wrote(|| {
@@ -685,6 +714,7 @@ impl WriterConnection {
             run,
             profile: crate::profile::current(),
             wait: crate::profile::writer_waiting(),
+            holder: crate::windows::holds::Holder::current(),
             done,
             enqueued,
         });
@@ -753,10 +783,11 @@ fn write_queue(
     let mut admission = fifo.receiver(writer_queue::Admission::new(queue, background));
     while let Some(job) = admission.next() {
         match job {
-            WriterJob::Lend { lent, returned, enqueued, origin } | WriterJob::FenceLend { lent, returned, enqueued, origin, .. } => {
+            WriterJob::Lend { lent, returned, holder, enqueued, origin }
+            | WriterJob::FenceLend { lent, returned, holder, enqueued, origin, .. } => {
                 fifo.dequeued_at(enqueued);
                 telemetry::METRICS.queue.record(enqueued.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
-                let _hold = crate::windows::Timer::start(crate::windows::StoreWork::WriterHold);
+                let _hold = crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Lend, &holder);
                 let _holder = callbacks.3.map(|writer| writer.holding(origin));
                 if let Err(std::sync::mpsc::SendError(back)) = lent.send(connection) {
                     connection = back;
@@ -814,7 +845,12 @@ fn run_write_batch(
     }
     let started = std::time::Instant::now();
     let mut attribution = writer_telemetry.map(telemetry::Batch::start);
-    let _hold = crate::windows::Timer::start(crate::windows::StoreWork::WriterHold);
+    // The writer starts a batch only from a batched write.
+    let first_holder = match &first {
+        WriterJob::Batched { holder, .. } => holder.clone(),
+        _ => crate::windows::holds::Holder::current(),
+    };
+    let mut hold = crate::windows::holds::WriterHold::start(crate::windows::holds::HoldKind::Batch, &first_holder);
     let transaction_timer = crate::windows::Timer::start(crate::windows::StoreWork::WriteTransaction);
     let mut answers = Vec::new();
     let mut lend = None;
@@ -839,6 +875,7 @@ fn run_write_batch(
             run,
             profile,
             mut wait,
+            holder,
             done,
             enqueued,
         } = current
@@ -868,6 +905,8 @@ fn run_write_batch(
                 // runs, and shares the commit below with the rest of the batch.
                 let _entered = crate::profile::enter(profile.as_ref());
                 let acquired = crate::profile::writer_acquired(wait);
+                let running = std::time::Instant::now();
+                hold.running(&holder);
                 let savepoint = (|| {
                     transaction.execute_batch("SAVEPOINT batched_write")?;
                     if run(transaction) {
@@ -878,6 +917,7 @@ fn run_write_batch(
                     }
                 })();
                 crate::profile::writer_released(acquired);
+                hold.ran(&holder, running.elapsed());
                 failure = savepoint.err().map(anyhow::Error::from);
                 if let (Some(batch), Some(operation_started)) = (&mut attribution, operation_started) {
                     let elapsed = operation_started.elapsed();
@@ -1081,7 +1121,7 @@ pub struct ReaderUsage {
 
 pub use read_lifetime::{
     LiveReadToken, OldestLiveRead, ReadLifetime, ReadLifetimeReport, oldest_live_read,
-    register_live_read,
+    open_snapshots_over, register_live_read,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use read_lifetime::live_read_locations;
@@ -1207,8 +1247,8 @@ pub struct PinnedRead<'a> {
     /// Whether the pin was registered in this thread's pin stack: set once its transaction
     /// began, so a failed BEGIN neither registers nor disturbs an outer pin.
     pub registered: bool,
-    /// Times the read transaction until it ends.
-    pub transaction: Option<crate::windows::Timer>,
+    /// Times the read transaction until it ends, and names who held one past its target.
+    pub transaction: Option<crate::windows::holds::ReadHold>,
 }
 
 impl Drop for PinnedRead<'_> {
@@ -1305,6 +1345,7 @@ impl ReadPool {
         let permit = if let Some(permit) = self.try_admit_read() {
             permit
         } else {
+            let _waiting = crate::windows::holds::Waiting::read();
             let acquire = self.admission.clone().acquire_owned();
             let capacity = if let Some(budget) = &budget {
                 tokio::select! {
@@ -1366,6 +1407,7 @@ impl ReadPool {
         }
         let waker = std::task::Waker::from(Arc::new(WakeThread(std::thread::current())));
         let mut context = std::task::Context::from_waker(&waker);
+        let _waiting = crate::windows::holds::Waiting::read();
         let mut acquire = std::pin::pin!(self.admission.clone().acquire_owned());
         let mut cancellation = budget.as_ref().map(ReadBudget::cancellation);
         loop {
@@ -2165,7 +2207,7 @@ mod tests {
                     assert_eq!(observed.depth_for_test(), expected_depth);
                     true
                 }),
-                profile: None, wait: None, enqueued, done,
+                profile: None, wait: None, holder: crate::windows::holds::Holder::current(), enqueued, done,
             })).unwrap();
             answers.push(answer);
         }
@@ -2314,6 +2356,7 @@ mod commit_observer_tests {
             }),
             profile: None,
             wait: None,
+            holder: crate::windows::holds::Holder::current(),
             done,
         });
         answer

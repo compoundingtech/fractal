@@ -234,6 +234,7 @@ static TASKS: LazyLock<[[KeyValue; 1]; 2]> = LazyLock::new(|| {
 });
 struct Instruments {
     wakes: Counter<u64>,
+    observation_drops: Counter<u64>,
     duration: Histogram<f64>,
 }
 static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
@@ -242,6 +243,10 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
         wakes: meter
             .u64_counter("st.reconcile.wakes")
             .with_unit("{wake}")
+            .build(),
+        observation_drops: meter
+            .u64_counter("st.reconcile.runtime_observation.dropped")
+            .with_unit("{observation}")
             .build(),
         duration: meter
             .f64_histogram("st.reconcile.pass.duration")
@@ -263,6 +268,13 @@ pub(crate) fn record_wake(cause: WakeCause, detail: Option<&str>) {
         METRICS.wakes.add(1, &ATTRIBUTES[cause as usize]);
     }
 }
+/// A rejected physical capture is visible without unbounded subject metric labels.
+pub(crate) fn record_runtime_observation_drop() {
+    if crate::otel::metrics_enabled() {
+        METRICS.observation_drops.add(1, &[]);
+    }
+}
+
 pub(crate) fn take_wake() -> WakeCause {
     WakeCause::ALL[PENDING.swap(WakeCause::Other as usize, Ordering::Relaxed)]
 }
@@ -372,16 +384,32 @@ mod tests {
         }
         assert_eq!(WakeCause::from("unknown source"), WakeCause::Other);
         let otel_values = [
-            "api", "replication_receive", "deadline", "timer_restart", "timer_step_timeout",
-            "timer_resume_verification", "timer_gate_timeout", "timer_gate_recheck",
-            "timer_gate", "timer_gate_poll", "timer_llm_gate", "file_watch", "reconciler",
-            "recorder_receipts", "startup", "continuation", "other",
+            "api",
+            "replication_receive",
+            "deadline",
+            "timer_restart",
+            "timer_step_timeout",
+            "timer_resume_verification",
+            "timer_gate_timeout",
+            "timer_gate_recheck",
+            "timer_gate",
+            "timer_gate_poll",
+            "timer_llm_gate",
+            "file_watch",
+            "reconciler",
+            "recorder_receipts",
+            "startup",
+            "continuation",
+            "other",
         ];
         for (index, cause) in WakeCause::ALL.into_iter().enumerate() {
             assert_eq!(cause as usize, index);
             assert_eq!(WakeCause::from(cause.legacy_str()), cause);
             assert_eq!(cause.otel_str(), otel_values[index]);
-            assert_eq!(ATTRIBUTES[index][0], KeyValue::new("cause", otel_values[index]));
+            assert_eq!(
+                ATTRIBUTES[index][0],
+                KeyValue::new("cause", otel_values[index])
+            );
         }
     }
 }

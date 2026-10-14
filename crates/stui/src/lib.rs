@@ -9,6 +9,7 @@ mod version;
 mod voice;
 
 pub use ui::screens::HOME_IDLE_TEXT;
+pub use ui::checklist;
 pub use version::display_version;
 
 use st3_feed as feed;
@@ -1538,6 +1539,7 @@ mission "release" state="ready" {
                     &gate.step,
                     action,
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(worker.clone()),
                         incarnation: Some("worker-one".into()),
                         summary: Some("Drafted".into()),

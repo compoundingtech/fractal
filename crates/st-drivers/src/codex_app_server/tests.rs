@@ -3338,6 +3338,109 @@ fn declared_resume_policy_preloads_before_the_tui_can_load_read_only() {
 }
 
 #[test]
+fn a_failed_preload_names_the_missing_rollout_not_the_closed_channel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _stop_exclusive = stop_flag_tests();
+    let socket = tmp.path().join("server.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialize"
+        );
+        write_json_message(
+            &mut websocket,
+            &json!({ "id": 0, "result": { "userAgent": "fake" } }),
+        )
+        .unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialized"
+        );
+        let request = read_json_message(&mut websocket).unwrap().unwrap();
+        assert_eq!(request["method"], "thread/resume");
+        write_json_message(
+            &mut websocket,
+            &json!({
+                "id": CONTROL_SUBSCRIBE_REQUEST_ID,
+                "error": {
+                    "code": -32600,
+                    "message": "no rollout found for thread id thread-prior"
+                }
+            }),
+        )
+        .unwrap();
+    });
+
+    let stream = UnixStream::connect(&socket).unwrap();
+    let shutdown = stream.try_clone().unwrap();
+    let websocket = initialize_control(stream)
+        .unwrap()
+        .expect("no stop raised in tests");
+    let binding_path = tmp.path().join("state/binding.json");
+    let control_state_path = tmp.path().join("state/control-state.json");
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let (events_tx, events_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (preloaded_tx, preloaded_rx) = mpsc::channel();
+    let pump = thread::spawn(move || {
+        pump_control(
+            websocket,
+            &binding_path,
+            &control_state_path,
+            &runtime,
+            Some(ControlResume {
+                thread_id: "thread-prior",
+                ready: ready_rx,
+                tui_loaded_timeout: TUI_LOADED_TIMEOUT,
+                permission_overrides: Some(ResumePermissionOverrides {
+                    approval_policy: Some("never".into()),
+                    approvals_reviewer: None,
+                    sandbox: Some("danger-full-access".into()),
+                    model: None,
+                    effort: None,
+                    permissions: None,
+                }),
+                preload: true,
+                preloaded: Some(preloaded_tx),
+            }),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            events_tx,
+        )
+    });
+    ready_tx.send(()).unwrap();
+    let closed = preloaded_rx
+        .recv_timeout(TEST_EVENT_TIMEOUT)
+        .map_err(anyhow::Error::from)
+        .unwrap_err();
+    server.join().unwrap();
+    let _ = shutdown.shutdown(Shutdown::Both);
+    pump.join().unwrap();
+
+    let reported = format!("{:#}", preload_failure(&events_rx, closed));
+    assert!(
+        reported.contains(
+            "saved Codex resume binding has no persisted rollout for thread thread-prior"
+        ),
+        "{reported}"
+    );
+    assert!(!reported.contains("sending half is closed"), "{reported}");
+    // With nothing recorded by the control thread the closed-channel error is all there is.
+    let (_, empty) = mpsc::channel::<ControlEvent>();
+    let fallback = format!(
+        "{:#}",
+        preload_failure(&empty, anyhow::anyhow!("closed channel"))
+    );
+    assert_eq!(fallback, "closed channel");
+}
+
+#[test]
 fn rejected_declared_resume_settings_fail_without_downgrading_the_policy() {
     let tmp = tempfile::tempdir().unwrap();
     let _stop_exclusive = stop_flag_tests();
@@ -8347,6 +8450,24 @@ fn native_codex_login_recovery_requires_a_successful_current_thread_turn() {
             .provider_auth,
         None
     );
+}
+
+#[test]
+fn an_unticked_setup_box_leaves_codex_its_own_approval_defaults_in_both_modes() {
+    use crate::access::AccessMode;
+    let socket = Some("/run/example/st.sock");
+    let workspace = Path::new("/work/example");
+    let plain: Vec<String> = vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()];
+    for mode in [AccessMode::Auto, AccessMode::Bypass] {
+        let ticked = managed_codex_argv_asking(mode, false, socket, workspace, plain.clone()).unwrap();
+        let asking = managed_codex_argv_asking(mode, true, socket, workspace, plain.clone()).unwrap();
+        assert!(ticked.len() > asking.len(), "{mode:?}: the install default adds permission arguments");
+        assert_eq!(
+            asking,
+            ["codex", "--dangerously-bypass-hook-trust", "--model", "gpt-example", "boot"],
+            "{mode:?}: only hook trust is added; no sandbox bypass, profile or reviewer"
+        );
+    }
 }
 
 #[test]

@@ -17,6 +17,7 @@ pub mod conversation;
 pub mod demo;
 mod direct;
 pub mod doc;
+pub mod checklist;
 mod edit;
 mod glass;
 mod hover;

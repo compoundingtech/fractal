@@ -2847,7 +2847,12 @@ pub fn run_controlled_paths(
 }
 
 /// Defaults apply only at the st3 launch entry point, before fresh/resume policy projection.
-fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
+fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, argv: Vec<String>) -> Result<Vec<String>> {
+    managed_codex_argv_asking(mode, crate::access::codex_asks(), endpoint, workspace, argv)
+}
+
+/// `asks` is an unticked "Let Codex work without asking": Codex keeps its own approval defaults.
+fn managed_codex_argv_asking(mode: crate::access::AccessMode, asks: bool, endpoint: Option<&str>, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
     let boundary = interactive_root_prefix_end(&argv[1..])?;
     let authored = &argv[1..1 + boundary];
     let mut explicit_permissions = false;
@@ -2864,6 +2869,8 @@ fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, w
         { explicit_permissions = true; }
         index += if matches!(arg, "-c" | "--config" | "--enable" | "--disable" | "--remote-auth-token-env" | "-m" | "--model" | "--local-provider" | "-p" | "--profile" | "-s" | "--sandbox" | "-C" | "--cd" | "--add-dir" | "-a" | "--ask-for-approval") { 2 } else { 1 };
     }
+    // An unticked "Let Codex work without asking" leaves Codex's own approval defaults in place.
+    explicit_permissions |= asks;
     let socket = if mode == crate::access::AccessMode::Auto && !explicit_permissions {
         let endpoint = endpoint.context("managed auto Codex needs ST3_ENDPOINT")?;
         Some(Path::new(endpoint.strip_prefix("unix://").unwrap_or(endpoint)))
@@ -3185,6 +3192,20 @@ fn run_controlled_owned(
     result
 }
 
+/// A preloaded resume that fails drops its completion sender, which reads as "channel is empty and
+/// sending half is closed". The control thread has already named the real cause (Codex rejected the
+/// declared settings, or the saved thread has no persisted rollout); report that one.
+fn preload_failure(events: &Receiver<ControlEvent>, closed: anyhow::Error) -> anyhow::Error {
+    while let Ok(event) = events.try_recv() {
+        if let ControlEvent::Failed(cause) = event {
+            return anyhow::anyhow!(
+                "Codex control could not preload the declared resume policy: {cause}"
+            );
+        }
+    }
+    closed
+}
+
 fn declared_codex_model(args: &[String]) -> Option<String> {
     let mut selected_config = None;
     let mut selected_direct = None;
@@ -3430,7 +3451,7 @@ fn run_connected(
             drop(resume_ready_tx);
             let _ = shutdown.shutdown(Shutdown::Both);
             let _ = event_thread.join();
-            return Err(error);
+            return Err(preload_failure(&events_rx, error));
         }
     }
     // A fresh initialized observer reads before this child can issue thread/start.
