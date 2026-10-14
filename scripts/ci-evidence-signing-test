@@ -126,6 +126,13 @@ with tempfile.TemporaryDirectory() as directory:
     helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(needs)))
     assert json.loads(out.read_text())['exit_code'] == 1
     needs['linux-gate']['result'] = 'success'
+    with_gates = {**needs, 'evidence-gate-mail-redelivery-canaries': {'result': 'success', 'outputs': {'skip': 'false'}},
+                  'evidence-gate-isolation-vm': {'result': 'success', 'outputs': {'skip': 'false'}}}
+    assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(with_gates), GITHUB_EVENT_NAME='merge_group')).returncode == 0, 'gates that did not skip do not block'
+    assert json.loads(out.read_text())['command'] == ['linux-gate', 'aggregate', 'linux-clippy', 'linux-gate', 'linux-tests'], 'the recorded command does not change when gate jobs are needed'
+    with_gates['evidence-gate-isolation-vm']['outputs']['skip'] = 'true'
+    stopped = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(with_gates), GITHUB_EVENT_NAME='merge_group'))
+    assert stopped.returncode == 1 and 'evidence-gate-isolation-vm' in stopped.stdout, 'every needed job succeeded but one gate said skip: no note'
     skipped = {**needs, 'linux-tests': {'result': 'skipped'}}
     refused = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(skipped), GITHUB_EVENT_NAME='merge_group'))
     assert refused.returncode == 1 and 'did not run' in refused.stdout, 'a skipped stage means this run did not test the tree itself'
@@ -160,6 +167,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='../x')).returncode == 1
     print('passed: a stage note carries the stage command, its real exit status and the digest of its exact log; a missing or garbled timing is a failure')
 
+<<<<<<< HEAD
     # --- step-facts: jobs with no stage log record the outcomes of the steps that ran
     base_env = dict(STEP_CHECK='isolation-vm', STEP_COMMAND=json.dumps(['isolation-vm', 'nixos-test-driver']), GITHUB_RUN_ID='7',
                     RUNNER_OS='Linux')
@@ -175,6 +183,15 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='not json')).returncode == 1
     assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='{}')).returncode == 1
     print('passed: a step-based job note records each step outcome; a skipped, cancelled or missing step means no note, a failed one a failure')
+=======
+    # --- a job whose gate said skip makes no note even if its logs and steps look like a success
+    assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='false')).returncode == 0
+    gated = helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='true'))
+    assert gated.returncode == 1 and 'evidence gate skipped' in gated.stdout
+    gated = helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=json.dumps({'driver': 'success'}), GATE_SKIP='true'))
+    assert gated.returncode == 1 and 'evidence gate skipped' in gated.stdout
+    print('passed: a job whose own evidence gate said skip makes no note, whatever its logs or steps show')
+>>>>>>> agent/evidence-stage-notes
 
     # --- cleanup: key overwritten and removed
     alias = tmp / 'alias'

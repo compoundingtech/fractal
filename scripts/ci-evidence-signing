@@ -106,10 +106,18 @@ def aggregate(path):
     Not the stages' commands, outputs, inventories, timings or toolchains: it did not run them.
     """
     needs = json.loads(env('NEEDS_JSON') or '{}')
-    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items())}
+    # The gate jobs only feed the skip check below; they are not part of the recorded command or results.
+    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items()) if not name.startswith('evidence-gate-')}
     gate = env('GATE_JOB', 'linux-gate')
     if gate not in results:
         raise Refused(f'the {gate!r} job is not among the needed jobs, so there is no verdict to record')
+    # An evidence gate that decided to skip says so in its output, set only by its marker step. Required
+    # checks whose gate skipped still end in success with their steps skipped, so their own result
+    # cannot show it: this output can. No note then, whatever the other results say.
+    taken = sorted(name for name, entry in needs.items()
+                   if name.startswith('evidence-gate-') and str((entry.get('outputs') or {}).get('skip', '')).lower() == 'true')
+    if taken:
+        raise Refused(f'not recording: the evidence gate skipped work in this run ({", ".join(taken)}), so it did not test this tree itself')
     # A needed job that did not run (skipped by the evidence gate, or for any other reason) means this
     # run did not itself test those stages. A note that says success would let one real run refresh
     # its own skips forever, so no note is made. Only the merge-queue-only shards may be skipped, and
@@ -132,6 +140,13 @@ def aggregate(path):
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 
 
+def gate_skipped():
+    """GATE_SKIP is the job's own evidence gate output. When it says skip, the job took the step-level
+    skip and ended in success without doing its work: no note, whatever its steps' outcomes say."""
+    if env('GATE_SKIP').lower() == 'true':
+        raise Refused('the evidence gate skipped this job\'s work, so it did not test anything itself; no note is made')
+
+
 def stage_facts(path):
     """What a stage job honestly knows: the command it ran, its exit status, the digest of its log.
 
@@ -139,6 +154,7 @@ def stage_facts(path):
     ("SECONDS STATUS"). A missing timing file means the stage did not finish: that is recorded as
     a failure, never inferred as success.
     """
+    gate_skipped()
     stage = env('STAGE')
     if not stage or '/' in stage:
         raise Refused('STAGE must name the ci-linux stage this job ran')
@@ -176,6 +192,7 @@ def step_facts(path):
     succeeded. A step that is skipped, cancelled or missing means the job did not run its work (for
     example it was covered by a trusted note), so no note is made, not even a failure.
     """
+    gate_skipped()
     check = env('STEP_CHECK')
     try:
         command = json.loads(env('STEP_COMMAND') or 'null')
