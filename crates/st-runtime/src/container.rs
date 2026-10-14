@@ -7,7 +7,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ fn deserialize_seat<'de, D: serde::Deserializer<'de>>(
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SeatRuntime {
-    Native,
+    Native {},
     Container(ContainerRuntime),
 }
 
@@ -56,6 +56,8 @@ pub struct ContainerRuntime {
     #[serde(deserialize_with = "deserialize_seat")]
     pub seat: String,
     pub endpoint: PathBuf,
+    /// Bridge UID as observed in the client's user namespace. It must be explicitly mapped,
+    /// not an overflow UID shared by unrelated host identities.
     pub bridge_uid: u32,
 }
 
@@ -89,7 +91,7 @@ impl ContainerStatus {
 }
 
 /// Suspend destroys volatile state. Resume starts a new native session, not a transcript resume.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContainerOperation {
     Status,
@@ -99,6 +101,32 @@ pub enum ContainerOperation {
     Resume,
     /// The adapter must verify the native channel binding, not trust the notification alone.
     NativeReady { incarnation: u64 },
+}
+
+impl<'de> Deserialize<'de> for ContainerOperation {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // Internally tagged unit variants ignore extra fields. Empty struct variants do not.
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Status {},
+            Start {},
+            Stop {},
+            Suspend {},
+            Resume {},
+            NativeReady { incarnation: u64 },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Status {} => Self::Status,
+            Wire::Start {} => Self::Start,
+            Wire::Stop {} => Self::Stop,
+            Wire::Suspend {} => Self::Suspend,
+            Wire::Resume {} => Self::Resume,
+            Wire::NativeReady { incarnation } => Self::NativeReady { incarnation },
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -160,9 +188,10 @@ impl ContainerRuntime {
         operation: ContainerOperation,
     ) -> Result<ContainerResponse> {
         anyhow::ensure!(is_seat_identifier(&self.seat), "invalid seat identifier");
-        let mut stream = UnixStream::connect(&self.endpoint).context("connect container bridge")?;
-        configure(&stream)?;
+        let stream = UnixStream::connect(&self.endpoint).context("connect container bridge")?;
+        let deadline = Instant::now() + IO_TIMEOUT;
         authenticate(&stream, self.bridge_uid)?;
+        let mut stream = DeadlineStream { stream, deadline };
         write_frame(
             &mut stream,
             &ContainerRequest {
@@ -188,14 +217,15 @@ impl ContainerRuntime {
 /// Serve one bounded request on an already accepted socket. The caller owns a private listener
 /// and serializes access to its fixed control adapter. This never contacts the raw st endpoint.
 pub fn serve_container_request(
-    mut stream: UnixStream,
+    stream: UnixStream,
     expected_uid: u32,
     seat: &str,
     role: ContainerBridgeRole,
     control: &mut impl ContainerControl,
 ) -> Result<()> {
-    configure(&stream)?;
+    let deadline = Instant::now() + IO_TIMEOUT;
     authenticate(&stream, expected_uid)?;
+    let mut stream = DeadlineStream { stream, deadline };
     let request: ContainerRequest = read_frame(&mut stream)?;
     let response = match dispatch(&request, seat, role, control) {
         Ok(status) => ContainerResponse::Status { status },
@@ -270,10 +300,41 @@ fn observation_matches(
     }
 }
 
-fn configure(stream: &UnixStream) -> Result<()> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    Ok(())
+/// One absolute I/O deadline, not an inactivity timeout that a slow peer can extend.
+struct DeadlineStream {
+    stream: UnixStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "container bridge I/O deadline exceeded",
+            ))
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(bytes)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.remaining()?;
+        self.stream.flush()
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -416,6 +477,8 @@ mod tests {
             r#"{"version":1,"seat":"synthetic","generation":0,"operation":{"kind":"exec","argv":["sh"]}}"#,
             r#"{"version":1,"seat":"synthetic","generation":0,"operation":{"kind":"status"},"content":"not allowed"}"#,
             r#"{"version":1,"seat":"free text is forbidden","generation":0,"operation":{"kind":"status"}}"#,
+            r#"{"version":1,"seat":"synthetic","generation":0,"operation":{"kind":"status","content":"not allowed"}}"#,
+            r#"{"version":1,"seat":"synthetic","generation":0,"operation":{"kind":"start","argv":["sh"]}}"#,
         ] {
             assert!(serde_json::from_str::<ContainerRequest>(json).is_err());
         }
@@ -433,6 +496,16 @@ mod tests {
         let runtime = SeatRuntime::Container(ContainerRuntime { seat: "synthetic".into(), endpoint: "/run/synthetic/control.sock".into(), bridge_uid: 123 });
         assert_eq!(serde_json::from_slice::<SeatRuntime>(&serde_json::to_vec(&runtime).unwrap()).unwrap(), runtime);
         assert!(serde_json::from_str::<SeatRuntime>(r#"{"kind":"unknown"}"#).is_err());
+        assert!(serde_json::from_str::<SeatRuntime>(r#"{"kind":"native","content":"not allowed"}"#).is_err());
+    }
+
+    #[test]
+    fn expired_deadline_refuses_reads_and_writes_even_with_bytes_available() {
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(&[1]).unwrap();
+        let mut stream = DeadlineStream { stream, deadline: Instant::now() };
+        assert_eq!(stream.read(&mut [0]).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(stream.write(&[1]).unwrap_err().kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[cfg(target_os = "linux")]

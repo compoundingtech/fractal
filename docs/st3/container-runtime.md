@@ -47,6 +47,9 @@ application UID. The server checks `SO_PEERCRED` before it reads a frame. The cl
 server UID before it sends a frame. The socket owner must protect the directory and socket. Use a
 stable user-namespace UID mapping. A missing socket, wrong peer or unsupported platform is an
 error, never permission to use the raw host daemon.
+The client compares the broker UID as observed in its own user namespace; the server compares the
+application's host-mapped UID. Both identities need explicit mappings. An overflow UID is not a
+valid bridge identity because unrelated host peers can share it inside a user namespace.
 
 The controller listener permits start, status, stop, suspend and resume. Do not mount this listener
 inside the container. The seat listener permits status and native-ready notification only. The
@@ -55,7 +58,9 @@ a foreign seat, unknown protocol version, wrong role, stale generation, invalid 
 invalid observation before it returns success. The deployment must serialize calls to one adapter.
 
 Each connection carries one length-prefixed JSON request and one response. The prefix is a
-four-byte big-endian length; the limit is 4096 bytes. The I/O deadline bounds one connection.
+four-byte big-endian length; the limit is 4096 bytes. One absolute I/O deadline starts after connect
+or accept; a slow peer cannot extend it with partial reads or writes. It does not interrupt adapter
+execution. The deployment must bound its own unit operations.
 Protocol version is 1. The request has `version`, `seat`, `generation` and a nested `operation` with
 an explicit `kind`. Unknown fields and operations are rejected. Status has only `generation`,
 `phase`, `ready` and `in_flight_writes`. Errors use closed codes. Error frames never contain command
