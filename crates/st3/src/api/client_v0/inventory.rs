@@ -1,399 +1,365 @@
+//! Screen inventories use the same authorized reads as HTTP, on the collection snapshot.
 use super::*;
-use st3_client::{HarnessInventory, HarnessInventoryItem, HarnessInventoryQuery, PageInfo};
-use hmac::Mac as _;
+use std::path::PathBuf;
 
-const CURSOR_TTL_MS: u128 = 60_000;
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Cursor {
-    actor: String,
-    agent: String,
-    query: HarnessInventoryQuery,
-    revision: String,
-    after: String,
-    expires_at: u128,
+pub(super) fn is_inventory(collection: &str) -> bool {
+    matches!(
+        collection,
+        "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
+    )
 }
 
-fn cursor_mac(state: &AppState, payload: &[u8]) -> Result<hmac::Hmac<Sha256>, ApiError> {
-    let key = terminal_capability_key(state)?;
-    let mut mac = <hmac::Hmac<Sha256>>::new_from_slice(&key).map_err(ApiError::internal)?;
-    mac.update(b"st3.harness-inventory.cursor.v1\0");
-    mac.update(payload);
-    Ok(mac)
-}
-
-fn encode_cursor(state: &AppState, cursor: &Cursor) -> Result<String, ApiError> {
-    let payload = serde_json::to_vec(cursor).map_err(ApiError::internal)?;
-    let signature = cursor_mac(state, &payload)?.finalize().into_bytes();
-    let encoding = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    Ok(format!("inventory-page/{}.{}", encoding.encode(payload), encoding.encode(signature)))
-}
-
-fn decode_cursor(state: &AppState, encoded: &str) -> Result<Cursor, ApiError> {
-    let malformed = || validation("malformed or unauthenticated inventory cursor");
-    let (payload, signature) = encoded.strip_prefix("inventory-page/")
-        .and_then(|body| body.split_once('.')).ok_or_else(malformed)?;
-    let encoding = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let payload = encoding.decode(payload).map_err(|_| malformed())?;
-    let signature = encoding.decode(signature).map_err(|_| malformed())?;
-    cursor_mac(state, &payload)?.verify_slice(&signature).map_err(|_| malformed())?;
-    serde_json::from_slice(&payload).map_err(|_| malformed())
-}
-
-fn validate_cursor_binding(cursor: &Cursor, actor: &str, agent: &str,
-    query: &HarnessInventoryQuery, now: u128) -> Result<(), ApiError> {
-    if cursor.actor != actor || cursor.agent != agent || &cursor.query != query
-        || cursor.expires_at < now || cursor.expires_at > now.saturating_add(CURSOR_TTL_MS) {
-        return Err(client_page_expired("inventory cursor expired or its binding changed"));
+pub(super) fn validate(request: &CollectionSubscribe) -> Result<(), ApiError> {
+    if request.collection != "usage" && (request.since_ms.is_some() || request.until_ms.is_some()) {
+        return Err(validation("period boundaries are supported for usage only"));
+    }
+    if matches!(
+        request.collection.as_str(),
+        "clients" | "usage" | "machines" | "sessions" | "terminals"
+    ) && (request.person.is_some() || request.actor.is_some())
+    {
+        return Err(validation(
+            "this inventory does not accept person or actor filters",
+        ));
+    }
+    if request.collection == "devices" && request.actor.is_some() {
+        return Err(validation("devices select a person, not an actor"));
+    }
+    if request
+        .since_ms
+        .zip(Some(request.until_ms.unwrap_or(client_now_ms() as u64)))
+        .is_some_and(|(since, until)| since > until)
+    {
+        return Err(validation("usage start must be before its end"));
     }
     Ok(())
 }
 
-pub(in crate::api) async fn read(
-    State(state): State<AppState>,
-    Extension(session): Extension<ClientSession>,
-    AxumPath(agent): AxumPath<String>,
-    Query(mut query): Query<HarnessInventoryQuery>,
-) -> Result<Json<Value>, ApiError> {
-    require_scope(&session, "read.projections")?;
-    if !agent.starts_with("agent/") || agent.len() <= 6 || agent.len() > 512 {
-        return Err(validation("inventory requires an agent subject"));
+/// Shared serialization keeps the HTTP and followed usage reports identical.
+pub(super) fn usage_value(store: &Store, since_ms: u64, until_ms: u64) -> anyhow::Result<Value> {
+    let (mut rows, agent_messages) = store.usage_period_report(since_ms, until_ms)?;
+    for row in &mut rows {
+        if let Some(fields) = row.as_object_mut() {
+            fields.retain(|_, value| value.as_str() != Some(""));
+        }
     }
-    if !matches!(query.collection.as_str(), "files" | "skills" | "skill-commands" | "slash-commands")
-        || query.directory.len() > 1024 || query.prefix.len() > 160
-        || query.prefix.chars().any(char::is_control)
-        || query.cursor.as_ref().is_some_and(|cursor| cursor.len() > 8192)
-        || query.limit.is_some_and(|limit| !(1..=200).contains(&limit)) {
-        return Err(validation("invalid inventory collection, filter, cursor or page bound"));
-    }
-    if query.collection != "files" && !query.directory.is_empty() {
-        return Err(validation("directory applies only to file inventory"));
-    }
-    query.limit = Some(query.limit.unwrap_or(50));
-    let live = remote_terminal_live_session(&state, &agent, &query.runtime_incarnation)?;
-    if live.owner_host_id != query.owner_host_id
-        || managed_session_id(&agent, &live.incarnation_id) != query.session_id {
-        return Err(stale("the inventory owner or managed session fence is stale"));
-    }
-    if live.owner_host_id != client_host_id(&state.node) {
-        if !acting_party(&session) { return Err(forbidden("remote inventory requires a concrete actor")); }
-        let relay = state.client_relay.as_ref().ok_or_else(|| remote_unavailable(&live.owner_host_id))?;
-        return relay.read(&live.owner_host_id, &crate::peer::ClientReadRequest {
-            authority_actor: session.authority_actor, relay: None,
-            request: crate::peer::ClientReadOperation::HarnessInventory { agent_id: agent, query },
-        }).await.map(Json).map_err(|error| remote_read_error(&live.owner_host_id, error));
-    }
-    let reader = state.clone();
-    let actor = session.authority_actor;
-    tokio::task::spawn_blocking(move || local_read(&reader, &actor, &agent, query))
-        .await.map_err(ApiError::internal)?.map(Json)
+    let limits = store
+        .account_limits()?
+        .into_iter()
+        .map(|limit| {
+            let mut value = serde_json::to_value(limit).expect("account limit is serializable");
+            if let Some(fields) = value.as_object_mut() {
+                fields.retain(|_, value| !value.is_null());
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"since_ms":since_ms, "until_ms":until_ms, "rows":rows, "limits":limits, "agent_messages":agent_messages}),
+    )
 }
 
-fn local_snapshot(state: &AppState, agent: &str, query: &HarnessInventoryQuery)
-    -> Result<Option<st_drivers::harness_inventory::Snapshot>, ApiError> {
-    let live = live_session(state, agent, Some(&query.runtime_incarnation))?;
-    if live.owner_host_id != query.owner_host_id || managed_session_id(agent, &live.incarnation_id) != query.session_id {
-        return Err(stale("the inventory owner or managed session fence is stale"));
+pub(super) fn items(
+    state: &AppState,
+    session: &ClientSession,
+    request: &CollectionSubscribe,
+    snapshot: &ClientSnapshot,
+) -> anyhow::Result<(Vec<Value>, bool)> {
+    let limit = request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
+    if let Some(deadline) = &request.inventory_deadline {
+        *deadline.lock().expect("inventory deadline") = session.grant_expires_at;
     }
-    if live.driver.as_deref() != Some("omp") { return Ok(None) }
-    let root = state.state_dir.join("drivers").join(&hex::encode(Sha256::digest(agent.as_bytes()))[..24]);
-    let identity = agent.trim_start_matches("agent/");
-    let observations = root.join("observations");
-    if !st_drivers::harness_events::enabled(&observations) { return Ok(None) }
-    let bytes = st_drivers::harness_events::read_snapshot(&observations, "harness-inventory")
-        .map_err(|_| inventory_unavailable("native inventory evidence is unreadable"))?;
-    let Some(bytes) = bytes else { return Ok(None) };
-    let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| inventory_unavailable("native inventory evidence is invalid"))?;
-    let provider = value["incarnation"].as_str()
-        .ok_or_else(|| inventory_unavailable("native inventory has no authenticated provider"))?;
-    let owner = st_drivers::harness_events::read_snapshot(&observations, "harness-state")
-        .map_err(|_| inventory_unavailable("native provider ownership is unreadable"))?
-        .ok_or_else(|| inventory_unavailable("native provider ownership is absent"))?;
-    let owner: Value = serde_json::from_slice(&owner)
-        .map_err(|_| inventory_unavailable("native provider ownership is invalid"))?;
-    if owner["incarnation"].as_str() != Some(provider) {
-        return Err(stale("native inventory evidence belongs to a superseded provider"));
-    }
-    if owner["state"] == "ended" && owner.get("exit").is_some_and(|exit| !exit.is_null()) {
-        return Err(stale("the native inventory provider has ended"));
-    }
-    let native = st_drivers::omp_session::bound_native_session(
-        &root.join("sessions/omp"), identity, identity, provider,
-    ).map_err(|_| inventory_unavailable("native session binding is unreadable"))?;
-    if native.as_deref() != Some(query.native_session_id.as_str()) {
-        return Err(stale("the inventory native session fence is stale or not ready"));
-    }
-    if let Some(fields) = value.as_object_mut() { fields.remove("incarnation"); }
-    let snapshot: st_drivers::harness_inventory::Snapshot = serde_json::from_value(value)
-        .map_err(|_| inventory_unavailable("native inventory evidence is invalid"))?;
-    if snapshot.incarnation_id != query.runtime_incarnation || snapshot.session_id != query.native_session_id {
-        return Err(stale("native inventory evidence belongs to a previous session"));
-    }
-    Ok(Some(snapshot))
-}
-
-fn inventory_unavailable(message: &str) -> ApiError {
-    ApiError { status: StatusCode::SERVICE_UNAVAILABLE, code: "inventory-unavailable".into(),
-        message: message.into(), details: Box::default() }
-}
-
-fn local_read(state: &AppState, actor: &str, agent: &str, mut query: HarnessInventoryQuery) -> Result<Value, ApiError> {
-    let snapshot = local_snapshot(state, agent, &query)?;
-    let encoded = query.cursor.take();
-    let limit = query.limit.unwrap_or(50);
-    let now = client_now_ms();
-    let mut expires_at = now.saturating_add(CURSOR_TTL_MS);
-    let cursor = encoded.as_ref().map(|encoded| {
-        let cursor = decode_cursor(state, encoded)?;
-        validate_cursor_binding(&cursor, actor, agent, &query, now)?;
-        Ok(cursor)
-    }).transpose()?;
-    let mut result = HarnessInventory {
-        kind: "harness-inventory".into(), agent_id: agent.into(), owner_host_id: query.owner_host_id.clone(),
-        session_id: query.session_id.clone(), native_session_id: snapshot.as_ref().map(|snapshot| snapshot.session_id.clone()),
-        runtime_incarnation: query.runtime_incarnation.clone(), collection: query.collection.clone(),
-        status: "unsupported".into(), coverage: "none".into(), full_inventory: false,
-        reason: Some("this harness has no observed native inventory source".into()),
-        observed_at: snapshot.as_ref().map(|snapshot| snapshot.observed_at.clone()), items: Vec::new(),
-        page: PageInfo { limit, has_more: false, next_cursor: None, cursor_expires_at: None },
+    let mut items = match request.collection.as_str() {
+        "clients" => {
+            let mut rows = client_connection_items(state, snapshot)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            if let Some(deadline) = &request.inventory_deadline {
+                let expiry = super::super::client_presence::next_expiry(&rows);
+                let mut deadline = deadline.lock().expect("inventory deadline");
+                *deadline = deadline.iter().copied().chain(expiry).min();
+            }
+            for row in &mut rows {
+                // The grouping tuple is stable across connect/disconnect and has no ambiguous separators.
+                let identity =
+                    json!([row["member"], row["actor"], row["client"], row["via"]]).to_string();
+                row["id"] = json!(format!(
+                    "connected-client/{}",
+                    hex::encode(Sha256::digest(identity.as_bytes()))
+                ));
+                row["kind"] = json!("connected-client");
+                row["updated_at"] = row["last_seen"].clone();
+                row["revision"] = json!(hex::encode(Sha256::digest(row.to_string().as_bytes())));
+            }
+            rows
+        }
+        "usage" => {
+            // The graph clock can predate this period on an idle or empty member.
+            // Open periods end at wall time, just as the authorized HTTP read does.
+            let until = request.until_ms.unwrap_or(client_now_ms() as u64);
+            let since = request.since_ms.unwrap_or(until.saturating_sub(86_400_000));
+            anyhow::ensure!(since <= until, "usage start must be before its end");
+            let mut value = usage_value(&state.store, since, until)?;
+            let rows = value["rows"].as_array_mut().expect("usage rows");
+            let has_more = rows.len() > limit;
+            rows.truncate(limit);
+            let revision = hex::encode(Sha256::digest(value.to_string().as_bytes()));
+            return Ok((
+                vec![
+                    json!({"id":"usage/current", "kind":"usage", "revision":revision,
+                "updated_at":snapshot.created_at, "value":value}),
+                ],
+                has_more,
+            ));
+        }
+        "machines" => machine_resources(state, false, snapshot, session)?,
+        "devices" => {
+            let person = person_filter(session, request.person.as_deref())
+                .map_err(|error| anyhow::anyhow!(error.message))?
+                .filter(|person| person.starts_with("person/"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("device inventory requires an explicitly authenticated person")
+                })?;
+            let mut rows = device_resources(state, snapshot, &person)
+                .map_err(|error| anyhow::anyhow!(error.message))?;
+            rows.retain(|row| row["state"] == "active");
+            rows
+        }
+        "sessions" => {
+            let managed = managed_native_session_ids(&state.store, snapshot.store_index)?;
+            let discovery = crate::external_sessions::discover_fresh(
+                state.native_session_home.as_deref(),
+                false,
+            )?;
+            let mut rows = discovery
+                .sessions
+                .into_iter()
+                .filter(|session| !managed.contains(&session.native_id))
+                .map(external_session_resource)
+                .collect::<Vec<_>>();
+            rows.extend(
+                discovery
+                    .unresolved_processes
+                    .into_iter()
+                    .map(|process| unresolved_session_resource(process, &snapshot.created_at)),
+            );
+            rows.sort_by(|left, right| {
+                right["updated_at"]
+                    .as_str()
+                    .cmp(&left["updated_at"].as_str())
+                    .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+            });
+            rows
+        }
+        "terminals" => {
+            let mut rows = terminal_resources_for_owner(state, false, snapshot, session, None)?;
+            rows.retain(|row| row["terminal_id"].is_string());
+            rows
+        }
+        _ => unreachable!(),
     };
-    let Some(snapshot) = snapshot else {
-        if encoded.is_some() { return Err(client_page_expired("native inventory source changed")); }
-        return serde_json::to_value(result).map_err(ApiError::internal);
-    };
-    let evidence_revision = hex::encode(Sha256::digest(serde_json::to_vec(&snapshot).map_err(ApiError::internal)?));
-    let mut revision = Sha256::new();
-    revision.update(evidence_revision.as_bytes());
-    match query.collection.as_str() {
-        "files" => {
-            if let (Some(root), Some(identity)) = (snapshot.workspace.as_deref(), snapshot.workspace_identity.as_ref()) {
-                let listing = crate::file_inventory::list(Path::new(root), identity, &query.directory, &query.prefix)
-                    .map_err(|error| match error {
-                        crate::file_inventory::Error::InvalidDirectory | crate::file_inventory::Error::InvalidPrefix => validation("file inventory requires a visible root-relative directory and name prefix"),
-                        crate::file_inventory::Error::Changed => client_page_expired("directory changed during inventory read"),
-                        crate::file_inventory::Error::ScanLimit => inventory_unavailable("directory exceeds the bounded inventory scan"),
-                        crate::file_inventory::Error::Io(error) => {
-                            let _ = error.kind(); // Do not expose owner filesystem paths in errors.
-                            inventory_unavailable("directory metadata cannot be read without following links")
-                        }
-                    })?;
-                revision.update(format!("{}:{}:{}:{}:{}:{}", listing.device, listing.inode, listing.modified_seconds,
-                    listing.modified_nanoseconds, listing.changed_seconds, listing.changed_nanoseconds).as_bytes());
-                for entry in listing.entries {
-                    if entry.name.chars().any(char::is_control) { continue }
-                    revision.update(entry.name.as_bytes());
-                    revision.update([u8::from(entry.directory)]);
-                    result.items.push(HarnessInventoryItem { name: entry.name,
-                        kind: if entry.directory { "directory" } else { "file" }.into(), source: None });
+    if request.collection == "devices"
+        && let Some(deadline) = &request.inventory_deadline
+    {
+        let expiry = items
+            .iter()
+            .filter_map(|row| row["expires_at"].as_str())
+            .filter_map(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.timestamp_millis().max(0) as u128)
+            .min();
+        let mut deadline = deadline.lock().expect("inventory deadline");
+        *deadline = deadline.iter().copied().chain(expiry).min();
+    }
+    if let Some(processes) = &request.native_processes {
+        *processes.lock().expect("native process coverage") = items
+            .iter()
+            .filter_map(|row| row.pointer("/process/pid").and_then(Value::as_u64))
+            .map(|pid| pid as u32)
+            .collect();
+    }
+    let has_more = items.len() > limit;
+    items.truncate(limit);
+    Ok((items, has_more))
+}
+
+/// Schedule actual membership expirations, without a timer that rereads idle inventories.
+pub(super) fn next_expiry(subscription: &CollectionSubscription) -> Option<u128> {
+    subscription
+        .request
+        .inventory_deadline
+        .as_ref()
+        .and_then(|deadline| *deadline.lock().expect("inventory deadline"))
+}
+
+/// Watch native inventory files while a session list is held. Missing roots are watched at
+/// their nearest existing ancestor, without recursively watching an unrelated home tree.
+pub(super) struct NativeWatch {
+    watcher: notify::RecommendedWatcher,
+    pub(super) processes_in_read: Arc<Mutex<Vec<u32>>>,
+    #[cfg(target_os = "linux")]
+    processes: BTreeMap<u32, tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
+    home: PathBuf,
+    paths: BTreeMap<PathBuf, notify::RecursiveMode>,
+    events: tokio::sync::watch::Receiver<Result<(), String>>,
+}
+
+impl NativeWatch {
+    pub(super) fn open(home: &Path) -> anyhow::Result<Self> {
+        let (sender, events) = tokio::sync::watch::channel(Ok(()));
+        let roots = native_roots(home);
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            match event {
+                Ok(event) => {
+                    if matches!(event.kind, notify::EventKind::Access(_)) {
+                        return;
+                    }
+                    // Ancestors admit newly created provider roots; other home files do not wake us.
+                    if !event.paths.iter().any(|path| {
+                        roots
+                            .iter()
+                            .any(|root| path.starts_with(root) || root.starts_with(path))
+                    }) {
+                        return;
+                    }
+                    // A later event must not erase a source failure before the socket sees it.
+                    sender.send_if_modified(|held| held.is_ok());
                 }
-                result.status = "supported".into(); result.coverage = "native-workspace".into();
-                result.full_inventory = true; result.reason = None;
-            } else { result.reason = Some("native process workspace identity has not been supplied".into()); }
+                Err(error) => {
+                    let _ = sender.send_replace(Err(error.to_string()));
+                }
+            }
+        })?;
+        let mut watch = Self {
+            watcher,
+            processes_in_read: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(target_os = "linux")]
+            processes: BTreeMap::new(),
+            home: home.to_owned(),
+            paths: BTreeMap::new(),
+            events,
+        };
+        watch.refresh()?;
+        Ok(watch)
+    }
+
+    fn refresh(&mut self) -> anyhow::Result<()> {
+        use notify::Watcher as _;
+        let mut paths = BTreeMap::new();
+        for root in self.roots() {
+            let mut path = root.clone();
+            while !path.is_dir() {
+                path = path
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("native session home has no existing ancestor"))?
+                    .to_owned();
+            }
+            let mode = if path == root {
+                notify::RecursiveMode::Recursive
+            } else {
+                notify::RecursiveMode::NonRecursive
+            };
+            paths
+                .entry(path)
+                .and_modify(|held| {
+                    if mode == notify::RecursiveMode::Recursive {
+                        *held = mode;
+                    }
+                })
+                .or_insert(mode);
         }
-        "skills" => { result.reason = Some("OMP does not expose full loaded skills through the interactive extension API".into()); }
-        "skill-commands" | "slash-commands" => {
-            result.coverage = if query.collection == "skill-commands" { "enabled-skill-commands" } else { "dynamic-commands" }.into();
-            result.status = match snapshot.dynamic_commands {
-                st_drivers::harness_inventory::Availability::Supported => "supported",
-                st_drivers::harness_inventory::Availability::Unsupported => "unsupported",
-                st_drivers::harness_inventory::Availability::Unavailable => "unavailable",
-            }.into();
-            result.reason = Some("interactive native source excludes builtins and disabled skill commands; this is not full inventory".into());
-            for command in snapshot.commands {
-                if !command.name.starts_with(&query.prefix) || (query.collection == "skill-commands"
-                    && command.source != st_drivers::harness_inventory::Source::Skill) { continue }
-                result.items.push(HarnessInventoryItem { name: command.name,
-                    kind: if command.source == st_drivers::harness_inventory::Source::Skill { "skill-command" } else { "slash-command" }.into(),
-                    source: Some(match command.source { st_drivers::harness_inventory::Source::Extension => "extension",
-                        st_drivers::harness_inventory::Source::Prompt => "prompt", st_drivers::harness_inventory::Source::Skill => "skill" }.into()) });
+        for (path, mode) in &paths {
+            if self.paths.get(path) != Some(mode) {
+                self.watcher.watch(path, *mode)?;
             }
         }
-        _ => return Err(validation("unknown inventory collection")),
-    }
-    let after = local_snapshot(state, agent, &query)?;
-    let after_revision = after.map(|snapshot| serde_json::to_vec(&snapshot)).transpose().map_err(ApiError::internal)?;
-    if after_revision.as_deref().map(|bytes| hex::encode(Sha256::digest(bytes))).as_deref() != Some(evidence_revision.as_str()) {
-        return Err(client_page_expired("native inventory changed during the read"));
-    }
-    let revision = hex::encode(revision.finalize());
-    if let Some(cursor) = cursor {
-        if cursor.revision != revision {
-            return Err(client_page_expired("inventory directory or native source changed"));
+        for path in self.paths.keys().filter(|path| !paths.contains_key(*path)) {
+            self.watcher.unwatch(path)?;
         }
-        expires_at = cursor.expires_at;
-        result.items.retain(|item| item.name > cursor.after);
+        self.paths = paths;
+        Ok(())
     }
-    result.page.has_more = result.items.len() > limit;
-    result.items.truncate(limit);
-    if result.page.has_more {
-        let cursor = Cursor { actor: actor.into(), agent: agent.into(), query, revision,
-            after: result.items.last().expect("nonempty bounded inventory page").name.clone(), expires_at };
-        result.page.next_cursor = Some(encode_cursor(state, &cursor)?);
-        result.page.cursor_expires_at = Some(client_timestamp(expires_at));
+
+    pub(super) fn observe_processes(&mut self) -> anyhow::Result<bool> {
+        let mut exited = false;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd as _;
+            let pids = self
+                .processes_in_read
+                .lock()
+                .expect("native process coverage")
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            self.processes.retain(|pid, _| pids.contains(pid));
+            for pid in pids {
+                if self.processes.contains_key(&pid) {
+                    continue;
+                }
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+                if fd < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::ESRCH) {
+                        exited = true;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+                self.processes
+                    .insert(pid, tokio::io::unix::AsyncFd::new(fd)?);
+            }
+        }
+        Ok(exited)
     }
-    serde_json::to_value(result).map_err(ApiError::internal)
+
+    pub(super) async fn changed(&mut self) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        let mut exits = self
+            .processes
+            .iter()
+            .map(|(pid, fd)| async move { fd.readable().await.map(|_| *pid) })
+            .collect::<futures_util::stream::FuturesUnordered<_>>();
+        #[cfg(target_os = "linux")]
+        let has_exits = !exits.is_empty();
+        #[cfg(not(target_os = "linux"))]
+        let (mut exits, has_exits) = (
+            futures_util::stream::pending::<std::io::Result<u32>>(),
+            false,
+        );
+        let exit = tokio::select! {
+            event = self.events.changed() => {
+                event?;
+                self.events.borrow_and_update().clone().map_err(anyhow::Error::msg)?;
+                None
+            }
+            pid = exits.next(), if has_exits => Some(pid.expect("process exit watcher")?),
+        };
+        drop(exits);
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = exit {
+            self.processes.remove(&pid);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = exit;
+        self.refresh()
+    }
+
+    fn roots(&self) -> Vec<PathBuf> {
+        native_roots(&self.home)
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    const AGENT: &str = "agent/example/inventory";
-    const RUNTIME: &str = "inventory:one";
-    fn fixture(root: &Path, workspace: &Path) -> AppState {
-        let state = crate::api::tests::state(root);
-        state.store.apply_internal(
-            &parse_intent(&format!("version 2\nagent \"example/inventory\" {{ workspace {:?}; harness \"omp\" {{}} }}\n", workspace), "node").unwrap(),
-            "inventory-fixture",
-        ).unwrap();
-        runtime(&state, RUNTIME);
-        let owner = root.join("drivers").join(&hex::encode(Sha256::digest(AGENT.as_bytes()))[..24]);
-        let observations = owner.join("observations");
-        st_drivers::harness_events::enable(&observations, RUNTIME).unwrap();
-        let seq = st_drivers::harness_state::claim(&observations, "example/inventory", "omp", "provider-one").unwrap();
-        let mut observer = st_drivers::pi_channel::EventObserver::new(
-            &observations, &owner.join("sessions/omp"), "example/inventory", "omp", "provider-one", seq, "example/inventory",
-        ).unwrap();
-        observer.observe(&json!({"type":"session", "sessionId":"native-one"})).unwrap();
-        observer.observe(&json!({"type":"ready", "sessionId":"native-one"})).unwrap();
-        use std::os::unix::fs::MetadataExt as _;
-        let metadata = workspace.metadata().unwrap();
-        observer.observe(&json!({"type":"inventory", "session_id":"native-one",
-            "workspace":workspace.to_str().unwrap(), "observed_at":"2026-10-04T12:00:00Z",
-            "workspace_identity":{"device":metadata.dev().to_string(), "inode":metadata.ino().to_string()},
-            "dynamic_commands":"supported", "commands":[
-                {"name":"inspect","source":"extension"}, {"name":"skill:review","source":"skill"}
-            ]})).unwrap();
-        state
-    }
-    fn runtime(state: &AppState, incarnation: &str) {
-        state.store.append_claim(&ClaimInput {
-            subject: AGENT.into(), kind: "runtime.observed".into(), actor: Some("person/alex".into()),
-            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"example/inventory",
-                "incarnation_id":incarnation, "terminal":false})).unwrap(),
-            evidence: vec![], expected_subject: None, idempotency_key: None,
-        }).unwrap();
-    }
-    fn query(collection: &str) -> HarnessInventoryQuery {
-        HarnessInventoryQuery { owner_host_id: "host/node".into(), session_id: managed_session_id(AGENT, RUNTIME),
-            native_session_id: "native-one".into(), runtime_incarnation: RUNTIME.into(), collection: collection.into(),
-            directory: String::new(), prefix: String::new(), limit: Some(1), cursor: None }
-    }
-    async fn call(state: &AppState, query: HarnessInventoryQuery) -> Result<Value, ApiError> {
-        read(State(state.clone()), Extension(ClientSession::local(Some("person/alex")).unwrap()),
-            AxumPath(AGENT.into()), Query(query)).await.map(|Json(value)| value)
-    }
-    #[tokio::test]
-    async fn inventory_pages_filter_confine_and_expire_on_namespace_or_native_binding_change() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        for name in ["alpha", "beta", ".env"] { std::fs::write(workspace.path().join(name), "private contents").unwrap(); }
-        std::os::unix::fs::symlink(outside.path(), workspace.path().join("external")).unwrap();
-        let state = fixture(root.path(), workspace.path());
-        let first = call(&state, query("files")).await.unwrap();
-        assert_eq!(first["items"], json!([{"name":"alpha","kind":"file","source":null}]));
-        assert_eq!(first["full_inventory"], true);
-        let mut next = query("files");
-        next.cursor = Some(first["page"]["next_cursor"].as_str().unwrap().into());
-        let second = call(&state, next.clone()).await.unwrap();
-        assert_eq!(second["items"], json!([{"name":"beta","kind":"file","source":null}]));
-        assert_eq!(second["page"]["has_more"], false);
-        for directory in ["..", ".env", "/absolute", "external"] {
-            let mut request = query("files"); request.directory = directory.into();
-            assert!(call(&state, request).await.is_err(), "must refuse {directory}");
-        }
-        let mut filtered = query("files"); filtered.prefix = "beta".into();
-        assert_eq!(call(&state, filtered).await.unwrap()["items"], second["items"]);
-        std::fs::write(workspace.path().join("gamma"), "private contents").unwrap();
-        assert_eq!(call(&state, next).await.unwrap_err().code, "page-cursor-expired");
-        let mut native_stale = query("files"); native_stale.native_session_id = "native-old".into();
-        assert_eq!(call(&state, native_stale).await.unwrap_err().code, "stale-fence");
-        runtime(&state, "inventory:two");
-        assert_eq!(call(&state, query("files")).await.unwrap_err().code, "stale-fence");
-    }
-    #[tokio::test]
-    async fn dynamic_native_inventory_never_claims_full_skills_or_builtins() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let state = fixture(root.path(), workspace.path());
-        let skills = call(&state, query("skills")).await.unwrap();
-        assert_eq!(skills["status"], "unsupported");
-        assert_eq!(skills["full_inventory"], false);
-        assert_eq!(skills["items"], json!([]));
-        let mut enabled = query("skill-commands"); enabled.prefix = "skill:r".into();
-        let commands = call(&state, enabled).await.unwrap();
-        assert_eq!(commands["coverage"], "enabled-skill-commands");
-        assert_eq!(commands["full_inventory"], false);
-        assert_eq!(commands["items"], json!([{"name":"skill:review","kind":"skill-command","source":"skill"}]));
-        let mut slash = query("slash-commands"); slash.prefix = "ins".into();
-        let command = call(&state, slash).await.unwrap();
-        assert_eq!(command["items"], json!([{"name":"inspect","kind":"slash-command","source":"extension"}]));
-        assert_eq!(command["full_inventory"], false);
-        assert!(!serde_json::to_string(&command).unwrap().contains(workspace.path().to_str().unwrap()));
-    }
-    #[tokio::test]
-    async fn pending_native_switch_and_provider_replacement_refuse_predecessor_inventory() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let state = fixture(root.path(), workspace.path());
-        let owner = root.path().join("drivers").join(&hex::encode(Sha256::digest(AGENT.as_bytes()))[..24]);
-        let observations = owner.join("observations");
-        let seq = st_drivers::harness_state::read(&st_drivers::harness_state::harness_state_path(&observations), None)
-            .unwrap().ownership_sequence.unwrap();
-        let mut observer = st_drivers::pi_channel::EventObserver::new(
-            &observations, &owner.join("sessions/omp"), "example/inventory", "omp", "provider-one", seq,
-            "example/inventory").unwrap().with_native_session(Some("native-one".into())).unwrap();
-        observer.observe(&json!({"type":"session", "sessionId":"native-two"})).unwrap();
-        assert_eq!(call(&state, query("slash-commands")).await.unwrap_err().code, "stale-fence");
-        st_drivers::harness_state::claim(&owner.join("observations"), "example/inventory", "omp", "provider-two").unwrap();
-        assert_eq!(call(&state, query("files")).await.unwrap_err().code, "stale-fence");
-    }
-    #[tokio::test]
-    async fn an_ended_provider_cannot_serve_its_inventory_while_runtime_still_reports_running() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let state = fixture(root.path(), workspace.path());
-        // A fresh exitless ownership claim is not a terminal observation.
-        assert_eq!(call(&state, query("slash-commands")).await.unwrap()["items"],
-            json!([{"name":"inspect","kind":"slash-command","source":"extension"}]));
-        let observations = root.path().join("drivers")
-            .join(&hex::encode(Sha256::digest(AGENT.as_bytes()))[..24]).join("observations");
-        let seq = st_drivers::harness_state::read(&st_drivers::harness_state::harness_state_path(&observations), None)
-            .unwrap().ownership_sequence.unwrap();
-        st_drivers::harness_state::Writer::new(&observations, "example/inventory", "omp",
-            Some("example/inventory".into())).with_ownership("provider-one", seq).ended("exit 0").unwrap();
-        for collection in ["files", "slash-commands"] {
-            assert_eq!(call(&state, query(collection)).await.unwrap_err().code, "stale-fence");
-        }
-    }
-    #[tokio::test]
-    async fn issued_cursor_cannot_be_renewed_or_rebound_by_editing_its_payload() {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        for name in ["alpha", "beta"] { std::fs::write(workspace.path().join(name), "").unwrap(); }
-        let state = fixture(root.path(), workspace.path());
-        let page = call(&state, query("files")).await.unwrap();
-        let encoded = page["page"]["next_cursor"].as_str().unwrap();
-        let mut expired = decode_cursor(&state, encoded).unwrap();
-        expired.expires_at = 0;
-        let expired = encode_cursor(&state, &expired).unwrap();
-        let mut continuation = query("files");
-        continuation.cursor = Some(expired.clone());
-        assert_eq!(call(&state, continuation).await.unwrap_err().code, "page-cursor-expired");
-        let (payload, signature) = expired.strip_prefix("inventory-page/").unwrap().split_once('.').unwrap();
-        let encoding = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let original: Value = serde_json::from_slice(&encoding.decode(payload).unwrap()).unwrap();
-        for field in ["expires_at", "actor", "limit"] {
-            let mut forged = original.clone();
-            let mut continuation = query("files");
-            match field {
-                "expires_at" => forged["expires_at"] = json!(client_now_ms() + 50_000),
-                "actor" => forged["actor"] = "person/intruder".into(),
-                _ => { forged["query"]["limit"] = 2.into(); continuation.limit = Some(2); },
-            }
-            continuation.cursor = Some(format!("inventory-page/{}.{}", encoding.encode(
-                serde_json::to_vec(&forged).unwrap()), signature));
-            assert_eq!(call(&state, continuation).await.unwrap_err().code, "validation-failed");
-        }
-    }
+fn native_roots(home: &Path) -> Vec<PathBuf> {
+    [
+        ".codex/sessions",
+        ".claude/projects",
+        ".claude/sessions",
+        ".pi/agent/sessions",
+        ".omp/agent/sessions",
+        ".oh-omp/agent/sessions",
+        ".local/share/opencode",
+    ]
+    .iter()
+    .map(|suffix| home.join(suffix))
+    .collect()
 }

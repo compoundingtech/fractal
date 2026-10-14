@@ -1,32 +1,7 @@
 //! Declaration builders shared by client actions and CLI creation.
 use kdl::{KdlDocument, KdlEntry, KdlNode};
 
-/// The simple seat name, restricted to characters that always form a Git branch component.
-pub fn agent_branch(name: &str) -> String {
-    let identity = name.trim_start_matches("agent/");
-    let name = identity.rsplit('/').next().unwrap_or(identity);
-    let name = if identity.contains('/') {
-        name
-    } else {
-        name.split_once('.').map_or(name, |(_, simple)| simple)
-    };
-    let branch: String = name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let branch = branch.trim_matches('-');
-    if branch.is_empty() {
-        "agent".into()
-    } else {
-        branch.into()
-    }
-}
+pub use st3_client::agent_branch;
 
 pub fn validate_agent_checkout(args: &st3_client::AgentCreateParameters) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -87,8 +62,7 @@ pub fn agent_document(
         }
         body.nodes_mut().push(checkout);
     }
-    let arguments: &[&str] = match args.harness.as_str() {
-        "claude" => {
+    if args.harness == "claude" {
             let mut environment = KdlNode::new("env");
             let mut variables = KdlDocument::new();
             variables
@@ -103,18 +77,7 @@ pub fn agent_document(
                     [".claude/settings.local.json", CLAUDE_SEAT_SETTINGS],
                 ),
             ]));
-            &[
-                "--dangerously-skip-permissions",
-                "--settings",
-                CLAUDE_SEAT_SETTINGS,
-            ]
-        }
-        "codex" => &[
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--dangerously-bypass-hook-trust",
-        ],
-        _ => &[],
-    };
+    }
     let mut harness = kdl_node("harness", [args.harness.as_str()]);
     let mut harness_body = KdlDocument::new();
     if let Some(model) = &args.model {
@@ -127,11 +90,6 @@ pub fn agent_document(
             .nodes_mut()
             .push(kdl_node("effort", [effort.as_str()]));
     }
-    if !arguments.is_empty() {
-        harness_body
-            .nodes_mut()
-            .push(kdl_node("args", arguments.iter().copied()));
-    }
     if let Some(message) = &args.message {
         let mut node = kdl_node("message", [message.as_str()]);
         node.entries_mut().push(KdlEntry::new_prop(
@@ -140,9 +98,8 @@ pub fn agent_document(
         ));
         harness_body.nodes_mut().push(node);
     }
-    if !harness_body.nodes().is_empty() {
-        harness.set_children(harness_body);
-    }
+    // The harness grammar requires a body even when the provider has no default flags.
+    harness.set_children(harness_body);
     body.nodes_mut().push(harness);
     if let Some(key) = creation_key {
         body.nodes_mut().push(creation_tags(key));
@@ -390,9 +347,19 @@ mod tests {
             ("parser", "parser"),
             ("agent/example.parser", "parser"),
             ("fleet/example/--parser.lock", "parser-lock"),
+            ("agent/example/HEAD", "head"),
             ("???", "agent"),
         ] {
             assert_eq!(agent_branch(name), branch);
+            let output = std::process::Command::new("git")
+                .args(["check-ref-format", "--branch", branch])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "Git rejected default branch {branch}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         let args = st3_client::AgentCreateParameters {
             branch: Some("parser".into()),

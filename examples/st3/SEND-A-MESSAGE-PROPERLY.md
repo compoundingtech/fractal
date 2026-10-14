@@ -2,7 +2,7 @@
 
 This example sends a question about an invented catalog project.
 
-Messages are for conversation: questions, answers, and context. They do not hand out work, and they
+Messages between agents, and from a person to an agent, are for conversation: questions, answers, and context. They do not hand out work, and they
 are not where results go. To give a seat work, start a mission whose step is assigned to it. To
 report a result, complete the step with it or store it as a document and cite the reference. Agents
 react to steps, gates, and dependencies, so a result in a message is invisible to the graph.
@@ -42,37 +42,52 @@ request_message="$(st conversations send \
   --body "$message_body")"
 ```
 
-An explicit response has both its own subject and the original canonical parent:
+A follow-up to the same agent has both its own subject and the original canonical parent:
 
 ```sh
-reply_body="$(/bin/cat <<'BODY'
+follow_up_body="$(/bin/cat <<'BODY'
 Use the invented spring edition. I recorded the choice in the active work evidence.
 BODY
 )"
 
-st conversations send person/operator \
-  --from agent/example/worker \
+st conversations send agent/example/worker \
+  --from person/operator \
   --subject 'Re: Choose the catalog edition' \
   --in-reply-to "$request_message" \
-  --body "$reply_body"
+  --body "$follow_up_body"
 ```
 
 `st conversations reply "$request_message" ...` is the shorter supported route when the sender
 has the original message: it derives the recipient and `in-reply-to`, and preserves or replaces the
 subject deliberately.
 
-## Bodies larger than 4 KiB
+People have no inbox, so the worker does not answer the operator with `send` or `reply`: both fail
+with a clear error when the recipient is a person. The worker prints its answer in the conversation
+the operator is reading. Only if the operator asked for it does the worker use an attention item
+(`work ask` for a decision, `work update` for information).
 
-Inline message content cannot exceed 4 KiB. Store a larger UTF-8 body as an immutable document,
-then send its exact `doc/NAME@HASH` reference as the body:
+## Long bodies
+
+A message body can be up to 256 KiB of UTF-8. Send it as the body, however long:
 
 ```sh
-document_ref="$(st documents put catalog-context.md --as doc/example/catalog-context)"
 st conversations send agent/example/worker \
   --from person/operator \
   --subject 'Catalog import context' \
-  --body "$document_ref"
+  --body "$(cat catalog-context.md)"
 ```
 
-One stored document can be at most 1 MiB. The receiver resolves the pinned reference; replacing the
-local file later cannot change the delivered bytes.
+Past 8 KiB, the message holds the first kilobyte as a preview and the whole text stays on the
+machine that sent it; other members ask that machine when they read it. `st conversations read`
+prints the whole text, and a seat is shown a preview with the instruction to read the rest. If the
+sending machine cannot be reached, the reader sees the preview and which machine has the rest. Over
+256 KiB the send is refused with `message-too-large`, and nothing is written: shorten the text or
+send it as several messages. [Long messages](../../docs/st3/long-messages.md) has the details.
+
+A pinned `doc/NAME@HASH` reference is still a valid body for a document of up to 1 MiB that
+already exists:
+
+```sh
+document_ref="$(st documents put catalog-context.md --as doc/example/catalog-context)"
+st conversations send agent/example/worker --from person/operator --body "$document_ref"
+```

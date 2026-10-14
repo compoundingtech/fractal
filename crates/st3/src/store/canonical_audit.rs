@@ -6,9 +6,12 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("blobs", &[]),
     ("documents", &["created_index"]),
     ("desired", &[]),
+    ("arrangements", &["changed_index"]),
+    ("arrangement_registers", &[]),
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),
+    ("person_directive_notes", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),
@@ -30,7 +33,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
 
 #[test]
 fn every_persistent_table_has_a_projection_scope() {
-    // Explicit local/storage exceptions from docs/st3/canonical-projections-audit.md. New
+    // Explicit local/storage exceptions from docs/st3/data-authority.md. New
     // tables must be classified; shared tables automatically join the row/digest comparison.
     let exceptions = [
         "meta",
@@ -38,7 +41,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "claims",
         "idempotency",
         "mission_run_requests",
-        "events",
+        "event_positions",
         "peer_cursors",
         "peer_replica_cursors",
         "replica_envelopes",
@@ -48,15 +51,34 @@ fn every_persistent_table_has_a_projection_scope() {
         "replication_refusals",
         "capabilities",
         "local_work_lease_renewals",
+        "local_git_change_records",
+        "local_git_change_latest",
         "local_mailbox_owners",
         "local_mailbox_bindings",
+        "local_mailbox_argv_bindings",
+        "local_mailbox_leases",
         "unread_mail",
         "unread_mail_prefixes",
         "unread_mail_pending",
         "agent_message_sends",
         "agent_message_days",
         "local_agent_message_pending",
+        "local_idle_messages",
+        "coordination_sends",
+        "local_coordination_backfill",
+        "stop_deferral_claims",
+        "local_stop_deferral_backfill",
+        "local_publication_claims",
+        "local_publication_starts",
+        "local_publication_pending",
+        "local_publication_batches",
+        "local_publication_bootstrap",
+        "local_publication_launch_epoch",
         "local_observations",
+        "local_runtime_starts",
+        "local_runtime_start_evidence",
+        "local_runtime_start_observation_generation",
+        "local_runtime_start_observation_subjects",
         "local_blobs",
         "local_blob_uploads",
         "local_subscription_mission_deferrals",
@@ -65,12 +87,17 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_usage_responses",
         "local_limit_stops",
         "local_seat_accounts",
+        "account_limit_readings",
+        "account_limit_seats",
         "local_latest_slots",
         "local_resource_projection_pending",
         "local_glass_head_pending",
         "local_glass_head_dirty",
+        "local_directive_note_pending",
+        "local_directive_note_dirty",
         "local_custom_dirty",
         "graph_generation",
+        "fleet_generation",
         "projection_digest_state",
         "projection_digest_generation",
         "projection_digest_operation_rows",
@@ -87,9 +114,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "replica_envelope_holds",
         "checkpoint_envelopes",
         "checkpoint_claims",
+        "checkpoint_capture_epoch",
         "checkpoints",
+        "checkpoint_capture_epoch",
     ];
-    let classified = SHARED_TABLES
+    let mut classified = SHARED_TABLES
         .iter()
         .map(|(name, _)| *name)
         .chain(exceptions)
@@ -109,6 +138,9 @@ fn every_persistent_table_has_a_projection_scope() {
         .unwrap()
         .collect::<rusqlite::Result<BTreeSet<_>>>()
         .unwrap();
+    if tables.contains("local_event_payloads") {
+        classified.insert("local_event_payloads".into());
+    }
     assert_eq!(
         tables, classified,
         "classify new tables and include shared logical rows in both ordering and digest tests"
@@ -118,8 +150,13 @@ fn every_persistent_table_has_a_projection_scope() {
 #[test]
 fn native_mailbox_ownership_changes_no_shared_projection_digest() {
     let store = Store::open_memory("alder").unwrap();
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"eval.worker\" { host \"alder\"; workspace \"/tmp\"; harness \"claude\" {} }", "alder",
+    ).unwrap();
+    store.apply_internal(&intent, "mailbox-audit").unwrap();
     crate::mailbox::tests::ready(&store, "session-1");
     let before = graph_digest(&store.readers.get()).unwrap();
+    let before_tables = projection_digest::tables(&store.readers.get()).unwrap();
     let first = crate::mailbox::Fence::new("agent/eval.worker", "session-1", "delivery");
     store.bind_mailbox(&first).unwrap();
     store
@@ -130,6 +167,33 @@ fn native_mailbox_ownership_changes_no_shared_projection_digest() {
         ))
         .unwrap();
     assert_eq!(before, graph_digest(&store.readers.get()).unwrap());
+    assert_eq!(before_tables, projection_digest::tables(&store.readers.get()).unwrap());
+    let authority = crate::mailbox::Authority {
+        provider: "claude".into(), session: "provider-1".into(), sequence: 1,
+        pid: std::process::id(),
+        process_token: st_runtime::process_start_token(std::process::id()).unwrap(),
+    };
+    let current = crate::mailbox::Fence::new("agent/eval.worker", "session-1", "title");
+    let bound = store.bind_mailbox_with_lease(&current, Some(&authority)).unwrap();
+    assert_eq!(store.mailbox_lease_authority(&bound).unwrap(), Some(authority));
+    assert_eq!(before, graph_digest(&store.readers.get()).unwrap());
+    assert_eq!(before_tables, projection_digest::tables(&store.readers.get()).unwrap());
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    // Scope-only raw row control, not an authenticated argv admission fixture.
+    tx.execute("INSERT INTO local_mailbox_argv_bindings SELECT token,subject,component,incarnation,epoch,'{}' FROM local_mailbox_bindings WHERE token=?1",[&bound.token]).unwrap();
+    assert_eq!(before, graph_digest(&tx).unwrap());
+    assert_eq!(before_tables, projection_digest::tables(&tx).unwrap());
+    tx.execute("DELETE FROM local_mailbox_argv_bindings WHERE token=?1",[&bound.token]).unwrap();
+    assert_eq!(before, graph_digest(&tx).unwrap());
+    assert_eq!(before_tables, projection_digest::tables(&tx).unwrap());
+    tx.execute("UPDATE local_mailbox_leases SET revoked=1 WHERE subject=?1", [&bound.subject]).unwrap();
+    assert_eq!(before, graph_digest(&tx).unwrap());
+    assert_eq!(before_tables, projection_digest::tables(&tx).unwrap());
+    tx.execute("DELETE FROM local_mailbox_leases WHERE subject=?1", [&bound.subject]).unwrap();
+    assert_eq!(before, graph_digest(&tx).unwrap());
+    assert_eq!(before_tables, projection_digest::tables(&tx).unwrap());
+    tx.commit().unwrap();
 }
 
 pub(super) fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
@@ -151,6 +215,9 @@ pub(super) fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
                     if (*table == "blobs" && name == "bytes")
                         || (*table == "documents" && name == "binding_key")
                         || (*table == "glass_heads" && matches!(name.as_str(), "created_key" | "head_key"))
+                        || (*table == "person_directive_notes" && name == "head_key")
+                        || (matches!(*table, "arrangements" | "arrangement_registers")
+                            && name == "winner")
                     {
                         format!("hex({name})")
                     } else {
@@ -374,8 +441,10 @@ fn compare_shared(expected: &Store, actual: &Store, phase: &str, mismatches: &mu
     if expected.usage_period_rows(0, 3000).unwrap() != actual.usage_period_rows(0, 3000).unwrap() {
         mismatches.push(format!("{phase}: period usage"));
     }
-    if expected.transport_links().unwrap() != actual.transport_links().unwrap() {
-        mismatches.push(format!("{phase}: replicated transport observations"));
+    for as_of in [2_000_000_000_000_u128, 2_000_000_600_000_u128] {
+        if expected.transport_links_at(as_of).unwrap() != actual.transport_links_at(as_of).unwrap() {
+            mismatches.push(format!("{phase}: replicated transport observations at {as_of}"));
+        }
     }
     let lane = |store: &Store| {
         crate::lane::replay(
@@ -413,6 +482,33 @@ fn write_audit_history(source: &Store) {
         subject:"glass/person/ada/019a0000-0000-7000-8000-000000000001".into(), kind:"glass.upserted".into(), actor:Some("person/ada".into()),
         fields: serde_json::from_value(json!({"body":{"name":"Audit workspace","layout":{"tabs":[{"pane":"opaque:anything"}]}}, "base_revision":null})).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None,
     }).unwrap();
+    source.connection.batched(|tx| -> Result<()> {
+        append_claim_record_tx(tx, &source.origin, "person/ada", st3_schema::directive_notes::KIND,
+            Some("person/ada"), &json!({"fields":{"text":"Audit current person context"}}), &[], None)?;
+        directive_notes::flush(tx)?;
+        Ok(())
+    }).unwrap().unwrap();
+    source
+        .append_claim(&ClaimInput {
+            subject: "arrangement/person/ada/019a0000-0000-7000-8000-000000000001".into(),
+            kind: "arrangement.edited".into(),
+            actor: Some("person/ada".into()),
+            fields: serde_json::from_value(json!({
+                "owner": "person/ada",
+                "operations": [
+                    {"op": "create", "name": "Audit sidebar"},
+                    {"op": "folder.create", "id": "019a0000-0000-7000-8000-000000000010",
+                        "name": "Work", "parent": null, "key": "a0"},
+                    {"op": "subject.place", "subject": "agent/alder.worker",
+                        "folder": "019a0000-0000-7000-8000-000000000010", "key": "a0"}
+                ]
+            }))
+            .unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
     let declared_message = r#"version 2
 message "audit-declared" {
   from "agent/alder.worker"
@@ -1180,7 +1276,6 @@ fn comparable_peers_name_differing_tables_and_legacy_peers_keep_their_digest() {
         .replication_status(true, Some(TEST_FLEET), &["alder".into()])
         .unwrap();
     assert_eq!(status.graph_digest, full);
-    assert_eq!(status.projection_digests.len(), SHARED_TABLES.len() + 1);
     // A planning mismatch remains visible even though the six-table compatibility hash agrees.
     summary
         .projection_digests

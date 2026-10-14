@@ -1,4 +1,4 @@
-import type { Agent } from '../../clients/typescript/st3-client';
+import type { Agent, Mission } from '../../clients/typescript/st3-client';
 import { ago } from './presentation';
 import type { SessionView } from '@smalltalk/st3-views';
 import { harnessColor, theme } from './theme';
@@ -8,7 +8,7 @@ import { harnessColor, theme } from './theme';
 // st found running but did not start listed last.
 
 // Declaration order is the sort order, as in stui's AgentState.
-export const AGENT_STATES = ['needs-you', 'needs-login', 'fault', 'working', 'idle', 'starting', 'stopped', 'unknown'] as const;
+export const AGENT_STATES = ['needs-you', 'needs-login', 'fault', 'working', 'compacting', 'idle', 'starting', 'down', 'stopped', 'unknown'] as const;
 export type AgentState = typeof AGENT_STATES[number];
 
 export type AgentRowView = {
@@ -24,6 +24,8 @@ export type AgentRowView = {
   activity: string;
   /** The graph path under the name. */
   path: string;
+  /** What the step it holds last reported (`st work progress`), on one line: the status read first. */
+  progress?: string;
   host: string;
   parent?: string;
 };
@@ -59,7 +61,7 @@ export function harnessName(driver: string | null | undefined): string {
   return '?';
 }
 
-type StateAgent = Pick<Agent, 'state' | 'harness_state' | 'fault' | 'delivery'> & { harness_error_state?: string | null; reason?: string | null; observation?: string | null; reachability?: string | null };
+type StateAgent = Pick<Agent, 'state' | 'harness_state' | 'fault' | 'delivery'> & { activity?: string | null } & { harness_error_state?: string | null; reason?: string | null; observation?: string | null; reachability?: string | null };
 export function agentState(agent: StateAgent): AgentState {
   if (agent.fault) return 'fault';
   // A seat whose message path runs a replaced binary or stopped polling takes no messages,
@@ -67,7 +69,10 @@ export function agentState(agent: StateAgent): AgentState {
   if (agent.delivery?.state === 'stale') return 'fault';
   switch (agent.state) {
     case 'failed': return 'fault';
-    case 'running': return agent.harness_state === 'working' ? 'working' : 'idle';
+    // st decides a seat with no session is down, since when; no app re-derives it.
+    case 'down': return 'down';
+    // A harness compacting its conversation is a status of the seat, never an alert.
+    case 'running': return agent.activity === 'compacting' ? 'compacting' : agent.harness_state === 'working' ? 'working' : 'idle';
     // Signed out of its provider: a login on its host fixes it, without a restart (Nathan, 2026-10-04).
     // st withdraws an idle claim it has not heard renewed lately: the harness reads "indeterminate"
     // and the seat "waiting", though it is up and reachable. That is an idle seat nobody has
@@ -87,8 +92,10 @@ export function agentGlyph(state: AgentState, spinner = SPINNER): { glyph: strin
     case 'needs-login': return { glyph: '⚿', color: theme.person };
     case 'fault': return { glyph: '✕', color: theme.fault };
     case 'working': return { glyph: spinner, color: theme.working };
+    case 'compacting': return { glyph: '◐', color: theme.working };
     case 'idle': return { glyph: '●', color: theme.idle };
     case 'starting': return { glyph: '◌', color: theme.waiting };
+    case 'down': return { glyph: '⊘', color: theme.fault };
     case 'stopped': return { glyph: '○', color: theme.quiet };
     case 'unknown': return { glyph: '?', color: theme.quiet };
   }
@@ -96,12 +103,14 @@ export function agentGlyph(state: AgentState, spinner = SPINNER): { glyph: strin
 
 export function agentWord(state: AgentState): string {
   switch (state) {
-    case 'needs-you': return 'needs you';
+    case 'needs-you': return 'alert';
     case 'needs-login': return 'needs login';
     case 'fault': return 'broken';
     case 'working': return 'working';
+    case 'compacting': return 'compacting';
     case 'idle': return 'idle';
     case 'starting': return 'starting';
+    case 'down': return 'down';
     case 'stopped': return 'stopped';
     case 'unknown': return 'not managed';
   }
@@ -111,10 +120,12 @@ export const UNMANAGED_GROUP = 'found running · not started by st';
 export function agentGroup(row: Pick<AgentRowView, 'state' | 'unmanaged'>): string {
   if (row.unmanaged) return UNMANAGED_GROUP;
   switch (row.state) {
-    case 'needs-you': return 'waiting on you';
+    case 'needs-you': return 'alerts';
     case 'needs-login': return 'needs login';
-    case 'fault': return 'broken';
-    case 'working': return 'working';
+    case 'fault':
+    case 'down': return 'broken';
+    case 'working':
+    case 'compacting': return 'working';
     case 'idle':
     case 'starting': return 'idle';
     case 'stopped':
@@ -123,14 +134,28 @@ export function agentGroup(row: Pick<AgentRowView, 'state' | 'unmanaged'>): stri
 }
 
 export const AGENT_LEGEND: ReadonlyArray<{ state: AgentState; word: string }> = [
-  { state: 'needs-you', word: 'needs you' },
+  { state: 'needs-you', word: 'alert' },
   { state: 'needs-login', word: 'needs login' },
   { state: 'working', word: 'working' },
+  { state: 'compacting', word: 'compacting' },
   { state: 'idle', word: 'idle' },
   { state: 'fault', word: 'broken' },
+  { state: 'down', word: 'down' },
   { state: 'stopped', word: 'stopped' },
   { state: 'unknown', word: 'unmanaged' },
 ];
+
+/** What a step last reported, on one line; the step run's id names it in whichever run holds it. */
+export function stepProgress(missions: Mission[], stepId: string): string | undefined {
+  for (const mission of missions) {
+    for (const run of mission.run_details ?? []) {
+      const step = (run.steps ?? []).find(candidate => candidate.id === stepId);
+      const line = step?.last_progress?.split(/\s+/).filter(Boolean).join(' ');
+      if (step) return line || undefined;
+    }
+  }
+  return undefined;
+}
 
 function host(id: string | null | undefined): string {
   return id ? id.replace(/^host\//, '') : '?';
@@ -140,8 +165,9 @@ function host(id: string | null | undefined): string {
  * Every seat st declares, then every running session st found but did not start. Undeclared
  * sessions are named `driver in workspace` and belong to the gateway's host.
  */
-export function agentRows(agents: Agent[], sessions: SessionView[], gatewayHost: string, now = Date.now()): AgentRowView[] {
+export function agentRows(agents: Agent[], sessions: SessionView[], gatewayHost: string, now = Date.now(), missions: Mission[] = []): AgentRowView[] {
   const declared = agents.map((agent): AgentRowView => ({
+    progress: agent.current_work?.[0] ? stepProgress(missions, agent.current_work[0].id) : undefined,
     id: agent.id,
     target: agent.id,
     name: agentName(agent),
