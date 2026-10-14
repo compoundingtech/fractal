@@ -3,7 +3,7 @@
 This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
-Digest: `da0aa17fd5d0a0236f7e0828b3d756b9e280934e9b71fd666f1572b3a7b53303`
+Digest: `f23e6ed61b5fa28fed507c99303d5fbad4ef873750494d53d35bc5bce3c70ace`
 Storage version: `19`
 Storage digest: `1dcbc0927e291e822470da735e497deec0a5ad4f1cd6cb7e00679a0e44fab099`
 
@@ -75,6 +75,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `agent.placement.source-offline` | `agent` | `authorized-requester` | `append` | `durable` | `desired_token!:string`, `destination!:string`, `sources!:array` |  |
 | `agent.presence` | `agent` | `same-subject-actor` | `append` | `durable` | `presence!:string`, `reachability:string`, `reason:string` |  |
 | `agent.queue.moved` | `agent` | `authorized-requester` | `append` | `durable` | `anchor:subject-reference(mission-run)`, `placement!:string`, `reason:string`, `run!:subject-reference(mission-run)` |  |
+| `agent.retired` | `agent` | `system-only` | `once` | `durable` | `declaration!:string`, `owner_host!:string`, `reason!:string`, `retired_by!:subject-reference(agent|person|daemon)`, `successor:subject-reference(agent)`, `transfer:string` |  |
 | `arrangement.edited` | `arrangement` | `ordinary-client` | `append` | `durable` | `action_digest:string`, `action_id:string`, `operations!:array`, `owner!:subject-reference(person)` |  |
 | `attention.requested` | `attention` | `authorized-participant` | `once` | `durable` | `closed_by:string`, `reason!:string`, `reviewer!:subject-reference(person)`, `severity!:string`, `step:subject-reference(step-run)`, `step_attempt:integer`, `targets:array`, `title!:string`, `until:string` |  |
 | `attention.resolved` | `attention` | `authorized-participant` | `once` | `durable` | `outcome!:string`, `reason:string`, `request!:string` |  |
