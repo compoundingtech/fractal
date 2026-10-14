@@ -68,12 +68,32 @@ the macOS 26.5 and 27 SDKs.
 The script builds and installs `st3` and `st3-migrate`, and makes `st` a symlink to
 the installed `st3`. `st` is never a separate build. On macOS, st3 lives in a fixed app bundle; see [macOS installation and signing](st3/macos-installation.md). A source install also needs [`pty`](https://github.com/compoundingtech/pty-rust) on `PATH`.
 
+## Fractal web diagnostics member
+
+Run `mr apply --worktree-mode auto` before entering `nix develop .#web` or
+`nix develop .#genie`. The `effect-utils` member in `megarepo.lock` supplies the
+shared developer bar, meters, and build identity utilities from source. The web
+shell publishes their generated dependency closure into root-owned immutable
+source inputs before pnpm installs it; no install writes into `repos/`.
+The flake input supplies the matching toolchain without replacing the member link.
+After changing workspace membership, run `nix develop .#genie -c genie`,
+`nix develop .#web -c pnpm install`, and regenerate the dependency licenses below.
+
+The app loads diagnostics only in development or explicit performance builds.
+Mod Shift B toggles the persisted bar preference. Counters and Meters open
+host-owned panels; the identity segment shows the canonical revision, dirty
+state, commit age, and version details. Meter histories share one scoped
+collector session, released when the bar is hidden.
+
 ## Workspace dependency licenses
 
 The root pnpm workspace includes the iOS app and TypeScript clients.
-`buck2/dependencies/licenses.json` records every name/version in the lockfile's `packages`
-set, not just the narrower Buck dependency closure. The inventory is generated, including
-font licenses such as `MIT AND OFL-1.1`; do not edit its entries by hand.
+`buck2/dependencies/licenses.json` records every registry package name/version in
+the lockfile's `packages` set, not just the narrower Buck dependency closure.
+Root-owned staged member sources have their directory resolutions validated but
+are not npm registry entries; their source repository owns their licensing.
+The inventory is generated, including font licenses such as `MIT AND OFL-1.1`;
+do not edit its entries by hand.
 
 Regenerate after changing the lockfile:
 
