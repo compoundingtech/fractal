@@ -118,7 +118,8 @@ describe('live header parity', () => {
         expect(inspector?.textContent).toContain('beforeCapture')
         expect(inspector?.textContent).toContain('afterCapture')
         expect(inspector?.querySelector('[data-captured-change]')).not.toBeNull()
-        expect(inspector?.querySelector('button[aria-label="Open src/example.ts"]')).not.toBeNull()
+        // Resource chips are named by their visible content (file name and counts), not an "Open <path>" label.
+        expect([...inspector!.querySelectorAll('[data-captured-change] button')].some(button => button.textContent?.startsWith('example.ts'))).toBe(true)
         expect(inspector?.textContent).not.toContain('This web client does not read change data yet')
       }, { timeout: 15_000 })
     } finally {

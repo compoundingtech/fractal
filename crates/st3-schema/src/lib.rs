@@ -2,6 +2,7 @@
 
 pub mod arrangements;
 pub mod custom;
+pub mod accountable;
 pub mod directive_notes;
 pub mod glasses;
 pub mod owned_terminals;
@@ -18,10 +19,10 @@ use sha2::{Digest as _, Sha256};
 pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
-pub const STORAGE_VERSION: u32 = 18;
+pub use st_storage_version::STORAGE_VERSION;
 pub const LOCAL_STORAGE_SCHEMA: &str = r#"## Local checkpoint capture storage
 
-SQLite `user_version` is 18. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
+SQLite `user_version` is 19. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
 ```sql
 CREATE TABLE IF NOT EXISTS checkpoint_capture_epoch (
@@ -56,6 +57,18 @@ Capture does not read envelope signatures/holds, projection-health rows, peer/cu
 Triggers persist and increment the epoch in the mutation's own transaction on every connection, without connection-local hooks or SQL functions. Rollback rolls back the increment too. A trigger-version migration atomically drops/recreates the old predicates, increments `value`, and stores `trigger_version=3`; captures using the old guard must restart. Earlier version-18 PR-head stores receive `cut_unix_ms` and `trigger_version` columns with default zero while preserving their epoch and frontier. Version-2 stores retain their active cut/frontier through the version-3 predicate migration. Ordinary reopens preserve all bounds and do not repeat the migration.
 
 Upgrade requires the normal process restart, not a history migration; its restart duration has not been measured. Stable older binaries reject storage version 18. Earlier version-18 PR-head binaries are not rollback targets: guard version 1 cannot safely operate the cut-aware schema, and guard version 2 rejects trigger version 3 on open. Their copied stores can migrate forward only. Binary rollback requires restoring a pre-upgrade database snapshot; otherwise roll forward. No replicated claim, checkpoint rule, wire protocol, or response shape changes.
+
+## Local runtime start operations
+
+Storage version 19 adds the owner-local `local_runtime_starts` ledger and its admission/pending indexes transactionally. It retains immutable prepared input, original declaration and operation identity, dispatch/result status, revocation and verified cleanup. The ledger does not replicate or enter graph digests, checkpoints or claim backups. Unresolved operations are never trimmed. Existing request receipts precede dispatch and revocation; completion receipts commit only while their original declaration remains selected and the operation remains unrevoked.
+
+In the same installation transaction, `meta` captures `publication-operation-format-shared-cut` from `MAX(claims.store_index)` and `publication-operation-format-local-cut` from `MAX(local_observations.id)`, using zero for an empty table and `INSERT OR IGNORE`. These are two indexed maxima before the first operation-bound request, not history scans. Reopen, graph replay and view forgetting preserve both immutable cuts. A store with existing operation rows but a missing cut is refused rather than capturing a later boundary; preserve that store and its original boundary evidence for forward recovery. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary.
+
+Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. A per-subject `local_runtime_start_observation_subjects` bookmark records that subject's latest ledger mutation serial in the same transaction. The observation writer rejects a subject bookmark newer than its pre-physical capture serial when publishing a differing or absent incarnation; unrelated subjects cannot starve recording of exits or absence. This is a ledger-mutation witness, not general runtime identity or a selected-declaration token. The bookmark table survives replay/forget and adds one row per ledger subject, without a history backfill. The observation writer reports repeated refusals through telemetry and a visible fault; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
+
+Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
+
+The old version-18 binary refuses version 19. Do not lower `user_version` for rollback: drain starts, revoke pending operations and verify that all producers and operation-owned runtimes have ended, preserve the ledger and runtime generation records as evidence, then restore a consistent pre-upgrade database and runtime state with their matching binary under Operations supervision. New exec generation records contain operation provenance that older runtimes cannot read; restoring only SQLite is insufficient. A claim-only restore does not carry cancellation tombstones and cannot safely authorize starting old unresolved producers. Roll forward if closure cannot be proved. See [seat lifecycle](../seat-lifecycle.md#pending-runtime-starts).
 "#;
 
 pub fn storage_digest() -> String {
@@ -338,6 +351,7 @@ impl Registry {
         }
         output.push_str("\n`resource.observed` validates facts against the resource kind. Custom resource facts remain open.\n");
         output.push_str("\nA `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.\n");
+        output.push_str("\n## Accountable fleet roots\n\nA top-level agent root may declare `accountable \"person/NAME\"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.\n\nAll members must upgrade before publishing accountable roots. Older members retain the new closed-schema claim field as unknown, without enforcing it or selecting the declaration. Existing declarations have no field and declare no trace principal. The field does not change the database layout or checkpoint rules.\n");
         output.push_str("\n## Current person directive notes\n\n`person.directive-note-set` records the subject person's current context on `person/NAME`. Only that exact person may set or clear it, including replicated admission. Required `text` is null to clear, or nonblank text of at most 4096 UTF-8 bytes; optional `expires_at` is a valid RFC 3339 UTC timestamp. The canonical latest claim selects the current revision, with its actor as author and accepted time as creation time. A clear or expired revision hides every earlier note.\n\nNotes inform and never grant approval, gate verdicts, delegation, or person-ask answers. A person reads only their own note. An agent reads the union of known account owners, declaration authorship chains and mission-run requesters it works for; missing or cyclic ownership does not select a global operator. Ownership walks stop at 16 hops, and oversized relation sets fail closed. Exact person-key lookups read a current projection that retains clear and expired tombstones; immutable claims remain authoritative. Projection creation does not backfill existing history during migration.\n\nPublication requires anchored membership and `features.person_directive_note=1` on the latest own-origin `daemon.started` for every active member. Known unfenced legacy writers also prevent publication. Advertisements cannot prove discovery of every legacy peer: fence legacy peers from replication before enabling notes.\n");
         output.push_str("\n## Harness todo snapshots\n\n`harness.todo.observed` replaces the entire seat todo list. Session and incarnation identify its source; `observed_at` is source timestamp provenance, not an ordering clock. Keep the last snapshot until replaced, and expose stale provenance rather than presenting an old binding as current. Missing means unobserved; `phases: []`, zero totals and `truncated: false` means known empty.\n\nEach phase has `name` and `tasks`; each task has `content`, `status` (`pending`, `in_progress`, `completed`, `blocked`) and optional string `blocker`. The shared phase/task shape can also represent a future plan with one unnamed phase. Bounds are 16 phases, 100 tasks total, 128 UTF-8 bytes per phase name and 512 per content/blocker. Producers shorten at UTF-8 boundaries and omit trailing tasks/phases in source order to keep serialized claim fields within 64 KiB (including JSON escaping). Bound-driven shortening or omission sets `truncated`. `totals` contains nonnegative integer counts for all four statuses from the full source: counts equal the visible list when not truncated and cannot be less than visible counts when truncated. Unknown nested fields, invalid statuses, null blockers and oversized fields are rejected.\n");
         output.push_str("\nOMP's native `abandoned` tasks are omitted from phase tasks rather than relabeled as completed. Their enclosing phase is preserved when it fits. `totals.abandoned` counts these dropped tasks separately; it is optional on the wire and defaults to zero when absent. Totals for the four task statuses count the full source snapshot and exclude abandoned tasks from active progress. Dropping an abandoned task does not set `truncated`; that flag describes text/list/serialized-size bounds only. The OMP producer always emits the abandoned count and reserves 4 KiB of the serialized-fields budget for authenticated provenance.\n");
@@ -2587,6 +2601,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reason", string()),
         ],
         "intent.desired" => &[
+            ("accountable", reference_to(&["person"])),
             ("kind", string()),
             ("revision", string()),
             ("desired", object()),
@@ -2784,6 +2799,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claim_expires_at_unix_ms", integer()),
             ("readiness_epoch", integer()),
             ("extend_ms", integer()),
+            ("clock", enumeration(&["paused", "running"])),
+            ("wait_until_unix_ms", integer()),
             ("handoff_key", string()),
             ("handoff_request", object()),
             ("handoff_to", reference()),

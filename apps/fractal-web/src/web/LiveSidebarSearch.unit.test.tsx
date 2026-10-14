@@ -47,6 +47,7 @@ describe('live sidebar search', () => {
     document.body.append(host)
     const root = createRoot(host)
     await act(async () => root.render(<LiveSidebarSearch value="" onChange={() => {}} />))
+    expect(host.querySelector('input')?.getAttribute('aria-description')).toMatch(/machine:.*host:/)
     const field = host.querySelector('[data-sx]')!
     const style = JSON.parse(field.getAttribute('data-sx')!) as Record<string, unknown>
     const sidebar = resolve(scheme, colorVars.sidebar)

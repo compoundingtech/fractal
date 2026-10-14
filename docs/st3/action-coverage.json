@@ -1,7 +1,7 @@
 {
   "version": 1,
   "client_commands": [
-    {"command":"collections.inventory","tests":["crates/st3/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_follows_connect_disconnect_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period","crates/st3/src/api/client_v0/collection_refresh_tests.rs::machines_inventory_follows_runtime_transport_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_follows_pairing_revocation_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::terminals_inventory_follows_runtime_changes_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::sessions_inventory_follows_files_process_exit_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::inventory_subscriptions_refuse_invalid_filters_limits_and_authority","crates/st3/src/api/client_v0/collection_refresh_tests.rs::idle_inventory_windows_do_not_reread_across_the_old_client_intervals","crates/st3/src/api/client_v0/collection_refresh_tests.rs::inventory_pairing_expiry_ends_held_windows_without_a_clock_poll","crates/st3/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_expires_a_hidden_row_and_updates_has_more_at_its_deadline","crates/st3/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_expires_recent_requests_at_their_deadline"],"behavior":"Optional authorized bounded screen inventories deliver v0 snapshots and changes; reconnect reads current sources, device and recent-client membership expires at actual deadlines, and native sessions follow files and process exits. Phone inventory hooks use these authorized reads through screen-scoped subscriptions; Node fake-feed tests verify shared slots, period selection, refresh, reconnect, grace cleanup and 72-second idle without requests; native adapter event tests verify protocol heartbeat delivery."},
+    {"command":"collections.inventory","tests":["crates/st3/tests/client_only.rs::an_older_member_reads_fleet_on_focus_without_attempting_inventory_subscriptions","crates/st3-feed/src/inventory_tests.rs::inventories_follow_sources_switch_periods_leave_and_reconnect_over_a_real_socket","crates/st3/tests/client_only.rs::inventory_screens_send_no_request_after_their_first_frames_for_more_than_a_minute","crates/st3/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_follows_connect_disconnect_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_open_period_uses_wall_time_on_an_empty_graph","crates/st3/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period","crates/st3/src/api/client_v0/collection_refresh_tests.rs::machines_inventory_follows_runtime_transport_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_follows_pairing_revocation_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::terminals_inventory_follows_runtime_changes_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::sessions_inventory_follows_files_process_exit_and_reconnect","crates/st3/src/api/client_v0/collection_refresh_tests.rs::inventory_subscriptions_refuse_invalid_filters_limits_and_authority","crates/st3/src/api/client_v0/collection_refresh_tests.rs::idle_inventory_windows_do_not_reread_across_the_old_client_intervals","crates/st3/src/api/client_v0/collection_refresh_tests.rs::inventory_pairing_expiry_ends_held_windows_without_a_clock_poll","crates/st3/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_expires_a_hidden_row_and_updates_has_more_at_its_deadline","crates/st3/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_expires_recent_requests_at_their_deadline"],"behavior":"Optional authorized bounded screen inventories deliver v0 snapshots and changes; reconnect reads current sources, device and recent-client membership expires at actual deadlines, and native sessions follow files and process exits. Phone inventory hooks use these authorized reads through screen-scoped subscriptions; Node fake-feed tests verify shared slots, period selection, refresh, reconnect, grace cleanup and 72-second idle without requests; native adapter event tests verify protocol heartbeat delivery."},
     {"command":"resources.list","tests":["crates/stui/src/ui/observed_resources.rs::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix","crates/stui/src/ui/glass.rs::sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing","crates/st3/src/api/client_v0.rs::resources_list_filters_latest_observations_and_fences_pages","crates/st3/src/api/client_v0.rs::resources_list_requires_projection_read_scope"],"behavior":"Existing optional bounded observation read; typed PR/repository/other catalog windows, canonical subjects, filing over Unix, missing rows retained, clicks only navigate, Enter only previews."},
     {"command":"observations.report","tests":["crates/st3/src/api/client_observations.rs::observation_paired_session_transport_reader_doctor_and_body_limits","crates/st3/src/api/client_observations.rs::observation_dedup_conflict_overlap_and_history_failure_have_no_partial_acceptance","crates/st3/src/api/client_observations.rs::observation_history_is_bounded_rotates_expires_and_survives_restart"],"behavior":"Paired-only local diagnostics; no graph mutation, snapshot fence, replicated ACK or durable receipt. Memory dedup/overlap survives identical retries only within bounded process retention; JSONL history persists independently."}
   ],
@@ -448,6 +448,23 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st agents handoff show",
+      "description": "Print a seat's latest handoff document",
+      "tests": [
+        "crates/st3/tests/agents_restart.rs::a_seat_writes_and_reads_its_handoff_through_the_cli"
+      ],
+      "verification": "real CLI over a private Unix socket; the second write keeps the first version"
+    },
+    {
+      "command": "st agents handoff write",
+      "description": "Replace this seat's handoff document from a file or standard input",
+      "tests": [
+        "crates/st3/tests/agents_restart.rs::a_seat_writes_and_reads_its_handoff_through_the_cli",
+        "crates/st3/src/api.rs::a_seat_writes_only_its_own_handoff"
+      ],
+      "verification": "real CLI over a private Unix socket; the daemon refuses another seat's handoff"
+    },
+    {
       "command": "st agents hold",
       "description": "Inspect, set, or release a Codex/OpenCode delivery hold; the provider keeps running",
       "tests": [
@@ -690,6 +707,9 @@
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
+    {"command": "st changes list", "description": "List bounded Git changes with explicit inventory and index freshness", "tests": ["crates/st3/tests/action_coverage.rs::cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart"], "verification": "real CLI over private Unix socket; disabled fallback and configured non-owner offline receipts survive disk-store reopen; sync stays unavailable without writes"},
+    {"command": "st changes show", "description": "Show one full Change-Id with exact source and PR fallback", "tests": ["crates/st3/tests/action_coverage.rs::cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart", "crates/st3/tests/action_coverage.rs::cli_git_change_owner_sync_imports_real_objects_and_preserves_receipts_across_restart"], "verification": "real CLI over private Unix socket; disabled fallback and configured non-owner offline receipts survive disk-store reopen; sync stays unavailable without writes; real owner CLI sync fetches private Git objects, writes the derived receipt, and repeats without reimport after restart"},
+    {"command": "st changes sync", "description": "Request owner-controlled metadata synchronization or typed unavailable admission", "tests": ["crates/st3/tests/action_coverage.rs::cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart", "crates/st3/tests/action_coverage.rs::cli_git_change_owner_sync_imports_real_objects_and_preserves_receipts_across_restart"], "verification": "real CLI over private Unix socket; disabled fallback and configured non-owner offline receipts survive disk-store reopen; sync stays unavailable without writes; real owner CLI sync fetches private Git objects, writes the derived receipt, and repeats without reimport after restart"},
     {
       "command": "st claim",
       "description": "Publish one registered typed observation",
@@ -1019,6 +1039,24 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st fleet transports add",
+      "description": "Enable Fabric on this existing fleet member without rejoining",
+      "tests": [
+        "crates/st3/tests/fleet.rs::an_existing_member_adds_and_removes_fabric_without_rejoining",
+        "crates/st3/tests/fleet.rs::fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged"
+      ],
+      "verification": "real CLI over isolated Unix daemons and workers with a Fabric shim; graph sync, restart restoration and refused exposure"
+    },
+    {
+      "command": "st fleet transports remove",
+      "description": "Withdraw Fabric from this fleet member while keeping a usable carrier",
+      "tests": [
+        "crates/st3/tests/fleet.rs::an_existing_member_adds_and_removes_fabric_without_rejoining",
+        "crates/st3/tests/fleet.rs::fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged"
+      ],
+      "verification": "real CLI over isolated Unix daemons and workers with a Fabric shim; withdrawal before unexpose, remaining-carrier sync, guards and rollback without Fabric"
+    },
+    {
       "command": "st fleet wait",
       "description": "Wait for this node's first sync to end, then check that it projects the same graph as the peer it synced from. Fails when the graphs differ after a heal",
       "tests": [
@@ -1313,7 +1351,7 @@
     },
     {
       "command": "st missions check",
-      "description": "Run each exec gate in a mission file once, now, the way a run would, and report its answer: pass (exit 0), not yet (exit 1), broken (anything else), or unchecked",
+      "description": "Check mission and step exec gates once and report pass, not yet, broken, or unchecked; loop until scripts are listed as unchecked and run after each round",
       "tests": [
         "crates/st3/tests/broken_gates.rs::a_check_answers_for_each_gate_and_publish_refuses_a_broken_one"
       ],
@@ -1337,7 +1375,7 @@
     },
     {
       "command": "st missions publish",
-      "description": "Publish exact authored mission KDL after preview, once its exec gates pass a check",
+      "description": "Publish exact authored mission KDL after preview and check mission and step exec gates; loop until scripts run after each round",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
       ],
@@ -1871,6 +1909,49 @@
       "verification": "real CLI over isolated disk-backed Unix daemons; source fences, partition/heal and retirement confirmation"
     },
     {
+      "command": "st slo",
+      "description": "List every objective and budget: target, current value, window and what is left; `explain` says one in plain words",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo chart",
+      "description": "Chart what is left of one objective or budget over a period, from the daemon's local history",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo explain",
+      "description": "Explain one objective or budget in plain words",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo ls",
+      "description": "List every objective and budget: target, current value, window and what is left",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st setup",
+      "description": "Configure this machine and start st, with flags for unattended setup",
+      "tests": [
+        "crates/st3/tests/setup.rs::archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harness",
+        "crates/st3/tests/setup.rs::flags_merge_config_without_prompting_and_invalid_names_do_not_write",
+        "crates/st3/tests/setup.rs::harness_probe_uses_login_path_order_and_flags_without_starting_a_seat",
+        "crates/st3/tests/setup.rs::onboarding_publication_is_graph_decided_and_preserves_stopped_assistant"
+      ],
+      "verification": "real CLI with isolated HOME, state and sockets; graph publication, concurrent first setup, stopped Assistant preservation and explicit rerun; simulated provider inventory"
+    },
+    {
       "command": "st skill",
       "description": "Default read command for this group.",
       "tests": [
@@ -1954,9 +2035,10 @@
       "command": "st terminals expose-fabric",
       "description": "Let fleet peers attach this host's terminals PTY to PTY over Fabric.",
       "tests": [
+        "crates/st3/tests/terminal_attach.rs::expose_fabric_points_fabric_at_the_daemons_terminal_socket",
         "crates/st3/tests/terminal_attach.rs::a_terminal_another_host_owns_attaches_pty_to_pty_over_fabric"
       ],
-      "verification": "existing CLI integration"
+      "verification": "real CLI with a recording fabric; attach through the daemon's terminal socket"
     },
     {
       "command": "st terminals input-client",
@@ -2197,6 +2279,14 @@
       "verification": "shared API restart case"
     },
     {
+      "command": "st work resume",
+      "description": "Start the execution clock again after `work wait`",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st work retry",
       "description": "Retry one failed step; this reopens its failed run when that step was the only failure",
       "tests": [
@@ -2275,6 +2365,14 @@
       "description": "Bring a person information they asked for. Nothing waits on it; it clears once read",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st work wait",
+      "description": "Stop the execution clock while claimed work waits for something outside this seat",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },

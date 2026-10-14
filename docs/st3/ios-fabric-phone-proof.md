@@ -37,7 +37,7 @@ Metadata-only evidence (no keys, bearers, node IDs, endpoint addresses or messag
 
 ## Trial procedure
 
-Use the [separate offline Debug app](../../apps/ios/modules/st-fabric/README.md#full-client-phone-trial). Keep signing material and populated pairing links out of the repository and logs. First verify the new build against an isolated daemon with a throwaway `FABRIC_HOME`. Then expose exactly the member's paired-only client Unix socket under one unused service name. Inspect peer names before adding the phone's public NodeID under an unused alias with only that exact service grant, and check `reload-peers` succeeds. Do not expose the privileged daemon socket.
+Use the [separate offline Debug app](../../apps/ios/modules/st-fabric/README.md#full-client-phone-trial). Keep signing material and populated pairing links out of the repository and logs. First verify the new build against an isolated daemon with a throwaway `FABRIC_HOME`. Then expose exactly the member's paired-only client Unix socket under one unused service name. Inspect peer names before adding the phone's public NodeID under an unused alias with only that exact service grant, inbound-only (`--inbound-only`, fabric 0.2.41 or later), and check `reload-peers` succeeds. Do not expose the privileged daemon socket.
 
 Use a short-lived full-control pairing for this trial. Open a link with `client=1`. Verify Home's live snapshot, follow the owner's chosen test conversation, and send one explicitly authorized test message. Record the member acknowledgement once and inspect its idempotent action result. Avoid unrelated fleet controls. The proof uses the gateway's legacy unsigned-device pairing path; it does not enroll, read or replace the ordinary app's action-signing key.
 
