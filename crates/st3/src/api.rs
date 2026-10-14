@@ -3130,6 +3130,7 @@ fn client_agent_cards_presented(
     } else {
         BTreeMap::new()
     };
+    let stop_deferral_faults = store.stop_deferral_faults_for(&agent_subjects, snapshot_index)?;
     // Harnesses, activity, and who can have a suspension or rollout, for many agents at once.
     // Each status names the actual-state claim it selected, the newest runtime observation
     // whenever the agent has one.
@@ -3162,7 +3163,8 @@ fn client_agent_cards_presented(
             subject.harness = card_reads.take_harness(store, &subject.subject)?;
             let member_fault = member_faults.get(&subject.subject);
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
-            let fault = member_fault.or(mailbox_fault);
+            let fault = member_fault.or(mailbox_fault)
+                .or_else(|| stop_deferral_faults.get(&subject.subject));
             let fields = subject
                 .actual
                 .as_ref()
@@ -3382,7 +3384,7 @@ fn client_agent_cards_presented(
                     None
                 },
             });
-            if mailbox_faults.is_none() && member_fault.is_none() {
+            if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
             }
