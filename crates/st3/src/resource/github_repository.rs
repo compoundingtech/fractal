@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
+use crate::github_http::GithubAuth;
 use super::{
     GITHUB_AUTH_REMEDY, GithubListing, ObservationRequest, ProviderObservation, github_cache_for,
     github_client, github_graphql, github_json, github_listing,
@@ -47,8 +48,11 @@ pub(crate) const RECENT_COMMENTS: usize = 20;
 /// The most pages of a hundred items one REST listing reads in one poll.
 const LISTING_PAGES: usize = 10;
 
-/// The most open pull requests the GraphQL read pages through, a hundred at a time.
-const PULL_REQUEST_PAGES: usize = 10;
+/// Bound the review/check execution subtree per request. The 100-PR query
+/// exceeded GitHub's execution deadline with workflow metadata; page twenty at
+/// a time, preserving the existing total bound of 1,000 open pull requests.
+const PULL_REQUEST_PAGE_SIZE: usize = 20;
+const PULL_REQUEST_PAGES: usize = 1000 / PULL_REQUEST_PAGE_SIZE;
 
 /// The most mentions one item keeps, newest first.
 const ITEM_MENTIONS: usize = 50;
@@ -579,28 +583,44 @@ fn listed_comment(comment: &Value, fields: &BTreeSet<String>) -> Option<Item> {
     })
 }
 
-const OPEN_PULL_REQUESTS: &str =
-    "query($owner: String!, $name: String!, $after: String, $ids: [ID!]!, $pulls: Boolean!) {
-  repository(owner: $owner, name: $name) @include(if: $pulls) {
-    pullRequests(states: OPEN, first: 100, after: $after) {
+const OPEN_PULL_REQUESTS: &str = "query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 20, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft headRefOid headRefName baseRefName createdAt
         author { login }
+        timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) { nodes {
+          __typename
+          ... on ReadyForReviewEvent { createdAt }
+          ... on ConvertToDraftEvent { createdAt }
+        } }
         reviewDecision
         mergeQueueEntry { state position }
         latestReviews(first: 20) { nodes { author { login } state submittedAt commit { oid } } }
         reviews(last: 20) { nodes { databaseId author { login } state submittedAt } }
-        commits(last: 1) { nodes { commit { statusCheckRollup { state
-          contexts(first: 100) { nodes {
+        commits(last: 1) { nodes { commit {
+          checkSuites(last: 100) { pageInfo { hasPreviousPage } nodes { databaseId createdAt app { databaseId }
+            workflowRun { databaseId event runAttempt workflow { databaseId } }
+          } }
+          statusCheckRollup { state
+          contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion checkSuite { app { databaseId } } }
+            ... on CheckRun { name status conclusion checkSuite {
+              databaseId createdAt app { databaseId }
+              workflowRun { databaseId event runAttempt workflow { databaseId } }
+            } }
             ... on StatusContext { context state }
           } }
         } } } }
       }
     }
   }
+}";
+
+// GitHub can reject the combined query even when each 100-item read succeeds separately.
+// Keep closure/transfer lookups out of the expensive PR review and check-rollup query.
+const RESOLVED_ITEMS: &str = "query($ids: [ID!]!) {
   nodes(ids: $ids) {
     id
     ... on Issue {
@@ -686,6 +706,178 @@ fn check_outcome(context: &Value) -> (String, Option<u64>, CheckOutcome) {
             },
         ),
     }
+}
+
+// A workflow can have a fresh suite before any of its required jobs appears in
+// the rollup. Keep expected context names from its older suite pending until
+// their replacements arrive; a draft skip is not evidence of ready execution.
+#[derive(Clone)]
+struct WorkflowExecution {
+    app: Option<u64>,
+    workflow: u64,
+    suite: u64,
+    run: u64,
+    attempt: u64,
+    created_at: i64,
+    event: String,
+    facts: Value,
+}
+
+impl WorkflowExecution {
+    fn from_suite(suite: &Value) -> Option<Self> {
+        let run = suite.get("workflowRun")?;
+        Some(Self {
+            app: suite.pointer("/app/databaseId").and_then(Value::as_u64),
+            workflow: run.pointer("/workflow/databaseId")?.as_u64()?,
+            suite: suite.get("databaseId")?.as_u64()?,
+            run: run.get("databaseId")?.as_u64()?,
+            attempt: run.get("runAttempt")?.as_u64()?,
+            created_at: chrono::DateTime::parse_from_rfc3339(suite.get("createdAt")?.as_str()?)
+                .ok()?
+                .timestamp_millis(),
+            event: run.get("event")?.as_str()?.to_owned(),
+            facts: suite.clone(),
+        })
+    }
+
+    fn key(&self) -> (Option<u64>, u64, String) {
+        (self.app, self.workflow, self.event.clone())
+    }
+    fn order(&self) -> (i64, u64, u64) {
+        (self.created_at, self.suite, self.attempt)
+    }
+}
+
+fn required_checks_for_pull_request(
+    node: &Value,
+    contexts: &[Value],
+    required: Option<&[RequiredCheck]>,
+) -> Value {
+    let ready_since = (node.get("isDraft").and_then(Value::as_bool) == Some(false))
+        .then(|| {
+            node.pointer("/timelineItems/nodes")
+                .and_then(Value::as_array)
+                .and_then(|events| events.last())
+                .filter(|event| event["__typename"] == "ReadyForReviewEvent")
+                .and_then(|event| event.get("createdAt"))
+                .or_else(|| node.get("createdAt"))
+                .and_then(Value::as_str)
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.timestamp_millis())
+        })
+        .flatten();
+    let mut latest = BTreeMap::<(Option<u64>, u64, String), WorkflowExecution>::new();
+    let suites = node
+        .pointer("/commits/nodes/0/commit/checkSuites/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            contexts
+                .iter()
+                .filter_map(|context| context.get("checkSuite")),
+        );
+    for suite in suites {
+        if let Some(execution) = WorkflowExecution::from_suite(suite) {
+            match latest.entry(execution.key()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(execution);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry)
+                    if execution.order() > entry.get().order() =>
+                {
+                    entry.insert(execution);
+                }
+                _ => {}
+            }
+        }
+    }
+    let current_names = contexts
+        .iter()
+        .filter_map(|context| {
+            let execution = WorkflowExecution::from_suite(context.get("checkSuite")?)?;
+            if latest.get(&execution.key())?.suite != execution.suite {
+                return None;
+            }
+            Some((context.get("name")?.as_str()?.to_owned(), execution.key()))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut selected = Vec::new();
+    for context in contexts {
+        let Some(execution) = context
+            .get("checkSuite")
+            .and_then(WorkflowExecution::from_suite)
+        else {
+            // Commit statuses and non-workflow checks keep their existing app/rule semantics.
+            selected.push(context.clone());
+            continue;
+        };
+        let newest = &latest[&execution.key()];
+        let name = context
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if newest.suite != execution.suite
+            && current_names.contains(&(name.to_owned(), execution.key()))
+        {
+            continue;
+        }
+        let stale_skip = execution.event == "pull_request"
+            && ready_since.is_some_and(|ready| execution.created_at < ready)
+            && context
+                .get("conclusion")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("skipped"));
+        let mut selected_context = context.clone();
+        if newest.suite != execution.suite || stale_skip {
+            selected_context["status"] = json!("PENDING");
+            selected_context["conclusion"] = Value::Null;
+            selected_context["checkSuite"] = newest.facts.clone();
+        }
+        selected.push(selected_context);
+    }
+    let mut result = required_checks(&selected, required);
+    let truncated = node
+        .pointer("/commits/nodes/0/commit/checkSuites/pageInfo/hasPreviousPage")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || node
+            .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts/pageInfo/hasNextPage")
+            .and_then(Value::as_bool)
+            == Some(true);
+    if truncated {
+        result["state"] = json!("pending");
+        result["incomplete"] = json!(true);
+    }
+    let executions = selected
+        .iter()
+        .filter_map(|context| {
+            let (name, app, _) = check_outcome(context);
+            if required
+                .filter(|rules| !rules.is_empty())
+                .is_some_and(|rules| {
+                    !rules
+                        .iter()
+                        .any(|rule| rule.context == name && (rule.app.is_none() || rule.app == app))
+                })
+            {
+                return None;
+            }
+            let execution = WorkflowExecution::from_suite(context.get("checkSuite")?)?;
+            Some((
+                execution.app,
+                execution.workflow,
+                execution.suite,
+                execution.run,
+                execution.attempt,
+                execution.event,
+            ))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if !executions.is_empty() {
+        result["execution"] = json!({"ready_since": ready_since, "workflows": executions});
+    }
+    result
 }
 
 /// How the checks a head must pass stand together. With rules that require checks, only those
@@ -796,7 +988,7 @@ fn open_pull_request(
         .unwrap_or_default();
     facts.insert(
         "required_checks".into(),
-        required_checks(&contexts, required),
+        required_checks_for_pull_request(node, &contexts, required),
     );
     let mut checks = contexts
         .iter()
@@ -959,11 +1151,11 @@ fn newest_updated_at<'a>(values: impl IntoIterator<Item = &'a Value>) -> Option<
 pub(super) async fn observe_at(
     request: ObservationRequest,
     api_base: &str,
-    token: Option<&str>,
+    token: Option<&GithubAuth>,
 ) -> Result<ProviderObservation> {
     let cache_for = github_cache_for(&request);
     let token = token
-        .filter(|value| !value.trim().is_empty())
+        .filter(|value| value.is_valid())
         .context(GITHUB_AUTH_REMEDY)?;
     let (owner, repository) = request
         .locator
@@ -1370,6 +1562,14 @@ pub(super) async fn observe_at(
     if !issues.is_empty() {
         facts.insert("issues".into(), Value::Array(issues));
     }
+    if fields.contains(super::github_workflows::PERFORMANCE_FAILURES_FIELD) {
+        let repository = format!("{}/{}", current_location.0, current_location.1);
+        let failures = super::github_workflows::main_performance_failures(
+            &client, &base, &repository, token, cache_for,
+        ).await?;
+        facts.insert(super::github_workflows::PERFORMANCE_FAILURES_FIELD.into(),
+            serde_json::to_value(failures)?);
+    }
     Ok(ProviderObservation {
         facts: Value::Object(facts),
         cursor: Some(serde_json::to_string(&cursor)?),
@@ -1393,7 +1593,7 @@ pub(super) async fn observe_at(
 async fn open_pull_requests(
     client: &reqwest::Client,
     api_base: &str,
-    token: &str,
+    token: &GithubAuth,
     cache_for: Duration,
     locator: &str,
     (owner, repository): (&str, &str),
@@ -1448,25 +1648,40 @@ async fn open_pull_requests(
         anyhow::ensure!(
             page < PULL_REQUEST_PAGES,
             "the repository has more than {} open pull requests",
-            PULL_REQUEST_PAGES * 100
+            PULL_REQUEST_PAGES * PULL_REQUEST_PAGE_SIZE
         );
-        let data = github_graphql(
-            client,
-            api_base,
-            token,
-            OPEN_PULL_REQUESTS,
-            json!({"owner": owner, "name": repository, "after": after,
-                "pulls": emit_pulls, "ids": identities.iter().skip(page * 100).take(100).collect::<Vec<_>>() }),
-        )
-        .await?;
-        resolved.extend(
-            data.get("nodes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .cloned(),
-        );
-        identities_read = identities.len().min((page + 1) * 100);
+        let data = if emit_pulls {
+            github_graphql(
+                client,
+                api_base,
+                token,
+                OPEN_PULL_REQUESTS,
+                json!({"owner": owner, "name": repository, "after": after}),
+            )
+            .await?
+        } else {
+            Value::Null
+        };
+        let ids = identities
+            .iter()
+            .take(1000) // Preserve the prior ten 100-identity resolution pages per read.
+            .skip(page * 100)
+            .take(100)
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            let resolved_data =
+                github_graphql(client, api_base, token, RESOLVED_ITEMS, json!({"ids": ids}))
+                    .await?;
+            resolved.extend(
+                resolved_data
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+        }
+        identities_read = identities.len().min((page + 1) * 100).min(1000);
         if !emit_pulls {
             break;
         }
@@ -1550,7 +1765,7 @@ async fn open_pull_requests(
 async fn required_by_base(
     client: &reqwest::Client,
     api_base: &str,
-    token: &str,
+    token: &GithubAuth,
     cache_for: Duration,
     (owner, repository): (&str, &str),
     base: &str,
@@ -1651,8 +1866,11 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeGithub {
         routes: Arc<Mutex<HashMap<String, (String, String)>>>,
+        links: Arc<Mutex<HashMap<String, String>>>,
         refused: Arc<Mutex<HashMap<String, String>>>,
         graphql: Arc<Mutex<String>>,
+        graphql_pages: Arc<Mutex<HashMap<String, String>>>,
+        reject_combined_details: Arc<Mutex<bool>>,
         graphql_requests: Arc<Mutex<Vec<Value>>>,
         requests: Arc<Mutex<Vec<String>>>,
     }
@@ -1706,17 +1924,34 @@ mod tests {
                         let respond = |status: &str, etag: Option<&str>, body: &str| {
                             let etag =
                                 etag.map_or(String::new(), |etag| format!("ETag: {etag}\r\n"));
+                            let link = target.split(' ').nth(1)
+                                .and_then(|path| server.links.lock().unwrap().get(path).cloned())
+                                .map_or(String::new(), |link| format!("Link: {link}\r\n"));
                             format!(
-                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{etag}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{etag}{link}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                                 body.len()
                             )
                         };
                         let response = if target.starts_with("POST /graphql ") {
-                            server.graphql_requests.lock().unwrap().push(
+                            let query: Value =
                                 serde_json::from_slice(&request[header_end..header_end + length])
-                                    .unwrap(),
-                            );
-                            respond("200 OK", None, &server.graphql.lock().unwrap())
+                                    .unwrap();
+                            let combined = query["query"].as_str().is_some_and(|query| {
+                                query.contains("pullRequests(") && query.contains("nodes(ids:")
+                            });
+                            let page_body = query["variables"]["after"].as_str()
+                                .and_then(|after| server.graphql_pages.lock().unwrap().get(after).cloned());
+                            server.graphql_requests.lock().unwrap().push(query);
+                            if combined && *server.reject_combined_details.lock().unwrap() {
+                                respond(
+                                    "200 OK",
+                                    None,
+                                    r#"{"errors":[{"message":"Something went wrong while executing your query"}]}"#,
+                                )
+                            } else {
+                                let body = page_body.unwrap_or_else(|| server.graphql.lock().unwrap().clone());
+                                respond("200 OK", None, &body)
+                            }
                         } else {
                             let path = target.split(' ').nth(1).unwrap().to_owned();
                             let route = server.routes.lock().unwrap().get(&path).cloned();
@@ -1939,9 +2174,94 @@ mod tests {
         assert!(!legacy.facts.contains_key("node_id"));
     }
 
+    fn workflow_run(id: u64, attempt: u64) -> Value {
+        json!({"id": id, "run_attempt": attempt, "head_sha": "a".repeat(40),
+            "name": "Performance", "path": ".github/workflows/perf.yml", "event": "push",
+            "head_branch": "main", "status": "completed", "conclusion": "failure",
+            "repository": {"full_name": "acme/garden"}})
+    }
+
+    const WORKFLOW_RUNS: &str = "/repos/acme/garden/actions/workflows/perf.yml/runs?branch=main&event=push&status=failure&per_page=100";
+
     #[tokio::test]
-    async fn resolution_details_share_the_gated_query_and_survive_etags() {
+    async fn main_performance_failures_are_narrow_and_only_read_run_metadata() {
         let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7, "full_name": "acme/garden"}));
+        let mut runs = vec![workflow_run(7, 1), workflow_run(7, 1)];
+        let mut ref_path = workflow_run(8, 2);
+        ref_path["path"] = json!(".github/workflows/perf.yml@refs/heads/main");
+        runs.push(ref_path);
+        for (field, wrong) in [
+            ("event", json!("pull_request")), ("head_branch", json!("feature")),
+            ("status", json!("in_progress")), ("conclusion", json!("success")),
+            ("conclusion", json!("cancelled")), ("conclusion", json!("timed_out")),
+            ("name", json!("Other workflow")), ("path", json!(".github/workflows/other.yml")),
+            ("run_attempt", json!(0)), ("head_sha", json!("missing")),
+            ("repository", json!({"full_name": "another/repository"})),
+        ] {
+            let mut excluded = workflow_run(99, 1);
+            excluded[field] = wrong;
+            runs.push(excluded);
+        }
+        github.route(WORKFLOW_RUNS, json!({"workflow_runs": runs}));
+        let field = super::super::github_workflows::PERFORMANCE_FAILURES_FIELD;
+        let first = observe_at(request(&[field], None, None), &base,
+            Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        let failures = first.facts[field].as_array().unwrap();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0]["run_id"], 7);
+        assert_eq!(failures[1]["run_attempt"], 2);
+        assert_eq!(failures[1]["workflow_path"], ".github/workflows/perf.yml");
+        assert_eq!(failures[0]["url"], "https://github.com/acme/garden/actions/runs/7");
+        assert_eq!(github.take_requests(), vec!["GET /repos/acme/garden HTTP/1.1".to_owned(),
+            format!("GET {WORKFLOW_RUNS} HTTP/1.1")]);
+        let second = observe_at(request(&[field], first.cursor.as_deref(), Some(first.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        assert_eq!(second.facts, first.facts);
+        let revalidated = github.requests.lock().unwrap().clone();
+        assert_eq!(revalidated.len(), 2);
+        assert!(revalidated.iter().all(|head| head.to_ascii_lowercase().contains("if-none-match:")));
+        assert!(github.graphql_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn main_performance_failures_follow_conditional_object_pagination_and_fail_closed() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7, "full_name": "acme/garden"}));
+        let page_two = "/repos/acme/garden/actions/workflows/perf.yml/runs?page=2";
+        github.route(WORKFLOW_RUNS, json!({"workflow_runs": [workflow_run(1, 1)]}));
+        github.route(page_two, json!({"workflow_runs": [workflow_run(2, 1)]}));
+        github.links.lock().unwrap().insert(WORKFLOW_RUNS.into(), format!("<{base}{page_two}>; rel=\"next\""));
+        let field = super::super::github_workflows::PERFORMANCE_FAILURES_FIELD;
+        let first = observe_at(request(&[field], None, None), &base,
+            Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        assert_eq!(first.facts[field].as_array().unwrap().len(), 2);
+        github.take_requests();
+        let unchanged = observe_at(request(&[field], first.cursor.as_deref(), Some(first.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        assert_eq!(unchanged.facts, first.facts);
+        assert!(github.take_requests().iter().any(|request| request.contains("page=2")));
+        github.route(page_two, json!({"workflow_runs": [workflow_run(2, 2)]}));
+        let rerun = observe_at(request(&[field], unchanged.cursor.as_deref(), Some(unchanged.facts)),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        assert_eq!(rerun.facts[field][1]["run_attempt"], 2);
+        github.route(WORKFLOW_RUNS, json!({"total_count": 1001, "workflow_runs": [workflow_run(1, 1)]}));
+        let overflow = observe_at(request(&[field], rerun.cursor.as_deref(), Some(rerun.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap_err();
+        assert!(overflow.to_string().contains("page bound"));
+        github.route(WORKFLOW_RUNS, json!({"unexpected_collection": []}));
+        assert!(observe_at(request(&[field], rerun.cursor.as_deref(), Some(rerun.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.is_err());
+        github.refuse(WORKFLOW_RUNS, "403 Forbidden");
+        assert!(observe_at(request(&[field], rerun.cursor.as_deref(), Some(rerun.facts)),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.is_err());
+        assert!(github.graphql_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn separate_resolution_and_pr_queries_survive_etags_and_combined_query_failure() {
+        let (github, base) = FakeGithub::start().await;
+        *github.reject_combined_details.lock().unwrap() = true;
         github.route(
             "/repos/acme/garden",
             json!({"id": 7, "node_id": "R_orchid", "full_name": "acme/garden"}),
@@ -1968,7 +2288,7 @@ mod tests {
         let first = observe_at(
             request(&["pull_requests", "issues"], None, None),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
@@ -1979,16 +2299,29 @@ mod tests {
             "PR_orchid"
         );
         let queries = github.graphql_requests.lock().unwrap().clone();
-        assert_eq!(queries.len(), 1);
-        assert_eq!(
-            queries[0]["variables"]["ids"],
-            json!(["I_orchid", "PR_orchid"])
-        );
+        assert_eq!(queries.len(), 2);
         assert!(
             queries[0]["query"]
                 .as_str()
                 .unwrap()
+                .contains("pullRequests(")
+        );
+        assert!(queries[0]["variables"].get("ids").is_none());
+        assert_eq!(
+            queries[1]["variables"]["ids"],
+            json!(["I_orchid", "PR_orchid"])
+        );
+        assert!(
+            queries[1]["query"]
+                .as_str()
+                .unwrap()
                 .contains("itemTypes: [CLOSED_EVENT]")
+        );
+        assert!(
+            !queries[1]["query"]
+                .as_str()
+                .unwrap()
+                .contains("pullRequests(")
         );
         github.take_requests();
         github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T00:00:00Z&per_page=100", json!([
@@ -2011,7 +2344,7 @@ mod tests {
                 Some(first.facts.clone()),
             ),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
@@ -2031,7 +2364,7 @@ mod tests {
                 Some(closed.facts),
             ),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
@@ -2062,7 +2395,7 @@ mod tests {
                 .iter()
                 .filter(|request| request.starts_with("POST"))
                 .count(),
-            1
+            2
         );
         let quiet = observe_at(
             request(
@@ -2071,7 +2404,7 @@ mod tests {
                 Some(final_read.facts),
             ),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
@@ -2100,7 +2433,7 @@ mod tests {
         github.open_pull_requests(json!([]));
         github.resolved_nodes(json!([{"id": "I_orchid", "state": "OPEN", "number": 1,
             "url": "https://github.com/acme/garden/issues/1"}]));
-        let first = observe_at(request(&["issues"], None, None), &base, Some("test"))
+        let first = observe_at(request(&["issues"], None, None), &base, Some(&GithubAuth::test("test")))
             .await
             .unwrap();
         github.take_requests();
@@ -2111,7 +2444,7 @@ mod tests {
         let moved = observe_at(
             request(&["issues"], first.cursor.as_deref(), Some(first.facts)),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
@@ -2142,7 +2475,7 @@ mod tests {
         let closed = observe_at(
             request(&["issues"], moved.cursor.as_deref(), Some(moved.facts)),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
@@ -2152,6 +2485,87 @@ mod tests {
             item(&closed.facts, "issues", 1)["moved_to"],
             "resource/github/acme/greenhouse/issue/77"
         );
+    }
+
+    #[tokio::test]
+    async fn open_pull_request_execution_pages_keep_all_items_and_the_total_bound() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden/rules/branches/main", json!([]));
+        let first = (1..=20)
+            .map(|number| open_pull(number, "head", "SUCCESS"))
+            .collect::<Vec<_>>();
+        github.open_pull_requests(json!(first));
+        {
+            let mut response: Value =
+                serde_json::from_str(&github.graphql.lock().unwrap()).unwrap();
+            response["data"]["repository"]["pullRequests"]["pageInfo"] =
+                json!({"hasNextPage":true, "endCursor":"page-two"});
+            *github.graphql.lock().unwrap() = response.to_string();
+        }
+        github.graphql_pages.lock().unwrap().insert(
+            "page-two".into(),
+            json!({"data":{"repository":{"pullRequests":{
+                "nodes":[open_pull(21, "head", "SUCCESS")],
+                "pageInfo":{"hasNextPage":false, "endCursor":null}
+            }}}})
+            .to_string(),
+        );
+        let result = open_pull_requests(
+            &reqwest::Client::new(),
+            &base,
+            &GithubAuth::test("fixture-auth"),
+            Duration::ZERO,
+            "acme/garden",
+            ("acme", "garden"),
+            false,
+            false,
+            &BTreeSet::new(),
+            true,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.open.len(), 21);
+        assert_eq!(result.open.last().unwrap()["number"], 21);
+        let queries = github.graphql_requests.lock().unwrap().clone();
+        assert_eq!(queries.len(), 2);
+        assert!(queries[0]["variables"]["after"].is_null());
+        assert_eq!(queries[1]["variables"]["after"], "page-two");
+        assert!(queries.iter().all(|query| {
+            query["query"]
+                .as_str()
+                .unwrap()
+                .contains("pullRequests(states: OPEN, first: 20, after: $after)")
+        }));
+        // A server that keeps offering another page must still stop at 1,000 PRs.
+        github.graphql_pages.lock().unwrap().clear();
+        let (overflow, overflow_base) = FakeGithub::start().await;
+        *overflow.graphql.lock().unwrap() = json!({"data":{"repository":{"pullRequests":{
+            "nodes":[], "pageInfo":{"hasNextPage":true,"endCursor":"again"}
+        }}}})
+        .to_string();
+        let error = open_pull_requests(
+            &reqwest::Client::new(),
+            &overflow_base,
+            &GithubAuth::test("fixture-auth"),
+            Duration::ZERO,
+            "acme/garden",
+            ("acme", "garden"),
+            false,
+            false,
+            &BTreeSet::new(),
+            true,
+            &[],
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("more than 1000 open pull requests")
+        );
+        assert_eq!(overflow.graphql_requests.lock().unwrap().len(), 50);
     }
 
     #[tokio::test]
@@ -2176,11 +2590,11 @@ mod tests {
         let first = observe_at(
             request(&["pull_requests", "issues"], None, None),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
-        let first_query = github.graphql_requests.lock().unwrap()[0].clone();
+        let first_query = github.graphql_requests.lock().unwrap()[1].clone();
         assert_eq!(
             first_query["variables"]["ids"].as_array().unwrap().len(),
             100
@@ -2193,7 +2607,7 @@ mod tests {
                 .iter()
                 .filter(|request| request.starts_with("POST"))
                 .count(),
-            1
+            2
         );
         github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T00:00:00Z&per_page=100", json!([]));
         age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
@@ -2204,11 +2618,11 @@ mod tests {
                 Some(first.facts),
             ),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
-        let next_query = github.graphql_requests.lock().unwrap()[1].clone();
+        let next_query = github.graphql_requests.lock().unwrap()[3].clone();
         assert_eq!(next_query["variables"]["ids"][0], "I_100");
         assert_eq!(next_query["variables"]["ids"][1], "I_000");
         assert_eq!(
@@ -2217,7 +2631,7 @@ mod tests {
                 .iter()
                 .filter(|request| request.starts_with("POST"))
                 .count(),
-            1
+            2
         );
     }
 
@@ -2244,7 +2658,7 @@ mod tests {
         let moved = observe_at(
             request(&["pull_requests"], None, Some(json!({"repository_id": 7}))),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
@@ -2276,7 +2690,7 @@ mod tests {
         let moved = observe_at(
             request(&["issues"], None, Some(json!({"repository_id": 7}))),
             &base,
-            Some("test"),
+            Some(&GithubAuth::test("test")),
         )
         .await
         .unwrap();
@@ -2340,7 +2754,7 @@ mod tests {
         let spender = "observer/orchid-one-poll".to_owned();
         let first = spend_as(
             spender.clone(),
-            observe_at(request(&fields, None, None), &base, Some("orchid-token")),
+            observe_at(request(&fields, None, None), &base, Some(&GithubAuth::test("orchid-token"))),
         )
         .await
         .unwrap();
@@ -2395,7 +2809,7 @@ mod tests {
             observe_at(
                 request(&fields, first.cursor.as_deref(), Some(first.facts.clone())),
                 &base,
-                Some("orchid-token"),
+                Some(&GithubAuth::test("orchid-token")),
             ),
         )
         .await
@@ -2417,7 +2831,7 @@ mod tests {
                     Some(json!({"repository_id": 7})),
                 ),
                 &base,
-                Some("orchid-token"),
+                Some(&GithubAuth::test("orchid-token")),
             ),
         )
         .await
@@ -2444,7 +2858,7 @@ mod tests {
         let settled = observe_at(
             request(&fields, third.cursor.as_deref(), None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2456,7 +2870,7 @@ mod tests {
         let quiet = observe_at(
             request(&fields, settled.cursor.as_deref(), None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2526,7 +2940,7 @@ mod tests {
                 Some(json!({"repository_id": 7})),
             ),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2622,7 +3036,7 @@ mod tests {
                 Some(json!({"repository_id": 7})),
             ),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2653,7 +3067,7 @@ mod tests {
                 Some(json!({"repository_id": 7})),
             ),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2662,6 +3076,168 @@ mod tests {
                 .get("recent_comments")
                 .is_none()
         );
+    }
+
+    fn workflow_suite(id: u64, at: &str) -> Value {
+        json!({"databaseId":id, "createdAt":at, "app":{"databaseId":15368},
+            "workflowRun":{"databaseId":id + 1000, "event":"pull_request", "runAttempt":1,
+                "workflow":{"databaseId":77}}})
+    }
+
+    fn workflow_check(name: &str, conclusion: Option<&str>, suite: &Value) -> Value {
+        json!({"__typename":"CheckRun", "name":name,
+            "status":if conclusion.is_some() { "COMPLETED" } else { "QUEUED" },
+            "conclusion":conclusion, "checkSuite":suite})
+    }
+
+    #[test]
+    fn required_checks_follow_ready_executions_without_rejecting_current_conditional_skips() {
+        let rules = [
+            RequiredCheck {
+                context: "build".into(),
+                app: Some(15368),
+            },
+            RequiredCheck {
+                context: "test".into(),
+                app: Some(15368),
+            },
+        ];
+        let old = workflow_suite(10, "2026-10-13T09:50:00Z");
+        let ready = workflow_suite(20, "2026-10-13T10:00:02Z");
+        let mut pull = json!({"isDraft":false, "createdAt":"2026-10-13T09:00:00Z",
+            "timelineItems":{"nodes":[{"__typename":"ReadyForReviewEvent", "createdAt":"2026-10-13T10:00:00Z"}]},
+            "commits":{"nodes":[{"commit":{"checkSuites":{"nodes":[]}}}]}});
+        let draft_checks = vec![
+            workflow_check("build", Some("SKIPPED"), &old),
+            workflow_check("test", Some("SKIPPED"), &old),
+        ];
+        let aggregate = |pull: &Value, checks: &[Value]| {
+            required_checks_for_pull_request(pull, checks, Some(&rules))
+        };
+        // Even before GitHub creates a fresh suite, the ready boundary invalidates
+        // draft skips. An external status is not silently substituted for the app.
+        assert_eq!(aggregate(&pull, &draft_checks)["state"], "pending");
+        pull["isDraft"] = json!(true);
+        assert_eq!(aggregate(&pull, &draft_checks)["state"], "pass");
+        pull["isDraft"] = json!(false);
+        pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] = json!([old, ready]);
+        // A new workflow can have only its runner-selection job initially.
+        let mut checks = draft_checks.clone();
+        checks.push(workflow_check("pick-runner", Some("SUCCESS"), &ready));
+        assert_eq!(aggregate(&pull, &checks)["state"], "pending");
+        assert_eq!(
+            required_checks_for_pull_request(&pull, &checks, None)["state"],
+            "pending"
+        );
+        checks.push(workflow_check("test", Some("SKIPPED"), &ready));
+        checks.push(workflow_check("build", None, &ready));
+        assert_eq!(aggregate(&pull, &checks)["state"], "pending");
+        checks.pop();
+        checks.push(workflow_check("build", Some("SUCCESS"), &ready));
+        checks.push(workflow_check("optional", Some("FAILURE"), &ready));
+        let complete = aggregate(&pull, &checks);
+        assert_eq!(
+            complete["state"], "pass",
+            "current conditional skip satisfies the rule"
+        );
+        checks.reverse();
+        assert_eq!(
+            aggregate(&pull, &checks),
+            complete,
+            "API ordering is not execution identity"
+        );
+        pull["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"] =
+            json!({"hasPreviousPage":true});
+        assert_eq!(
+            aggregate(&pull, &checks)["state"],
+            "pending",
+            "partial suite history cannot qualify currentness"
+        );
+        pull["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"] =
+            json!({"hasPreviousPage":false});
+        pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["pageInfo"] =
+            json!({"hasNextPage":true});
+        assert_eq!(
+            aggregate(&pull, &checks)["state"],
+            "pending",
+            "partial check pages cannot pass"
+        );
+        pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["pageInfo"] =
+            json!({"hasNextPage":false});
+        let mut failure = checks.clone();
+        failure
+            .iter_mut()
+            .find(|check| check["name"] == "build" && check["checkSuite"]["databaseId"] == 20)
+            .unwrap()["conclusion"] = json!("FAILURE");
+        assert_eq!(aggregate(&pull, &failure)["state"], "fail");
+        let mut wrong_app = checks;
+        for check in &mut wrong_app {
+            if check["checkSuite"]["databaseId"] == 20 {
+                check["checkSuite"]["app"]["databaseId"] = json!(99);
+            }
+        }
+        assert_eq!(aggregate(&pull, &wrong_app)["state"], "pending");
+    }
+
+    #[test]
+    fn required_checks_do_not_supersede_pull_request_suites_with_other_events() {
+        let rules = [RequiredCheck {
+            context: "build".into(),
+            app: Some(15368),
+        }];
+        let ready = workflow_suite(20, "2026-10-13T10:00:02Z");
+        let checks = [workflow_check("build", Some("SUCCESS"), &ready)];
+        let mut pull = json!({"isDraft":false, "createdAt":"2026-10-13T09:00:00Z",
+            "commits":{"nodes":[{"commit":{"checkSuites":{"nodes":[ready]}}}]}});
+        let expected = required_checks_for_pull_request(&pull, &checks, Some(&rules));
+        for event in ["push", "workflow_dispatch"] {
+            let mut unrelated = workflow_suite(30, "2026-10-13T10:01:00Z");
+            unrelated["workflowRun"]["event"] = json!(event);
+            pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] =
+                json!([ready, unrelated]);
+            assert_eq!(
+                required_checks_for_pull_request(&pull, &checks, Some(&rules)),
+                expected,
+                "a later {event} suite cannot replace the pull_request execution"
+            );
+        }
+        let next_pr = workflow_suite(40, "2026-10-13T10:02:00Z");
+        pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] = json!([ready, next_pr]);
+        assert_eq!(
+            required_checks_for_pull_request(&pull, &checks, Some(&rules))["state"],
+            "pending",
+            "a later pull_request suite still supersedes old jobs"
+        );
+    }
+
+    #[test]
+    fn required_check_success_identity_changes_for_a_new_execution_on_the_same_head() {
+        let rules = [RequiredCheck {
+            context: "build".into(),
+            app: Some(15368),
+        }];
+        let pull = json!({"isDraft":false, "createdAt":"2026-10-13T09:00:00Z"});
+        let first = required_checks_for_pull_request(
+            &pull,
+            &[workflow_check(
+                "build",
+                Some("SUCCESS"),
+                &workflow_suite(10, "2026-10-13T09:01:00Z"),
+            )],
+            Some(&rules),
+        );
+        let second = required_checks_for_pull_request(
+            &pull,
+            &[workflow_check(
+                "build",
+                Some("SUCCESS"),
+                &workflow_suite(20, "2026-10-13T09:02:00Z"),
+            )],
+            Some(&rules),
+        );
+        assert_eq!(first["state"], "pass");
+        assert_eq!(second["state"], "pass");
+        assert_ne!(first["execution"], second["execution"]);
     }
 
     #[tokio::test]
@@ -2775,7 +3351,7 @@ mod tests {
         let observed = observe_at(
             request(&["pull_requests"], None, None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .expect("an unreadable rule never fails the observation");
@@ -2823,7 +3399,7 @@ mod tests {
         let first = observe_at(
             request(&["pull_requests"], None, None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2845,7 +3421,7 @@ mod tests {
         let rerun = observe_at(
             request(&["pull_requests"], first.cursor.as_deref(), None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2869,7 +3445,7 @@ mod tests {
         let first = observe_at(
             request(&["pull_requests"], None, None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2895,7 +3471,7 @@ mod tests {
         let opened = observe_at(
             request(&["pull_requests"], first.cursor.as_deref(), None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2925,7 +3501,7 @@ mod tests {
         let first = observe_at(
             request(&["pull_requests"], None, None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2950,7 +3526,7 @@ mod tests {
         let within = observe_at(
             request(&["pull_requests"], first.cursor.as_deref(), None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2970,7 +3546,7 @@ mod tests {
         let after = observe_at(
             request(&["pull_requests"], within.cursor.as_deref(), None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -2998,7 +3574,7 @@ mod tests {
         let observed = observe_at(
             request(&["issues"], None, None),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -3032,7 +3608,7 @@ mod tests {
         let observed = observe_at(
             request(&["pull_requests"], Some("a3f1c0ffee"), Some(legacy)),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap();
@@ -3049,7 +3625,7 @@ mod tests {
         let error = observe_at(
             request(&["issues"], None, Some(json!({"repository_id": 7}))),
             &base,
-            Some("orchid-token"),
+            Some(&GithubAuth::test("orchid-token")),
         )
         .await
         .unwrap_err();

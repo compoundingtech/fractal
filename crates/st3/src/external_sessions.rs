@@ -1,18 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{self, File};
-use std::io::{BufRead as _, BufReader, Seek as _, SeekFrom};
+use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 #[cfg(not(target_os = "linux"))]
 use chrono::NaiveDateTime;
 use chrono::{DateTime, Utc};
 use kdl::{KdlDocument, KdlEntry, KdlNode};
 use rusqlite::{Connection, OpenFlags, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use walkdir::WalkDir;
@@ -22,15 +24,13 @@ pub(crate) const MAX_EXPOSED_HISTORY: usize = 2_000;
 const MAX_METADATA_LINES: usize = 64;
 const MAX_TIMELINE_LINES: usize = 4_096;
 const MAX_TIMELINE_BYTES: u64 = 32 * 1024 * 1024;
-// A maximum-size page must remain below the client gateway's one-megabyte response ceiling even
-// when every native entry contains a large tool payload.
-const MAX_TIMELINE_VALUE_BYTES: usize = 8 * 1024;
+// Wire size limits and owner references are applied by api/client_v0/conversation_blocks.
 const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(2);
 /// How long a saved-history request waits for a background transcript read before it answers
 /// with the last complete inventory.
 const HISTORY_WAIT: Duration = Duration::from_secs(2);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ExternalDriver {
     Codex,
@@ -463,20 +463,61 @@ pub(crate) fn find_bound_transcript(
     driver: ExternalDriver,
     native_id: &str,
 ) -> Result<Option<ExternalSession>> {
-    let root = match driver {
-        ExternalDriver::Codex => home.join(".codex/sessions"),
-        ExternalDriver::Claude => home.join(".claude/projects"),
+    find_bound_transcript_with(home, driver, native_id, None, &[])
+}
+
+/// Whether `hint`, a path a seat's hook recorded, can be this session's Claude transcript:
+/// Claude's layout `<config>/projects/<encoded cwd>/<session>.jsonl`, spelled with no link in any
+/// part of it. A recorded path is data a seat wrote, so it never reaches a file outside a
+/// `projects` directory, or through a symlinked parent.
+fn claude_transcript_hint(hint: &Path, filename: &str) -> bool {
+    hint.is_absolute()
+        && hint.file_name().and_then(|name| name.to_str()) == Some(filename)
+        && hint
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "projects")
+        && hint.canonicalize().is_ok_and(|real| real == hint)
+        && std::fs::symlink_metadata(hint).is_ok_and(|metadata| metadata.is_file())
+}
+
+/// `find_bound_transcript`, also looking where a Claude seat on its own login keeps transcripts.
+/// `hint` is the path Claude gave the SessionStart hook for this very session, which follows the
+/// seat's `CLAUDE_CONFIG_DIR` whatever account it runs on; it counts only if it names this
+/// session's file. `extra_roots` are further `projects` directories to search, such as the logins
+/// of declared accounts, for a seat whose binding recorded no path.
+pub(crate) fn find_bound_transcript_with(
+    home: &Path,
+    driver: ExternalDriver,
+    native_id: &str,
+    hint: Option<&Path>,
+    extra_roots: &[PathBuf],
+) -> Result<Option<ExternalSession>> {
+    let mut roots = match driver {
+        ExternalDriver::Codex => vec![home.join(".codex/sessions")],
+        ExternalDriver::Claude => vec![home.join(".claude/projects")],
         _ => return Ok(None),
     };
+    if driver == ExternalDriver::Claude {
+        roots.extend(extra_roots.iter().cloned());
+    }
     let filename = format!("{native_id}.jsonl");
     // Codex prefixes the session ID with the rollout time: `rollout-<time>-<id>.jsonl`.
     let codex_suffix = format!("-{filename}");
     let mut found: Option<SessionMetadata> = None;
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
+    if driver == ExternalDriver::Claude
+        && let Some(hint) = hint.filter(|hint| claude_transcript_hint(hint, &filename))
+        && let Ok(Some(metadata)) = read_metadata(driver, hint)
     {
+        found = Some(metadata);
+    }
+    for entry in roots.iter().flat_map(|root| {
+        WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+    }) {
         let Some(name) = entry.file_name().to_str() else {
             continue;
         };
@@ -779,10 +820,9 @@ pub(crate) fn find_managed_omp_transcript(
     const CANDIDATES: usize = 64;
     let mut files = Vec::new();
     for entry in entries.filter_map(std::result::Result::ok) {
-        if entry.file_type().is_ok_and(|kind| kind.is_file())
-            && entry.path().extension().is_some_and(|ext| ext == "jsonl")
-        {
-            files.push(entry.path());
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+            files.push(path);
             if files.len() >= CANDIDATES * 4 {
                 files.sort_unstable_by(|left, right| right.file_name().cmp(&left.file_name()));
                 files.truncate(CANDIDATES);
@@ -834,156 +874,1107 @@ pub(crate) fn timestamp(unix_ms: u128) -> String {
 
 /// Normalize a native transcript into timeline entries.
 ///
-/// Harnesses change their files between releases, crash mid-write, and occasionally tear a
-/// record. The reader is liberal in what it accepts: one unreadable unit (a line that is not
-/// UTF-8, is not JSON, or carries a kind this reader does not know) costs only that unit, never
-/// the rest of the transcript. What it emits stays conservative: a skipped line or an
-/// unrecognized record becomes a clearly-labelled `system` entry, never an entry attributed to
-/// the user or the agent. Only opening the file can fail the whole read.
-pub(crate) fn normalized_timeline(session: &ExternalSession) -> Result<Vec<Value>> {
-    if session.driver == ExternalDriver::OpenCode {
-        return normalized_opencode_timeline(session);
-    }
-    let metadata = fs::metadata(&session.transcript)
-        .with_context(|| format!("inspect transcript {}", session.transcript.display()))?;
-    let mut file = File::open(&session.transcript)
-        .with_context(|| format!("read transcript {}", session.transcript.display()))?;
-    let start = metadata.len().saturating_sub(MAX_TIMELINE_BYTES);
-    file.seek(SeekFrom::Start(start))?;
-    let mut reader = BufReader::new(file);
-    let mut read_error = None;
-    // Where each line starts in the file: an entry's identity, which must not change as the
-    // read window slides along a growing transcript.
-    let mut offset = start;
-    if start != 0 {
-        let mut partial = Vec::new();
-        match reader.read_until(b'\n', &mut partial) {
-            Ok(count) => offset += count as u64,
-            Err(error) => read_error = Some(error),
-        }
-    }
-    // Each line keeps whether it ended with a newline: only the final, unterminated line can be
-    // a record the harness is still writing.
-    let mut lines = VecDeque::new();
-    while read_error.is_none() {
-        let mut buffer = Vec::new();
-        match reader.read_until(b'\n', &mut buffer) {
-            Ok(0) => break,
-            Ok(_) => {
-                let terminated = buffer.last() == Some(&b'\n');
-                if lines.len() == MAX_TIMELINE_LINES {
-                    lines.pop_front();
-                }
-                // A line that is not UTF-8 is read lossily rather than ending the transcript.
-                lines.push_back((
-                    String::from_utf8_lossy(&buffer).into_owned(),
-                    terminated,
-                    offset,
-                ));
-                offset += buffer.len() as u64;
-                if !terminated {
-                    break;
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => read_error = Some(error),
-        }
-    }
+/// Volatile entry locator; removed before a timeline leaves the owner. It contains no
+/// conversation bytes and is authenticated inside the owner content reference.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "format", rename_all = "kebab-case")]
+pub(crate) enum NativeLocator {
+    Jsonl {
+        offset: u64,
+        length: u64,
+        digest: String,
+        sequence: u64,
+        timestamp: String,
+        line_index: usize,
+    },
+    Sqlite {
+        part_row: i64,
+        message_row: i64,
+        digest: String,
+        message_digest: String,
+        sequence: u64,
+        timestamp: String,
+        role: String,
+    },
+    SqliteMessage {
+        message_row: i64,
+        digest: String,
+        sequence: u64,
+        timestamp: String,
+    },
+}
+
+/// Read one identified native record, independent of the size of the session history.
+pub(crate) fn normalized_record(
+    session: &ExternalSession,
+    locator: &NativeLocator,
+) -> Result<Vec<Value>> {
     let mut items = Vec::new();
-    if start != 0 || lines.len() == MAX_TIMELINE_LINES {
-        items.push(timeline_item(
-            0,
-            &timestamp(session.updated_at_unix_ms),
-            "system",
-            "truncation",
-            json!({
-                "reason": "the native transcript prefix is outside the bounded read window",
-                "omitted_from_sequence": 0,
-                "omitted_to_sequence": 0
-            }),
-        ));
-    }
-    // An entry without its own timestamp takes its predecessor's, so it stays in place when
-    // the timeline is merged by time with Small Talk messages.
-    let mut last_timestamp = timestamp(session.updated_at_unix_ms);
-    let mut next_free_sequence = 0_u64;
-    for (line_index, (line, terminated, line_start)) in lines.into_iter().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // A line's entries are numbered from where it starts in the file, so an entry keeps its
-        // ID however the read window slides; numbered by position in the window, every entry
-        // was renumbered as the transcript grew, and clients saw each one again as new. A line
-        // owns sixteen numbers per byte; a record with more parts than that pushes the
-        // following lines later instead of colliding with their entry IDs.
-        let sequence = line_start
-            .saturating_add(1)
-            .saturating_mul(16)
-            .max(next_free_sequence);
-        let first_new = items.len();
-        match serde_json::from_str::<Value>(line) {
-            Ok(value) => normalize_native_line(
-                session.driver,
-                &value,
-                sequence,
-                &last_timestamp,
-                &mut items,
-            ),
-            // The harness is still writing this record; the next read sees it whole.
-            Err(_) if !terminated => {}
-            Err(error) => {
-                let recovered = recover_trailing_record(line);
-                push_unreadable_line(
-                    &mut items,
-                    sequence,
-                    &last_timestamp,
-                    session.driver,
-                    line_index,
-                    &error,
-                    recovered.is_some(),
-                );
-                if let Some(value) = recovered {
-                    normalize_native_line(
-                        session.driver,
-                        &value,
-                        sequence.saturating_add(1),
-                        &last_timestamp,
-                        &mut items,
+    match locator {
+        NativeLocator::Jsonl {
+            offset,
+            length,
+            digest: expected,
+            sequence,
+            timestamp,
+            line_index,
+        } => {
+            anyhow::ensure!(
+                session.driver != ExternalDriver::OpenCode && *length <= MAX_TIMELINE_BYTES,
+                "invalid native locator"
+            );
+            let mut file = File::open(&session.transcript)?;
+            file.seek(SeekFrom::Start(*offset))?;
+            let mut bytes = Vec::new();
+            (&mut file).take(*length).read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() as u64 == *length && hex::encode(Sha256::digest(&bytes)) == *expected,
+                "native entry changed"
+            );
+            if bytes.last() != Some(&b'\n') {
+                let end = offset.saturating_add(*length);
+                let total = file.metadata()?.len();
+                if total > end {
+                    // A previously incomplete record now has more bytes. A complete JSON
+                    // record may acquire its separator without changing the normalized entry.
+                    let mut next = [0];
+                    file.read_exact(&mut next)?;
+                    anyhow::ensure!(
+                        next[0] == b'\n' && serde_json::from_slice::<Value>(&bytes).is_ok(),
+                        "native tail record changed"
                     );
                 }
             }
+            normalize_native_bytes(
+                session.driver,
+                &bytes,
+                *sequence,
+                timestamp,
+                *line_index,
+                false,
+                &mut items,
+            );
         }
-        if let Some(highest) = items[first_new..]
+        NativeLocator::Sqlite {
+            part_row,
+            message_row,
+            digest: expected,
+            message_digest,
+            sequence,
+            timestamp,
+            role,
+        } => {
+            anyhow::ensure!(
+                session.driver == ExternalDriver::OpenCode,
+                "invalid native locator"
+            );
+            let connection = open_opencode_database(&session.transcript)?;
+            let (message_id, created, encoded) = connection.query_row(
+                "SELECT id, time_created, data FROM message WHERE rowid = ?1 AND session_id = ?2",
+                params![message_row, session.native_id],
+                |row| {
+                    sqlite_row_guard(row, &[0, 1, 2])?;
+                    Ok((
+                        sqlite_bytes(row, 0)?,
+                        row.get::<_, Option<i64>>(1).ok().flatten(),
+                        sqlite_bytes(row, 2)?,
+                    ))
+                },
+            )?;
+            let message = serde_json::from_slice::<Value>(&encoded).unwrap_or(Value::Null);
+            anyhow::ensure!(
+                native_message_digest(&message_id, created, &message) == *message_digest,
+                "native message display context changed"
+            );
+            let (part_id, encoded) = connection.query_row(
+                "SELECT id, data FROM part WHERE rowid = ?1 AND session_id = ?2 AND message_id = (SELECT id FROM message WHERE rowid = ?3 AND session_id = ?2)",
+                params![part_row, session.native_id, message_row],
+                |row| {
+                    sqlite_row_guard(row, &[0, 1])?;
+                    Ok((sqlite_bytes(row, 0)?, sqlite_bytes(row, 1)?))
+                },
+            )?;
+            anyhow::ensure!(
+                sqlite_part_digest(&part_id, &encoded) == *expected,
+                "native part changed"
+            );
+            let native_role = message.get("role").and_then(Value::as_str);
+            let displayed_role = match native_role {
+                Some("user" | "assistant" | "system" | "tool" | "toolResult" | "tool_result")
+                | None => role.as_str(),
+                Some(role) => role,
+            };
+            normalize_opencode_bytes(
+                &encoded,
+                &part_id,
+                &mut sequence.clone(),
+                timestamp,
+                displayed_role,
+                &mut items,
+            )?;
+        }
+        NativeLocator::SqliteMessage {
+            message_row,
+            digest: expected,
+            sequence,
+            timestamp,
+        } => {
+            anyhow::ensure!(
+                session.driver == ExternalDriver::OpenCode,
+                "invalid native locator"
+            );
+            let connection = open_opencode_database(&session.transcript)?;
+            let (id, created, encoded) = connection.query_row(
+                "SELECT id, time_created, data FROM message WHERE rowid=?1 AND session_id=?2",
+                params![message_row, session.native_id],
+                |row| {
+                    sqlite_row_guard(row, &[0, 1, 2])?;
+                    Ok((
+                        sqlite_bytes(row, 0)?,
+                        sqlite_bytes(row, 1)?,
+                        sqlite_bytes(row, 2)?,
+                    ))
+                },
+            )?;
+            anyhow::ensure!(
+                sqlite_message_digest(&id, &created, &encoded) == *expected,
+                "native message changed"
+            );
+            items.push(opencode_message_record(
+                &id, &created, &encoded, *sequence, timestamp,
+            ));
+        }
+    }
+    Ok(items)
+}
+
+/// Harnesses change their files between releases, crash mid-write, and occasionally tear a
+/// record. The reader is liberal in what it accepts: one unreadable unit (a line that is not
+/// UTF-8, is not JSON, or carries a kind this reader does not know) costs only that unit, never
+/// the rest of the transcript. What it emits stays conservative: an unreadable line or an
+/// unrecognized record becomes a clearly-labelled `system` entry, never an entry attributed to
+/// the user or the agent. Only opening the file can fail the whole read.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TimelineOrder {
+    Sequence,
+    TimestampSequence,
+}
+
+/// Native entries have rank 0; Small Talk messages have rank 1.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TimelineKey {
+    pub(crate) timestamp: String,
+    pub(crate) sequence: u64,
+    pub(crate) rank: u8,
+    pub(crate) id: String,
+}
+
+impl TimelineKey {
+    pub(crate) fn cmp_in(&self, other: &Self, order: TimelineOrder) -> std::cmp::Ordering {
+        compare_timeline_positions(
+            (&self.timestamp, self.sequence, self.rank, &self.id),
+            (&other.timestamp, other.sequence, other.rank, &other.id),
+            order,
+        )
+    }
+}
+
+fn compare_timeline_positions(
+    left: (&str, u64, u8, &str),
+    right: (&str, u64, u8, &str),
+    order: TimelineOrder,
+) -> std::cmp::Ordering {
+    match order {
+        TimelineOrder::Sequence => (left.1, left.2, left.3).cmp(&(right.1, right.2, right.3)),
+        TimelineOrder::TimestampSequence => left.cmp(&right),
+    }
+}
+
+fn native_timeline_position(item: &Value) -> (&str, u64, u8, &str) {
+    (
+        item["timestamp"].as_str().unwrap_or_default(),
+        item["sequence"].as_u64().unwrap_or_default(),
+        0,
+        item["id"].as_str().unwrap_or_default(),
+    )
+}
+
+pub(crate) fn timeline_key(item: &Value, rank: u8) -> TimelineKey {
+    TimelineKey {
+        timestamp: item["timestamp"].as_str().unwrap_or_default().to_owned(),
+        sequence: item["sequence"].as_u64().unwrap_or_default(),
+        rank,
+        id: item["id"].as_str().unwrap_or_default().to_owned(),
+    }
+}
+
+pub(crate) struct TimelineSlice {
+    /// Newest-first entries strictly before the supplied key.
+    pub(crate) items: Vec<Value>,
+    pub(crate) has_more: bool,
+    /// Source content generation: stable across appends, moved by every non-append rebuild.
+    pub(crate) generation: u64,
+}
+
+#[cfg(test)]
+pub(crate) fn timeline_slice(
+    session: &ExternalSession,
+    order: TimelineOrder,
+    before: Option<&TimelineKey>,
+    limit: usize,
+) -> Result<TimelineSlice> {
+    let timeline = LineTimeline::acquire(session);
+    let mut held = timeline.hold();
+    held.slice(session, order, before, limit)
+}
+
+fn collect_timeline_slice<'a>(
+    committed: impl Iterator<Item = &'a Value>,
+    transient: impl Iterator<Item = &'a Value>,
+    order: TimelineOrder,
+    before: Option<&TimelineKey>,
+    limit: usize,
+    clone_output: impl Fn(&Value) -> Value,
+) -> TimelineSlice {
+    let is_before = |item: &&Value| {
+        before.is_none_or(|before| {
+            compare_timeline_positions(
+                native_timeline_position(item),
+                (&before.timestamp, before.sequence, before.rank, &before.id),
+                order,
+            )
+            .is_lt()
+        })
+    };
+    let mut committed = committed.filter(is_before).peekable();
+    let mut transient = transient.filter(is_before).peekable();
+    let mut items = Vec::new();
+    while items.len() < limit {
+        let item = match (committed.peek(), transient.peek()) {
+            (Some(item), Some(tail))
+                if compare_timeline_positions(
+                    native_timeline_position(item),
+                    native_timeline_position(tail),
+                    order,
+                )
+                .is_lt() =>
+            {
+                transient.next()
+            }
+            (Some(_), _) => committed.next(),
+            (None, Some(_)) => transient.next(),
+            (None, None) => break,
+        };
+        if let Some(item) = item {
+            items.push(clone_output(item));
+        }
+    }
+    TimelineSlice {
+        items,
+        has_more: committed.peek().is_some() || transient.peek().is_some(),
+        generation: 0,
+    }
+}
+
+const MAX_FOLDED_TRANSCRIPTS: usize = 16;
+const MAX_FOLDED_SOURCE_BYTES: usize = 96 * 1024 * 1024;
+type SharedLineFold = Arc<Mutex<LineTimelineFold>>;
+type LineFoldCache = VecDeque<(PathBuf, ExternalDriver, SharedLineFold, usize)>;
+#[cfg(not(test))]
+static LINE_FOLDS: LazyLock<Mutex<LineFoldCache>> = LazyLock::new(Mutex::default);
+
+/// The fold cache serving `transcript`: the process-wide one, or under test the cache of the
+/// test's own scope, so parallel tests never evict or contend for each other's folds.
+#[cfg(not(test))]
+fn line_folds(_transcript: &Path) -> &'static Mutex<LineFoldCache> {
+    &LINE_FOLDS
+}
+
+#[cfg(test)]
+fn line_folds(transcript: &Path) -> Arc<Mutex<LineFoldCache>> {
+    static SCOPES: timeline_test_support::Scopes<Mutex<LineFoldCache>> =
+        LazyLock::new(Mutex::default);
+    timeline_test_support::scoped(&SCOPES, transcript, Mutex::default)
+}
+
+/// Process-random epoch for timeline generations. A restart draws a fresh epoch, so page
+/// cursors bound to a generation never carry into another process, matching the cursor MAC
+/// key. Within one process, rebuild serials keep generations strictly increasing.
+static TIMELINE_GENERATION_EPOCH: LazyLock<u64> = LazyLock::new(|| {
+    let mut bytes = [0_u8; 8];
+    getrandom::fill(&mut bytes).expect("timeline generation epoch entropy");
+    // Clear the top bit so adding rebuild serials cannot wrap in any relevant lifetime.
+    u64::from_be_bytes(bytes) & (u64::MAX >> 1)
+});
+static TIMELINE_REBUILDS: AtomicU64 = AtomicU64::new(0);
+fn next_timeline_generation() -> u64 {
+    TIMELINE_GENERATION_EPOCH.wrapping_add(
+        TIMELINE_REBUILDS
+            .fetch_add(1, AtomicOrdering::Relaxed)
+            .saturating_add(1),
+    )
+}
+
+/// Test-only determinism hooks: park one transcript refresh mid-read and observe readers
+/// queued on a contended fold. Nothing here is compiled into release builds.
+#[cfg(test)]
+pub(crate) mod timeline_test_support {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, LazyLock, Mutex};
+
+    /// Per-scope instances of a process-wide budget or cache.
+    pub(crate) type Scopes<T> = LazyLock<Mutex<HashMap<PathBuf, Arc<T>>>>;
+
+    /// A test's isolation scope: the temporary directory its transcripts live in. Paths
+    /// outside the temporary directory share one scope.
+    fn scope(path: &Path) -> PathBuf {
+        let temp = std::env::temp_dir();
+        path.strip_prefix(&temp)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .map_or_else(PathBuf::new, |first| temp.join(first))
+    }
+
+    /// The instance of a process-wide budget or cache for `path`'s scope, so each test owns
+    /// its own and parallel tests cannot affect each other through global state.
+    pub(crate) fn scoped<T>(scopes: &Scopes<T>, path: &Path, create: impl FnOnce() -> T) -> Arc<T> {
+        let mut scopes = scopes.lock().unwrap_or_else(|error| error.into_inner());
+        Arc::clone(
+            scopes
+                .entry(scope(path))
+                .or_insert_with(|| Arc::new(create())),
+        )
+    }
+
+    static FOLD_WAITERS: AtomicUsize = AtomicUsize::new(0);
+    static REFRESH_GATES: LazyLock<Mutex<HashMap<PathBuf, RefreshGate>>> =
+        LazyLock::new(Mutex::default);
+    static REFRESH_ARRIVED: Condvar = Condvar::new();
+
+    /// One gated transcript refresh: arrived once its reader parked, released to let it run.
+    struct RefreshGate {
+        arrived: bool,
+        released: bool,
+    }
+
+    /// Test hooks never propagate lock poison: a gate recovering its current state is always
+    /// sound, matching the fold's own poison recovery.
+    fn gates() -> std::sync::MutexGuard<'static, HashMap<PathBuf, RefreshGate>> {
+        REFRESH_GATES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Park the next refresh of `path` until `release_refresh(path)`, so a test controls
+    /// exactly when the fold's I/O completes while holding the fold. Gates are per path, so
+    /// parallel tests never release each other's readers.
+    pub(crate) fn arm_refresh(path: &Path) {
+        let mut gates = gates();
+        gates.insert(
+            path.to_owned(),
+            RefreshGate {
+                arrived: false,
+                released: false,
+            },
+        );
+        REFRESH_ARRIVED.notify_all();
+    }
+
+    pub(crate) fn wait_refresh_arrived(path: &Path) {
+        let mut gates = gates();
+        while !gates.get(path).is_some_and(|gate| gate.arrived) {
+            gates = REFRESH_ARRIVED
+                .wait(gates)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
+    pub(crate) fn release_refresh(path: &Path) {
+        let mut gates = gates();
+        if let Some(gate) = gates.get_mut(path) {
+            gate.released = true;
+        }
+        REFRESH_ARRIVED.notify_all();
+    }
+
+    pub(crate) fn gate_refresh(path: &Path) {
+        let mut gates = gates();
+        loop {
+            let Some(gate) = gates.get_mut(path) else {
+                return;
+            };
+            if gate.released {
+                return;
+            }
+            if !gate.arrived {
+                gate.arrived = true;
+                REFRESH_ARRIVED.notify_all();
+                continue;
+            }
+            gates = REFRESH_ARRIVED
+                .wait(gates)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+
+    /// Block until `count` readers are parked on a contended fold. They are guaranteed to
+    /// arrive: the gated refresh holds that fold for as long as the test wants.
+    pub(crate) fn wait_fold_waiters(count: usize) {
+        while FOLD_WAITERS.load(Ordering::SeqCst) < count {
+            std::thread::yield_now();
+        }
+    }
+
+    pub(crate) fn enter_contended() {
+        FOLD_WAITERS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn leave_contended() {
+        FOLD_WAITERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Run `use_folds` on the fold cache serving `transcript`. A poisoned cache starts empty.
+fn with_line_folds<R>(transcript: &Path, use_folds: impl FnOnce(&mut LineFoldCache) -> R) -> R {
+    let cache = line_folds(transcript);
+    let mut folds = match cache.lock() {
+        Ok(folds) => folds,
+        Err(error) => {
+            let mut folds = error.into_inner();
+            folds.clear();
+            cache.clear_poison();
+            folds
+        }
+    };
+    use_folds(&mut folds)
+}
+
+fn line_fold(session: &ExternalSession) -> SharedLineFold {
+    with_line_folds(&session.transcript, |folds| {
+        let found = folds.iter().position(|(path, driver, _, _)| {
+            path == &session.transcript && *driver == session.driver
+        });
+        let entry = found
+            .and_then(|index| folds.remove(index))
+            .unwrap_or_else(|| {
+                (
+                    session.transcript.clone(),
+                    session.driver,
+                    SharedLineFold::default(),
+                    0,
+                )
+            });
+        let fold = Arc::clone(&entry.2);
+        folds.push_back(entry);
+        trim_line_folds(folds, MAX_FOLDED_SOURCE_BYTES);
+        fold
+    })
+}
+
+fn account_line_fold(session: &ExternalSession, fold: &SharedLineFold, bytes: usize) {
+    with_line_folds(&session.transcript, |folds| {
+        if let Some(index) = folds.iter().position(|entry| Arc::ptr_eq(&entry.2, fold)) {
+            let mut entry = folds.remove(index).expect("located fold");
+            entry.3 = bytes;
+            folds.push_back(entry);
+        }
+        trim_line_folds(folds, MAX_FOLDED_SOURCE_BYTES);
+    });
+}
+
+fn trim_line_folds(folds: &mut LineFoldCache, budget: usize) {
+    folds.retain(|entry| entry.3 <= budget);
+    let mut bytes: usize = folds.iter().map(|entry| entry.3).sum();
+    while folds.len() > MAX_FOLDED_TRANSCRIPTS || bytes > budget {
+        if let Some(entry) = folds.pop_front() {
+            bytes -= entry.3;
+        }
+    }
+}
+
+fn lock_fold(fold: &SharedLineFold) -> std::sync::MutexGuard<'_, LineTimelineFold> {
+    if let Ok(state) = fold.try_lock() {
+        return state;
+    }
+    #[cfg(test)]
+    timeline_test_support::enter_contended();
+    let state = match fold.lock() {
+        Ok(state) => state,
+        Err(error) => {
+            let mut state = error.into_inner();
+            *state = LineTimelineFold::default();
+            fold.clear_poison();
+            state
+        }
+    };
+    #[cfg(test)]
+    timeline_test_support::leave_contended();
+    state
+}
+
+/// One transcript's bounded reader. Whole-source drivers (OpenCode) have no shared fold;
+/// line drivers share one, and `hold` waits for it before the caller takes any global read
+/// slot, so several viewers of one conversation queue on the fold instead of exhausting the
+/// bounded read budget an unrelated conversation still needs.
+pub(crate) struct LineTimeline {
+    fold: Option<SharedLineFold>,
+}
+
+impl LineTimeline {
+    /// Resolves the shared fold without locking it and without transcript I/O.
+    pub(crate) fn acquire(session: &ExternalSession) -> Self {
+        if session.driver == ExternalDriver::OpenCode {
+            return Self { fold: None };
+        }
+        Self {
+            fold: Some(line_fold(session)),
+        }
+    }
+
+    /// Blocks for the fold while holding no caller resource.
+    pub(crate) fn hold(&self) -> LineTimelineHeld<'_> {
+        LineTimelineHeld {
+            fold: self.fold.as_ref(),
+            guard: self.fold.as_ref().map(lock_fold),
+        }
+    }
+}
+
+pub(crate) struct LineTimelineHeld<'a> {
+    fold: Option<&'a SharedLineFold>,
+    guard: Option<std::sync::MutexGuard<'a, LineTimelineFold>>,
+}
+
+impl LineTimelineHeld<'_> {
+    pub(crate) fn read(&mut self, session: &ExternalSession) -> Result<Vec<Value>> {
+        match self.guard.as_mut() {
+            Some(state) => {
+                let result = state.read(session);
+                let fold = self.fold.expect("held fold state has its fold");
+                account_line_fold(session, fold, state.retained_source_bytes);
+                result
+            }
+            None => normalized_opencode_timeline(session),
+        }
+    }
+
+    pub(crate) fn slice(
+        &mut self,
+        session: &ExternalSession,
+        order: TimelineOrder,
+        before: Option<&TimelineKey>,
+        limit: usize,
+    ) -> Result<TimelineSlice> {
+        match self.guard.as_mut() {
+            Some(state) => {
+                let result = state.slice(session, order, before, limit);
+                let fold = self.fold.expect("held fold state has its fold");
+                account_line_fold(session, fold, state.retained_source_bytes);
+                result
+            }
+            None => opencode_timeline_slice(session, order, before, limit),
+        }
+    }
+}
+
+pub(crate) fn normalized_timeline(session: &ExternalSession) -> Result<Vec<Value>> {
+    let timeline = LineTimeline::acquire(session);
+    let mut held = timeline.hold();
+    held.read(session)
+}
+
+/// Volatile bounded fold of an append-only JSONL transcript. Replacement, shrinkage and a
+/// changed last complete record rebuild it and draw a new generation, expiring page cursors
+/// from the replaced content; pure appends keep the generation. Earlier edits are fenced by
+/// normalized_record on pinned content reads, rather than by scanning the entire transcript
+/// on every page.
+#[derive(Default)]
+pub(crate) struct LineTimelineFold {
+    identity: Option<FileIdentity>,
+    last_record: Option<(u64, usize, [u8; 32])>,
+    generation: u64,
+    consumed: u64,
+    observed_len: u64,
+    lines: VecDeque<FoldedLine>,
+    entries: BTreeMap<(String, u64, u8, String), (usize, usize)>,
+    sequence_entries: BTreeMap<(u64, u8, String), (usize, usize)>,
+    emitting_lines: BTreeSet<usize>,
+    next_line_number: usize,
+    seed_timestamp: String,
+    retained_source_bytes: usize,
+}
+
+struct FoldedLine {
+    start: u64,
+    /// Stable within this fold; translated to a window-relative index only on output.
+    number: usize,
+    bytes: Vec<u8>,
+    digest: [u8; 32],
+    locator: Option<NativeLocator>,
+    next_free_sequence: u64,
+    last_timestamp: String,
+    items: Vec<Value>,
+}
+
+impl FoldedLine {
+    fn new(start: u64, number: usize, bytes: Vec<u8>) -> Self {
+        Self {
+            start,
+            number,
+            digest: Sha256::digest(&bytes).into(),
+            bytes,
+            locator: None,
+            next_free_sequence: 0,
+            last_timestamp: String::new(),
+            items: Vec::new(),
+        }
+    }
+
+    fn normalize(
+        &mut self,
+        driver: ExternalDriver,
+        sequence: u64,
+        timestamp: &str,
+        line_number: usize,
+    ) -> Result<()> {
+        // Cached locators and diagnostics carry a stable fold ordinal, not an index
+        // that needs rewriting whenever the bounded window slides.
+        self.items.clear();
+        normalize_native_bytes(
+            driver,
+            &self.bytes,
+            sequence,
+            timestamp,
+            line_number,
+            true,
+            &mut self.items,
+        );
+        let locator = NativeLocator::Jsonl {
+            offset: self.start,
+            length: self.bytes.len() as u64,
+            digest: hex::encode(self.digest),
+            sequence,
+            timestamp: timestamp.to_owned(),
+            line_index: line_number,
+        };
+        let source = serde_json::to_value(&locator)?;
+        for item in &mut self.items {
+            item["_source"] = source.clone();
+        }
+        self.locator = Some(locator);
+        self.next_free_sequence = self
+            .items
             .iter()
             .filter_map(|item| item["sequence"].as_u64())
             .max()
-        {
-            next_free_sequence = highest.saturating_add(1);
-        }
-        if let Some(stamp) = items[first_new..]
+            .map_or(sequence, |highest| highest.saturating_add(1));
+        self.last_timestamp = self
+            .items
             .last()
             .and_then(|item| item["timestamp"].as_str())
-        {
-            last_timestamp = stamp.to_owned();
+            .unwrap_or(timestamp)
+            .to_owned();
+        Ok(())
+    }
+}
+
+impl LineTimelineFold {
+    fn read(&mut self, session: &ExternalSession) -> Result<Vec<Value>> {
+        let mut transient = self.refresh(session)?;
+        transient.sort_by_key(|item| item["sequence"].as_u64().unwrap_or(u64::MAX));
+        let mut transient = transient.iter().peekable();
+        let mut committed = self
+            .sequence_entries
+            .values()
+            .map(|&position| self.indexed_item(position))
+            .peekable();
+        let mut items = Vec::new();
+        // Native sequences are monotonic across records. Merge the small transient
+        // set instead of sorting the complete returned window.
+        loop {
+            let item = match (committed.peek(), transient.peek()) {
+                (Some(item), Some(tail))
+                    if tail["sequence"].as_u64().unwrap_or(u64::MAX)
+                        <= item["sequence"].as_u64().unwrap_or(u64::MAX) =>
+                {
+                    transient.next()
+                }
+                (Some(_), _) => committed.next(),
+                (None, Some(_)) => transient.next(),
+                (None, None) => break,
+            };
+            if let Some(item) = item {
+                items.push(self.clone_output(item));
+            }
+        }
+        Ok(items)
+    }
+
+    fn slice(
+        &mut self,
+        session: &ExternalSession,
+        order: TimelineOrder,
+        before: Option<&TimelineKey>,
+        limit: usize,
+    ) -> Result<TimelineSlice> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let mut transient = self.refresh(session)?;
+        transient.sort_by(|a, b| {
+            compare_timeline_positions(
+                native_timeline_position(a),
+                native_timeline_position(b),
+                order,
+            )
+        });
+        let mut slice = match order {
+            TimelineOrder::Sequence => {
+                let upper = before.map(|key| (key.sequence, key.rank, key.id.clone()));
+                let committed = self
+                    .sequence_entries
+                    .range::<(u64, u8, String), _>((
+                        Unbounded,
+                        upper.as_ref().map_or(Unbounded, Excluded),
+                    ))
+                    .rev()
+                    .map(|(_, &position)| self.indexed_item(position));
+                collect_timeline_slice(
+                    committed,
+                    transient.iter().rev(),
+                    order,
+                    before,
+                    limit,
+                    |item| self.clone_output(item),
+                )
+            }
+            TimelineOrder::TimestampSequence => {
+                let upper = before.map(|key| {
+                    (
+                        key.timestamp.clone(),
+                        key.sequence,
+                        key.rank,
+                        key.id.clone(),
+                    )
+                });
+                let committed = self
+                    .entries
+                    .range::<(String, u64, u8, String), _>((
+                        Unbounded,
+                        upper.as_ref().map_or(Unbounded, Excluded),
+                    ))
+                    .rev()
+                    .map(|(_, &position)| self.indexed_item(position));
+                collect_timeline_slice(
+                    committed,
+                    transient.iter().rev(),
+                    order,
+                    before,
+                    limit,
+                    |item| self.clone_output(item),
+                )
+            }
+        };
+        slice.generation = self.generation;
+        Ok(slice)
+    }
+
+    fn indexed_item(&self, (number, index): (usize, usize)) -> &Value {
+        let first = self
+            .lines
+            .front()
+            .expect("indexed entry has a retained line")
+            .number;
+        &self.lines[number - first].items[index]
+    }
+
+    fn clone_output(&self, item: &Value) -> Value {
+        let mut item = item.clone();
+        if let Some(number) = item["_source"]["line_index"].as_u64() {
+            let first = self
+                .lines
+                .front()
+                .map_or(self.next_line_number, |line| line.number);
+            let line_index = number - first as u64;
+            item["_source"]["line_index"] = json!(line_index);
+            if item["body"]["code"] == "native-line-unreadable" {
+                item["body"]["details"]["line_in_window"] = json!(line_index.saturating_add(1));
+            }
+        }
+        item
+    }
+
+    fn seed_before(&self, number: usize, fallback: &str) -> (u64, String) {
+        self.emitting_lines.range(..number).next_back().map_or_else(
+            || (0, fallback.to_owned()),
+            |number| {
+                let first = self
+                    .lines
+                    .front()
+                    .expect("emitting line is retained")
+                    .number;
+                let line = &self.lines[*number - first];
+                (line.next_free_sequence, line.last_timestamp.clone())
+            },
+        )
+    }
+
+    fn remove_entries(&mut self, items: &[Value]) {
+        for item in items {
+            let key = timeline_key(item, 0);
+            self.sequence_entries
+                .remove(&(key.sequence, key.rank, key.id.clone()));
+            self.entries
+                .remove(&(key.timestamp, key.sequence, key.rank, key.id));
         }
     }
-    if let Some(error) = read_error {
-        items.push(timeline_item(
-            next_free_sequence.max(16),
-            &last_timestamp,
-            "system",
-            "error",
-            json!({
-                "code": "native-transcript-read-failed",
-                "message": format!("st stopped reading the {} transcript early: {error}", session.driver.as_str()),
-                "retryable": true,
-                "details": {}
-            }),
-        ));
+
+    fn pop_front(&mut self) {
+        if let Some(line) = self.lines.pop_front() {
+            self.retained_source_bytes -= line.bytes.len();
+            self.emitting_lines.remove(&line.number);
+            self.remove_entries(&line.items);
+        }
     }
-    items.sort_by_key(|item| item["sequence"].as_u64().unwrap_or(u64::MAX));
-    Ok(items)
+
+    fn refresh(&mut self, session: &ExternalSession) -> Result<Vec<Value>> {
+        let mut file = File::open(&session.transcript)
+            .with_context(|| format!("read transcript {}", session.transcript.display()))?;
+        let metadata = file.metadata()?;
+        let len = metadata.len();
+        let window_start = len.saturating_sub(MAX_TIMELINE_BYTES);
+        let identity = file_identity(&metadata);
+        if !self.resumable(&identity, len, window_start, &mut file) {
+            // Any non-append change (replacement, shrink, edit, or a cold fold, including one
+            // the fold cache evicted) draws a new generation, so outstanding page cursors are
+            // refused as expired instead of applying their old boundary to a re-read fold.
+            *self = Self {
+                identity: Some(identity),
+                consumed: window_start,
+                generation: next_timeline_generation(),
+                ..Self::default()
+            };
+        }
+        let first_new_number = self.next_line_number;
+        let previous_first = self.lines.front().map(|line| line.number);
+        file.seek(SeekFrom::Start(self.consumed))?;
+        // Appends beyond this high-water mark belong to the next refresh.
+        let mut reader = BufReader::new(file.take(len - self.consumed));
+        let mut read_error = None;
+        if self.consumed == window_start && window_start != 0 && self.lines.is_empty() {
+            let mut partial = Vec::new();
+            match reader.read_until(b'\n', &mut partial) {
+                Ok(count) => self.consumed += count as u64,
+                Err(error) => read_error = Some(error),
+            }
+        }
+        let mut tail = None;
+        while read_error.is_none() {
+            let mut buffer = Vec::new();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(_) if buffer.last() == Some(&b'\n') => {
+                    #[cfg(test)]
+                    timeline_test_support::gate_refresh(session.transcript.as_path());
+                    let line = FoldedLine::new(self.consumed, self.next_line_number, buffer);
+                    self.next_line_number += 1;
+                    self.consumed += line.bytes.len() as u64;
+                    self.last_record = Some((line.start, line.bytes.len(), line.digest));
+                    self.retained_source_bytes += line.bytes.len();
+                    self.lines.push_back(line);
+                    while self.lines.len() > MAX_TIMELINE_LINES {
+                        self.pop_front();
+                    }
+                }
+                Ok(_) => {
+                    tail = Some(FoldedLine::new(
+                        self.consumed,
+                        self.next_line_number,
+                        buffer,
+                    ));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => read_error = Some(error),
+            }
+        }
+        while window_start != 0
+            && self
+                .lines
+                .front()
+                .is_some_and(|line| line.start <= window_start)
+        {
+            self.pop_front();
+        }
+        let output_cap = MAX_TIMELINE_LINES - usize::from(tail.is_some());
+        while self.lines.len() > output_cap {
+            self.pop_front();
+        }
+        let mut transient = Vec::new();
+        if window_start != 0 || self.lines.len() + usize::from(tail.is_some()) == MAX_TIMELINE_LINES
+        {
+            transient.push(timeline_item(
+                0, &timestamp(session.updated_at_unix_ms), "system", "truncation",
+                json!({
+                    "reason": "the native transcript prefix is outside the bounded read window; not fetchable through this owner read",
+                    "fetchable": false,
+                    "limit_bytes": MAX_TIMELINE_BYTES,
+                    "omitted_from_sequence": 0,
+                    "omitted_to_sequence": 0
+                }),
+            ));
+        }
+        let seed_timestamp = timestamp(session.started_at_unix_ms);
+        let first = self.lines.front().map(|line| line.number);
+        let new_index = first.map_or(0, |number| {
+            first_new_number
+                .saturating_sub(number)
+                .min(self.lines.len())
+        });
+        // Append-only reads begin at the newly added suffix. Eviction or a changed
+        // session seed can change inherited timestamps and sequence collisions, so
+        // replay only the affected prefix until its cached inputs converge.
+        let mut index = if first != previous_first || seed_timestamp != self.seed_timestamp {
+            0
+        } else {
+            new_index
+        };
+        let (mut next_free_sequence, mut last_timestamp) = if index == 0 {
+            (0, seed_timestamp.clone())
+        } else {
+            self.seed_before(first_new_number, &seed_timestamp)
+        };
+        while index < self.lines.len() {
+            if index < new_index {
+                // Omitted records carry neither an output nor a seed transition.
+                // Do not replay long runs of them when the initial seed changes.
+                index = self
+                    .emitting_lines
+                    .range(self.lines[index].number..first_new_number)
+                    .next()
+                    .map_or(new_index, |number| {
+                        *number - first.expect("replay has a retained line")
+                    });
+                if index == self.lines.len() {
+                    break;
+                }
+            }
+            let line = &mut self.lines[index];
+            let sequence = line
+                .start
+                .saturating_add(1)
+                .saturating_mul(16)
+                .max(next_free_sequence);
+            let unchanged = matches!(&line.locator, Some(NativeLocator::Jsonl {
+                sequence: old_sequence, timestamp: old_timestamp, ..
+            }) if *old_sequence == sequence && old_timestamp == &last_timestamp);
+            if unchanged && index < new_index {
+                // The remaining old suffix has identical inputs and outputs; jump
+                // directly to new records, including over runs of omitted records.
+                index = new_index;
+                (next_free_sequence, last_timestamp) =
+                    self.seed_before(first_new_number, &seed_timestamp);
+                continue;
+            }
+            for item in &line.items {
+                let key = timeline_key(item, 0);
+                self.sequence_entries
+                    .remove(&(key.sequence, key.rank, key.id.clone()));
+                self.entries
+                    .remove(&(key.timestamp, key.sequence, key.rank, key.id));
+            }
+            line.normalize(session.driver, sequence, &last_timestamp, line.number)?;
+            if line.items.is_empty() {
+                // An omitted record must not advance the oracle's sequence seed.
+                line.next_free_sequence = next_free_sequence;
+            }
+            if !line.items.is_empty() {
+                self.emitting_lines.insert(line.number);
+            }
+            for (item_index, item) in line.items.iter().enumerate() {
+                let key = timeline_key(item, 0);
+                self.sequence_entries.insert(
+                    (key.sequence, key.rank, key.id.clone()),
+                    (line.number, item_index),
+                );
+                self.entries.insert(
+                    (key.timestamp, key.sequence, key.rank, key.id),
+                    (line.number, item_index),
+                );
+            }
+            next_free_sequence = line.next_free_sequence;
+            last_timestamp.clone_from(&line.last_timestamp);
+            index += 1;
+        }
+        self.seed_timestamp = seed_timestamp;
+        if let Some(mut tail) = tail {
+            let sequence = tail
+                .start
+                .saturating_add(1)
+                .saturating_mul(16)
+                .max(next_free_sequence);
+            tail.normalize(session.driver, sequence, &last_timestamp, tail.number)?;
+            if !tail.items.is_empty() {
+                next_free_sequence = tail.next_free_sequence;
+            }
+            last_timestamp = tail.last_timestamp;
+            transient.extend(tail.items);
+        }
+        if let Some(error) = read_error {
+            transient.push(timeline_item(
+                next_free_sequence.max(16), &last_timestamp, "system", "error",
+                json!({
+                    "code": "native-transcript-read-failed",
+                    "message": format!("st stopped reading the {} transcript early: {error}", session.driver.as_str()),
+                    "retryable": true,
+                    "details": {}
+                }),
+            ));
+        }
+        self.observed_len = len;
+        Ok(transient)
+    }
+
+    fn resumable(
+        &self,
+        identity: &FileIdentity,
+        len: u64,
+        window_start: u64,
+        file: &mut File,
+    ) -> bool {
+        if self.identity.as_ref() != Some(identity)
+            || len < self.consumed
+            || len < self.observed_len
+            || self.consumed <= window_start
+        {
+            return false;
+        }
+        let Some((start, length, digest)) = self.last_record else {
+            return self.consumed == 0;
+        };
+        let mut record = vec![0; length];
+        file.seek(SeekFrom::Start(start)).is_ok()
+            && file.read_exact(&mut record).is_ok()
+            && <[u8; 32]>::from(Sha256::digest(&record)) == digest
+    }
+}
+
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = Option<SystemTime>;
+
+fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        (metadata.dev(), metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.created().ok()
+    }
 }
 
 fn normalize_native_line(
@@ -993,6 +1984,10 @@ fn normalize_native_line(
     fallback_timestamp: &str,
     items: &mut Vec<Value>,
 ) {
+    if omission_reason(driver, value).is_some() {
+        return;
+    }
+    let first = items.len();
     match driver {
         ExternalDriver::Codex => normalize_codex(value, sequence, fallback_timestamp, items),
         ExternalDriver::Claude => normalize_claude(value, sequence, fallback_timestamp, items),
@@ -1002,6 +1997,28 @@ fn normalize_native_line(
         // OpenCode history is stored in SQLite and never read line by line.
         ExternalDriver::OpenCode => {}
     }
+    if items.len() == first {
+        // No parser branch may silently discard a record outside the omission table.
+        push_unrecognized(
+            items,
+            sequence,
+            fallback_timestamp,
+            driver.as_str(),
+            "record",
+            value.get("type").and_then(Value::as_str),
+            value,
+        );
+    }
+    // Keep the complete native record, including fields a typed projection does not use.
+    // This is a display hint, not an authorization or content filter.
+    let body = &mut items[first]["body"];
+    if body.get("blocks").is_none() {
+        body["blocks"] = json!([]);
+    }
+    body["blocks"].as_array_mut().unwrap().push(json!({
+        "id":format!("native-{sequence}/source"), "kind":"source_record",
+        "source_type":driver.as_str(), "visibility":"internal", "payload":{"raw":value}
+    }));
 }
 
 /// Recover a whole record glued behind a torn one.
@@ -1011,7 +2028,7 @@ fn normalize_native_line(
 /// object only opens after `:`, `,`, `[`, or at the start, so an object opening after anything
 /// else is where the torn record ends. The first such position whose remainder parses as one
 /// whole object is the recovered record. The search is bounded.
-fn recover_trailing_record(line: &str) -> Option<Value> {
+fn recover_trailing_record(line: &str, preview: bool) -> Option<Value> {
     let bytes = line.as_bytes();
     let mut attempts = 0;
     for (index, _) in line.match_indices('{') {
@@ -1029,48 +2046,159 @@ fn recover_trailing_record(line: &str) -> Option<Value> {
         if attempts > 16 {
             return None;
         }
-        if let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(&line[index..]) {
+        if let Ok(value @ Value::Object(_)) = parse_native_record(&bytes[index..], preview) {
             return Some(value);
         }
     }
     None
 }
 
-fn push_unreadable_line(
-    items: &mut Vec<Value>,
+/// Native records above this size paint with bounded normalized strings. The fold still reads
+/// and retains the source bytes; a continuation normalizes their complete strings on demand.
+const PREVIEW_RECORD_BYTES: usize = 256 * 1024;
+/// The longest head a preview keeps of a string. With its marker it stays within the client
+/// display window (8 KiB), so the marker reports the size of the complete native string.
+const PREVIEW_STRING_BYTES: usize = 8 * 1024 - 128;
+
+/// Parse one native record. A preview of an oversized record retains all keys and elements,
+/// but bounds each normalized string. This avoids full long-string copies in typed bodies and
+/// source-record payloads; it does not bound total record memory or avoid scanning source bytes.
+fn parse_native_record(bytes: &[u8], preview: bool) -> serde_json::Result<Value> {
+    if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+        serde_json::from_slice::<PreviewValue>(bytes).map(|PreviewValue(value)| value)
+    } else {
+        serde_json::from_slice(bytes)
+    }
+}
+
+fn preview_text(text: &str) -> String {
+    if text.len() <= PREVIEW_STRING_BYTES {
+        return text.to_owned();
+    }
+    let mut end = PREVIEW_STRING_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[st truncated this native timeline value: size limit; {} bytes]",
+        &text[..end],
+        text.len()
+    )
+}
+
+struct PreviewValue(Value);
+
+impl<'de> Deserialize<'de> for PreviewValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(PreviewVisitor).map(Self)
+    }
+}
+
+struct PreviewVisitor;
+
+impl<'de> serde::de::Visitor<'de> for PreviewVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(preview_text(value)))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(PreviewValue(value)) = seq.next_element()? {
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut values = serde_json::Map::new();
+        while let Some((key, PreviewValue(value))) = map.next_entry::<String, PreviewValue>()? {
+            values.insert(key, value);
+        }
+        Ok(Value::Object(values))
+    }
+}
+
+/// Unparseable records preserve exact bytes, including newline, controls and invalid UTF-8.
+/// A `preview` of an oversized record bounds every retained string (see `parse_native_record`)
+/// and marks its entries with `_preview_of_bytes`; the owner serves the rest on request.
+fn normalize_native_bytes(
+    driver: ExternalDriver,
+    bytes: &[u8],
     sequence: u64,
     timestamp: &str,
-    driver: ExternalDriver,
     line_index: usize,
-    error: &serde_json::Error,
-    recovered: bool,
+    preview: bool,
+    items: &mut Vec<Value>,
 ) {
-    let message = if recovered {
-        format!(
-            "st skipped a torn {} transcript record and kept the record written after it",
-            driver.as_str()
-        )
-    } else {
-        format!(
-            "st skipped a {} transcript line that is not valid JSON",
-            driver.as_str()
-        )
-    };
-    items.push(timeline_item(
-        sequence,
-        timestamp,
-        "system",
-        "error",
-        json!({
-            "code": "native-line-unreadable",
-            "message": message,
-            "retryable": false,
-            "details": {
-                "line_in_window": line_index.saturating_add(1),
-                "parse_error": error.to_string(),
+    let first = items.len();
+    match parse_native_record(bytes, preview) {
+        Ok(value) => normalize_native_line(driver, &value, sequence, timestamp, items),
+        Err(error) => {
+            let recovered = std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|line| recover_trailing_record(line, preview));
+            let mut item = timeline_item(
+                sequence,
+                timestamp,
+                "system",
+                "error",
+                json!({
+                    "code":"native-line-unreadable",
+                    "message":format!("st preserved an unreadable {} transcript record{}", driver.as_str(), if recovered.is_some() { " and recovered the record after the torn prefix" } else { "" }),
+                    "retryable":false, "details":{"line_in_window":line_index.saturating_add(1),"parse_error":error.to_string()}
+                }),
+            );
+            let kept = if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+                &bytes[..PREVIEW_STRING_BYTES]
+            } else {
+                bytes
+            };
+            item["body"]["blocks"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, raw_bytes_block(sequence, driver.as_str(), kept));
+            items.push(item);
+            if let Some(value) = recovered {
+                normalize_native_line(driver, &value, sequence.saturating_add(1), timestamp, items);
             }
-        }),
-    ));
+        }
+    }
+    if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+        for item in &mut items[first..] {
+            item["_preview_of_bytes"] = json!(bytes.len());
+        }
+    }
+}
+
+fn raw_bytes_block(sequence: u64, source_type: &str, bytes: &[u8]) -> Value {
+    json!({"id":format!("native-{sequence}/raw"),"kind":"raw_text","source_type":source_type,
+        "payload":{"encoding":"base64","bytes":BASE64.encode(bytes),"text":String::from_utf8_lossy(bytes)}})
 }
 
 pub(crate) struct ImportSeat {
@@ -1857,68 +2985,130 @@ fn external_session_id(driver: ExternalDriver, native_id: &str) -> String {
     )
 }
 
+// Streaming updates to token/model/completion metadata do not change an existing part.
+// Only message fields that determine its displayed attribution/timing fence the ref.
+fn native_message_digest(id: &[u8], created: Option<i64>, message: &Value) -> String {
+    digest(&format!(
+        "{}:{created:?}:{}",
+        BASE64.encode(id),
+        message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("system")
+    ))
+}
+
+const OPENCODE_MESSAGE_WINDOW_SQL: &str = "SELECT rowid, id, time_created, data FROM (\
+     SELECT rowid, id, time_created, data FROM message \
+     WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT ?2\
+ ) ORDER BY time_created, id";
+
 fn normalized_opencode_timeline(session: &ExternalSession) -> Result<Vec<Value>> {
+    Ok(opencode_timeline(session)?.0)
+}
+
+fn opencode_timeline_slice(
+    session: &ExternalSession,
+    order: TimelineOrder,
+    before: Option<&TimelineKey>,
+    limit: usize,
+) -> Result<TimelineSlice> {
+    let (mut items, generation) = opencode_timeline(session)?;
+    items.sort_by(|a, b| {
+        compare_timeline_positions(
+            native_timeline_position(a),
+            native_timeline_position(b),
+            order,
+        )
+    });
+    let mut slice = collect_timeline_slice(
+        items.iter().rev(),
+        std::iter::empty(),
+        order,
+        before,
+        limit,
+        Value::clone,
+    );
+    slice.generation = generation;
+    Ok(slice)
+}
+
+fn opencode_timeline(session: &ExternalSession) -> Result<(Vec<Value>, u64)> {
     let connection = open_opencode_database(&session.transcript)?;
-    let mut message_statement = connection.prepare(
-        "SELECT id, time_created, data FROM (\
-             SELECT id, time_created, data FROM message \
-             WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT ?2\
-         ) ORDER BY time_created, id",
-    )?;
-    // Rows are decoded one column at a time, so one row with an unexpected column type costs
-    // only itself. The count of rows that could not be decoded is shown, not hidden.
-    let mut skipped_rows = 0_usize;
-    let mut messages = Vec::new();
-    for row in message_statement.query_map(
+    let mut message_statement = connection.prepare(OPENCODE_MESSAGE_WINDOW_SQL)?;
+    // Count only row identities, then stream native bytes. Never collect 4,097 payload rows.
+    let message_count: usize = connection.query_row(
+        "SELECT count(*) FROM (SELECT 1 FROM message WHERE session_id=?1 LIMIT ?2)",
         params![session.native_id, MAX_TIMELINE_LINES as i64 + 1],
-        |row| {
-            Ok((
-                row.get::<_, Option<String>>(0).ok().flatten(),
-                row.get::<_, Option<i64>>(1).ok().flatten(),
-                row.get::<_, Option<String>>(2).ok().flatten(),
-            ))
-        },
-    )? {
-        match row {
-            Ok((Some(id), created, encoded)) => messages.push((id, created, encoded)),
-            _ => skipped_rows += 1,
-        }
-    }
-    let mut truncated = messages.len() > MAX_TIMELINE_LINES;
+        |row| row.get(0),
+    )?;
+    let mut messages =
+        message_statement.query(params![session.native_id, MAX_TIMELINE_LINES as i64 + 1])?;
+    let mut truncated = message_count > MAX_TIMELINE_LINES;
     if truncated {
-        messages.remove(0);
+        messages.next()?;
     }
     // A database from an OpenCode release without the part table still shows its messages.
     let mut part_statement = connection
         .prepare(
-            "SELECT data FROM part WHERE session_id = ?1 AND message_id = ?2 \
+            "SELECT rowid, id, data FROM part WHERE session_id = ?1 AND message_id = (SELECT id FROM message WHERE rowid = ?2) \
              ORDER BY time_created, id",
         )
         .ok();
     let parts_unavailable = part_statement.is_none();
     let mut items = VecDeque::new();
     // Include the surrounding JSON array delimiters so this remains an exact bound on the
-    // serialized timeline, not just on its native payloads.
+    // serialized timeline, not just on its native payloads. The content generation folds
+    // exactly what this read can return, so any database change that alters the bounded
+    // timeline moves it.
+    let mut generation = Sha256::new();
     let mut serialized_bytes = 2_usize;
     let mut sequence = 1_u64;
     let mut last_created = session.started_at_unix_ms;
-    for (message_id, created, encoded) in messages {
-        let message = encoded
-            .and_then(|encoded| serde_json::from_str::<Value>(&encoded).ok())
-            .unwrap_or(Value::Null);
-        let role = normalized_role(message.get("role").and_then(Value::as_str));
+    while let Some(row) = messages.next()? {
+        let message_row = row.get::<_, i64>(0)?;
+        let created = row.get::<_, Option<i64>>(2).ok().flatten();
         if let Some(created) = created {
             last_created = created.max(0) as u128;
         }
         let at = timestamp(last_created);
+        let row_bytes = sqlite_row_bytes(row, &[1, 2, 3])?;
+        if row_bytes > MAX_TIMELINE_BYTES as usize {
+            generation.update(format!("oversized-message:{row_bytes}").as_bytes());
+            let notice = oversized_sqlite_row(&mut sequence, &at, "message", row_bytes)?;
+            extend_bounded_opencode_timeline(
+                &mut items,
+                &mut serialized_bytes,
+                &mut truncated,
+                vec![notice],
+            );
+            // Its parts have no trustworthy display context until the message fits the bound.
+            continue;
+        }
+        let id_bytes = sqlite_bytes(row, 1)?;
+        let created_bytes = sqlite_bytes(row, 2)?;
+        let encoded = sqlite_bytes(row, 3)?;
+        let message = serde_json::from_slice::<Value>(&encoded).unwrap_or(Value::Null);
+        let message_digest = native_message_digest(&id_bytes, created, &message);
+        let native_role = message.get("role").and_then(Value::as_str);
+        let role = match native_role {
+            Some("user" | "assistant" | "system" | "tool" | "toolResult" | "tool_result")
+            | None => normalized_role(native_role),
+            Some(role) => role,
+        };
         let mut additions = Vec::with_capacity(2);
-        push_message(
-            &mut additions,
-            next_opencode_sequence(&mut sequence)?,
-            &at,
-            role,
-            &message_id,
-        );
+        let entry_sequence = next_opencode_sequence(&mut sequence)?;
+        let row_digest = sqlite_message_digest(&id_bytes, &created_bytes, &encoded);
+        generation.update(row_digest.as_bytes());
+        let mut record =
+            opencode_message_record(&id_bytes, &created_bytes, &encoded, entry_sequence, &at);
+        record["_source"] = serde_json::to_value(NativeLocator::SqliteMessage {
+            message_row,
+            digest: row_digest,
+            sequence: entry_sequence,
+            timestamp: at.clone(),
+        })?;
+        additions.push(record);
         extend_bounded_opencode_timeline(
             &mut items,
             &mut serialized_bytes,
@@ -1928,93 +3118,48 @@ fn normalized_opencode_timeline(session: &ExternalSession) -> Result<Vec<Value>>
         let Some(part_statement) = part_statement.as_mut() else {
             continue;
         };
-        let parts = match part_statement.query_map(params![session.native_id, message_id], |row| {
-            row.get::<_, Option<String>>(0)
-        }) {
-            Ok(parts) => parts.collect::<Vec<_>>(),
-            Err(_) => {
-                skipped_rows += 1;
+        let mut parts = part_statement.query(params![session.native_id, message_row])?;
+        while let Some(row) = parts.next()? {
+            let part_row = row.get::<_, i64>(0)?;
+            let row_bytes = sqlite_row_bytes(row, &[1, 2])?;
+            if row_bytes > MAX_TIMELINE_BYTES as usize {
+                generation.update(format!("oversized-part:{row_bytes}").as_bytes());
+                let notice = oversized_sqlite_row(&mut sequence, &at, "part", row_bytes)?;
+                extend_bounded_opencode_timeline(
+                    &mut items,
+                    &mut serialized_bytes,
+                    &mut truncated,
+                    vec![notice],
+                );
                 continue;
             }
-        };
-        for encoded_part in parts {
-            let Some(part) = encoded_part
-                .ok()
-                .flatten()
-                .and_then(|encoded| serde_json::from_str::<Value>(&encoded).ok())
-            else {
-                skipped_rows += 1;
-                continue;
-            };
+            let part_id = sqlite_bytes(row, 1)?;
+            let encoded_part = sqlite_bytes(row, 2)?;
             let mut additions = Vec::with_capacity(2);
-            match part.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    if let Some(text) = part.get("text").and_then(Value::as_str) {
-                        push_content(
-                            &mut additions,
-                            next_opencode_sequence(&mut sequence)?,
-                            &at,
-                            role,
-                            text,
-                        );
-                    }
-                }
-                Some("tool") => {
-                    let call_id = part
-                        .get("callID")
-                        .or_else(|| part.get("callId"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("native-call");
-                    let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
-                    let state = part.get("state").unwrap_or(&Value::Null);
-                    push_tool_call(
-                        &mut additions,
-                        next_opencode_sequence(&mut sequence)?,
-                        &at,
-                        call_id,
-                        name,
-                        state.get("input").cloned().unwrap_or_else(|| json!({})),
-                    );
-                    let status = state.get("status").and_then(Value::as_str);
-                    if matches!(status, Some("completed" | "error")) {
-                        push_tool_result_with_status(
-                            &mut additions,
-                            next_opencode_sequence(&mut sequence)?,
-                            &at,
-                            call_id,
-                            state
-                                .get("output")
-                                .or_else(|| state.get("error"))
-                                .cloned()
-                                .unwrap_or(Value::Null),
-                            status == Some("error"),
-                        );
-                    }
-                }
-                Some("file") => {
-                    let name = part
-                        .get("filename")
-                        .or_else(|| part.get("url"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("attachment");
-                    push_content(
-                        &mut additions,
-                        next_opencode_sequence(&mut sequence)?,
-                        &at,
-                        role,
-                        &format!("[file: {name}]"),
-                    );
-                }
-                Some(kind) if OPENCODE_HIDDEN_PARTS.contains(&kind) => {}
-                kind => push_unrecognized(
-                    &mut additions,
-                    next_opencode_sequence(&mut sequence)?,
-                    &at,
-                    "opencode",
-                    "part",
-                    kind,
-                    &part,
-                ),
+            let entry_sequence = sequence;
+            normalize_opencode_bytes(
+                &encoded_part,
+                &part_id,
+                &mut sequence,
+                &at,
+                role,
+                &mut additions,
+            )?;
+            let locator = serde_json::to_value(NativeLocator::Sqlite {
+                part_row,
+                message_row,
+                digest: {
+                    let part_digest = sqlite_part_digest(&part_id, &encoded_part);
+                    generation.update(part_digest.as_bytes());
+                    part_digest
+                },
+                message_digest: message_digest.clone(),
+                sequence: entry_sequence,
+                timestamp: at.clone(),
+                role: normalized_role(Some(role)).to_owned(),
+            })?;
+            for item in &mut additions {
+                item["_source"] = locator.clone();
             }
             extend_bounded_opencode_timeline(
                 &mut items,
@@ -2024,12 +3169,8 @@ fn normalized_opencode_timeline(session: &ExternalSession) -> Result<Vec<Value>>
             );
         }
     }
-    if skipped_rows > 0 || parts_unavailable {
-        let message = if parts_unavailable {
-            "st could not read OpenCode's part table, so message contents are missing".to_owned()
-        } else {
-            format!("st skipped {skipped_rows} OpenCode rows it could not decode")
-        };
+    if parts_unavailable {
+        let message = "st could not read OpenCode's part table, so message contents are missing";
         let notice = timeline_item(
             next_opencode_sequence(&mut sequence)?,
             &timestamp(session.updated_at_unix_ms),
@@ -2039,7 +3180,7 @@ fn normalized_opencode_timeline(session: &ExternalSession) -> Result<Vec<Value>>
                 "code": "native-rows-unreadable",
                 "message": message,
                 "retryable": false,
-                "details": {"skipped_rows": skipped_rows}
+                "details": {"parts_unavailable":true}
             }),
         );
         extend_bounded_opencode_timeline(
@@ -2049,6 +3190,14 @@ fn normalized_opencode_timeline(session: &ExternalSession) -> Result<Vec<Value>>
             vec![notice],
         );
     }
+    generation.update(
+        format!("truncated:{truncated}:count:{message_count}:parts:{parts_unavailable}").as_bytes(),
+    );
+    let generation = u64::from_be_bytes(
+        generation.finalize()[..8]
+            .try_into()
+            .expect("an 8-byte generation prefix"),
+    );
     if truncated {
         prepend_opencode_truncation(
             &mut items,
@@ -2059,14 +3208,268 @@ fn normalized_opencode_timeline(session: &ExternalSession) -> Result<Vec<Value>>
                 "system",
                 "truncation",
                 json!({
-                    "reason": "the native OpenCode history prefix is outside the bounded read window",
+                    "reason": "the native OpenCode history prefix is outside the bounded read window; not fetchable through this owner read",
+                    "fetchable": false,
+                    "limit_bytes": MAX_TIMELINE_BYTES,
                     "omitted_from_sequence": 0,
                     "omitted_to_sequence": 0
                 }),
             ),
         );
     }
-    Ok(items.into_iter().map(|(item, _)| item).collect())
+    Ok((
+        items.into_iter().map(|(item, _)| item).collect(),
+        generation,
+    ))
+}
+
+// Inspect SQLite's borrowed cells before allocating any Rust payload copies. Numeric values
+// are measured as their small textual representation; text/blob payloads stay borrowed.
+fn sqlite_row_bytes(row: &rusqlite::Row<'_>, columns: &[usize]) -> rusqlite::Result<usize> {
+    use rusqlite::types::ValueRef;
+    columns.iter().try_fold(0_usize, |total, column| {
+        let size = match row.get_ref(*column)? {
+            ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.len(),
+            ValueRef::Null => 4,
+            ValueRef::Integer(value) => value.to_string().len(),
+            ValueRef::Real(value) => value.to_string().len(),
+        };
+        Ok(total.saturating_add(size))
+    })
+}
+
+fn sqlite_row_guard(row: &rusqlite::Row<'_>, columns: &[usize]) -> rusqlite::Result<()> {
+    if sqlite_row_bytes(row, columns)? > MAX_TIMELINE_BYTES as usize {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            columns[0],
+            row.get_ref(columns[0])?.data_type(),
+            Box::new(std::io::Error::other(
+                "native SQLite row exceeds the 32 MiB owner-read bound",
+            )),
+        ));
+    }
+    Ok(())
+}
+
+fn sqlite_bytes(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<Vec<u8>> {
+    use rusqlite::types::ValueRef;
+    sqlite_row_guard(row, &[column])?;
+    Ok(match row.get_ref(column)? {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.to_vec(),
+        ValueRef::Null => b"null".to_vec(),
+        ValueRef::Integer(value) => value.to_string().into_bytes(),
+        ValueRef::Real(value) => value.to_string().into_bytes(),
+    })
+}
+
+fn oversized_sqlite_row(sequence: &mut u64, at: &str, kind: &str, bytes: usize) -> Result<Value> {
+    Ok(timeline_item(
+        next_opencode_sequence(sequence)?,
+        at,
+        "system",
+        "error",
+        json!({
+            "code":"native-record-size-limit",
+            "message":format!("not fetchable: OpenCode {kind} row exceeds the 32 MiB owner-read bound ({bytes} source bytes); its contents are unavailable through this read"),
+            "retryable":false,
+            "details":{"source_type":format!("opencode/{kind}"),"limit_bytes":MAX_TIMELINE_BYTES,"original_bytes":bytes,"fetchable":false,"parts_unavailable":kind == "message"}
+        }),
+    ))
+}
+
+// SQL IDs are part of native identity, even when a rowid survives a rename/rebind.
+fn sqlite_part_digest(id: &[u8], encoded: &[u8]) -> String {
+    sqlite_message_digest(id, &[], encoded)
+}
+
+fn sqlite_message_digest(id: &[u8], created: &[u8], encoded: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    for bytes in [id, created, encoded] {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    hex::encode(hash.finalize())
+}
+
+fn opencode_message_record(
+    id: &[u8],
+    created: &[u8],
+    encoded: &[u8],
+    sequence: u64,
+    at: &str,
+) -> Value {
+    let message = serde_json::from_slice::<Value>(encoded);
+    let role = message
+        .as_ref()
+        .ok()
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str);
+    let mut items = Vec::new();
+    push_message(
+        &mut items,
+        sequence,
+        at,
+        normalized_role(role),
+        &String::from_utf8_lossy(id),
+    );
+    let mut block = match message {
+        Ok(raw) => {
+            json!({"id":format!("native-{sequence}/source"),"kind":"source_record","source_type":"opencode/message","visibility":"internal","payload":{"raw":raw,"id_bytes":BASE64.encode(id),"created_bytes":BASE64.encode(created)}})
+        }
+        Err(_) => raw_bytes_block(sequence, "opencode/message", encoded),
+    };
+    block["payload"]["id_bytes"] = json!(BASE64.encode(id));
+    block["payload"]["created_bytes"] = json!(BASE64.encode(created));
+    items[0]["body"]["blocks"] = json!([block]);
+    items.remove(0)
+}
+
+fn normalize_opencode_bytes(
+    encoded: &[u8],
+    id: &[u8],
+    sequence: &mut u64,
+    at: &str,
+    role: &str,
+    additions: &mut Vec<Value>,
+) -> Result<()> {
+    let first = additions.len();
+    match serde_json::from_slice::<Value>(encoded) {
+        Ok(part) => {
+            normalize_opencode_part(&part, sequence, at, role, additions)?;
+            if additions.len() == first {
+                push_unrecognized(
+                    additions,
+                    next_opencode_sequence(sequence)?,
+                    at,
+                    "opencode",
+                    "part",
+                    part.get("type").and_then(Value::as_str),
+                    &part,
+                );
+            }
+            let item = &mut additions[first];
+            if item["body"].get("blocks").is_none() {
+                item["body"]["blocks"] = json!([]);
+            }
+            let block_id = format!("{}/source", item["id"].as_str().unwrap());
+            item["body"]["blocks"].as_array_mut().unwrap().push(json!({"id":block_id,"kind":"source_record","source_type":"opencode/part","visibility":"internal","payload":{"raw":part,"id_bytes":BASE64.encode(id)}}));
+        }
+        Err(_) => {
+            let seq = next_opencode_sequence(sequence)?;
+            let mut item = timeline_item(
+                seq,
+                at,
+                "system",
+                "content",
+                json!({"media_type":"text/plain","text":format!("[unreadable opencode part]\n{}",String::from_utf8_lossy(encoded))}),
+            );
+            item["body"]["blocks"] = json!([raw_bytes_block(seq, "opencode/part", encoded)]);
+            item["body"]["blocks"][0]["payload"]["id_bytes"] = json!(BASE64.encode(id));
+            additions.push(item);
+        }
+    }
+    Ok(())
+}
+
+fn normalize_opencode_part(
+    part: &Value,
+    sequence: &mut u64,
+    at: &str,
+    role: &str,
+    additions: &mut Vec<Value>,
+) -> Result<()> {
+    if !matches!(role, "user" | "assistant" | "system" | "tool") {
+        push_native_block(
+            additions,
+            next_opencode_sequence(sequence)?,
+            at,
+            "system",
+            (
+                "unknown",
+                part.get("type").and_then(Value::as_str).unwrap_or("part"),
+            ),
+            json!({"raw":part,"source_role":role}),
+            &format!("[unknown opencode role `{role}`]"),
+        );
+        return Ok(());
+    }
+    match part.get("type").and_then(Value::as_str) {
+        Some("text") => {
+            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                push_content(additions, next_opencode_sequence(sequence)?, at, role, text);
+            }
+        }
+        Some("tool") => {
+            let call_id = part
+                .get("callID")
+                .or_else(|| part.get("callId"))
+                .and_then(Value::as_str)
+                .unwrap_or("native-call");
+            let name = part.get("tool").and_then(Value::as_str).unwrap_or("tool");
+            let state = part.get("state").unwrap_or(&Value::Null);
+            push_tool_call(
+                additions,
+                next_opencode_sequence(sequence)?,
+                at,
+                call_id,
+                name,
+                state.get("input").cloned().unwrap_or_else(|| json!({})),
+            );
+            let status = state.get("status").and_then(Value::as_str);
+            if matches!(status, Some("completed" | "error")) {
+                push_tool_result_with_status(
+                    additions,
+                    next_opencode_sequence(sequence)?,
+                    at,
+                    call_id,
+                    state
+                        .get("output")
+                        .or_else(|| state.get("error"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    status == Some("error"),
+                );
+            }
+        }
+        Some("image" | "input_image" | "image_url" | "output_image") => {
+            push_image(additions, next_opencode_sequence(sequence)?, at, role, part);
+        }
+        Some(kind) if REASONING_BLOCKS.contains(&kind) => {
+            push_reasoning(additions, next_opencode_sequence(sequence)?, at, role, part);
+        }
+        Some("file")
+            if part
+                .get("mime")
+                .and_then(Value::as_str)
+                .is_some_and(|mime| mime.starts_with("image/")) =>
+        {
+            push_image(additions, next_opencode_sequence(sequence)?, at, role, part);
+        }
+        Some("file") => {
+            let name = part
+                .get("filename")
+                .or_else(|| part.get("url"))
+                .and_then(Value::as_str)
+                .unwrap_or("attachment");
+            push_content(
+                additions,
+                next_opencode_sequence(sequence)?,
+                at,
+                role,
+                &format!("[file: {name}]"),
+            );
+        }
+        kind => push_unrecognized(
+            additions,
+            next_opencode_sequence(sequence)?,
+            at,
+            "opencode",
+            "part",
+            kind,
+            part,
+        ),
+    }
+    Ok(())
 }
 
 fn next_opencode_sequence(sequence: &mut u64) -> Result<u64> {
@@ -2084,7 +3487,43 @@ fn extend_bounded_opencode_timeline(
     additions: Vec<Value>,
 ) {
     let byte_limit = usize::try_from(MAX_TIMELINE_BYTES).unwrap_or(usize::MAX);
-    for item in additions {
+    for mut item in additions {
+        let raw_size = serde_json::to_vec(&item).map_or(byte_limit, |encoded| encoded.len());
+        if raw_size > byte_limit {
+            item["_oversized_bytes"] = json!(raw_size);
+            let payload_sizes = item["body"]["blocks"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| {
+                            let payload = if block["payload"] == json!({"body_ref":true}) {
+                                &item["body"]
+                            } else {
+                                &block["payload"]
+                            };
+                            serde_json::to_vec(payload).expect("native JSON").len()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            item["_oversized_payload_bytes"] = json!(payload_sizes);
+            let marker = json!(format!(
+                "[st truncated this native timeline value: size limit; {raw_size} bytes; fetch from owner]"
+            ));
+            for key in ["text", "arguments", "content"] {
+                if item["body"].get(key).is_some() {
+                    item["body"][key] = marker.clone();
+                }
+            }
+            if let Some(blocks) = item["body"]["blocks"].as_array_mut() {
+                for block in blocks {
+                    if block["payload"] != json!({"body_ref":true}) {
+                        block["payload"] = marker.clone();
+                    }
+                }
+            }
+        }
         let item_bytes = serde_json::to_vec(&item).map_or(byte_limit, |encoded| encoded.len());
         let mut additional_bytes = item_bytes + usize::from(!items.is_empty());
         while items.len() >= MAX_TIMELINE_LINES
@@ -2149,65 +3588,32 @@ fn prepend_opencode_truncation(
     }
 }
 
-/// Codex records that are known and are not conversation: session headers, the event stream
-/// that mirrors response items, turn settings, and accounting.
-const CODEX_BOOKKEEPING: &[&str] = &[
-    "session_meta",
-    "event_msg",
-    "turn_context",
-    "compacted",
-    "token_usage_record",
-    "world_state",
-];
-/// Codex response items that are known and deliberately not shown (private reasoning and
-/// workspace snapshots).
-const CODEX_HIDDEN_ITEMS: &[&str] = &["reasoning", "ghost_snapshot"];
-/// Claude records that are known and are not conversation: UI and session bookkeeping.
-const CLAUDE_BOOKKEEPING: &[&str] = &[
-    "file-history-snapshot",
-    "file-history-delta",
-    "queue-operation",
-    "permission-mode",
-    "mode",
-    "atis-latch",
-    "last-prompt",
-    "ai-title",
-    "custom-title",
-    "summary",
-    "cost-state",
-    "progress",
-    "agent-name",
-    "tag",
-    "pr-link",
-    "bridge-session",
-    "fork-context-ref",
-];
-/// Content blocks that are known and deliberately not shown: the model's private reasoning.
-const HIDDEN_REASONING_BLOCKS: &[&str] = &["thinking", "redacted_thinking"];
-/// Pi and OMP records that are known and are not conversation.
-const OMP_BOOKKEEPING: &[&str] = &[
-    "session",
-    "model_change",
-    "thinking_level_change",
-    "label",
-    "session_info",
-    "custom",
-    "credential_pin",
-    "title",
-];
-/// OpenCode parts that are known and deliberately not shown.
-const OPENCODE_HIDDEN_PARTS: &[&str] = &[
-    "reasoning",
-    "step-start",
-    "step-finish",
-    "snapshot",
-    "patch",
-    "agent",
-    "retry",
-    "compaction",
-];
-/// The most JSON an unrecognized record contributes to its generic entry.
-const MAX_UNRECOGNIZED_BYTES: usize = 512;
+/// Explicit omission table: only these records may be absent from the data.
+/// See docs/st3/conversation-normalization-design.md, native record visibility audit.
+fn omission_reason(driver: ExternalDriver, value: &Value) -> Option<&'static str> {
+    match (driver, value.get("type").and_then(Value::as_str)) {
+        (ExternalDriver::Codex, Some("session_meta")) => Some("setup header, not a chat turn"),
+        (ExternalDriver::Codex, Some("response_item"))
+            if value.pointer("/payload/type").and_then(Value::as_str) == Some("message")
+                && matches!(
+                    value.pointer("/payload/role").and_then(Value::as_str),
+                    Some("system" | "developer")
+                ) =>
+        {
+            Some("provider bootstrap instructions, not a chat turn")
+        }
+        (ExternalDriver::Omp | ExternalDriver::Pi, Some("session")) => {
+            Some("setup header, not a chat turn")
+        }
+        (ExternalDriver::Omp | ExternalDriver::Pi, Some("custom_message"))
+            if value.get("display") == Some(&Value::Bool(false)) =>
+        {
+            Some("extension explicitly marks it hidden in the harness")
+        }
+        _ => None,
+    }
+}
+const REASONING_BLOCKS: &[&str] = &["thinking", "redacted_thinking", "reasoning"];
 
 /// A native timestamp as the timeline carries it. RFC 3339 text is kept as written; a number is
 /// Unix milliseconds (or seconds, when too small to be milliseconds). Anything else is absent,
@@ -2230,9 +3636,8 @@ fn native_timestamp(value: Option<&Value>) -> Option<String> {
     }
 }
 
-/// Show a record this reader does not understand as a generic, clearly-labelled system entry
-/// with a bounded excerpt, instead of dropping it. The role is always `system`: an unknown
-/// record is never attributed to the user or the agent.
+/// Preserve unknown native JSON and label its origin. Transport bounds are applied on reads.
+/// Records without an explicit native attribution use the system role.
 fn push_unrecognized(
     items: &mut Vec<Value>,
     sequence: u64,
@@ -2242,28 +3647,137 @@ fn push_unrecognized(
     kind: Option<&str>,
     value: &Value,
 ) {
-    if driver == "omp" && omp_has_image_payload(value) {
-        push_omp_image_unavailable(items, sequence, timestamp, value);
-        return;
-    }
+    let block_kind = match kind {
+        Some("thinking" | "redacted_thinking" | "reasoning") => {
+            push_reasoning(items, sequence, timestamp, "system", value);
+            return;
+        }
+        Some("job" | "job_start" | "job_update" | "job_end") => "job",
+        Some("subagent" | "subagent_start" | "subagent_update" | "subagent_end" | "agent") => {
+            "subagent"
+        }
+        Some("ask" | "ask_start" | "ask_update" | "ask_end") => "ask",
+        Some(
+            "status"
+            | "model_change"
+            | "thinking_level_change"
+            | "step-start"
+            | "step-finish"
+            | "retry"
+            | "compaction"
+            | "compacted"
+            | "summary",
+        ) => "status",
+        _ => "unknown",
+    };
     let label = match kind {
         Some(kind) => format!("[unrecognized {driver} {what} `{kind}`]"),
         None => format!("[unrecognized {driver} {what} without a type]"),
     };
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    let excerpt = truncate_at_char_boundary(&encoded, MAX_UNRECOGNIZED_BYTES);
-    let ellipsis = if excerpt.len() < encoded.len() {
-        "…"
-    } else {
-        ""
-    };
-    items.push(timeline_item(
+    let role = value
+        .get("role")
+        .or_else(|| value.pointer("/message/role"))
+        .and_then(Value::as_str)
+        .map(|role| normalized_role(Some(role)))
+        .unwrap_or("system");
+    push_native_block(
+        items,
         sequence,
         timestamp,
-        "system",
+        role,
+        (block_kind, kind.unwrap_or(what)),
+        json!({"raw": value}),
+        &label,
+    );
+    if matches!(driver, "omp" | "pi")
+        && let Some((kind, view, visibility)) = crate::native_views::omp_record_view(value)
+        && let Some(item) = items.last_mut()
+    {
+        let block = &mut item["body"]["blocks"][0];
+        block["kind"] = json!(kind);
+        block["view"] = view;
+        if let Some(visibility) = visibility {
+            block["visibility"] = json!(visibility);
+        }
+    }
+}
+
+/// Native bodies stay owner-local. HTTP negotiation adds size bounds and owner fetch refs;
+/// the text is a legacy-client fallback, not a separate capture or storage policy.
+fn push_native_block(
+    items: &mut Vec<Value>,
+    sequence: u64,
+    timestamp: &str,
+    role: &str,
+    (kind, source_type): (&str, &str),
+    payload: Value,
+    label: &str,
+) {
+    let fallback = match kind {
+        "image" => "[image · load from owner]".to_owned(),
+        "reasoning" => payload
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| format!("[reasoning]\n{text}"))
+            .unwrap_or_else(|| format!("[reasoning]\n{payload}")),
+        _ => format!("{label}\n{payload}"),
+    };
+    let mut item = timeline_item(
+        sequence,
+        timestamp,
+        role,
         "content",
-        json!({"media_type":"text/plain", "text":format!("{label}\n{excerpt}{ellipsis}")}),
-    ));
+        json!({"media_type":"text/plain", "text":fallback}),
+    );
+    item["body"]["blocks"] = json!([{
+        "id": format!("native-{sequence}/0"), "kind":kind,
+        "source_type":source_type, "payload":payload
+    }]);
+    items.push(item);
+}
+
+fn push_reasoning(
+    items: &mut Vec<Value>,
+    sequence: u64,
+    timestamp: &str,
+    role: &str,
+    part: &Value,
+) {
+    let text = part
+        .get("thinking")
+        .or_else(|| part.get("text"))
+        .or_else(|| part.get("summary"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    push_native_block(
+        items,
+        sequence,
+        timestamp,
+        role,
+        (
+            "reasoning",
+            part.get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("reasoning"),
+        ),
+        json!({"text":text,"raw":part}),
+        "[reasoning]",
+    );
+}
+
+fn push_image(items: &mut Vec<Value>, sequence: u64, timestamp: &str, role: &str, part: &Value) {
+    push_native_block(
+        items,
+        sequence,
+        timestamp,
+        role,
+        (
+            "image",
+            part.get("type").and_then(Value::as_str).unwrap_or("image"),
+        ),
+        part.clone(),
+        "[image]",
+    );
 }
 
 fn json_kind(value: &Value) -> &'static str {
@@ -2278,11 +3792,13 @@ fn json_kind(value: &Value) -> &'static str {
 }
 
 fn normalize_codex(value: &Value, sequence: u64, fallback_timestamp: &str, items: &mut Vec<Value>) {
+    if omission_reason(ExternalDriver::Codex, value).is_some() {
+        return;
+    }
     let timestamp =
         native_timestamp(value.get("timestamp")).unwrap_or_else(|| fallback_timestamp.to_owned());
     match value.get("type").and_then(Value::as_str) {
         Some("response_item") => {}
-        Some(kind) if CODEX_BOOKKEEPING.contains(&kind) => return,
         kind => {
             push_unrecognized(items, sequence, &timestamp, "codex", "record", kind, value);
             return;
@@ -2291,8 +3807,16 @@ fn normalize_codex(value: &Value, sequence: u64, fallback_timestamp: &str, items
     let payload = &value["payload"];
     match payload.get("type").and_then(Value::as_str) {
         Some("message") => {
-            // Provider bootstrap instructions are not a visible chat turn.
             if !matches!(payload["role"].as_str(), Some("user" | "assistant")) {
+                push_unrecognized(
+                    items,
+                    sequence,
+                    &timestamp,
+                    "codex",
+                    "message",
+                    payload["role"].as_str(),
+                    value,
+                );
                 return;
             }
             let role = normalized_role(payload["role"].as_str());
@@ -2317,7 +3841,7 @@ fn normalize_codex(value: &Value, sequence: u64, fallback_timestamp: &str, items
                         }
                         match part.get("type").and_then(Value::as_str) {
                             Some("input_image" | "output_image" | "image") => {
-                                push_content(items, part_sequence, &timestamp, role, "[image]")
+                                push_image(items, part_sequence, &timestamp, role, part)
                             }
                             kind => push_unrecognized(
                                 items,
@@ -2363,7 +3887,7 @@ fn normalize_codex(value: &Value, sequence: u64, fallback_timestamp: &str, items
             payload["call_id"].as_str().unwrap_or("native-call"),
             payload.get("output").cloned().unwrap_or(Value::Null),
         ),
-        Some(kind) if CODEX_HIDDEN_ITEMS.contains(&kind) => {}
+        Some("reasoning") => push_reasoning(items, sequence, &timestamp, "assistant", payload),
         kind => push_unrecognized(
             items,
             sequence,
@@ -2405,6 +3929,16 @@ fn normalize_claude(
                     &timestamp,
                     "user",
                 );
+            } else {
+                push_unrecognized(
+                    items,
+                    sequence,
+                    &timestamp,
+                    "claude",
+                    "attachment",
+                    value.pointer("/attachment/type").and_then(Value::as_str),
+                    value,
+                );
             }
             return;
         }
@@ -2415,10 +3949,19 @@ fn normalize_claude(
                 && !text.trim().is_empty()
             {
                 push_content(items, sequence, &timestamp, "system", text);
+            } else {
+                push_unrecognized(
+                    items,
+                    sequence,
+                    &timestamp,
+                    "claude",
+                    "system",
+                    value.get("subtype").and_then(Value::as_str),
+                    value,
+                );
             }
             return;
         }
-        Some(kind) if CLAUDE_BOOKKEEPING.contains(&kind) => return,
         kind => {
             push_unrecognized(items, sequence, &timestamp, "claude", "entry", kind, value);
             return;
@@ -2478,10 +4021,19 @@ fn push_claude_content(
                         part.get("content").cloned().unwrap_or(Value::Null),
                         part.get("is_error") == Some(&Value::Bool(true)),
                     ),
-                    Some(kind) if HIDDEN_REASONING_BLOCKS.contains(&kind) => {}
-                    Some(kind @ ("image" | "document")) => {
-                        push_content(items, item_sequence, timestamp, role, &format!("[{kind}]"))
+                    Some(kind) if REASONING_BLOCKS.contains(&kind) => {
+                        push_reasoning(items, item_sequence, timestamp, role, part);
                     }
+                    Some("image") => push_image(items, item_sequence, timestamp, role, part),
+                    Some("document") => push_native_block(
+                        items,
+                        item_sequence,
+                        timestamp,
+                        role,
+                        ("document", "claude/document"),
+                        part.clone(),
+                        "[document]",
+                    ),
                     kind => push_unrecognized(
                         items,
                         item_sequence,
@@ -2507,6 +4059,128 @@ fn push_claude_content(
     }
 }
 
+/// OMP persists a failed assistant turn with `stopReason: "error"`, an `errorMessage`, and —
+/// once an automatic retry settles — a `retryRecovery` marker recording how the attempt was
+/// recovered or superseded. Project the presentation exactly as the harness resolves it:
+/// superseded attempts are hidden, recovered ones render a compact note that still discloses
+/// the original error, silent and user-interrupt aborts render nothing, and terminal failures
+/// render in full. `label` is the resolved display text; `message` keeps the original error.
+fn omp_assistant_error_view(message: &Value) -> Option<Value> {
+    const SILENT_ABORT_MARKER: &str = "__omp.silent_abort__";
+    const USER_INTERRUPT_LABEL: &str = "Interrupted by user";
+    const GENERIC_ABORT_SENTINEL: &str = "Request was aborted";
+    let retry = message
+        .get("retryRecovery")
+        .filter(|retry| retry.is_object());
+    let stop_reason = message.get("stopReason").and_then(Value::as_str);
+    let error_message = message.get("errorMessage").and_then(Value::as_str);
+    let error_id = message.get("errorId").and_then(Value::as_i64);
+    let flagged = |bit: i64| error_id.is_some_and(|id| id & bit != 0);
+    let silent_abort = error_message == Some(SILENT_ABORT_MARKER) || flagged(0x0200_0000);
+    let user_interrupt = error_message == Some(USER_INTERRUPT_LABEL) || flagged(0x0400_0000);
+    let retry_note = || {
+        retry
+            .and_then(|retry| retry.get("note"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    let (status, presentation, is_error, label) = match retry
+        .and_then(|retry| retry.get("status"))
+        .and_then(Value::as_str)
+    {
+        Some("recovered") => ("recovered", "compact-recovered", false, retry_note()),
+        Some("superseded") => ("superseded", "none", false, ""),
+        _ => match stop_reason {
+            Some("error") => ("failed", "full", true, error_message.unwrap_or("Error")),
+            Some("aborted") => {
+                if silent_abort || user_interrupt {
+                    return None;
+                }
+                let custom = error_message.is_some_and(|text| {
+                    !text.is_empty()
+                        && text != GENERIC_ABORT_SENTINEL
+                        && text != SILENT_ABORT_MARKER
+                });
+                (
+                    "failed",
+                    "full",
+                    true,
+                    if custom {
+                        error_message.unwrap_or_default()
+                    } else {
+                        "Operation aborted"
+                    },
+                )
+            }
+            _ => {
+                let text = error_message?;
+                if text.is_empty() || silent_abort || user_interrupt {
+                    return None;
+                }
+                ("failed", "full", true, text)
+            }
+        },
+    };
+    let mut view = json!({
+        "type": "assistant_error",
+        "status": status,
+        "presentation": presentation,
+        "is_error": is_error,
+        "label": label,
+        "message": error_message.unwrap_or(""),
+    });
+    if let Some(stop_reason) = stop_reason {
+        view["stop_reason"] = json!(stop_reason);
+    }
+    if let Some(error_id) = error_id {
+        view["error_id"] = json!(error_id);
+    }
+    for field in ["api", "provider", "model"] {
+        if let Some(value) = message.get(field).and_then(Value::as_str) {
+            view[field] = json!(value);
+        }
+    }
+    if let Some(retry) = retry {
+        let mut projected = json!({});
+        for field in ["kind", "status", "recovery", "note"] {
+            if let Some(value) = retry.get(field).and_then(Value::as_str) {
+                projected[field] = json!(value);
+            }
+        }
+        if let Some(attempt) = retry.get("attempt").and_then(Value::as_u64) {
+            projected["attempt"] = json!(attempt);
+        }
+        if let Some(recovered_at) = retry.get("recoveredAt").and_then(Value::as_str) {
+            projected["recovered_at"] = json!(recovered_at);
+        }
+        if let Some(superseded) = retry.get("supersededBy").filter(|value| value.is_object()) {
+            let mut by = json!({});
+            if let Some(at) = superseded.get("timestamp").and_then(Value::as_i64) {
+                by["timestamp"] = json!(at);
+            }
+            for (target, field) in [
+                ("response_id", "responseId"),
+                ("provider", "provider"),
+                ("model", "model"),
+            ] {
+                if let Some(value) = superseded.get(field).and_then(Value::as_str) {
+                    by[target] = json!(value);
+                }
+            }
+            if by.as_object().is_some_and(|by| !by.is_empty()) {
+                projected["superseded_by"] = by;
+            }
+        }
+        if projected
+            .as_object()
+            .is_some_and(|projected| !projected.is_empty())
+        {
+            view["retry"] = projected;
+        }
+    }
+    Some(view)
+}
+
 fn normalize_omp(
     driver: ExternalDriver,
     value: &Value,
@@ -2514,10 +4188,15 @@ fn normalize_omp(
     fallback_timestamp: &str,
     items: &mut Vec<Value>,
 ) {
+    if omission_reason(driver, value).is_some() {
+        return;
+    }
     let label = driver.as_str();
     let timestamp = native_timestamp(value.get("timestamp"))
         .or_else(|| native_timestamp(value.pointer("/message/timestamp")))
         .unwrap_or_else(|| fallback_timestamp.to_owned());
+    let record_view = crate::native_views::omp_record_view(value);
+    let first_item = items.len();
     match value.get("type").and_then(Value::as_str) {
         Some("message") => {}
         Some(kind @ ("compaction" | "branch_summary")) => {
@@ -2531,6 +4210,27 @@ fn normalize_omp(
                     "system",
                     &format!("[{label} {kind}]\n{summary}"),
                 );
+            } else {
+                push_unrecognized(
+                    items,
+                    sequence,
+                    &timestamp,
+                    label,
+                    "entry",
+                    Some(kind),
+                    value,
+                );
+            }
+            if let Some((kind, view, visibility)) = record_view
+                && let Some(item) = items.last_mut()
+            {
+                let block = &mut item["body"]["blocks"][0];
+                block["kind"] = json!(kind);
+                block["payload"] = json!({"raw":value});
+                block["view"] = view;
+                if let Some(visibility) = visibility {
+                    block["visibility"] = json!(visibility);
+                }
             }
             return;
         }
@@ -2545,10 +4245,96 @@ fn normalize_omp(
                     &timestamp,
                     "system",
                 );
+                if let Some((kind, view, visibility)) = record_view {
+                    for item in &mut items[first_item..] {
+                        if let Some(blocks) = item["body"]["blocks"].as_array_mut() {
+                            for block in blocks {
+                                block["kind"] = json!(kind);
+                                block["payload"] = json!({"raw":value});
+                                block["view"] = view.clone();
+                                if let Some(visibility) = visibility {
+                                    block["visibility"] = json!(visibility);
+                                }
+                            }
+                        }
+                    }
+                    if items.len() == first_item {
+                        push_unrecognized(
+                            items,
+                            sequence,
+                            &timestamp,
+                            label,
+                            "entry",
+                            Some("custom_message"),
+                            value,
+                        );
+                    }
+                }
             }
             return;
         }
-        Some(kind) if OMP_BOOKKEEPING.contains(&kind) => return,
+        Some("custom") => {
+            if let Some((kind, view, visibility)) = record_view
+                && view["type"] == "tool_start"
+            {
+                let tool = view["tool"].as_str().unwrap_or("tool");
+                push_native_block(
+                    items,
+                    sequence,
+                    &timestamp,
+                    "system",
+                    (kind, "custom"),
+                    json!({"raw": value}),
+                    &format!("[{label} tool start {tool}]"),
+                );
+                let block = &mut items.last_mut().unwrap()["body"]["blocks"][0];
+                block["view"] = view;
+                if let Some(visibility) = visibility {
+                    block["visibility"] = json!(visibility);
+                }
+            } else {
+                push_unrecognized(
+                    items,
+                    sequence,
+                    &timestamp,
+                    label,
+                    "entry",
+                    Some("custom"),
+                    value,
+                );
+            }
+            return;
+        }
+        Some(record_type @ ("reset_boundary" | "credential_pin" | "title")) => {
+            let text = match record_type {
+                "reset_boundary" => format!("[{label} session reset]"),
+                "credential_pin" => format!(
+                    "[{label} credential pin {}]",
+                    value["provider"].as_str().unwrap_or_default()
+                ),
+                _ => format!(
+                    "[{label} title] {}",
+                    value["title"].as_str().unwrap_or_default()
+                ),
+            };
+            if let Some((kind, view, visibility)) = record_view {
+                push_native_block(
+                    items,
+                    sequence,
+                    &timestamp,
+                    "system",
+                    (kind, record_type),
+                    json!({"raw": value}),
+                    &text,
+                );
+                let block = &mut items.last_mut().unwrap()["body"]["blocks"][0];
+                block["view"] = view;
+                if let Some(visibility) = visibility {
+                    block["visibility"] = json!(visibility);
+                }
+            }
+            return;
+        }
         kind => {
             push_unrecognized(items, sequence, &timestamp, label, "entry", kind, value);
             return;
@@ -2556,6 +4342,32 @@ fn normalize_omp(
     }
     let message = &value["message"];
     let native_role = message.get("role").and_then(Value::as_str);
+    if let Some(native_role) = native_role
+        && !matches!(
+            native_role,
+            "user"
+                | "assistant"
+                | "system"
+                | "developer"
+                | "tool"
+                | "toolResult"
+                | "tool_result"
+                | "bashExecution"
+                | "branchSummary"
+                | "compactionSummary"
+        )
+    {
+        push_unrecognized(
+            items,
+            sequence,
+            &timestamp,
+            label,
+            "message role",
+            Some(native_role),
+            value,
+        );
+        return;
+    }
     let role = normalized_role(native_role);
     let message_id = value["id"]
         .as_str()
@@ -2569,9 +4381,28 @@ fn normalize_omp(
                 sequence + 1,
                 &timestamp,
                 message["toolCallId"].as_str().unwrap_or_default(),
-                omp_result_images(driver, message.get("content").cloned().unwrap_or(Value::Null)),
-                message.get("isError").and_then(Value::as_bool).unwrap_or(false),
+                message.get("content").cloned().unwrap_or(Value::Null),
+                message
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             );
+            preserve_omp_result_timing(items, message);
+            if let Some(item) = items.last_mut() {
+                item["body"]["blocks"][0]["view"] = crate::native_views::tool_output_view(
+                    message
+                        .get("toolName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool"),
+                    message["toolCallId"].as_str().unwrap_or_default(),
+                    message
+                        .get("isError")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    message.get("details"),
+                );
+                item["body"]["blocks"][0]["payload"] = json!({"body_ref":true,"raw":value});
+            }
             return;
         }
         // A shell command the person ran with `!`: shown as the harness recorded it, without
@@ -2604,6 +4435,7 @@ fn normalize_omp(
         }
         _ => {}
     }
+    let first_content = items.len();
     push_omp_content(
         driver,
         items,
@@ -2612,6 +4444,50 @@ fn normalize_omp(
         &timestamp,
         role,
     );
+    if native_role == Some("assistant")
+        && let Some(view) = omp_assistant_error_view(message)
+    {
+        // The error presentation is its own block after the turn's content, so every
+        // existing native block identity stays stable.
+        let error_sequence = items
+            .last()
+            .and_then(|item| item["sequence"].as_u64())
+            .map_or(sequence + 1, |last| last + 1);
+        let label = view["label"].as_str().unwrap_or_default().to_owned();
+        let fallback = match view["presentation"].as_str() {
+            Some("full") => format!("[error] {label}"),
+            Some("compact-recovered") => format!("[retry recovered] {label}"),
+            _ => String::new(),
+        };
+        push_content(items, error_sequence, &timestamp, "assistant", &fallback);
+        let block = &mut items.last_mut().expect("error item just pushed")["body"]["blocks"][0];
+        block["kind"] = json!("error");
+        block["source_type"] = json!(format!("{}/assistant_error", driver.as_str()));
+        block["payload"] = json!({"body_ref": true});
+        block["view"] = view;
+    }
+    // Message-level metadata has one owner: the last emitted block, including a
+    // tool call or an error. Newest-first header windows retain that block even
+    // when they split a message, without counting each part as another response.
+    if let Some(metadata) = crate::native_views::assistant_metadata(message)
+        && let Some(block) = items[first_content..]
+            .iter_mut()
+            .rev()
+            .filter_map(|item| item["body"]["blocks"].as_array_mut())
+            .find_map(|blocks| blocks.last_mut())
+    {
+        if let Some(existing) = block.get_mut("metadata").and_then(Value::as_object_mut) {
+            if let Some(additions) = metadata.as_object() {
+                existing.extend(
+                    additions
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+            }
+        } else {
+            block["metadata"] = metadata;
+        }
+    }
 }
 
 fn push_omp_content(
@@ -2639,33 +4515,62 @@ fn push_omp_content(
                             part["text"].as_str().unwrap_or_default(),
                         );
                     }
-                    Some("toolCall" | "tool_call") => push_tool_call(
-                        items,
-                        item_sequence,
-                        &timestamp,
-                        part.get("id")
-                            .or_else(|| part.get("toolCallId"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("native-call"),
-                        part.get("name").and_then(Value::as_str).unwrap_or("tool"),
-                        part.get("arguments").cloned().unwrap_or_else(|| json!({})),
-                    ),
-                    Some("toolResult" | "tool_result") => push_tool_result(
-                        items,
-                        item_sequence,
-                        &timestamp,
-                        part.get("toolCallId")
+                    Some("toolCall" | "tool_call") => {
+                        let tool = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        push_tool_call(
+                            items,
+                            item_sequence,
+                            &timestamp,
+                            part.get("id")
+                                .or_else(|| part.get("toolCallId"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("native-call"),
+                            tool,
+                            part.get("arguments").cloned().unwrap_or_else(|| json!({})),
+                        );
+                        if let Some(item) = items.last_mut() {
+                            item["body"]["blocks"][0]["view"] = crate::native_views::tool_call_view(
+                                tool,
+                                &item["body"]["arguments"],
+                            );
+                        }
+                    }
+                    Some("toolResult" | "tool_result") => {
+                        let call_id = part
+                            .get("toolCallId")
                             .or_else(|| part.get("call_id"))
                             .and_then(Value::as_str)
-                            .unwrap_or("native-call"),
-                        omp_result_images(driver, part.get("content").cloned().unwrap_or(Value::Null)),
-                    ),
-                    Some(kind) if HIDDEN_REASONING_BLOCKS.contains(&kind) => {}
-                    Some("image") if driver == ExternalDriver::Omp => {
-                        push_omp_image_unavailable(items, item_sequence, &timestamp, part);
+                            .unwrap_or("native-call");
+                        push_tool_result(
+                            items,
+                            item_sequence,
+                            &timestamp,
+                            call_id,
+                            part.get("content").cloned().unwrap_or(Value::Null),
+                        );
+                        if let Some(item) = items.last_mut() {
+                            item["body"]["blocks"][0]["view"] =
+                                crate::native_views::tool_output_view(
+                                    part.get("toolName")
+                                        .or_else(|| part.get("name"))
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("tool"),
+                                    call_id,
+                                    part.get("isError")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false),
+                                    part.get("details"),
+                                );
+                            item["body"]["blocks"][0]["payload"] =
+                                json!({"body_ref":true,"raw":part});
+                        }
+                        preserve_omp_result_timing(items, part);
                     }
-                    Some("image") => {
-                        push_content(items, item_sequence, &timestamp, role, "[image]")
+                    Some(kind) if REASONING_BLOCKS.contains(&kind) => {
+                        push_reasoning(items, item_sequence, &timestamp, role, part);
+                    }
+                    Some("image" | "input_image" | "image_url") => {
+                        push_image(items, item_sequence, &timestamp, role, part);
                     }
                     kind => push_unrecognized(
                         items,
@@ -2689,79 +4594,6 @@ fn push_omp_content(
             Some(json_kind(other)),
             other,
         ),
-    }
-}
-
-fn omp_image_availability(image: &Value) -> Value {
-    let reference = image.get("data").and_then(Value::as_str).filter(|reference| {
-        reference.strip_prefix("blob:sha256:").is_some_and(|digest| {
-            digest.len() == 64
-                && digest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-    });
-    let mut details = json!({
-        "_tag":"OmpImage","version":1,
-        "availability":if reference.is_some() { "unavailable" } else { "withheld" },
-        "reason":if reference.is_some() { "native_blob_not_fetchable" } else { "image_payload_not_authorized" },
-    });
-    if let Some(reference) = reference {
-        // This is not a st attachment ID: no origin/authorization evidence exists to fetch it.
-        details["native_ref"] = json!(reference);
-    }
-    if let Some(mime) = image.get("mimeType").and_then(Value::as_str)
-        .filter(|mime| matches!(*mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp"))
-    {
-        details["mime_type"] = json!(mime);
-    } else {
-        details["mime_availability"] = json!("unknown");
-    }
-    for key in ["width", "height"] {
-        if let Some(value) = image.get(key).and_then(Value::as_u64).filter(|value| *value <= 65_535) {
-            details[key] = json!(value);
-        }
-    }
-    details
-}
-
-fn push_omp_image_unavailable(
-    items: &mut Vec<Value>,
-    sequence: u64,
-    timestamp: &str,
-    image: &Value,
-) {
-    items.push(timeline_item(sequence, timestamp, "system", "error", json!({
-        "code":"native_image_unavailable",
-        "message":"Native image is unavailable through the conversation attachment service.",
-        "retryable":false,
-        "details":omp_image_availability(image),
-    })));
-}
-
-/// Unknown native shapes must not turn an image or a data URI into visible JSON text.
-fn omp_has_image_payload(value: &Value) -> bool {
-    match value {
-        Value::String(text) => text.trim_start().starts_with("data:"),
-        Value::Array(values) => values.iter().any(omp_has_image_payload),
-        Value::Object(fields) => {
-            fields.get("type").and_then(Value::as_str).is_some_and(|kind| {
-                matches!(kind, "image" | "input_image" | "image_url")
-            }) || fields.contains_key("image_url")
-                || fields.values().any(omp_has_image_payload)
-        }
-        _ => false,
-    }
-}
-
-fn omp_result_images(driver: ExternalDriver, content: Value) -> Value {
-    if driver != ExternalDriver::Omp {
-        return content;
-    }
-    match content {
-        Value::Array(parts) => Value::Array(
-            parts.into_iter().map(|part| omp_result_images(driver, part)).collect(),
-        ),
-        other if omp_has_image_payload(&other) => omp_image_availability(&other),
-        other => other,
     }
 }
 
@@ -2791,7 +4623,6 @@ fn push_message(
 }
 
 fn push_content(items: &mut Vec<Value>, sequence: u64, timestamp: &str, role: &str, text: &str) {
-    let text = bounded_text(text);
     items.push(timeline_item(
         sequence,
         timestamp,
@@ -2813,7 +4644,6 @@ fn push_tool_call(
         .as_str()
         .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or(arguments);
-    let arguments = bounded_value(arguments);
     items.push(timeline_item(
         sequence,
         timestamp,
@@ -2841,38 +4671,38 @@ fn push_tool_result_with_status(
     content: Value,
     failed: bool,
 ) {
-    let content = bounded_value(content);
     let status = if failed { "error" } else { "success" };
     items.push(timeline_item(sequence, timestamp, "tool", "tool_result", json!({"call_id":call_id, "status":status, "media_type":"application/json", "content":content})));
 }
 
-fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
+fn preserve_omp_result_timing(items: &mut [Value], native_result: &Value) {
+    let Some(details) = native_result.get("details").and_then(Value::as_object) else {
+        return;
+    };
+    if details.is_empty() {
+        return;
     }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    &value[..end]
-}
-
-fn bounded_text(value: &str) -> String {
-    if value.len() <= MAX_TIMELINE_VALUE_BYTES {
-        return value.to_owned();
-    }
-    // The bound is in bytes: it keeps a page under the gateway's response ceiling.
-    let mut output = truncate_at_char_boundary(value, MAX_TIMELINE_VALUE_BYTES).to_owned();
-    output.push_str("\n[st truncated this native timeline value]");
-    output
-}
-
-fn bounded_value(value: Value) -> Value {
-    match serde_json::to_string(&value) {
-        Ok(encoded) if encoded.len() > MAX_TIMELINE_VALUE_BYTES => {
-            Value::String(bounded_text(&encoded))
+    let blocks = items.last_mut().expect("result was just appended")["body"]["blocks"]
+        .as_array_mut()
+        .expect("tool result has normalized blocks");
+    for block in blocks {
+        if block["kind"] != "tool_output" {
+            continue;
         }
-        _ => value,
+        // Keep the native details object open: original names, units and future fields
+        // survive beside any metadata already supplied by normalization.
+        let metadata = block
+            .as_object_mut()
+            .expect("normalized block is an object")
+            .entry("metadata")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("block metadata is an object");
+        metadata.extend(
+            details
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
     }
 }
 
@@ -2881,8 +4711,22 @@ fn timeline_item(
     timestamp: &str,
     role: &str,
     entry_type: &str,
-    body: Value,
+    mut body: Value,
 ) -> Value {
+    let kind = match entry_type {
+        "content" => Some("text"),
+        "tool_call" => Some("tool_call"),
+        "tool_result" => Some("tool_output"),
+        "status" => Some("status"),
+        "error" => Some("error"),
+        _ => None,
+    };
+    if let Some(kind) = kind {
+        body["blocks"] = json!([{
+            "id":format!("native-{sequence}/0"), "kind":kind,
+            "source_type":entry_type, "payload":{"body_ref":true}
+        }]);
+    }
     json!({
         "id": format!("timeline-entry/native-{sequence}"),
         "sequence": sequence,
@@ -2993,6 +4837,214 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_omp_message_usage_once(content: Value) {
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
+            let mut items = Vec::new();
+            for (sequence, usd) in [(0, 0.25), (1000, 0.5)] {
+                let record = json!({
+                    "type": "message",
+                    "message": {
+                        "role": "assistant", "content": content, "model": "test-model",
+                        "usage": {"input": 12, "output": 5, "totalTokens": 17, "cost": {"total": usd}},
+                        "contextSnapshot": {"promptTokens": 23},
+                    },
+                });
+                let first = items.len();
+                normalize_omp(driver, &record, sequence, "2026-10-06T00:00:00Z", &mut items);
+                let blocks: Vec<_> = items[first..]
+                    .iter()
+                    .filter_map(|item| item["body"]["blocks"].as_array())
+                    .flatten()
+                    .collect();
+                let owner = blocks.last().unwrap();
+                assert_eq!(owner["metadata"]["usage"]["cost_usd"], usd);
+                assert_eq!(owner["metadata"]["usage"]["total"], 17);
+                assert_eq!(blocks.iter().filter(|block| block["metadata"]["usage"].is_object()).count(), 1);
+            }
+            let header = crate::conversation_header::derive(&items, false);
+            assert_eq!(header["cost"]["value"]["usd"], 0.75);
+            assert_eq!(header["model"]["value"], "test-model");
+            assert_eq!(header["context"]["value"]["tokens"], 23);
+        }
+    }
+
+    #[test]
+    fn omp_thinking_and_text_count_message_usage_once() {
+        assert_omp_message_usage_once(json!([
+            {"type": "thinking", "thinking": "Consider the request"},
+            {"type": "text", "text": "Answer"},
+        ]));
+    }
+
+    #[test]
+    fn omp_tool_call_only_counts_message_usage_once() {
+        assert_omp_message_usage_once(json!([
+            {"type": "toolCall", "id": "first", "name": "read", "arguments": {"path": "a"}},
+            {"type": "toolCall", "id": "second", "name": "read", "arguments": {"path": "b"}},
+        ]));
+    }
+
+    #[test]
+    fn omp_split_newest_header_window_keeps_latest_message_metadata() {
+        let mut content: Vec<_> = (0..201)
+            .map(|index| json!({"type": "text", "text": format!("part {index}")}))
+            .collect();
+        content.push(json!({
+            "type": "toolCall", "id": "last-call", "name": "read", "arguments": {"path": "a"},
+        }));
+        assert_omp_message_usage_once(json!(content));
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
+            let mut items = Vec::new();
+            for (sequence, message, timestamp) in [
+                (0, json!({
+                    "role": "assistant", "content": "previous answer", "model": "old-model",
+                    "usage": {"cost": {"total": 0.25}},
+                    "contextSnapshot": {"promptTokens": 11},
+                }), "2026-10-06T00:00:00Z"),
+                (1000, json!({
+                    "role": "assistant", "content": content, "model": "latest-model",
+                    "usage": {"input": 12, "output": 5, "totalTokens": 17, "cost": {"total": 0.5}},
+                    "contextSnapshot": {"promptTokens": 23}, "ttft": 10, "duration": 30,
+                }), "2026-10-06T00:00:01Z"),
+            ] {
+                normalize_omp(driver, &json!({"type": "message", "message": message}),
+                    sequence, timestamp, &mut items);
+            }
+            let owner = &items.last().unwrap()["body"]["blocks"][0];
+            assert_eq!(owner["kind"], "tool_call");
+            assert_eq!(owner["metadata"]["usage"]["total"], 17);
+            assert_eq!(owner["metadata"]["ttft_ms"], 10);
+            assert_eq!(owner["metadata"]["duration_ms"], 30);
+            // Match the native header's newest-first 200-item window: the latest
+            // message spans 202 entries, so its first projected blocks are absent.
+            items.reverse();
+            let head = &items[..200];
+            assert_eq!(head.len(), 200);
+            assert!(head.iter().all(|item| item["sequence"].as_u64().unwrap() > 1001));
+            let header = crate::conversation_header::derive(head, true);
+            assert_eq!(header["cost"]["value"], json!({"usd": 0.5, "window": true}));
+            assert_eq!(header["model"]["value"], "latest-model");
+            assert_eq!(
+                header["context"]["value"],
+                json!({"tokens": 23, "window": null})
+            );
+            for field in ["cost", "model", "context"] {
+                assert_eq!(header[field]["as_of"], "2026-10-06T00:00:01Z");
+            }
+        }
+    }
+
+    #[test]
+    fn omp_parity_fixture_projects_all_views_without_losing_native_payloads() {
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
+            let mut items = Vec::new();
+            for (index, line) in include_str!("../fixtures/native-records/omp-parity.jsonl")
+                .lines()
+                .enumerate()
+            {
+                let record: Value = serde_json::from_str(line).unwrap();
+                let first = items.len();
+                normalize_omp(
+                    driver,
+                    &record,
+                    index as u64 * 100,
+                    "2026-10-06T00:00:00Z",
+                    &mut items,
+                );
+                if let Some((_, view, _)) = crate::native_views::omp_record_view(&record) {
+                    let block = &items[first]["body"]["blocks"][0];
+                    assert_eq!(block["payload"]["raw"], record);
+                    assert_eq!(block["view"], view);
+                }
+                if record.pointer("/message/role").and_then(Value::as_str) == Some("toolResult") {
+                    assert_eq!(
+                        items.last().unwrap()["body"]["content"],
+                        record["message"]["content"]
+                    );
+                    assert_eq!(
+                        items.last().unwrap()["body"]["blocks"][0]["payload"]["raw"],
+                        record
+                    );
+                }
+                if let Some(parts) = record.pointer("/message/content").and_then(Value::as_array) {
+                    for part in parts.iter().filter(|part| part["type"] == "toolCall") {
+                        let call = items[first..]
+                            .iter()
+                            .find(|item| item["type"] == "tool_call")
+                            .unwrap();
+                        assert_eq!(call["body"]["arguments"], part["arguments"]);
+                    }
+                }
+            }
+            let pairs: std::collections::BTreeSet<_> = items
+                .iter()
+                .flat_map(|item| item["body"]["blocks"].as_array().into_iter().flatten())
+                .filter_map(|block| {
+                    Some((block["kind"].as_str()?, block["view"]["type"].as_str()?))
+                })
+                .collect();
+            for expected in [
+                ("tool_call", "bash"),
+                ("tool_call", "edit"),
+                ("tool_call", "write"),
+                ("tool_call", "read"),
+                ("tool_call", "search"),
+                ("tool_call", "todo"),
+                ("tool_call", "ask"),
+                ("tool_call", "task"),
+                ("tool_call", "hub"),
+                ("tool_call", "eval"),
+                ("tool_call", "generic"),
+                ("tool_output", "bash"),
+                ("tool_output", "edit"),
+                ("tool_output", "search"),
+                ("tool_output", "todo"),
+                ("tool_output", "ask"),
+                ("tool_output", "task"),
+                ("tool_output", "hub"),
+                ("tool_output", "generic"),
+                ("irc", "irc"),
+                ("job", "job"),
+                ("status", "skill"),
+                ("status", "compaction"),
+                ("status", "model_change"),
+                ("status", "thinking_level"),
+                ("status", "title"),
+                ("status", "session_exit"),
+                ("status", "tool_start"),
+                ("error", "assistant_error"),
+            ] {
+                assert!(
+                    pairs.contains(&expected),
+                    "missing {expected:?} for {driver:?}"
+                );
+            }
+            let blocks: Vec<_> = items
+                .iter()
+                .flat_map(|item| item["body"]["blocks"].as_array().into_iter().flatten())
+                .collect();
+            assert!(
+                blocks
+                    .iter()
+                    .any(|block| block["view"]["type"] == "tool_start"
+                        && block["visibility"] == "internal")
+            );
+            assert!(blocks.iter().any(|block| block["metadata"]["context_tokens"] == 23
+                && block["metadata"]["usage"]["cost_usd"] == 0.01));
+            for kind in ["text", "reasoning"] {
+                assert!(blocks.iter().any(|block| block["kind"] == kind));
+            }
+            assert!(items.iter().any(|item| item["body"]["text"]
+                == "Synthetic extension fallback"
+                && item["body"]["blocks"][0]["kind"] == "text"));
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| item["body"]["text"] == "Synthetic hidden extension")
+            );
+        }
+    }
 
     #[test]
     fn metadata_cache_refreshes_after_a_transcript_changes() {
@@ -3409,6 +5461,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_claude_seat_on_any_account_is_found_by_the_path_claude_gave_its_hook() {
+        let home = tempfile::tempdir().unwrap();
+        // A recorded path must be spelled with no link, and a temporary directory may sit behind one.
+        let base = home.path().canonicalize().unwrap();
+        let line = |id: &str| {
+            format!(
+                r#"{{"sessionId":"{id}","timestamp":"2026-09-24T00:00:00Z","type":"user","message":{{"content":"hello"}}}}"#
+            )
+        };
+        // Two accounts, neither under ~/.claude, in directories st has never heard of.
+        let first = base.join("logins/first/projects/-work");
+        let second = base.join("elsewhere/second-login/projects/-work");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join("on-first.jsonl"), line("on-first")).unwrap();
+        fs::write(second.join("on-second.jsonl"), line("on-second")).unwrap();
+        let find = |id: &str, hint: Option<&Path>, extra: &[PathBuf]| {
+            find_bound_transcript_with(home.path(), ExternalDriver::Claude, id, hint, extra)
+                .unwrap()
+        };
+        // Without the recorded path or a declared login, the default place misses.
+        assert!(find("on-second", None, &[]).is_none());
+        // The recorded path finds it, whichever account wrote it.
+        let hint = second.join("on-second.jsonl");
+        assert_eq!(
+            find("on-second", Some(&hint), &[]).unwrap().transcript,
+            hint
+        );
+        // A declared account's login directory finds a seat whose binding recorded no path.
+        let extra = [
+            base.join("logins/first/projects"),
+            base.join("elsewhere/second-login/projects"),
+        ];
+        assert_eq!(find("on-first", None, &extra).unwrap().transcript, first.join("on-first.jsonl"));
+        assert_eq!(find("on-second", None, &extra).unwrap().transcript, hint);
+        // A recorded path never stands in for a different session, a relative path, or a link.
+        assert!(find("on-first", Some(&hint), &[]).is_none());
+        assert!(find("on-second", Some(Path::new("on-second.jsonl")), &[]).is_none());
+        let link = base.join("link/on-second.jsonl");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&hint, &link).unwrap();
+        assert!(find("on-second", Some(&link), &[]).is_none());
+        // A correctly named file outside any projects directory is not Claude's session file,
+        // even though the binding names both the file and the session.
+        let stray = base.join("stray/-work");
+        fs::create_dir_all(&stray).unwrap();
+        fs::write(stray.join("on-stray.jsonl"), line("on-stray")).unwrap();
+        assert!(find("on-stray", Some(&stray.join("on-stray.jsonl")), &[]).is_none());
+        // A symlinked parent directory is followed by an open but not by a recorded path, even
+        // when the spelled path looks like <config>/projects/<cwd>/<session>.jsonl.
+        let aliased = base.join("aliased/projects/-work");
+        fs::create_dir_all(aliased.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&second, &aliased).unwrap();
+        let through_link = aliased.join("on-second.jsonl");
+        assert!(through_link.is_file());
+        assert!(find("on-second", Some(&through_link), &[]).is_none());
+    }
+
     #[cfg(target_os = "linux")]
     fn path_executable(name: &str) -> PathBuf {
         std::env::var_os("PATH")
@@ -3468,139 +5579,22 @@ mod tests {
     }
 
     #[test]
-    fn omp_images_keep_safe_identity_and_typed_unavailability_without_pixels() {
-        let reference = format!("blob:sha256:{}", "a".repeat(64));
-        let image = json!({"type":"image","data":reference,"mimeType":"image/webp","width":640,"height":480});
-        let mut items = Vec::new();
-        normalize_omp(ExternalDriver::Omp, &json!({
-            "type":"message","id":"image-message","message":{"role":"user","content":[image.clone()]}
-        }), 0, "", &mut items);
-        let notice = items.iter().find(|item| item["type"] == "error").unwrap();
-        assert_eq!(notice["body"]["code"], "native_image_unavailable");
-        assert_eq!(notice["body"]["details"]["native_ref"], reference);
-        assert_eq!(notice["body"]["details"]["mime_type"], "image/webp");
-        assert_eq!(notice["body"]["details"]["availability"], "unavailable");
-        assert_eq!(notice["body"]["details"]["reason"], "native_blob_not_fetchable");
-        assert_eq!(notice["body"]["details"]["width"], 640);
-        assert_eq!(notice["body"]["details"]["height"], 480);
-
-        for data in ["planted-image-bytes", "https://user:secret@example.invalid/image", "blob:sha256:secret"] {
-            items.clear();
-            normalize_omp(ExternalDriver::Omp, &json!({
-                "type":"message","id":"image-tool","message":{
-                    "role":"toolResult","toolCallId":"image-call","isError":false,
-                    "content":[{"type":"text","text":"kept"},{"type":"image","data":data,"mimeType":"image/png"}]
-                }
-            }), 0, "", &mut items);
-            let result = items.iter().find(|item| item["type"] == "tool_result").unwrap();
-            assert_eq!(result["body"]["call_id"], "image-call");
-            assert_eq!(result["body"]["content"][0]["text"], "kept");
-            assert_eq!(result["body"]["content"][1]["_tag"], "OmpImage");
-            assert_eq!(result["body"]["content"][1]["availability"], "withheld");
-            assert_eq!(result["body"]["content"][1]["mime_type"], "image/png");
-            assert!(!serde_json::to_string(&items).unwrap().contains(data));
-        }
-    }
-
-    #[test]
-    fn omp_nested_result_images_withhold_bytes_and_unknown_mime() {
-        let mut items = Vec::new();
-        normalize_omp(ExternalDriver::Omp, &json!({
-            "type":"message","id":"nested-image","message":{"role":"tool","content":[{
-                "type":"toolResult","toolCallId":"nested-call","content":[{
-                    "type":"image","data":"planted-image-bytes","mimeType":"planted-mime-secret"
-                }]
-            }]}
-        }), 0, "", &mut items);
-        let result = items.iter().find(|item| item["type"] == "tool_result").unwrap();
-        assert_eq!(result["body"]["content"][0]["mime_availability"], "unknown");
-        assert_eq!(result["body"]["content"][0]["reason"], "image_payload_not_authorized");
-        assert!(!serde_json::to_string(&items).unwrap().contains("planted-"));
-    }
-
-    #[test]
-    fn omp_images_reject_malformed_direct_refs_and_oversized_dimensions() {
-        let canonical = format!("blob:sha256:{}", "a".repeat(64));
-        for reference in [
-            format!("blob:sha256:{}", "A".repeat(64)),
-            format!("blob:sha256:{}", "a".repeat(63)),
-            format!("blob:sha256:{}", "a".repeat(65)),
-            format!("{canonical}trailing-data"),
-            format!("blob:sha256:{}", "é".repeat(32)),
-            "data:image/png;base64,planted-pixels".into(),
-        ] {
+    fn native_images_keep_original_sources_for_owner_fetch() {
+        let part = json!({"type":"image","data":"data:image/png;base64,AAAA","mimeType":"image/png","width":70000});
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
             let mut items = Vec::new();
-            normalize_omp(ExternalDriver::Omp, &json!({
-                "type":"message","id":"malformed-image","message":{"role":"user","content":[{
-                    "type":"image","data":reference,"mimeType":"planted-mime",
-                    "width":9_007_199_254_740_992_u64,"height":65_536
-                }]}
-            }), 0, "", &mut items);
-            let details = &items.iter().find(|item| item["type"] == "error").unwrap()["body"]["details"];
-            assert_eq!(details["availability"], "withheld");
-            assert_eq!(details["reason"], "image_payload_not_authorized");
-            assert!(details.get("native_ref").is_none());
-            assert!(details.get("width").is_none());
-            assert!(details.get("height").is_none());
-            assert!(!serde_json::to_string(&items).unwrap().contains(&reference));
+            normalize_omp(
+                driver,
+                &json!({"type":"message","id":"image","message":{"role":"user","content":[part.clone()]}}),
+                0,
+                "",
+                &mut items,
+            );
+            let block = &items[1]["body"]["blocks"][0];
+            assert_eq!(block["kind"], "image");
+            assert_eq!(block["payload"], part);
+            assert_eq!(items[1]["body"]["text"], "[image · load from owner]");
         }
-        let details = omp_image_availability(&json!({
-            "type":"image","data":canonical,"width":65_535,"height":480
-        }));
-        assert_eq!(details["width"], 65_535);
-        assert_eq!(details["height"], 480);
-    }
-
-    #[test]
-    fn omp_images_withhold_unrecognized_and_single_object_payloads() {
-        let payload = "data:image/png;base64,planted-pixels";
-        for block in [
-            json!({"type":"input_image","image_url":payload}),
-            json!({"type":"image_url","image_url":{"url":payload}}),
-            json!({"type":"future_block","source":{"data":payload}}),
-        ] {
-            for content in [json!([block.clone()]), block.clone()] {
-                let mut items = Vec::new();
-                normalize_omp(ExternalDriver::Omp, &json!({
-                    "type":"message","id":"unknown-image","message":{"role":"user","content":content}
-                }), 0, "", &mut items);
-                let details = &items.iter().find(|item| item["type"] == "error").unwrap()["body"]["details"];
-                assert_eq!(details["_tag"], "OmpImage");
-                assert_eq!(details["availability"], "withheld");
-                assert!(!serde_json::to_string(&items).unwrap().contains(payload));
-            }
-            for content in [json!([{"type":"text","text":"kept"},block.clone()]), block.clone()] {
-                let mut items = Vec::new();
-                normalize_omp(ExternalDriver::Omp, &json!({
-                    "type":"message","id":"unknown-tool-image","message":{
-                        "role":"toolResult","toolCallId":"image-call","content":content
-                    }
-                }), 0, "", &mut items);
-                let result = &items.iter().find(|item| item["type"] == "tool_result").unwrap()["body"]["content"];
-                let placeholder = if result.is_array() {
-                    assert_eq!(result[0]["text"], "kept");
-                    &result[1]
-                } else {
-                    result
-                };
-                assert_eq!(placeholder["_tag"], "OmpImage");
-                assert_eq!(placeholder["availability"], "withheld");
-                assert!(!serde_json::to_string(&items).unwrap().contains(payload));
-            }
-        }
-    }
-
-    #[test]
-    fn pi_images_remain_plain_image_placeholders() {
-        let mut items = Vec::new();
-        normalize_omp(ExternalDriver::Pi, &json!({
-            "type":"message","id":"pi-image","message":{"role":"user","content":[{
-                "type":"image","data":"planted-pixels","mimeType":"image/png"
-            }]}
-        }), 0, "", &mut items);
-        let content = items.iter().find(|item| item["type"] == "content").unwrap();
-        assert_eq!(content["body"]["text"], "[image]");
-        assert!(!serde_json::to_string(&items).unwrap().contains("planted-pixels"));
     }
 
     #[test]
@@ -3608,10 +5602,22 @@ mod tests {
         let fixture = omp_tool_result_fixture();
         let mut items = Vec::new();
         for (offset, entry) in fixture[..2].iter().enumerate() {
-            normalize_omp(ExternalDriver::Omp, entry, offset as u64 * 16, "", &mut items);
+            normalize_omp(
+                ExternalDriver::Omp,
+                entry,
+                offset as u64 * 16,
+                "",
+                &mut items,
+            );
         }
-        let call = items.iter().find(|item| item["type"] == "tool_call").unwrap();
-        let result = items.iter().find(|item| item["type"] == "tool_result").unwrap();
+        let call = items
+            .iter()
+            .find(|item| item["type"] == "tool_call")
+            .unwrap();
+        let result = items
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
         assert_eq!(result["body"]["call_id"], call["body"]["call_id"]);
         assert_eq!(result["body"]["status"], "success");
         assert_eq!(result["body"]["content"], fixture[1]["message"]["content"]);
@@ -3623,13 +5629,345 @@ mod tests {
         let fixture = omp_tool_result_fixture();
         let mut items = Vec::new();
         for (offset, entry) in fixture[2..].iter().enumerate() {
-            normalize_omp(ExternalDriver::Omp, entry, offset as u64 * 16, "", &mut items);
+            normalize_omp(
+                ExternalDriver::Omp,
+                entry,
+                offset as u64 * 16,
+                "",
+                &mut items,
+            );
         }
-        let call = items.iter().find(|item| item["type"] == "tool_call").unwrap();
-        let result = items.iter().find(|item| item["type"] == "tool_result").unwrap();
+        let call = items
+            .iter()
+            .find(|item| item["type"] == "tool_call")
+            .unwrap();
+        let result = items
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
         assert_eq!(result["body"]["call_id"], call["body"]["call_id"]);
         assert_eq!(result["body"]["status"], "error");
         assert_eq!(result["body"]["content"], fixture[3]["message"]["content"]);
+    }
+
+    #[test]
+    fn pi_and_omp_tool_result_blocks_preserve_native_details_and_source_records() {
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
+            for details in [
+                json!({"wallTimeMs": 12.75, "timeoutSeconds": 0, "futureTimeNs": 0.125}),
+                json!({"wallTimeMs": 0, "timeoutSeconds": 0.125, "future": {"unit": "ticks", "value": 4.5}}),
+            ] {
+                for nested_kind in [None, Some("toolResult"), Some("tool_result")] {
+                    let mut entry = omp_tool_result_fixture()[1].clone();
+                    entry["message"]["arguments"] = json!({"timeoutSeconds": 999});
+                    if let Some(kind) = nested_kind {
+                        entry["message"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("toolCallId");
+                        entry["message"]["content"] = json!([{
+                            "type": kind, "call_id": "nested",
+                            "content": "finished", "details": details
+                        }]);
+                    } else {
+                        entry["message"]["details"] = details.clone();
+                    }
+                    let mut items = Vec::new();
+                    normalize_native_line(driver, &entry, 0, "", &mut items);
+                    let result = items
+                        .iter()
+                        .find(|item| item["type"] == "tool_result")
+                        .unwrap();
+                    assert_eq!(result["body"]["blocks"][0]["kind"], "tool_output");
+                    assert_eq!(result["body"]["blocks"][0]["metadata"], details);
+                    assert!(result["body"].get("metadata").is_none());
+                    let source = items
+                        .iter()
+                        .flat_map(|item| item["body"]["blocks"].as_array().unwrap())
+                        .find(|block| block["kind"] == "source_record")
+                        .unwrap();
+                    assert_eq!(source["payload"]["raw"], entry);
+                    assert!(source.get("metadata").is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_tool_result_details_merge_without_inventing_absent_timing() {
+        let mut entry = omp_tool_result_fixture()[1].clone();
+        entry["message"].as_object_mut().unwrap().remove("details");
+        entry["message"]["arguments"] = json!({"timeoutSeconds": 999});
+        let mut items = Vec::new();
+        normalize_native_line(ExternalDriver::Omp, &entry, 0, "", &mut items);
+        assert!(
+            items.last().unwrap()["body"]["blocks"][0]
+                .get("metadata")
+                .is_none()
+        );
+        items.last_mut().unwrap()["body"]["blocks"][0]["metadata"] =
+            json!({"existing": true, "wallTimeMs": 999});
+        entry["message"]["details"] =
+            json!({"wallTimeMs": 0, "timeoutSeconds": 0.125, "future": "unchanged"});
+        let source_before = items[0]["body"]["blocks"].clone();
+        preserve_omp_result_timing(&mut items, &entry["message"]);
+        assert_eq!(
+            items.last().unwrap()["body"]["blocks"][0]["metadata"],
+            json!({"existing": true, "wallTimeMs": 0, "timeoutSeconds": 0.125, "future": "unchanged"})
+        );
+        assert_eq!(items[0]["body"]["blocks"], source_before);
+    }
+
+    #[test]
+    fn omp_failed_assistant_record_appends_typed_error_block() {
+        let record = json!({
+            "type": "message",
+            "id": "err-one",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "synthetic planning note"}],
+                "api": "openai-codex-responses",
+                "provider": "openai-codex",
+                "model": "gpt-5.6-sol",
+                "stopReason": "error",
+                "errorId": 135168,
+                "errorMessage": "synthetic socket closed",
+                "retryRecovery": {
+                    "kind": "auto-retry",
+                    "status": "recovered",
+                    "attempt": 1,
+                    "recoveredAt": "2026-01-01T00:00:20Z",
+                    "recovery": "plain",
+                    "note": "error; retried",
+                    "supersededBy": {
+                        "timestamp": 1789031579362i64,
+                        "responseId": "resp_synthetic",
+                        "provider": "openai-codex",
+                        "model": "gpt-5.6-sol"
+                    }
+                }
+            }
+        });
+        for (driver, source_type) in [
+            (ExternalDriver::Omp, "omp/assistant_error"),
+            (ExternalDriver::Pi, "pi/assistant_error"),
+        ] {
+            let mut items = Vec::new();
+            normalize_omp(driver, &record, 16, "", &mut items);
+            assert_eq!(items.len(), 3);
+            // Prior content and its native block identity are untouched.
+            assert_eq!(items[1]["type"], "content");
+            assert_eq!(items[1]["body"]["blocks"][0]["id"], "native-17/0");
+            let error = items.last().unwrap();
+            assert_eq!(error["type"], "content");
+            assert_eq!(error["role"], "assistant");
+            assert_eq!(error["sequence"], 18);
+            let block = &error["body"]["blocks"][0];
+            assert_eq!(block["id"], "native-18/0");
+            assert_eq!(block["kind"], "error");
+            assert_eq!(block["source_type"], source_type);
+            assert_eq!(block["payload"], json!({"body_ref": true}));
+            assert_eq!(block["view"]["type"], "assistant_error");
+            assert_eq!(block["view"]["status"], "recovered");
+            assert_eq!(block["view"]["presentation"], "compact-recovered");
+            assert_eq!(block["view"]["is_error"], false);
+            assert_eq!(block["view"]["label"], "error; retried");
+            assert_eq!(block["view"]["message"], "synthetic socket closed");
+            assert_eq!(block["view"]["stop_reason"], "error");
+            assert_eq!(block["view"]["error_id"], 135168);
+            assert_eq!(block["view"]["api"], "openai-codex-responses");
+            assert_eq!(block["view"]["provider"], "openai-codex");
+            assert_eq!(block["view"]["model"], "gpt-5.6-sol");
+            assert_eq!(block["view"]["retry"]["kind"], "auto-retry");
+            assert_eq!(block["view"]["retry"]["status"], "recovered");
+            assert_eq!(block["view"]["retry"]["attempt"], 1);
+            assert_eq!(block["view"]["retry"]["recovery"], "plain");
+            assert_eq!(block["view"]["retry"]["note"], "error; retried");
+            assert_eq!(
+                block["view"]["retry"]["recovered_at"],
+                "2026-01-01T00:00:20Z"
+            );
+            assert_eq!(
+                block["view"]["retry"]["superseded_by"],
+                json!({
+                    "timestamp": 1789031579362i64,
+                    "response_id": "resp_synthetic",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.6-sol"
+                })
+            );
+            assert!(
+                block["view"]["retry"]["superseded_by"]
+                    .get("responseId")
+                    .is_none()
+            );
+            assert_eq!(error["body"]["text"], "[retry recovered] error; retried");
+        }
+    }
+
+    #[test]
+    fn omp_terminal_assistant_error_renders_in_full() {
+        let mut record = json!({
+            "type": "message",
+            "id": "err-two",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": "synthetic boom"
+            }
+        });
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+        let block = &items.last().unwrap()["body"]["blocks"][0];
+        assert_eq!(block["view"]["status"], "failed");
+        assert_eq!(block["view"]["presentation"], "full");
+        assert_eq!(block["view"]["is_error"], true);
+        assert_eq!(block["view"]["label"], "synthetic boom");
+        assert_eq!(block["view"]["message"], "synthetic boom");
+        assert!(block["view"]["retry"].is_null());
+        assert!(block["view"]["provider"].is_null());
+        assert_eq!(
+            items.last().unwrap()["body"]["text"],
+            "[error] synthetic boom"
+        );
+
+        record["message"]
+            .as_object_mut()
+            .unwrap()
+            .remove("errorMessage");
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+        assert_eq!(
+            items.last().unwrap()["body"]["blocks"][0]["view"]["label"],
+            "Error"
+        );
+    }
+
+    #[test]
+    fn omp_superseded_retry_error_is_typed_but_not_an_error() {
+        let record = json!({
+            "type": "message",
+            "id": "err-three",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": "synthetic rate limited",
+                "retryRecovery": {
+                    "kind": "auto-retry",
+                    "status": "superseded",
+                    "attempt": 2,
+                    "recovery": "model",
+                    "note": "switched model; retried"
+                }
+            }
+        });
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+        let block = &items.last().unwrap()["body"]["blocks"][0];
+        assert_eq!(block["kind"], "error");
+        assert_eq!(block["view"]["status"], "superseded");
+        assert_eq!(block["view"]["presentation"], "none");
+        assert_eq!(block["view"]["is_error"], false);
+        assert_eq!(block["view"]["label"], "");
+        assert_eq!(block["view"]["message"], "synthetic rate limited");
+        assert_eq!(block["view"]["retry"]["status"], "superseded");
+        assert_eq!(block["view"]["retry"]["attempt"], 2);
+        assert!(block["view"]["retry"]["superseded_by"].is_null());
+        assert_eq!(items.last().unwrap()["body"]["text"], "");
+    }
+
+    #[test]
+    fn omp_aborted_assistant_errors_match_native_presentation_rules() {
+        let cases = [
+            (
+                json!({"stopReason":"aborted","errorMessage":"__omp.silent_abort__"}),
+                None,
+            ),
+            (
+                json!({"stopReason":"aborted","errorMessage":"Interrupted by user"}),
+                None,
+            ),
+            (
+                json!({"stopReason":"aborted","errorId": 0x0400_0000i64, "errorMessage":"synthetic"}),
+                None,
+            ),
+            (
+                json!({"stopReason":"aborted","errorId": 0x0200_0000i64}),
+                None,
+            ),
+            (json!({"stopReason":"aborted"}), Some("Operation aborted")),
+            (
+                json!({"stopReason":"aborted","errorMessage":"Request was aborted"}),
+                Some("Operation aborted"),
+            ),
+            (
+                json!({"stopReason":"aborted","errorMessage":"synthetic context limit"}),
+                Some("synthetic context limit"),
+            ),
+            (
+                json!({"errorMessage":"synthetic late failure"}),
+                Some("synthetic late failure"),
+            ),
+            (json!({"stopReason":"stop"}), None),
+            (json!({}), None),
+        ];
+        for (fields, expected) in cases {
+            let record = json!({
+                "type": "message",
+                "id": "abort-one",
+                "message": {"role": "assistant", "content": []}
+            });
+            let mut record = record;
+            let message = record["message"].as_object_mut().unwrap();
+            for (key, value) in fields.as_object().unwrap() {
+                message.insert(key.clone(), value.clone());
+            }
+            let mut items = Vec::new();
+            normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+            match expected {
+                None => assert_eq!(items.len(), 1, "no error block for {fields}"),
+                Some(label) => {
+                    let block = &items.last().unwrap()["body"]["blocks"][0];
+                    assert_eq!(block["view"]["status"], "failed", "for {fields}");
+                    assert_eq!(block["view"]["presentation"], "full", "for {fields}");
+                    assert_eq!(block["view"]["is_error"], true, "for {fields}");
+                    assert_eq!(block["view"]["label"], label, "for {fields}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn omp_assistant_error_block_keeps_source_record_and_native_identity() {
+        let record = json!({
+            "type": "message",
+            "id": "err-four",
+            "message": {
+                "role": "assistant",
+                "content": "synthetic partial answer",
+                "stopReason": "error",
+                "errorMessage": "synthetic socket closed"
+            }
+        });
+        let mut items = Vec::new();
+        normalize_native_line(ExternalDriver::Omp, &record, 16, "", &mut items);
+        // Source record stays on the first item; the error block is separate.
+        assert_eq!(items[0]["body"]["blocks"][0]["kind"], "source_record");
+        assert_eq!(items[0]["body"]["blocks"][0]["payload"]["raw"], record);
+        assert_eq!(items[0]["body"]["blocks"][0]["visibility"], "internal");
+        assert_eq!(items[1]["body"]["blocks"][0]["id"], "native-17/0");
+        assert_eq!(items[1]["body"]["blocks"][0]["kind"], "text");
+        let error = items.last().unwrap();
+        assert_eq!(error["sequence"], 18);
+        assert_eq!(error["body"]["blocks"][0]["kind"], "error");
+        assert_eq!(
+            error["body"]["blocks"][0]["source_type"],
+            "omp/assistant_error"
+        );
+        assert_eq!(error["body"]["text"], "[error] synthetic socket closed");
     }
 
     #[test]
@@ -3638,12 +5976,18 @@ mod tests {
         let message = entry["message"].as_object_mut().unwrap();
         let call_id = message.remove("toolCallId").unwrap();
         let content = message.remove("content").unwrap();
-        message.insert("content".to_owned(), json!([{
-            "type": "toolResult", "toolCallId": call_id, "content": content
-        }]));
+        message.insert(
+            "content".to_owned(),
+            json!([{
+                "type": "toolResult", "toolCallId": call_id, "content": content
+            }]),
+        );
         let mut items = Vec::new();
         normalize_omp(ExternalDriver::Omp, &entry, 0, "", &mut items);
-        let result = items.iter().find(|item| item["type"] == "tool_result").unwrap();
+        let result = items
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
         assert_eq!(result["body"]["call_id"], call_id);
         assert_eq!(result["body"]["status"], "success");
         assert_eq!(result["body"]["content"], content);
@@ -4293,7 +6637,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_still_being_written_is_skipped_silently_until_complete() {
+    fn a_record_still_being_written_is_preserved_until_complete() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("session.jsonl");
         let complete = claude_line("assistant", "2026-09-30T10:00:01Z", "partial answer");
@@ -4307,13 +6651,29 @@ mod tests {
 
         let writing = normalized_timeline(&session).unwrap();
         assert_eq!(texts(&writing), ["question"]);
-        assert!(writing.iter().all(|item| item["type"] != "error"));
+        let partial = writing
+            .iter()
+            .find(|item| item["body"]["code"] == "native-line-unreadable")
+            .unwrap();
+        assert_eq!(
+            BASE64
+                .decode(
+                    partial["body"]["blocks"][0]["payload"]["bytes"]
+                        .as_str()
+                        .unwrap()
+                )
+                .unwrap(),
+            &complete.as_bytes()[..complete.len() / 2]
+        );
+        let locator = serde_json::from_value(partial["_source"].clone()).unwrap();
+        assert!(normalized_record(&session, &locator).is_ok());
 
         fs::write(&path, format!("{first}\n{complete}\n")).unwrap();
         let written = normalized_timeline(&session).unwrap();
         assert_eq!(texts(&written), ["question", "partial answer"]);
         // Entries already seen keep their identity when the record completes.
-        assert_eq!(writing[..], written[..writing.len()]);
+        assert_eq!(writing[..2], written[..2]);
+        assert!(normalized_record(&session, &locator).is_err());
     }
 
     #[test]
@@ -4377,12 +6737,14 @@ mod tests {
         }
         let labels = texts(&items);
         assert!(labels[0].starts_with("[unrecognized claude entry `brand-new-kind`]"));
-        assert!(labels[1].starts_with("[unrecognized claude entry without a type]"));
-        assert!(labels[2].starts_with("[unrecognized claude content block `hologram`]"));
-        assert_eq!(labels[3], "[image]");
-        assert_eq!(labels[4], "visible");
-        assert_eq!(labels.len(), 5);
-        assert!(!labels.iter().any(|text| text.contains("private")));
+        assert!(labels[2].starts_with("[unrecognized claude entry without a type]"));
+        assert_eq!(labels[3], "[reasoning]\nprivate");
+        assert!(labels[4].starts_with("[unrecognized claude content block `hologram`]"));
+        assert_eq!(labels[5], "[image · load from owner]");
+        assert_eq!(labels[6], "visible");
+        assert_eq!(labels.len(), 7);
+        assert!(labels[1].starts_with("[unrecognized claude entry `file-history-snapshot`]"));
+        assert!(labels.iter().any(|text| text.contains("private")));
         for item in &items {
             if item["body"]["text"]
                 .as_str()
@@ -4400,17 +6762,71 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognized_record_excerpt_is_bounded() {
+    fn omp_developer_reminders_are_system_text_without_unknown_blocks() {
+        let text = "<system-reminder>\nSynthetic incomplete todo reminder.\n</system-reminder>";
+        let mut record = json!({
+            "type": "message",
+            "message": {
+                "role": "developer",
+                "attribution": {"source": "harness"},
+                "timestamp": "2026-10-06T12:00:00Z",
+                "content": [{"type": "text", "text": text}]
+            }
+        });
         let mut items = Vec::new();
-        normalize_claude(
-            &json!({"type":"brand-new-kind","blob":"é".repeat(MAX_TIMELINE_VALUE_BYTES)}),
+        normalize_omp(ExternalDriver::Omp, &record, 16, &timestamp(0), &mut items);
+        assert!(items.iter().all(|item| item["role"] == "system"));
+        let blocks: Vec<_> = items
+            .iter()
+            .flat_map(|item| item["body"]["blocks"].as_array().into_iter().flatten())
+            .collect();
+        assert!(blocks.iter().all(|block| block["kind"] != "unknown"));
+        assert!(blocks.iter().any(|block| block["kind"] == "text"));
+        assert!(items.iter().any(|item| item["body"]["text"] == text));
+
+        // Native attribution is handled exactly as it is for other OMP system messages.
+        record["message"]["role"] = json!("system");
+        let mut system_items = Vec::new();
+        normalize_omp(
+            ExternalDriver::Omp,
+            &record,
             16,
             &timestamp(0),
-            &mut items,
+            &mut system_items,
         );
-        let text = items[0]["body"]["text"].as_str().unwrap();
-        assert!(text.len() < MAX_UNRECOGNIZED_BYTES + 128, "{}", text.len());
-        assert!(text.ends_with('…'));
+        assert_eq!(items, system_items);
+    }
+
+    #[test]
+    fn future_native_roles_use_legacy_system_envelopes_and_keep_raw_attribution() {
+        let stamp = timestamp(0);
+        let value = json!({"type":"message","message":{"role":"future-role","content":[{"type":"text","text":"invented-token"}]}});
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &value, 16, &stamp, &mut items);
+        assert_eq!(items[0]["role"], "system");
+        assert_eq!(items[0]["body"]["blocks"][0]["payload"]["raw"], value);
+        let mut sequence = 1;
+        let mut items = Vec::new();
+        let part = json!({"type":"text","text":"invented-token"});
+        normalize_opencode_part(&part, &mut sequence, &stamp, "future-role", &mut items).unwrap();
+        assert_eq!(items[0]["role"], "system");
+        assert_eq!(
+            items[0]["body"]["blocks"][0]["payload"],
+            json!({"raw":part,"source_role":"future-role"})
+        );
+        assert_ne!(
+            native_message_digest(b"message-one", Some(1), &json!({"role":"future-role"})),
+            native_message_digest(b"message-one", Some(1), &json!({"role":"another-role"}))
+        );
+    }
+
+    #[test]
+    fn unknown_json_is_lossless_before_transport_bounding() {
+        let value = json!({"type":"brand-new-kind","blob":"é".repeat(8192),"nested":{"token":"invented-token"}});
+        let mut items = Vec::new();
+        normalize_claude(&value, 16, &timestamp(0), &mut items);
+        assert_eq!(items[0]["body"]["blocks"][0]["kind"], "unknown");
+        assert_eq!(items[0]["body"]["blocks"][0]["payload"]["raw"], value);
     }
 
     #[test]
@@ -4441,10 +6857,11 @@ mod tests {
             &fallback,
             &mut items,
         );
-        assert_eq!(
-            texts(&items),
-            ["a message delivered while busy", "Conversation compacted"]
-        );
+        let labels = texts(&items);
+        assert_eq!(labels[0], "a message delivered while busy");
+        assert!(labels[1].contains("total_tokens_reminder"));
+        assert_eq!(labels[2], "Conversation compacted");
+        assert!(labels[3].contains("turn_duration"));
         assert_eq!(items[1]["role"], "user");
         assert_eq!(items[2]["role"], "system");
     }
@@ -4506,7 +6923,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_codex_records_and_items_are_labelled_and_known_ones_stay_hidden() {
+    fn codex_event_mirrors_and_unknown_records_are_retained_raw() {
         let fallback = timestamp(0);
         let mut items = Vec::new();
         for (sequence, value) in [
@@ -4535,12 +6952,15 @@ mod tests {
             normalize_codex(&value, sequence, &fallback, &mut items);
         }
         let labels = texts(&items);
-        assert!(labels[0].starts_with("[unrecognized codex record `new_record_kind`]"));
-        assert!(labels[1].starts_with("[unrecognized codex response item `web_search_call`]"));
-        assert_eq!(labels[2], "[image]");
-        assert!(labels[3].starts_with("[unrecognized codex message part `input_hologram`]"));
-        assert_eq!(labels[4], "typed");
-        assert_eq!(labels.len(), 5);
+        assert!(labels[1].starts_with("[reasoning]"));
+        assert!(labels[2].starts_with("[unrecognized codex record `new_record_kind`]"));
+        assert!(labels[3].starts_with("[unrecognized codex response item `web_search_call`]"));
+        assert_eq!(labels[4], "[image · load from owner]");
+        assert!(labels[5].starts_with("[unrecognized codex message part `input_hologram`]"));
+        assert_eq!(labels[6], "typed");
+        assert_eq!(labels.len(), 7);
+        assert!(labels[0].contains("event_msg"));
+        assert!(labels[0].contains("dup"));
         assert_unique_ids(&items);
     }
 
@@ -4574,12 +6994,14 @@ mod tests {
             normalize_omp(ExternalDriver::Omp, &value, sequence, &fallback, &mut items);
         }
         let labels = texts(&items);
-        assert_eq!(labels[0], "[omp compaction]\nearlier work");
-        assert_eq!(labels[1], "$ ls\nfile");
-        assert!(labels[2].starts_with("[unrecognized omp entry `future_kind`]"));
-        assert!(labels[3].starts_with("[unrecognized omp content block `sparkle`]"));
-        assert_eq!(labels[4], "answer");
-        assert_eq!(labels.len(), 5);
+        assert!(labels[0].contains("model_change"));
+        assert_eq!(labels[1], "[omp compaction]\nearlier work");
+        assert_eq!(labels[2], "$ ls\nfile");
+        assert!(labels[3].starts_with("[unrecognized omp entry `future_kind`]"));
+        assert_eq!(labels[4], "[reasoning]\nprivate");
+        assert!(labels[5].starts_with("[unrecognized omp content block `sparkle`]"));
+        assert_eq!(labels[6], "answer");
+        assert_eq!(labels.len(), 7);
         let shell = items
             .iter()
             .find(|item| item["body"]["text"] == "$ ls\nfile")
@@ -4588,7 +7010,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_rows_that_cannot_be_decoded_cost_only_themselves() {
+    fn opencode_rows_preserve_null_unknown_and_malformed_data() {
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("opencode.db");
         let connection = Connection::open(&database).unwrap();
@@ -4617,8 +7039,9 @@ mod tests {
         let timeline = normalized_timeline(&session).unwrap();
 
         let labels = texts(&timeline);
-        assert!(labels[0].starts_with("[unrecognized opencode part `hologram`]"));
-        assert_eq!(labels[1..], ["kept", "[file: notes.md]"]);
+        assert!(labels[0].starts_with("[unrecognized opencode part"));
+        assert!(labels[1].starts_with("[unrecognized opencode part `hologram`]"));
+        assert_eq!(labels[2..], ["kept", "[file: notes.md]"]);
         assert_eq!(
             timeline
                 .iter()
@@ -4629,8 +7052,17 @@ mod tests {
         assert!(
             timeline
                 .iter()
-                .any(|item| item["body"]["code"] == "native-rows-unreadable")
+                .all(|item| item["body"]["code"] != "native-rows-unreadable")
         );
+        for item in &timeline {
+            let locator = serde_json::from_value(item["_source"].clone()).unwrap();
+            let fetched = normalized_record(&session, &locator).unwrap();
+            assert!(
+                fetched
+                    .iter()
+                    .any(|record| record["id"] == item["id"] && record["body"] == item["body"])
+            );
+        }
         assert_unique_ids(&timeline);
     }
 
@@ -4764,5 +7196,1229 @@ mod tests {
         exact.exact_session = true;
         terminate_exact_process(ExternalDriver::Codex, &exact).unwrap();
         assert!(child.wait().unwrap().code().is_none());
+    }
+    #[test]
+    fn every_native_record_is_preserved_unless_the_omission_table_justifies_it() {
+        let stamp = timestamp(0);
+        let fixtures = [
+            (
+                ExternalDriver::Codex,
+                include_str!("../fixtures/native-records/codex.jsonl"),
+            ),
+            (
+                ExternalDriver::Claude,
+                include_str!("../fixtures/native-records/claude.jsonl"),
+            ),
+            (
+                ExternalDriver::Omp,
+                include_str!("../fixtures/omp-resume/run4-08-after-retry.jsonl"),
+            ),
+            (
+                ExternalDriver::Pi,
+                include_str!("../fixtures/omp-resume/run4-08-after-retry.jsonl"),
+            ),
+            (
+                ExternalDriver::Omp,
+                include_str!("../fixtures/omp-tool-results.jsonl"),
+            ),
+        ];
+        for (driver, fixture) in fixtures {
+            let mut records = fixture
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            // Unknown types are deliberate probes, not invented cross-harness known types.
+            records.push(json!({"type":"future-kind","raw":"fixture-unknown"}));
+            if matches!(driver, ExternalDriver::Omp | ExternalDriver::Pi) {
+                records.extend([
+                    json!({"type":"custom_message","display":false,"content":"fixture hidden"}),
+                    json!({"type":"custom_message","display":true,"content":"fixture visible"}),
+                ]);
+            }
+            for record in records {
+                let mut entries = Vec::new();
+                normalize_native_line(driver, &record, 16, &stamp, &mut entries);
+                assert_eq!(
+                    entries.is_empty(),
+                    omission_reason(driver, &record).is_some(),
+                    "{driver:?} {record}"
+                );
+                if !entries.is_empty() {
+                    assert!(
+                        entries
+                            .iter()
+                            .flat_map(|entry| entry["body"]["blocks"].as_array().unwrap())
+                            .any(|block| block["kind"] == "source_record"
+                                && block["payload"]["raw"] == record),
+                        "{driver:?} {record}"
+                    );
+                }
+            }
+        }
+        // Real OpenCode capture: test the native row objects, not the SSE envelope.
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../st-drivers/tests/fixtures/harness-admission/opencode-1.18.34.json"
+        ))
+        .unwrap();
+        let mut part_types = BTreeSet::new();
+        let mut message_count = 0;
+        for event in fixture["events"].as_array().unwrap() {
+            if event["type"] == "message.updated" {
+                let record = &event["properties"]["info"];
+                let encoded = serde_json::to_vec(record).unwrap();
+                let entry = opencode_message_record(b"fixture-id", b"1", &encoded, 16, &stamp);
+                assert!(omission_reason(ExternalDriver::OpenCode, record).is_none());
+                assert_eq!(entry["body"]["blocks"][0]["payload"]["raw"], *record);
+                message_count += 1;
+            } else if event["type"] == "message.part.updated" {
+                let record = &event["properties"]["part"];
+                part_types.insert(record["type"].as_str().unwrap());
+                let mut entries = Vec::new();
+                normalize_opencode_bytes(
+                    &serde_json::to_vec(record).unwrap(),
+                    b"fixture-id",
+                    &mut 16,
+                    &stamp,
+                    "assistant",
+                    &mut entries,
+                )
+                .unwrap();
+                assert_eq!(
+                    entries.is_empty(),
+                    omission_reason(ExternalDriver::OpenCode, record).is_some(),
+                    "OpenCode {record}"
+                );
+                assert!(
+                    entries
+                        .iter()
+                        .flat_map(|entry| entry["body"]["blocks"].as_array().unwrap())
+                        .any(|block| block["kind"] == "source_record"
+                            && block["payload"]["raw"] == *record)
+                );
+            }
+        }
+        assert!(message_count > 0);
+        for kind in ["text", "tool", "step-start", "step-finish"] {
+            assert!(
+                part_types.contains(kind),
+                "real capture must exercise {kind}"
+            );
+        }
+        let unknown = json!({"type":"future-part","payload":"fixture"});
+        let mut entries = Vec::new();
+        normalize_opencode_bytes(
+            &serde_json::to_vec(&unknown).unwrap(),
+            b"fixture-id",
+            &mut 16,
+            &stamp,
+            "assistant",
+            &mut entries,
+        )
+        .unwrap();
+        assert_eq!(entries[0]["body"]["blocks"][0]["kind"], "unknown");
+        assert_eq!(entries[0]["body"]["blocks"][0]["payload"]["raw"], unknown);
+        assert!(
+            omission_reason(ExternalDriver::Codex, &json!({"type":"session_meta"}))
+                .unwrap()
+                .contains("setup header")
+        );
+        assert!(
+            omission_reason(
+                ExternalDriver::Omp,
+                &json!({"type":"custom_message","display":false})
+            )
+            .unwrap()
+            .contains("hidden")
+        );
+    }
+
+    #[test]
+    fn malformed_and_unknown_encoding_lines_preserve_exact_bytes_and_direct_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let bytes = [
+            b"not JSON\n".as_slice(),
+            b"{\"type\":\"user\",\"text\":\"\xff\"}\n",
+            b"\n",
+            b"{\"truncated\":",
+        ];
+        fs::write(&path, bytes.concat()).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        let entries = normalized_timeline(&session).unwrap();
+        assert_eq!(entries.len(), bytes.len());
+        for (entry, original) in entries.iter().zip(bytes) {
+            let payload = &entry["body"]["blocks"][0]["payload"];
+            assert_eq!(
+                BASE64.decode(payload["bytes"].as_str().unwrap()).unwrap(),
+                original
+            );
+            let locator = serde_json::from_value(entry["_source"].clone()).unwrap();
+            assert_eq!(
+                normalized_record(&session, &locator).unwrap()[0]["body"],
+                entry["body"]
+            );
+        }
+    }
+
+    #[test]
+    fn native_owner_window_jsonl_line_over_32_mib_is_not_fetchable() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let mut file = std::io::BufWriter::new(File::create(&path).unwrap());
+        file.write_all(
+            br#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":""#,
+        )
+        .unwrap();
+        std::io::copy(
+            &mut std::io::repeat(b'x').take(MAX_TIMELINE_BYTES + 1),
+            &mut file,
+        )
+        .unwrap();
+        file.write_all(br#""}]}}"#).unwrap();
+        file.flush().unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > MAX_TIMELINE_BYTES);
+
+        let session = transcript_session(ExternalDriver::Omp, &path);
+        let entries = normalized_timeline(&session).unwrap();
+        assert_eq!(entries.len(), 1, "no partial JSON masquerading as a record");
+        let notice = &entries[0];
+        assert_eq!(notice["type"], "truncation");
+        assert_eq!(notice["body"]["fetchable"], false);
+        assert_eq!(notice["body"]["limit_bytes"], MAX_TIMELINE_BYTES);
+        assert!(
+            notice["body"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("not fetchable")
+        );
+        assert!(notice.get("_source").is_none(), "no unusable chunk locator");
+
+        // Finish the oversized line and append a complete harness record. The
+        // read starts inside the huge line and must resume at its next newline.
+        file.write_all(b"\n").unwrap();
+        let later = json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"after the oversized line"}]}});
+        serde_json::to_writer(&mut file, &later).unwrap();
+        file.write_all(b"\n").unwrap();
+        file.flush().unwrap();
+        let entries = normalized_timeline(&session).unwrap();
+        assert_eq!(entries[0]["body"]["fetchable"], false);
+        assert!(texts(&entries).contains(&"after the oversized line"));
+        let entry = entries
+            .iter()
+            .find(|entry| entry["type"] == "content")
+            .unwrap();
+        let locator = serde_json::from_value(entry["_source"].clone()).unwrap();
+        let recovered = normalized_record(&session, &locator)
+            .unwrap()
+            .into_iter()
+            .find(|recovered| recovered["id"] == entry["id"])
+            .unwrap();
+        assert_eq!(recovered["body"], entry["body"]);
+        assert!(serde_json::to_vec(&entries).unwrap().len() < 16 * 1024);
+    }
+
+    #[test]
+    fn native_owner_window_opencode_query_uses_the_harness_index_before_sorting() {
+        let mut db = Connection::open_in_memory().unwrap();
+        // OpenCode v1.18.34's native message index, not an index st installs:
+        // https://github.com/anomalyco/opencode/blob/aec0b9a6d8898f68f923aaf08b7306d931fd9d76/packages/core/src/session/sql.ts#L64-L76
+        db.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);\
+             CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);",
+        )
+        .unwrap();
+        let transaction = db.transaction().unwrap();
+        {
+            let mut insert = transaction
+                .prepare("INSERT INTO message VALUES (?1, 'fixture-session', ?2, '{}')")
+                .unwrap();
+            for index in 0..MAX_TIMELINE_LINES + 3 {
+                insert
+                    .execute(params![format!("msg-{index:06}"), (index / 2) as i64])
+                    .unwrap();
+            }
+        }
+        transaction.execute("INSERT INTO message VALUES ('other-session-message', 'other-session', 999999, '{}')", []).unwrap();
+        transaction.commit().unwrap();
+
+        let limit = MAX_TIMELINE_LINES as i64 + 1;
+        let mut explain = db
+            .prepare(&format!("EXPLAIN QUERY PLAN {OPENCODE_MESSAGE_WINDOW_SQL}"))
+            .unwrap();
+        let plan = explain
+            .query_map(params!["fixture-session", limit], |row| {
+                Ok((row.get::<_, i64>(1)?, row.get::<_, String>(3)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        println!("OpenCode bounded message-window plan: {plan:?}");
+        assert!(
+            plan.iter().any(|(_, detail)| detail
+                .contains("SEARCH message USING INDEX message_session_time_created_id_idx")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .iter()
+                .any(|(_, detail)| detail.starts_with("SCAN message")),
+            "{plan:?}"
+        );
+        for (parent, detail) in &plan {
+            if detail.contains("TEMP B-TREE") {
+                assert_eq!(
+                    *parent, 0,
+                    "only the already-limited outer window may sort: {plan:?}"
+                );
+            }
+        }
+        let mut messages = db.prepare(OPENCODE_MESSAGE_WINDOW_SQL).unwrap();
+        let ids = messages
+            .query_map(params!["fixture-session", limit], |row| {
+                row.get::<_, String>(1)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(ids.len(), limit as usize);
+        assert_eq!(ids.first().unwrap(), "msg-000002");
+        assert_eq!(
+            ids.last().unwrap(),
+            &format!("msg-{:06}", MAX_TIMELINE_LINES + 2)
+        );
+        assert!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "timestamp ties keep id ordering"
+        );
+    }
+
+    #[test]
+    fn opencode_oversized_rows_are_explicit_and_do_not_hide_later_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("opencode.db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT); CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);").unwrap();
+        db.execute(
+            "INSERT INTO message VALUES ('oversized','ses',1,zeroblob(?1))",
+            params![MAX_TIMELINE_BYTES as i64 + 1],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message VALUES ('msg','ses',2,?1)",
+            params![r#"{"role":"assistant"}"#],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO part VALUES ('oversized','msg','ses',1,zeroblob(?1))",
+            params![MAX_TIMELINE_BYTES as i64 + 1],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO part VALUES ('part','msg','ses',2,?1)",
+            params![r#"{"type":"text","text":"later row is visible"}"#],
+        )
+        .unwrap();
+        let mut session = transcript_session(ExternalDriver::OpenCode, &path);
+        session.native_id = "ses".into();
+        let entries = normalized_timeline(&session).unwrap();
+        let notices = entries
+            .iter()
+            .filter(|entry| entry["body"]["code"] == "native-record-size-limit")
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 2);
+        for notice in notices {
+            assert_eq!(notice["body"]["details"]["fetchable"], false);
+            assert!(
+                notice["body"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not fetchable")
+            );
+            assert!(
+                notice.get("_source").is_none(),
+                "no unusable continuation ref"
+            );
+        }
+        assert!(texts(&entries).contains(&"later row is visible"));
+        db.query_row("SELECT data FROM message WHERE id='oversized'", [], |row| {
+            assert!(
+                sqlite_bytes(row, 0).is_err(),
+                "cell is checked before copying"
+            );
+            Ok(())
+        })
+        .unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry["body"]["text"] == "later row is visible")
+            .unwrap();
+        let locator = serde_json::from_value(entry["_source"].clone()).unwrap();
+        db.execute(
+            "UPDATE part SET data=zeroblob(?1) WHERE id='part'",
+            params![MAX_TIMELINE_BYTES as i64 + 1],
+        )
+        .unwrap();
+        assert!(
+            normalized_record(&session, &locator).is_err(),
+            "direct ref reads share the row guard"
+        );
+    }
+
+    #[test]
+    fn opencode_invalid_utf8_blob_and_torn_json_keep_their_original_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("opencode.db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT); CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);").unwrap();
+        let message = b"{\"role\":";
+        db.execute(
+            "INSERT INTO message VALUES ('msg','ses',1,?1)",
+            params![message.as_slice()],
+        )
+        .unwrap();
+        let part = b"bad\xffbytes";
+        db.execute(
+            "INSERT INTO part VALUES ('part','msg','ses',1,?1)",
+            params![part.as_slice()],
+        )
+        .unwrap();
+        let mut session = transcript_session(ExternalDriver::OpenCode, &path);
+        session.native_id = "ses".into();
+        let entries = normalized_timeline(&session).unwrap();
+        assert_eq!(entries.len(), 2);
+        for (entry, bytes) in entries.iter().zip([message.as_slice(), part.as_slice()]) {
+            assert_eq!(
+                BASE64
+                    .decode(
+                        entry["body"]["blocks"][0]["payload"]["bytes"]
+                            .as_str()
+                            .unwrap()
+                    )
+                    .unwrap(),
+                bytes
+            );
+            let locator = serde_json::from_value(entry["_source"].clone()).unwrap();
+            assert_eq!(
+                normalized_record(&session, &locator).unwrap()[0]["body"],
+                entry["body"]
+            );
+        }
+    }
+    #[test]
+    fn error_blocks_and_source_supplied_timing_fit_the_open_contract() {
+        let mut entry = timeline_item(
+            16,
+            &timestamp(0),
+            "system",
+            "error",
+            json!({"code":"native-stop","message":"provider stopped","retryable":true,"details":{"stopReason":"future","errorMessage":"invented-token"}}),
+        );
+        assert_eq!(entry["body"]["blocks"][0]["kind"], "error");
+        assert_eq!(
+            entry["body"]["blocks"][0]["payload"],
+            json!({"body_ref":true})
+        );
+        let metadata =
+            json!({"wallTimeMs":12.75,"timeoutSeconds":0,"future":{"value":"untouched"}});
+        entry["body"]["blocks"][0]["metadata"] = metadata.clone();
+        let decoded: st3_client::TimelineEntry = serde_json::from_value(entry).unwrap();
+        let st3_client::TimelineBody::Error(body) = decoded.body else {
+            panic!("known error envelope")
+        };
+        assert_eq!(body.blocks[0].metadata.as_ref(), Some(&metadata));
+    }
+
+    // Claude has no omitted record kinds: these fillers remain visible system entries.
+    const CLAUDE_WINDOW_FILLER: &str = "{\"type\":\"file-history-snapshot\"}\n";
+
+    fn chat_texts(timeline: &[Value]) -> Vec<&str> {
+        timeline
+            .iter()
+            .filter(|item| item["type"] == "content")
+            .filter(|item| matches!(item["role"].as_str(), Some("user" | "assistant")))
+            .filter_map(|item| item["body"]["text"].as_str())
+            .collect()
+    }
+
+    /// Independent bounded-reader oracle, retaining the upstream normalization inputs.
+    fn unfurled_timeline(session: &ExternalSession) -> Vec<Value> {
+        let bytes = fs::read(&session.transcript).unwrap();
+        let start = bytes.len().saturating_sub(MAX_TIMELINE_BYTES as usize);
+        let mut offset = start;
+        if start != 0 {
+            offset += bytes[start..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len() - start, |index| index + 1);
+        }
+        let mut lines = VecDeque::new();
+        for line in bytes[offset..].split_inclusive(|byte| *byte == b'\n') {
+            if lines.len() == MAX_TIMELINE_LINES {
+                lines.pop_front();
+            }
+            lines.push_back((offset as u64, line));
+            offset += line.len();
+        }
+        let mut items = Vec::new();
+        if start != 0 || lines.len() == MAX_TIMELINE_LINES {
+            items.push(timeline_item(
+                0, &timestamp(session.updated_at_unix_ms), "system", "truncation",
+                json!({
+                    "reason": "the native transcript prefix is outside the bounded read window; not fetchable through this owner read",
+                    "fetchable": false, "limit_bytes": MAX_TIMELINE_BYTES,
+                    "omitted_from_sequence": 0, "omitted_to_sequence": 0
+                }),
+            ));
+        }
+        let mut last_timestamp = timestamp(session.started_at_unix_ms);
+        let mut next_free_sequence = 0;
+        for (line_index, (offset, bytes)) in lines.into_iter().enumerate() {
+            let sequence = offset
+                .saturating_add(1)
+                .saturating_mul(16)
+                .max(next_free_sequence);
+            let first = items.len();
+            normalize_native_bytes(
+                session.driver,
+                bytes,
+                sequence,
+                &last_timestamp,
+                line_index,
+                true,
+                &mut items,
+            );
+            let source = serde_json::to_value(NativeLocator::Jsonl {
+                offset,
+                length: bytes.len() as u64,
+                digest: hex::encode(Sha256::digest(bytes)),
+                sequence,
+                timestamp: last_timestamp.clone(),
+                line_index,
+            })
+            .unwrap();
+            for item in &mut items[first..] {
+                item["_source"] = source.clone();
+            }
+            if let Some(highest) = items[first..]
+                .iter()
+                .filter_map(|item| item["sequence"].as_u64())
+                .max()
+            {
+                next_free_sequence = highest.saturating_add(1);
+            }
+            if let Some(stamp) = items[first..]
+                .last()
+                .and_then(|item| item["timestamp"].as_str())
+            {
+                last_timestamp = stamp.to_owned();
+            }
+        }
+        items.sort_by_key(|item| item["sequence"].as_u64().unwrap_or(u64::MAX));
+        items
+    }
+
+    // Window-transition tests compare every entry without the quadratic cost of
+    // paging and looking up each of thousands of visible filler records.
+    fn assert_fold_matches_upstream(session: &ExternalSession) -> Vec<Value> {
+        let expected = unfurled_timeline(session);
+        assert_eq!(normalized_timeline(session).unwrap(), expected);
+        expected
+    }
+
+    fn assert_timeline_slices(session: &ExternalSession) -> Vec<Value> {
+        let expected = assert_fold_matches_upstream(session);
+        for order in [TimelineOrder::Sequence, TimelineOrder::TimestampSequence] {
+            let mut ordered = expected.clone();
+            ordered.sort_by(|a, b| timeline_key(b, 0).cmp_in(&timeline_key(a, 0), order));
+            let mut walked = Vec::new();
+            let mut before = None;
+            loop {
+                let page = timeline_slice(session, order, before.as_ref(), 7).unwrap();
+                let end = ordered.len().min(walked.len() + 7);
+                assert_eq!(page.items, ordered[walked.len()..end]);
+                walked.extend(page.items);
+                assert_eq!(page.has_more, walked.len() < ordered.len());
+                if !page.has_more {
+                    break;
+                }
+                before = Some(timeline_key(walked.last().unwrap(), 0));
+            }
+            assert_eq!(walked, ordered);
+            let zero = timeline_slice(session, order, None, 0).unwrap();
+            assert!(zero.items.is_empty());
+            assert_eq!(zero.has_more, !ordered.is_empty());
+        }
+        expected
+    }
+
+    #[test]
+    fn incremental_fold_preserves_native_bytes_and_sources_for_all_line_drivers() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        for driver in [
+            ExternalDriver::Claude,
+            ExternalDriver::Codex,
+            ExternalDriver::Pi,
+            ExternalDriver::Omp,
+        ] {
+            let path = root.path().join(format!("{}.jsonl", driver.as_str()));
+            fs::write(
+                &path,
+                b"\n{\"type\":\"new-kind\",\"value\":{\"kept\":true}}\n",
+            )
+            .unwrap();
+            let session = transcript_session(driver, &path);
+            assert_timeline_slices(&session);
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(b"unreadable\xff\n{\"type\":").unwrap();
+            assert_timeline_slices(&session);
+            file.write_all(b"\"another-new-kind\",\"extra\":true}\n")
+                .unwrap();
+            let entries = assert_timeline_slices(&session);
+            for entry in &entries {
+                let locator = serde_json::from_value(entry["_source"].clone()).unwrap();
+                let record = normalized_record(&session, &locator).unwrap();
+                assert!(
+                    record
+                        .iter()
+                        .any(|item| item["id"] == entry["id"] && item["body"] == entry["body"])
+                );
+            }
+        }
+    }
+
+    fn codex_record(id: &str, text: &str) -> String {
+        format!(
+            "{}\n",
+            json!({"type":"response_item","timestamp":"2026-10-07T00:00:00Z",
+                "payload":{"type":"message","role":"assistant","id":id,
+                    "content":[{"type":"output_text","text":text}]}})
+        )
+    }
+
+    #[test]
+    fn timeline_generation_survives_appends_and_moves_on_in_place_rewrites() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("generation.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}{}",
+                codex_record("one", "one"),
+                codex_record("two", "two")
+            ),
+        )
+        .unwrap();
+        let session = transcript_session(ExternalDriver::Codex, &path);
+        let order = TimelineOrder::Sequence;
+        let first = timeline_slice(&session, order, None, 10).unwrap();
+        assert_eq!(texts(&first.items).len(), 2);
+        // A pure append keeps the generation, so an outstanding page cursor still applies.
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{}", codex_record("three", "three")).unwrap();
+        let appended = timeline_slice(&session, order, None, 10).unwrap();
+        assert_eq!(appended.generation, first.generation);
+        // Same inode, truncated and rewritten: every basis input still matches.
+        fs::write(&path, codex_record("replaced", "replaced")).unwrap();
+        let replaced = timeline_slice(&session, order, None, 10).unwrap();
+        assert_ne!(replaced.generation, first.generation);
+        assert_eq!(texts(&replaced.items), ["replaced"]);
+        // A rewrite of the single retained record moves it again.
+        fs::write(&path, codex_record("edited", "edited")).unwrap();
+        let edited = timeline_slice(&session, order, None, 10).unwrap();
+        assert_ne!(edited.generation, replaced.generation);
+        assert_eq!(texts(&edited.items), ["edited"]);
+    }
+
+    #[test]
+    fn an_evicted_fold_reopens_under_a_new_generation_with_the_same_items() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("evicted.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}{}",
+                codex_record("one", "one"),
+                codex_record("two", "two")
+            ),
+        )
+        .unwrap();
+        let session = transcript_session(ExternalDriver::Codex, &path);
+        let order = TimelineOrder::Sequence;
+        let first = timeline_slice(&session, order, None, 10).unwrap();
+        for index in 0..MAX_FOLDED_TRANSCRIPTS {
+            let other = root.path().join(format!("other-{index}.jsonl"));
+            fs::write(&other, codex_record("other", "other")).unwrap();
+            timeline_slice(
+                &transcript_session(ExternalDriver::Codex, &other),
+                order,
+                None,
+                10,
+            )
+            .unwrap();
+        }
+        assert!(with_line_folds(&path, |folds| {
+            !folds.iter().any(|entry| entry.0 == path)
+        }));
+        // The re-read fold must not reuse the evicted generation: a cursor minted against
+        // it would otherwise page a rebuilt fold as if it were the old one.
+        let reopened = timeline_slice(&session, order, None, 10).unwrap();
+        assert_ne!(reopened.generation, first.generation);
+        assert_eq!(reopened.items, first.items);
+        // Slices are newest-first by sequence, even when native timestamps tie.
+        assert_eq!(texts(&reopened.items), ["two", "one"]);
+    }
+
+    #[test]
+    fn concurrent_append_during_a_parked_refresh_is_read_completely() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("parked.jsonl");
+        fs::write(&path, codex_record("one", "one")).unwrap();
+        timeline_test_support::arm_refresh(&path);
+        let reader = {
+            let session = transcript_session(ExternalDriver::Codex, &path);
+            std::thread::spawn(move || normalized_timeline(&session).unwrap())
+        };
+        timeline_test_support::wait_refresh_arrived(&path);
+        // The size was captured and the first record read, but EOF has not been checked.
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{}", codex_record("two", "two")).unwrap();
+        timeline_test_support::release_refresh(&path);
+        let parked = reader.join().unwrap();
+        assert_eq!(texts(&parked), ["one"]);
+        let session = transcript_session(ExternalDriver::Codex, &path);
+        let after = timeline_slice(&session, TimelineOrder::Sequence, None, 10).unwrap();
+        assert_eq!(texts(&after.items), ["two", "one"]);
+    }
+
+    #[test]
+    fn opencode_timeline_generation_tracks_database_content() {
+        let home = tempfile::tempdir().unwrap();
+        let parent = home.path().join(".local/share/opencode");
+        fs::create_dir_all(&parent).unwrap();
+        let database = parent.join("opencode.db");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE message (\
+                    id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, \
+                    time_updated INTEGER, data TEXT\
+                 );\
+                 CREATE TABLE part (\
+                    id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, \
+                    time_created INTEGER, time_updated INTEGER, data TEXT\
+                 );",
+            )
+            .unwrap();
+        let insert = |connection: &Connection, id: &str, created: i64| {
+            connection
+                .execute(
+                    "INSERT INTO message VALUES (?1, 'ses_native', ?2, ?2, ?3)",
+                    params![id, created, r#"{"role":"assistant"}"#],
+                )
+                .unwrap();
+        };
+        insert(&connection, "msg_1", 1_700_000_000_000);
+        let external = ExternalSession {
+            id: external_session_id(ExternalDriver::OpenCode, "ses_native"),
+            revision: "revision".into(),
+            driver: ExternalDriver::OpenCode,
+            native_id: "ses_native".into(),
+            transcript: database,
+            codex_home: None,
+            cwd: None,
+            title: None,
+            started_at_unix_ms: 1_700_000_000_000,
+            updated_at_unix_ms: 1_700_000_001_000,
+            process: None,
+        };
+        let order = TimelineOrder::Sequence;
+        let first = timeline_slice(&external, order, None, 10).unwrap();
+        let again = timeline_slice(&external, order, None, 10).unwrap();
+        assert_eq!(first.generation, again.generation);
+        insert(&connection, "msg_2", 1_700_000_001_000);
+        drop(connection);
+        let changed = timeline_slice(&external, order, None, 10).unwrap();
+        assert_ne!(changed.generation, first.generation);
+    }
+
+    #[test]
+    fn incremental_fold_reseeds_cached_suffix_when_session_start_changes() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let head = json!({"type":"user","message":{"role":"user","content":"head"}});
+        let anchor = claude_line("user", "2026-09-30T10:00:00Z", "anchor");
+        fs::write(
+            &path,
+            format!("{CLAUDE_WINDOW_FILLER}{head}\n{anchor}\n{CLAUDE_WINDOW_FILLER}not JSON"),
+        )
+        .unwrap();
+        let mut session = transcript_session(ExternalDriver::Claude, &path);
+        session.started_at_unix_ms = 1000;
+        let before = assert_timeline_slices(&session);
+        session.started_at_unix_ms = 2000;
+        let after = assert_timeline_slices(&session);
+        assert_eq!(
+            after
+                .iter()
+                .find(|item| item["body"]["text"] == "head")
+                .unwrap()["timestamp"],
+            timestamp(2000),
+        );
+        assert_eq!(
+            before
+                .iter()
+                .find(|item| item["body"]["text"] == "anchor")
+                .unwrap()["id"],
+            after
+                .iter()
+                .find(|item| item["body"]["text"] == "anchor")
+                .unwrap()["id"],
+        );
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "\n{CLAUDE_WINDOW_FILLER}{head}\n").unwrap();
+        let appended = assert_timeline_slices(&session);
+        assert_eq!(
+            appended
+                .iter()
+                .rev()
+                .find(|item| item["body"]["text"] == "head")
+                .unwrap()["timestamp"],
+            "2026-09-30T10:00:00Z",
+        );
+    }
+
+    #[test]
+    fn a_cold_and_sliding_fold_seed_timestamp_from_the_retained_window() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let predecessor = claude_line("user", "2026-09-30T10:00:00Z", "omitted");
+        let head = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"head"}]}});
+        fs::write(
+            &path,
+            format!(
+                "{predecessor}\n{}{head}\n",
+                CLAUDE_WINDOW_FILLER.repeat(MAX_TIMELINE_LINES - 2)
+            ),
+        )
+        .unwrap();
+        let mut session = transcript_session(ExternalDriver::Claude, &path);
+        session.started_at_unix_ms = 1000;
+        session.updated_at_unix_ms = 2000;
+        let before = assert_fold_matches_upstream(&session);
+        assert_eq!(
+            before
+                .iter()
+                .find(|item| item["body"]["text"] == "head")
+                .unwrap()["timestamp"],
+            "2026-09-30T10:00:00Z"
+        );
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(CLAUDE_WINDOW_FILLER.as_bytes()).unwrap();
+        let after = assert_fold_matches_upstream(&session);
+        assert_eq!(chat_texts(&after), ["head"]);
+        assert_eq!(
+            after
+                .iter()
+                .find(|item| item["body"]["text"] == "head")
+                .unwrap()["timestamp"],
+            timestamp(session.started_at_unix_ms)
+        );
+    }
+
+    #[test]
+    fn incremental_line_fold_matches_upstream_across_the_line_cap() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        fs::write(&path, CLAUDE_WINDOW_FILLER.repeat(MAX_TIMELINE_LINES - 3)).unwrap();
+        let mut session = transcript_session(ExternalDriver::Claude, &path);
+        session.started_at_unix_ms = 1000;
+        session.updated_at_unix_ms = 2000;
+        assert_fold_matches_upstream(&session);
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for index in 0..8 {
+            writeln!(
+                file,
+                "{}",
+                claude_line("user", "2026-09-30T10:00:00Z", &format!("record-{index}"))
+            )
+            .unwrap();
+            assert_fold_matches_upstream(&session);
+        }
+        file.write_all(b"not JSON\xff\n").unwrap();
+        let before = assert_fold_matches_upstream(&session);
+        let old = before.iter().find(|item| item["type"] == "error").unwrap();
+        writeln!(
+            file,
+            "{}",
+            claude_line("user", "2026-09-30T10:00:01Z", "after error")
+        )
+        .unwrap();
+        let after = assert_fold_matches_upstream(&session);
+        let new = after.iter().find(|item| item["type"] == "error").unwrap();
+        assert_eq!(new["id"], old["id"]);
+        assert_eq!(new["_source"]["offset"], old["_source"]["offset"]);
+        assert_eq!(new["body"]["blocks"], old["body"]["blocks"]);
+        assert_eq!(
+            new["body"]["details"]["line_in_window"].as_u64().unwrap() + 1,
+            old["body"]["details"]["line_in_window"].as_u64().unwrap(),
+        );
+    }
+
+    #[test]
+    fn line_fold_rebuilds_after_rewrite_truncation_and_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let record = |text| claude_line("user", "2026-09-30T10:00:00Z", text);
+        let original = format!("{}\n{}\n", record("first"), record("last"));
+        fs::write(&path, &original).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        assert_eq!(texts(&assert_timeline_slices(&session)), ["first", "last"]);
+        let identity = file_identity(&fs::metadata(&path).unwrap());
+        let rewritten = format!("{}\n{}\n", record("other"), record("edit"));
+        assert_eq!(original.len(), rewritten.len());
+        fs::write(&path, rewritten).unwrap();
+        assert_eq!(file_identity(&fs::metadata(&path).unwrap()), identity);
+        assert_eq!(texts(&assert_timeline_slices(&session)), ["other", "edit"]);
+        fs::write(&path, format!("{}\n", record("short"))).unwrap();
+        assert_eq!(texts(&assert_timeline_slices(&session)), ["short"]);
+        let replacement = root.path().join("replacement.jsonl");
+        fs::write(
+            &replacement,
+            format!("{}\n{}\n", record("replacement"), record("new")),
+        )
+        .unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        #[cfg(unix)]
+        assert_ne!(file_identity(&fs::metadata(&path).unwrap()), identity);
+        assert_eq!(
+            texts(&assert_timeline_slices(&session)),
+            ["replacement", "new"]
+        );
+    }
+
+    #[test]
+    fn parsed_and_torn_tails_are_refolded_with_pinned_record_sources() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let first = claude_line("user", "2026-09-30T10:00:00Z", "question");
+        let tail = claude_line("assistant", "2026-09-30T10:00:01Z", "answer");
+        fs::write(&path, format!("{first}\n{tail}")).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        let writing = assert_timeline_slices(&session);
+        let changed = tail.replace("answer", "edited");
+        fs::write(&path, format!("{first}\n{changed}")).unwrap();
+        let edited = assert_timeline_slices(&session);
+        assert_eq!(texts(&edited), ["question", "edited"]);
+        assert_eq!(
+            edited.iter().map(|entry| &entry["id"]).collect::<Vec<_>>(),
+            writing.iter().map(|entry| &entry["id"]).collect::<Vec<_>>()
+        );
+        let locator = serde_json::from_value(edited.last().unwrap()["_source"].clone()).unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file).unwrap();
+        let completed = assert_timeline_slices(&session);
+        assert_eq!(
+            completed.last().unwrap()["id"],
+            edited.last().unwrap()["id"]
+        );
+        assert_ne!(
+            completed.last().unwrap()["_source"],
+            edited.last().unwrap()["_source"]
+        );
+        assert_eq!(
+            normalized_record(&session, &locator)
+                .unwrap()
+                .last()
+                .unwrap()["body"],
+            edited.last().unwrap()["body"]
+        );
+        let completed_len = file.metadata().unwrap().len();
+        file.write_all(b"{\"type\":\"assistant\",\"message\":")
+            .unwrap();
+        let torn = assert_timeline_slices(&session);
+        assert_eq!(
+            torn.last().unwrap()["body"]["code"],
+            "native-line-unreadable"
+        );
+        file.write_all(
+            b"{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"repaired\"}]}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            texts(&assert_timeline_slices(&session)),
+            ["question", "edited", "repaired"]
+        );
+        file.set_len(completed_len).unwrap();
+        assert_eq!(assert_timeline_slices(&session), completed);
+    }
+
+    #[test]
+    fn removing_a_tail_restores_the_full_completed_line_window() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let first = claude_line("user", "2026-09-30T10:00:00Z", "first");
+        let tail = claude_line("assistant", "2026-09-30T10:00:01Z", "tail");
+        let completed = format!(
+            "{first}\n{}",
+            CLAUDE_WINDOW_FILLER.repeat(MAX_TIMELINE_LINES - 1)
+        );
+        fs::write(&path, format!("{completed}{tail}")).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        assert_eq!(
+            chat_texts(&assert_fold_matches_upstream(&session)),
+            ["tail"]
+        );
+        fs::write(&path, completed).unwrap();
+        assert_eq!(
+            chat_texts(&assert_fold_matches_upstream(&session)),
+            ["first"]
+        );
+    }
+
+    #[test]
+    fn timeline_slices_preserve_each_order_with_truncation_and_mixed_timestamps() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let stamps = [
+            "2026-09-30T10:30:00+02:00",
+            "2026-09-30T10:00:00.000Z",
+            "2026-09-30T10:00:00Z",
+            "2026-09-30T09:00:00Z",
+        ];
+        let records = (0..23)
+            .map(|index| {
+                format!(
+                    "{}\n",
+                    claude_line(
+                        "user",
+                        stamps[index % stamps.len()],
+                        &format!("record-{index}")
+                    ),
+                )
+            })
+            .collect::<String>();
+        fs::write(
+            &path,
+            format!(
+                "{}{records}",
+                CLAUDE_WINDOW_FILLER.repeat(MAX_TIMELINE_LINES)
+            ),
+        )
+        .unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        assert_timeline_slices(&session);
+        let sequence = timeline_slice(&session, TimelineOrder::Sequence, None, usize::MAX).unwrap();
+        assert_eq!(sequence.items[0]["body"]["text"], "record-22");
+        assert_eq!(sequence.items.last().unwrap()["type"], "truncation");
+        let timed =
+            timeline_slice(&session, TimelineOrder::TimestampSequence, None, usize::MAX).unwrap();
+        assert_ne!(sequence.items, timed.items);
+        assert_eq!(timed.items[0]["timestamp"], stamps[0]);
+    }
+
+    #[test]
+    fn timeline_slices_and_entry_lookup_follow_byte_window_slides() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let records = |label: &str, count| {
+            (0..count)
+                .map(|index| {
+                    format!(
+                        "{}\n",
+                        claude_line("user", "2026-09-30T10:00:00Z", &format!("{label}-{index}")),
+                    )
+                })
+                .collect::<String>()
+        };
+        let prefix = records("old", 18);
+        let suffix = records("recent", 16);
+        let mut file = File::create(&path).unwrap();
+        file.write_all(prefix.as_bytes()).unwrap();
+        // A single omitted JSON record spans the window without expanded raw-text payloads.
+        let opening = b"{\"type\":\"file-history-snapshot\",\"padding\":\"";
+        let closing = b"\"}\n";
+        let padding = MAX_TIMELINE_BYTES as usize
+            - prefix.len()
+            - suffix.len()
+            - opening.len()
+            - closing.len();
+        file.write_all(opening).unwrap();
+        file.write_all(&vec![b' '; padding]).unwrap();
+        file.write_all(closing).unwrap();
+        file.write_all(suffix.as_bytes()).unwrap();
+        drop(file);
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        let initial = assert_timeline_slices(&session);
+        let old = initial
+            .iter()
+            .find(|item| item["body"]["text"] == "old-0")
+            .unwrap();
+        let survivor = initial
+            .iter()
+            .find(|item| item["body"]["text"] == "recent-0")
+            .unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(records("appended", 16).as_bytes()).unwrap();
+        let slid = assert_timeline_slices(&session);
+        assert!(slid.iter().any(|item| item["type"] == "truncation"));
+        assert!(!slid.iter().any(|item| item["id"] == old["id"]));
+        let retained = slid
+            .iter()
+            .find(|item| item["id"] == survivor["id"])
+            .unwrap();
+        assert_eq!(retained["body"], survivor["body"]);
+        assert_eq!(retained["_source"]["offset"], survivor["_source"]["offset"]);
+        assert_ne!(
+            retained["_source"]["line_index"],
+            survivor["_source"]["line_index"]
+        );
+    }
+
+    #[test]
+    fn fold_cache_evicts_to_source_byte_and_transcript_budgets() {
+        let budget = 2 * (claude_line("user", "2026-09-30T10:00:00Z", "small").len() + 1);
+        let root = tempfile::tempdir().unwrap();
+        let mut cache = LineFoldCache::new();
+        let mut expected_bytes = 0;
+        for index in 0..4 {
+            let path = root.path().join(format!("{index}.jsonl"));
+            let text = if index == 3 {
+                "x".repeat(budget)
+            } else {
+                "small".into()
+            };
+            let record = format!("{}\n", claude_line("user", "2026-09-30T10:00:00Z", &text));
+            fs::write(&path, &record).unwrap();
+            let session = transcript_session(ExternalDriver::Claude, &path);
+            let fold = SharedLineFold::default();
+            let bytes = {
+                let mut state = match fold.lock() {
+                    Ok(state) => state,
+                    Err(error) => panic!("test fold poisoned: {error}"),
+                };
+                assert_eq!(texts(&state.read(&session).unwrap()), [text.as_str()]);
+                assert_eq!(state.retained_source_bytes, record.len());
+                state.retained_source_bytes
+            };
+            cache.push_back((path.clone(), session.driver, fold, bytes));
+            trim_line_folds(&mut cache, budget);
+            assert!(cache.iter().map(|entry| entry.3).sum::<usize>() <= budget);
+            if bytes > budget {
+                assert!(!cache.iter().any(|entry| entry.0 == path));
+                assert_eq!(
+                    cache.iter().map(|entry| entry.3).sum::<usize>(),
+                    expected_bytes
+                );
+            } else {
+                assert_eq!(cache.back().unwrap().0, path);
+                if index == 2 {
+                    assert_eq!(cache.front().unwrap().0, root.path().join("1.jsonl"));
+                }
+                expected_bytes = cache.iter().map(|entry| entry.3).sum();
+            }
+        }
+        cache.clear();
+        for index in 0..MAX_FOLDED_TRANSCRIPTS + 2 {
+            cache.push_back((
+                root.path().join(format!("{index}.jsonl")),
+                ExternalDriver::Claude,
+                SharedLineFold::default(),
+                0,
+            ));
+            trim_line_folds(&mut cache, budget);
+        }
+        assert_eq!(cache.len(), MAX_FOLDED_TRANSCRIPTS);
+        assert_eq!(cache.front().unwrap().0, root.path().join("2.jsonl"));
+    }
+
+    #[test]
+    #[ignore = "benchmark over a local corpus"]
+    fn conversation_ivm_bench() {
+        use std::io::Write as _;
+        let Ok(corpus) = std::env::var("ST_CONV_IVM_CORPUS") else {
+            return;
+        };
+        let median = |mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        let ms = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
+        let text = fs::read(corpus).unwrap();
+        let base = text.len().saturating_sub(40 << 20);
+        let base = if base == 0 {
+            0
+        } else {
+            base + text[base..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .expect("corpus must contain complete records")
+                + 1
+        };
+        let text = &text[base..];
+        let mut cuts = text
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'\n')
+            .map(|(index, _)| index + 1)
+            .collect::<Vec<_>>();
+        assert!(
+            cuts.len() >= 2,
+            "corpus must contain at least two complete records"
+        );
+        cuts = cuts.split_off(cuts.len().saturating_sub(17));
+        let root = tempfile::tempdir().unwrap();
+        let mut cold = Vec::new();
+        let mut incremental = Vec::new();
+        let mut first_page = Vec::new();
+        let mut items = 0;
+        for (run, window) in cuts.windows(2).enumerate() {
+            let path = root.path().join(format!("run-{run}.jsonl"));
+            fs::write(&path, &text[..window[0]]).unwrap();
+            let session = transcript_session(ExternalDriver::Omp, &path);
+            let start = Instant::now();
+            normalized_timeline(&session).unwrap();
+            cold.push(ms(start));
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(&text[window[0]..window[1]]).unwrap();
+            let start = Instant::now();
+            let after = normalized_timeline(&session).unwrap();
+            incremental.push(ms(start));
+            items = after.len();
+            fs::write(&path, &text[..window[0]]).unwrap();
+            normalized_timeline(&session).unwrap();
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(&text[window[0]..window[1]]).unwrap();
+            let start = Instant::now();
+            let page =
+                timeline_slice(&session, TimelineOrder::TimestampSequence, None, 200).unwrap();
+            first_page.push(ms(start));
+            let mut expected = after;
+            expected.sort_by(|a, b| {
+                timeline_key(b, 0).cmp_in(&timeline_key(a, 0), TimelineOrder::TimestampSequence)
+            });
+            expected.truncate(200);
+            assert_eq!(page.items, expected);
+            assert_eq!(page.has_more, items > 200);
+        }
+        eprintln!(
+            "corpus_bytes={} window_items={items} cold_p50_ms={:.3} cold_max_ms={:.3} incremental_p50_ms={:.3} incremental_max_ms={:.3} first_page200_after_append_p50_ms={:.3} first_page200_after_append_max_ms={:.3}",
+            text.len(),
+            median(cold.clone()),
+            cold.iter().copied().fold(0.0, f64::max),
+            median(incremental.clone()),
+            incremental.iter().copied().fold(0.0, f64::max),
+            median(first_page.clone()),
+            first_page.iter().copied().fold(0.0, f64::max),
+        );
     }
 }
