@@ -29,6 +29,8 @@ export type CarrierPorts = {
 export const DIAL_BUDGET_MS = 4000;
 /** After fabric failed, how long the next foreground goes straight to the saved route. */
 export const REMEMBER_FAILURE_MS = 30_000;
+/** After a failure the carrier tries fabric again by itself, after these waits (the last repeats): a phone that fell back to a saved route that cannot be reached must not stay there until it is killed. */
+export const RETRY_WAITS_MS = [30_000, 60_000, 120_000, 300_000];
 /** Waits before each of the redials after the feed lost a ready fabric connection. */
 export const REDIAL_WAITS_MS = [1000, 2000, 5000];
 
@@ -48,6 +50,7 @@ export class FabricCarrier {
   private failedAt = -Infinity;
   private failedReason = '';
   private running = false;
+  private failures = 0;
 
   constructor(private readonly ports: CarrierPorts, private readonly changed: (snapshot: FabricSnapshot) => void) {}
 
@@ -77,10 +80,10 @@ export class FabricCarrier {
   }
 
   /** The person asks for fabric again after a failure or refusal. */
-  retry(): void { this.failedAt = -Infinity; this.redials = 0; void this.reconcile(true); }
+  retry(): void { this.failedAt = -Infinity; this.redials = 0; this.failures = 0; void this.reconcile(true); }
 
   /** The feed over the bridge reports a good connection: redials start over. */
-  feedLive(): void { this.redials = 0; }
+  feedLive(): void { this.redials = 0; this.failures = 0; }
 
   /** The feed over the bridge lost its connection. A refusal ends the trial; anything else is redialed. */
   async feedFailed(): Promise<void> {
@@ -103,6 +106,7 @@ export class FabricCarrier {
       this.failedAt = this.ports.now();
       this.failedReason = 'Fabric lost its connection to the member';
       this.publish({ phase: 'failed', bridgeUrl: '', reason: this.failedReason });
+      this.scheduleRetry();
       return;
     }
     const wait = REDIAL_WAITS_MS[this.redials++];
@@ -154,6 +158,7 @@ export class FabricCarrier {
         this.failedAt = this.ports.now();
         this.failedReason = `Fabric did not answer within ${Math.round(DIAL_BUDGET_MS / 1000)} s`;
         this.publish({ phase: 'failed', bridgeUrl: '', reason: this.failedReason });
+        this.scheduleRetry();
         return;
       }
       this.publish({ phase: 'ready', bridgeUrl: outcome.url, path: outcome.path ?? 'unknown', reason: '' });
@@ -164,7 +169,18 @@ export class FabricCarrier {
       this.failedReason = reasonOf(error);
       await this.ports.stop().catch(() => {});
       this.publish({ phase: 'failed', bridgeUrl: '', reason: this.failedReason });
+      this.scheduleRetry();
     }
+  }
+
+  /** Try fabric again after a wait that grows, while it is still wanted and still failed. */
+  private scheduleRetry(): void {
+    const epoch = this.epoch;
+    const wait = RETRY_WAITS_MS[Math.min(this.failures++, RETRY_WAITS_MS.length - 1)];
+    void this.ports.wait(wait).then(() => {
+      if (epoch !== this.epoch || this.snapshotValue.phase !== 'failed') return;
+      void this.reconcile(true);
+    });
   }
 }
 

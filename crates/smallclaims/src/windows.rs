@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+pub mod holds;
 mod intervals;
 pub use intervals::{IntervalSeries, MinuteSummary, histogram_upper_ms, histogram_lower_ms};
 
@@ -260,11 +261,13 @@ pub fn set_store_target(kind: StoreWork, target: Option<Duration>) {
         .target = target;
 }
 
-pub fn record_store(kind: StoreWork, duration: Duration) {
+/// Count one sample of the store's work, and say whether it missed its target.
+pub fn record_store(kind: StoreWork, duration: Duration) -> bool {
     let now = Instant::now();
     let mut store = store(kind).lock().unwrap_or_else(PoisonError::into_inner);
     let over = store.target.is_some_and(|target| duration > target);
     store.series.record(now, duration, over);
+    over
 }
 
 /// A copy of one store series, to read or to merge with another.

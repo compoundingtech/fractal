@@ -17,6 +17,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "missions",
             "alerts",
             "usage",
+            "slo",
             "terminals",
             "machines",
             "launch",
@@ -28,7 +29,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Inside an agent seat",
-        &["work", "gh", "claim", "diagnostic", "trace", "skill"],
+        &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
     ),
     (
         "Running st on a machine or fleet",

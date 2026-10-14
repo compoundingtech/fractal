@@ -33,6 +33,9 @@ Use these documents for implementation details:
 - [Checkpoints and trimming](checkpoints.md) explains how every node of a fleet agrees to delete old
   claims together: when a checkpoint is due, seal, verify and trim, which claims a rule may drop and
   why, excusing an unreachable member, and what the first real trim taught.
+- [Checkpoint capture in bounded memory](checkpoint-capture.md) is the design for capturing,
+  planning and proving a checkpoint within a fixed memory budget, with a capture that resumes
+  after a restart (#2492).
 - [Retention](retention.md) names how long st keeps each claim kind: the policy file, its four
   classes, and how a rule is added and measured.
 - [Shell completion](cli-completion/spec.md) defines live entity candidates, their descriptions,
@@ -44,6 +47,8 @@ Use these documents for implementation details:
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
 - [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
+- [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
+  message a restarted seat is sent with that handoff and the live state of its work.
 - [Seats across deploys](seat-deploys.md) explains how a running seat's driver and channels follow
   a replaced st binary without ending the provider session, and how st reports a stale message path.
 - [Silent messages](silent-messages.md) explains the silent and wake message kinds, capped held batches, and where status and run events go.
