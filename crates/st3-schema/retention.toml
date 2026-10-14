@@ -28,6 +28,7 @@
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
 "agent.queue.moved" = { class = "durable" }
+"agent.retired" = { class = "durable" }
 "arrangement.edited" = { class = "durable" }
 "attention.requested" = { class = "durable" }
 "attention.resolved" = { class = "durable" }

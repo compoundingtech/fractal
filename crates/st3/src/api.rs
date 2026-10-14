@@ -48,8 +48,7 @@ use crate::model::{
     PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest,
     PlanningProposalRequest, PlanningRevisionRequest,
     PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse,
-    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse, ReplicationHealAnswer,
-    ReplicationHealAnswerRequest, ReplicationHealNextRequest, ReplicationHealStep,
+    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse,
     ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
@@ -388,7 +387,10 @@ pub(crate) struct ApiError {
 impl ApiError {
     fn bad(error: St3Error) -> Self {
         let status = match error.code {
-            "stale-subject"
+            "recipient-retired"
+            | "lifecycle-unavailable"
+            | "retirement-upgrade-required"
+            | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -462,11 +464,12 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({ "code": self.code, "message": self.message, "details": self.details })),
-        )
-            .into_response()
+        let mut body =
+            json!({ "code": self.code, "message": self.message, "details": self.details });
+        if let Some(applied) = body["details"].get("applied").cloned() {
+            body["applied"] = applied;
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -827,17 +830,11 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             post(replication_checkpoint_adopt)
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
-        .route(
-            "/v1/internal/replication/heal/answer",
-            post(replication_heal_answer)
-                .layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
-        )
-        .route(
-            "/v1/internal/replication/heal/next",
-            post(replication_heal_next)
-                .layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
-        )
         .route("/v1/internal/fleet/membership", get(fleet_membership_view))
+        .route(
+            "/v1/internal/fleet/admission-residue",
+            get(fleet_admission_residue),
+        )
         .route("/v1/internal/fleet/status", get(fleet_status))
         .route(
             "/v1/internal/fleet/invites",
@@ -1592,7 +1589,7 @@ fn client_host_id(node: &str) -> String {
 }
 
 fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
-    json!({
+    let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
         "error_version": "st3.client.error.v0",
         "request_id": request_id,
@@ -1600,7 +1597,11 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
         "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
         "retryable": client_error_retryable(status, raw.get("code").and_then(Value::as_str)),
         "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
-    })
+    });
+    if let Some(applied) = raw.get("applied") {
+        envelope["applied"] = applied.clone();
+    }
+    envelope
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
@@ -1644,7 +1645,10 @@ fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
 
 fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
-        "not-found"
+        "recipient-retired"
+        | "lifecycle-unavailable"
+        | "retirement-upgrade-required"
+        | "not-found"
         | "forbidden"
         | "attention-migrated"
         | "unsupported-capability"
@@ -3248,6 +3252,9 @@ fn client_agent_cards_presented(
                 Some("snapshotting" | "fencing-source" | "transferring" | "restoring") if state == "stopped" => "suspended",
                 _ => state,
             };
+            let state = if subject.desired.as_ref().is_some_and(|desired| desired.get("retirement").is_some()) {
+                "retired"
+            } else { state };
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
@@ -8576,8 +8583,8 @@ fn doctor_report_with_operation_drift(
                         .collect::<String>(),
                     first_sync_failed
                         .map(|first| format!(
-                            "the first sync with {} ended with a different graph, and a heal \
-                             did not fix it: {}; ",
+                            "the first sync with {} failed on an earlier build: {}; it ends at \
+                             the next exchange where both hold the same claims; ",
                             first.peer.as_deref().unwrap_or("a peer"),
                             first.message.as_deref().unwrap_or("no reason recorded")
                         ))
@@ -9096,7 +9103,7 @@ async fn replication_receive(
         if let Some(round_trip_ms) = request.round_trip_ms {
             store.record_replication_round_trip(Duration::from_millis(round_trip_ms));
         }
-        // Only the worker's own requests carry a round trip, and only they heal.
+        // Only the worker's own requests carry a round trip, and only they prove its route out.
         let receipt = store.receive_replication_exchange_asking(
             &request.peer,
             &request.fleet_id,
@@ -9198,50 +9205,6 @@ async fn replication_receive(
             .send_modify(|generation| *generation = generation.saturating_add(1));
     }
     Ok(Json(response))
-}
-
-/// Answer a peer's heal question. A swap or a replay can change the graph.
-async fn replication_heal_answer(
-    State(state): State<AppState>,
-    Json(request): Json<ReplicationHealAnswerRequest>,
-) -> Result<Json<ReplicationHealAnswer>, ApiError> {
-    if state.fleet_id.as_deref() != Some(request.fleet_id.as_str()) {
-        return Err(ApiError::bad(St3Error::new(
-            "fleet-id-mismatch",
-            "the peer belongs to another fleet",
-        )));
-    }
-    let store = state.store.clone();
-    let (answer, changed) = blocking_store(move || {
-        let before = store.replication_change_point()?;
-        let answer = store.heal_answer(&request.peer, &request.query)?;
-        let changed = store.replication_change_point()? != before;
-        Ok((answer, changed))
-    })
-    .await?;
-    if changed {
-        signal_changed(&state);
-    }
-    Ok(Json(answer))
-}
-
-/// Compare a peer's heal answer with this node's claims and say what to ask next.
-async fn replication_heal_next(
-    State(state): State<AppState>,
-    Json(request): Json<ReplicationHealNextRequest>,
-) -> Result<Json<ReplicationHealStep>, ApiError> {
-    let store = state.store.clone();
-    let (step, changed) = blocking_store(move || {
-        let before = store.replication_change_point()?;
-        let step = store.heal_next(&request.peer, request.answer)?;
-        let changed = store.replication_change_point()? != before;
-        Ok((step, changed))
-    })
-    .await?;
-    if changed {
-        signal_changed(&state);
-    }
-    Ok(Json(step))
 }
 
 /// A span such as `45s`, `12m` or `3h` for a doctor message.
@@ -9630,8 +9593,6 @@ async fn refuse_while_leaving(
                 | "/v1/internal/replication/receive"
                 | "/v1/internal/replication/peer-failure"
                 | "/v1/internal/replication/worker-status"
-                | "/v1/internal/replication/heal/answer"
-                | "/v1/internal/replication/heal/next"
                 | "/v1/internal/replication/checkpoint"
                 | "/v1/internal/replication-wake"
         );
@@ -9654,6 +9615,17 @@ async fn fleet_membership_view(
 ) -> Result<Json<crate::fleet::FleetView>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || store.fleet_view_sealed())
+        .await
+        .map(Json)
+}
+
+/// What doctor's fleet-admission check reports as admitted before this node knew better, for
+/// `st fleet wait` to refuse on.
+async fn fleet_admission_residue(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<smallclaims::store::FleetAdmissionResidue>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.fleet_admission_residue())
         .await
         .map(Json)
 }
@@ -20718,7 +20690,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             assert_eq!(admitted.iter().map(|claim| &claim.id).collect::<Vec<_>>(), expected_ids);
         }
 
-        let app = router(state);
+        let app = router(state.clone());
         let path = |after| {
             format!(
                 "/v1/events/page?after={after}&owner_run={}&limit=2&wait=false",
@@ -20758,12 +20730,89 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         assert_eq!(third["has_more"], json!(false));
         assert!(third["frontier"].as_u64().unwrap() >= accepted[4].store_index);
 
-        let (status, done) = get_request(app, &path(accepted[4].store_index)).await;
+        let (status, done) = get_request(app.clone(), &path(accepted[4].store_index)).await;
         assert_eq!(status, StatusCode::OK, "{done}");
         let done = done.get("value").unwrap_or(&done);
         assert_eq!(done["items"], json!([]));
         assert_eq!(done["next_after"], Value::Null);
         assert_eq!(done["has_more"], json!(false));
+
+        // Read the original five-event window through the same router before and
+        // after ownership changes. New apply events lie after this raw scan.
+        let owner_window = |owner: &str| {
+            format!(
+                "/v1/events/page?after={setup_cursor}&owner_run={}&limit=5&wait=false",
+                owner.replace('/', "%2F")
+            )
+        };
+        let unrelated_path = format!(
+            "{}&subject={}",
+            owner_window(&runs[1].subject),
+            subject_b.replace('/', "%2F")
+        );
+        let expected_all = accepted.iter().map(|claim| json!({
+            "store_index": claim.store_index,
+            "kind": &claim.kind,
+            "subject": &claim.subject,
+            "body": &claim.body,
+        })).collect::<Vec<_>>();
+        let expected_b = expected_all.iter()
+            .filter(|event| event["subject"].as_str() == Some(subject_b))
+            .cloned().collect::<Vec<_>>();
+        let (status, before_b) = get_request(app.clone(), &owner_window(&runs[1].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{before_b}");
+        let before_b = before_b.get("value").unwrap_or(&before_b);
+        assert_eq!(before_b["items"], json!(expected_b));
+        let (status, unrelated_before) = get_request(app.clone(), &unrelated_path).await;
+        assert_eq!(status, StatusCode::OK, "{unrelated_before}");
+        let unrelated_before = unrelated_before.get("value").unwrap_or(&unrelated_before);
+        assert_eq!(unrelated_before["items"], json!(expected_b));
+        assert_eq!(unrelated_before["next_after"], json!(accepted[4].store_index));
+
+        let desired = intent.subjects.get_mut(subject_a).unwrap();
+        desired.owner_run = Some(runs[1].subject.clone());
+        desired.owner_generation = Some(runs[1].generation.clone());
+        desired.owner_step = Some(runs[1].steps[0].subject.clone());
+        roster_fixture_apply(&state.store, &intent, "event-page-owner-reassigned");
+        assert!(!state.store.desired_subjects_for_owner_run(&runs[0].subject).unwrap()
+            .iter().any(|desired| desired.subject == subject_a));
+        let reassigned = state.store.desired_subjects_for_owner_run(&runs[1].subject).unwrap();
+        assert!(reassigned.iter().any(|desired| desired.subject == subject_a));
+        assert!(reassigned.iter().any(|desired| desired.subject == subject_b));
+
+        let (status, old_owner) = get_request(app.clone(), &owner_window(&runs[0].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{old_owner}");
+        let old_owner = old_owner.get("value").unwrap_or(&old_owner);
+        assert_eq!(old_owner["items"], json!([]));
+        assert_eq!(old_owner["next_after"], json!(accepted[4].store_index));
+        let (status, new_owner) = get_request(app.clone(), &owner_window(&runs[1].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{new_owner}");
+        let new_owner = new_owner.get("value").unwrap_or(&new_owner);
+        assert_eq!(new_owner["items"], json!(expected_all));
+        assert_eq!(new_owner["next_after"], json!(accepted[4].store_index));
+        let (status, unrelated_after) = get_request(app.clone(), &unrelated_path).await;
+        assert_eq!(status, StatusCode::OK, "{unrelated_after}");
+        let unrelated_after = unrelated_after.get("value").unwrap_or(&unrelated_after);
+        assert_eq!(unrelated_after["items"], unrelated_before["items"]);
+        assert_eq!(unrelated_after["next_after"], unrelated_before["next_after"]);
+
+        let desired = intent.subjects.get_mut(subject_a).unwrap();
+        desired.owner_run = Some(runs[0].subject.clone());
+        desired.owner_generation = Some(runs[0].generation.clone());
+        desired.owner_step = Some(runs[0].steps[0].subject.clone());
+        roster_fixture_apply(&state.store, &intent, "event-page-owner-restored");
+        assert!(state.store.desired_subjects_for_owner_run(&runs[0].subject).unwrap()
+            .iter().any(|desired| desired.subject == subject_a));
+        assert!(!state.store.desired_subjects_for_owner_run(&runs[1].subject).unwrap()
+            .iter().any(|desired| desired.subject == subject_a));
+        let (status, restored_a) = get_request(app.clone(), &owner_window(&runs[0].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{restored_a}");
+        let restored_a = restored_a.get("value").unwrap_or(&restored_a);
+        assert_eq!(restored_a["items"], second["items"]);
+        let (status, restored_b) = get_request(app, &owner_window(&runs[1].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{restored_b}");
+        let restored_b = restored_b.get("value").unwrap_or(&restored_b);
+        assert_eq!(restored_b["items"], before_b["items"]);
     }
 
     #[tokio::test]
