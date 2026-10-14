@@ -332,3 +332,48 @@ If the observer clock reads earlier than the degraded completion, the sample has
 `elapsed_ms` null and `skewed` true; the signed record stays valid and the sample
 is left out of `re_attestation_elapsed_ms`. That value is a measurement only, not
 a policy input, until deadlines and the production controller are decided.
+
+## Standalone verifier
+
+`scripts/evidence-verify` answers one question without a built st: does a trusted,
+signed note exist for this exact tree and this check? It needs only `git`,
+`ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<record-id>` notes
+(one SSH-signed commit per record), and finishes in well under a second on a
+repository with hundreds of records. `st evidence verify` stays the reference
+implementation; the script's tests use real Git repositories and real SSH
+signatures.
+
+```sh
+scripts/evidence-verify --repo . --revision HEAD --check typescript-client \
+  --keys-from BASE_COMMIT [--command '["nix","build",".#checks.x86_64-linux.suite"]']
+```
+
+Exit 0 is satisfied, exit 1 is not satisfied, exit 2 is a usage error. Both print one JSON
+document: `{"satisfied":true,"tree","check","record","kind","signer","trust_level","tier","observed_at","command"}`
+or `{"satisfied":false,"reason","check","detail"}`.
+
+Trust comes only from the key list: `--keys FILE`, or `--keys-from COMMIT`, which reads
+`.st/evidence-keys` (OpenSSH allowed-signers syntax, `namespaces="git"`) from the
+accepted base, never from the change under test. A signer's trust level is the part of
+its principal before the first slash (`machine/ci1` is level `machine`); it is never
+read from the record. Removing a line revokes every note that key signed.
+
+`kind` is the record's `runner`, and only `nix`, `wrapper` (the existing CI job wrapped so it signs its result) and `sekrets` are accepted. The latest
+trusted record for the tree and check decides, so a newer failure supersedes an older
+pass. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
+`wrong_check`, `bad_signature` (forged or unsigned), `untrusted_signer` (a valid
+signature from a key not on the list, or a principal that differs from the record's
+signer), `untrusted_tier`, `unsupported_kind`, `check_failed`, `wrong_command` and
+`error` (unreadable input: no decision was made, count it separately). Notes are found
+by the tree they name with one `git cat-file --batch-check`, so the cost grows with the
+number of evidence refs; pack refs, or add a per-tree index, before they reach the
+thousands.
+
+A check that calls the script must pass `--command` with the argument vector it
+expects; without it, any command a trusted signer recorded under that check name
+satisfies the check, and the recorded output hash is not compared. A record whose
+`observed_at` has no time zone is not evidence, because naive and aware times cannot
+be ordered against each other.
+
+This slice verifies SSH-signed `tests` records. The raw Nix output-path signature
+check for the typed `nix` observation is a later slice, agreed with the Nix producer.
