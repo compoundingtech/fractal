@@ -1641,6 +1641,13 @@ mod retry_tests {
                 .unwrap()
                 .peers
                 .remove(0);
+            let failed = peer
+                .last_failed_exchange
+                .as_ref()
+                .expect("the closed Fabric tunnel records its attempted carrier");
+            assert_eq!(failed.carrier, crate::replication::ReplicationCarrier::Fabric, "{probe}");
+            assert_eq!(failed.fabric_route.as_deref(), Some("unknown"), "{probe}");
+            assert!(peer.last_successful_exchange.is_none(), "{probe}");
             if refused {
                 assert_eq!(peer.status, "refused", "{probe}");
                 assert!(peer.last_error.is_none());
