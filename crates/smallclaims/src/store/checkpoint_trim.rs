@@ -29,7 +29,7 @@ pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 /// than the chunk itself, so this is well under the writer's 100 ms target.
 pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// A point in a trim where a test makes it stop, as a crash would there.
+/// A condition a test injects into a trim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrimFault {
     /// This many chunks of tombstones are recorded, and the checkpoint is still `recording`.
@@ -40,6 +40,9 @@ pub enum TrimFault {
     AfterChunk(usize),
     /// Every row is deleted and the checkpoint is not yet marked trimmed.
     BeforeFinish,
+    /// The first deletion chunk starts with its time budget already spent.
+    #[cfg(test)]
+    ExpireChunkBudget,
     /// The first chunk bumps the graph generation without changing the graph.
     TouchGraph,
     /// The first chunk changes a graph table, as a trim must never do.
@@ -145,8 +148,53 @@ pub enum Application {
     Manifest(CheckpointManifestNeed),
 }
 
+/// Tombstones a trim reads at most this many at a time.
+const TOMBSTONE_READ_PAGE: usize = 256;
+
+/// The tombstones a trim records: a manifest's in memory, or this node's own staged plan.
+trait Tombstones {
+    fn counts(&self) -> (usize, usize);
+    fn envelope_page(&self, after: usize, limit: usize) -> Result<Vec<EnvelopeTombstone>>;
+    fn claim_page(&self, after: usize, limit: usize) -> Result<Vec<ClaimTombstone>>;
+    fn slices(&self) -> Option<(&[EnvelopeTombstone], &[ClaimTombstone])> {
+        None
+    }
+}
+
+impl Tombstones for (&[EnvelopeTombstone], &[ClaimTombstone]) {
+    fn counts(&self) -> (usize, usize) {
+        (self.0.len(), self.1.len())
+    }
+
+    fn envelope_page(&self, after: usize, limit: usize) -> Result<Vec<EnvelopeTombstone>> {
+        Ok(self.0.iter().skip(after).take(limit).cloned().collect())
+    }
+
+    fn claim_page(&self, after: usize, limit: usize) -> Result<Vec<ClaimTombstone>> {
+        Ok(self.1.iter().skip(after).take(limit).cloned().collect())
+    }
+
+    fn slices(&self) -> Option<(&[EnvelopeTombstone], &[ClaimTombstone])> {
+        Some((self.0, self.1))
+    }
+}
+
+impl Tombstones for (&super::checkpoint_staging::StagedSet, &super::checkpoint_staging::StagedPlan) {
+    fn counts(&self) -> (usize, usize) {
+        (self.1.dropped_envelopes, self.1.dropped_claims)
+    }
+
+    fn envelope_page(&self, after: usize, limit: usize) -> Result<Vec<EnvelopeTombstone>> {
+        self.0.dropped_envelopes(after, limit)
+    }
+
+    fn claim_page(&self, after: usize, limit: usize) -> Result<Vec<ClaimTombstone>> {
+        self.0.dropped_claims(after, limit)
+    }
+}
+
 impl Store {
-    /// Make the next trim stop at `fault`, as a crash would. Tests only.
+    /// Arm a fault in the next trim. Tests only.
     pub fn set_trim_fault(&self, fault: Option<TrimFault>) {
         *self
             .trim_fault
@@ -250,6 +298,7 @@ impl Store {
     pub fn apply_stable_checkpoints(
         &self,
         claims: &[CheckpointClaim],
+        scratch: &Path,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<Option<CheckpointManifestNeed>> {
         self.runtime.checkpoint_preflight()?;
@@ -260,8 +309,11 @@ impl Store {
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for checkpoint in interrupted {
-            self.finish_trim(&checkpoint, actions)?;
+        {
+            let _span = crate::profile::span("trim.resume");
+            for checkpoint in interrupted {
+                self.finish_trim(&checkpoint, actions)?;
+            }
         }
         match self.newest_application(claims)? {
             None | Some(Application::Done) => Ok(None),
@@ -273,31 +325,24 @@ impl Store {
             }) => {
                 let _completion = super::checkpoint_completion::Completion::outer();
                 let cut = certificate.terms.cut_unix_ms;
-                let verified = |plan: &super::checkpoint::DropPlan| {
-                    plan.sealed_digest == certificate.terms.sealed_digest
-                        && plan.drop_digest == certificate.terms.drop_digest
+                // The staged plan this node verified, when its store-index cut still holds: the
+                // file's identity fixes the epoch, rules and executable, so a repair, a late
+                // envelope or a rules change since makes it capture and plan again. A plan that
+                // differs from the certificate every participant verified is never trimmed.
+                let (staged, plan) = {
+                    let _span = crate::profile::span("trim.capture_plan");
+                    let staged = self.checkpoint_staged_set(cut, Some(seal_rowid), scratch)?;
+                    let plan = self.plan_staged_checkpoint(&staged)?;
+                    (staged, plan)
                 };
-                let sealed = self.checkpoint_sealed_set_through(cut, Some(seal_rowid))?;
-                let mut plan = self.runtime.plan_checkpoint_drops(&sealed);
-                if !verified(&plan) {
-                    // The set is read in pages, each its own snapshot, so a write between two
-                    // pages (a repair changing a record's state) could tear one read. A torn read
-                    // must not send the node to adopt a peer's manifest: read once more first.
-                    let sealed = self.checkpoint_sealed_set_through(cut, Some(seal_rowid))?;
-                    plan = self.runtime.plan_checkpoint_drops(&sealed);
-                }
-                if verified(&plan) {
-                    self.trim_checkpoint(
-                        &checkpoint,
-                        cut,
-                        &plan.drop_digest,
-                        &plan.envelopes,
-                        &plan.claims,
-                        false,
-                        actions,
-                    )?;
+                if plan.sealed_digest == certificate.terms.sealed_digest
+                    && plan.drop_digest == certificate.terms.drop_digest
+                {
+                    self.trim_staged_checkpoint(&checkpoint, &staged, &plan, actions)?;
+                    staged.remove()?;
                     return Ok(None);
                 }
+                staged.remove()?;
                 // Its own rows no longer give the drop it verified, so it adopts the manifest
                 // from a peer like a node that did not take part.
                 self.set_checkpoint_state(&checkpoint, cut, "plan-changed")?;
@@ -559,6 +604,29 @@ impl Store {
         exact: bool,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
+        self.trim_checkpoint_from(checkpoint, cut_unix_ms, drop_digest, &(envelopes, claims), exact, actions)
+    }
+
+    /// `trim_checkpoint` from this node's own staged plan, read a page at a time.
+    pub fn trim_staged_checkpoint(
+        &self,
+        checkpoint: &str,
+        staged: &super::checkpoint_staging::StagedSet,
+        plan: &super::checkpoint_staging::StagedPlan,
+        actions: &mut Vec<CheckpointAction>,
+    ) -> Result<()> {
+        self.trim_checkpoint_from(checkpoint, plan.cut_unix_ms, &plan.drop_digest, &(staged, plan), false, actions)
+    }
+
+    fn trim_checkpoint_from(
+        &self,
+        checkpoint: &str,
+        cut_unix_ms: u128,
+        drop_digest: &str,
+        tombstones: &dyn Tombstones,
+        exact: bool,
+        actions: &mut Vec<CheckpointAction>,
+    ) -> Result<()> {
         let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
         let mark = |transaction: &Transaction<'_>, state: &str| -> Result<()> {
@@ -573,15 +641,20 @@ impl Store {
                     checkpoint,
                     i64::try_from(cut_unix_ms)?,
                     drop_digest,
-                    json!({"envelopes": envelopes.len(), "claims": claims.len()}).to_string(),
+                    json!({"envelopes": tombstones.counts().0, "claims": tombstones.counts().1}).to_string(),
                     i64::try_from(now_ms())?,
                     state
                 ],
             )?;
             Ok(())
         };
+        // Recording, in either branch, through the `trimming` mark; finish_trim's spans follow.
+        let record = crate::profile::span("trim.record");
         if exact {
             // Adoption replaces every other tombstone, so it stays one transaction.
+            let (envelopes, claims) = tombstones
+                .slices()
+                .ok_or_else(|| anyhow::anyhow!("an exact trim needs its manifest in memory"))?;
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             keep_only_tombstones_tx(&transaction, envelopes, claims)?;
@@ -595,26 +668,38 @@ impl Store {
                 mark(&transaction, "recording")?;
                 transaction.commit()?;
             }
-            // Recording again changes nothing, so a restart records what is missing.
+            // Recording again changes nothing, so a restart records what is missing. The
+            // tombstones are read a page at a time, outside the writer.
+            let (envelope_count, claim_count) = tombstones.counts();
             let (mut envelope, mut claim, mut chunks) = (0, 0, 0);
-            while envelope < envelopes.len() || claim < claims.len() {
+            let mut envelope_page: std::collections::VecDeque<EnvelopeTombstone> = Default::default();
+            let mut claim_page: std::collections::VecDeque<ClaimTombstone> = Default::default();
+            while envelope < envelope_count || claim < claim_count {
+                if envelope < envelope_count && envelope_page.is_empty() {
+                    envelope_page.extend(tombstones.envelope_page(envelope, TOMBSTONE_READ_PAGE)?);
+                } else if envelope >= envelope_count && claim_page.is_empty() {
+                    claim_page.extend(tombstones.claim_page(claim, TOMBSTONE_READ_PAGE)?);
+                }
+                anyhow::ensure!(
+                    !envelope_page.is_empty() || !claim_page.is_empty(),
+                    "the tombstones of {checkpoint} ended before their count"
+                );
                 let mut connection = self.connection.write();
                 let transaction = connection.transaction()?;
                 let started = std::time::Instant::now();
                 while started.elapsed() < TRIM_CHUNK_BUDGET
-                    && (envelope < envelopes.len() || claim < claims.len())
+                    && (!envelope_page.is_empty() || (envelope >= envelope_count && !claim_page.is_empty()))
                 {
-                    if envelope < envelopes.len() {
-                        let next = &envelopes[envelope..envelope + 1];
-                        record_checkpoint_tombstones_tx(&transaction, checkpoint, next, &[])?;
+                    if let Some(next) = envelope_page.pop_front() {
+                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[next], &[])?;
                         envelope += 1;
-                    } else {
-                        let next = &claims[claim..claim + 1];
-                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], next)?;
+                    } else if let Some(next) = claim_page.pop_front() {
+                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], &[next])?;
                         claim += 1;
                     }
                     self.pause_for_trim_row_cost();
                 }
+
                 transaction.commit()?;
                 drop(connection);
                 chunks += 1;
@@ -625,6 +710,7 @@ impl Store {
             mark(&transaction, "trimming")?;
             transaction.commit()?;
         }
+        drop(record);
         self.replica_rows_changed();
         self.stop_for_trim_fault(TrimFault::AfterTombstones)?;
         self.finish_trim(checkpoint, actions)
@@ -643,10 +729,21 @@ impl Store {
         let mut deleted_envelopes = 0;
         let mut deleted_claims = 0;
         let mut cursor = TrimCursor::default();
+        let delete = crate::profile::span("trim.delete");
         loop {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
+            #[cfg(test)]
+            let started = {
+                let mut fault = self.trim_fault.lock().unwrap_or_else(PoisonError::into_inner);
+                if *fault == Some(TrimFault::ExpireChunkBudget) {
+                    *fault = None;
+                    started - TRIM_CHUNK_BUDGET
+                } else {
+                    started
+                }
+            };
             let most = self.trim_chunk_envelopes.load(Ordering::Acquire);
             // Deleting claims touches no graph table, so the generation stays. Only if it moved
             // are the digests themselves compared, before and after, in this transaction.
@@ -655,7 +752,9 @@ impl Store {
             let mut envelopes = Vec::new();
             let mut claims = Vec::new();
             let mut steps = 0;
-            while steps < most && started.elapsed() < TRIM_CHUNK_BUDGET {
+            // Only an empty lookup proves exhaustion. Even if transaction setup spent the
+            // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
+            while steps < most && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET) {
                 let (envelope, envelope_claims) = next_trim_rows(&transaction, &mut cursor)?;
                 if envelope.is_none() && envelope_claims.is_empty() {
                     break;
@@ -705,8 +804,10 @@ impl Store {
             chunks += 1;
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
         }
+        drop(delete);
         self.stop_for_trim_fault(TrimFault::BeforeFinish)?;
         {
+            let _span = crate::profile::span("trim.final_mark");
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             transaction.execute(
@@ -728,6 +829,72 @@ impl Store {
             claims: deleted_claims,
         });
         Ok(())
+    }
+}
+
+/// How far the sweep of rows earlier trims left behind has gone: `after:CLAIM_ID`, or `done`.
+pub const TRIMMED_CLAIM_ROWS_SWEPT: &str = "checkpoint_trimmed_claim_rows_swept";
+
+/// How long one sweep transaction deletes before it commits. Its commit then writes and syncs
+/// the pages it changed, so this is well under the writer's 100 ms target.
+pub const SWEEP_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
+
+impl Store {
+    /// Delete the signature and verdict rows of every claim a checkpoint dropped that this store
+    /// still holds. Builds before this one deleted a dropped claim but not these rows. It walks
+    /// the claim tombstones once, in chunks that each commit after `SWEEP_CHUNK_BUDGET`, then
+    /// records that it is done, so a later pass reads one row. Returns the rows deleted.
+    pub fn sweep_trimmed_claim_rows(&self) -> Result<usize> {
+        let progress = {
+            let connection = self.readers.get();
+            super::fleet_meta(&connection, TRIMMED_CLAIM_ROWS_SWEPT)?
+        };
+        if progress.as_deref() == Some("done") {
+            return Ok(0);
+        }
+        let mut after = progress
+            .as_deref()
+            .and_then(|progress| progress.strip_prefix("after:"))
+            .unwrap_or_default()
+            .to_owned();
+        let mut rows = 0;
+        loop {
+            let mut connection = self.connection.write();
+            let transaction = connection.transaction()?;
+            let started = std::time::Instant::now();
+            let mut finished = false;
+            // One claim at a time: on a store larger than its page cache, each claim's deletes
+            // read pages from disk, so the budget is checked after every claim.
+            while started.elapsed() < SWEEP_CHUNK_BUDGET {
+                let Some(id) = transaction
+                    .prepare_cached("SELECT id FROM checkpoint_claims WHERE id > ?1 ORDER BY id LIMIT 1")?
+                    .query_row([&after], |row| row.get::<_, String>(0))
+                    .optional()?
+                else {
+                    finished = true;
+                    break;
+                };
+                // A claim held in two envelopes can be both kept and tombstoned.
+                let held: bool = transaction
+                    .prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?
+                    .query_row([&id], |row| row.get(0))?;
+                if !held {
+                    rows += super::principals::forget_claim_tx(&transaction, &id)?;
+                }
+                after = id;
+            }
+            let progress = if finished { "done".to_owned() } else { format!("after:{after}") };
+            transaction.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![TRIMMED_CLAIM_ROWS_SWEPT, progress],
+            )?;
+            transaction.commit()?;
+            drop(connection);
+            if finished {
+                return Ok(rows);
+            }
+        }
     }
 }
 
@@ -832,3 +999,8 @@ fn deletable_claim(id: String, operation_id: Option<String>) -> ClaimTombstone {
         accepted_at_unix_ms: 0,
     }
 }
+
+#[cfg(test)]
+mod capture_lifetime_tests;
+#[cfg(test)]
+mod phase_span_tests;

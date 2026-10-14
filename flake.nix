@@ -103,7 +103,7 @@
 
         # Cargo.toml is the single source of truth for the version, so a release
         # bump needs no matching edit here.
-        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
         # NixStamp for the shared build-versioning contract: the flake rev is a
         # pure input, so baking it lets a hermetic build know its own identity
@@ -120,8 +120,7 @@
             self.rev
           else
             "nix-dirty.${self.dirtyRev or self.dirtyShortRev or "unknown"}";
-        buildStamp = builtins.toJSON {
-          type = "nix";
+        buildStamp = import ./nix/build-stamp.nix {
           inherit version;
           rev = sourceRev;
           fullRev = self.rev or self.dirtyRev or sourceRev;
@@ -221,9 +220,6 @@
           "st2-pty-stats-component"
           "--exclude"
           "st2-vista-component"
-          # The standalone decision model has its own hermetic gate.
-          "--exclude"
-          "st-decision-fold"
           # `checks.st3` gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
@@ -255,7 +251,7 @@
           inherit cargoDeps;
 
           # The workspace default members include the st3 crates. This package ships only st2;
-          # st3, `st`, stui, and st3-migrate come from the st3 package, so each has one build.
+          # st3, `st`, and st3-migrate come from the st3 package, so each has one build.
           cargoBuildFlags = [
             "-p"
             "st2"
@@ -390,7 +386,7 @@
               fi
             done
           '';
-          # Stamp st3, its shared driver library, and stui from this declared flake source.
+          # Stamp st3, its shared driver library, and the terminal UI library from this declared flake source.
           CLI_BUILD_STAMP = buildStamp;
           inherit cargoDeps;
           cargoBuildFlags = [
@@ -398,8 +394,6 @@
             "st3"
             "-p"
             "st3-migrate"
-            "-p"
-            "stui"
           ];
           # `--no-fail-fast` reports every failing test target in one run.
           cargoTestFlags = [
@@ -515,7 +509,7 @@
           nativeBuildInputs = [ pkgs.bashInteractive pkgs.fish pkgs.zsh ];
         } ''
           test "$(readlink ${st3}/bin/st)" = st3
-          test -x ${st3}/bin/stui
+          test ! -e ${st3}/bin/stui
           test -x ${st3}/bin/pty
           expected='${version}+${sourceRev}${pkgs.lib.optionalString (sourceDirty && !(pkgs.lib.hasSuffix "-dirty" sourceRev)) "-dirty"}'
           ${st3}/bin/st3 --version > st3.version
@@ -523,7 +517,7 @@
           test "$(wc -l < st3.version)" -eq 1
           ${st3}/bin/st --version --json > version.json
           test "$(${pkgs.jq}/bin/jq -r .machine_version version.json)" = "$expected"
-          ${st3}/bin/stui --version | grep -F "$expected"
+          ${st3}/bin/st ui --version | grep -F "$expected"
           ${st3}/bin/st3 --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
@@ -545,14 +539,14 @@
           pkgs.runCommand "st3-install-layout-${version}" { } ''
             export HOME=$(mktemp -d)
             test "$(readlink ${st3}/bin/st)" = st3
-            printf '%s\n' pty st st3 st3-migrate stui > expected-package-bin
+            printf '%s\n' pty st st3 st3-migrate > expected-package-bin
             ls ${st3}/bin | sort > actual-package-bin
             cmp expected-package-bin actual-package-bin
 
             mkdir built
-            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate ${st3}/bin/stui built/
+            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate built/
             bash ${self}/scripts/install --from built --bin-dir "$PWD/bin"
-            printf '%s\n' st st3 st3-migrate stui > expected-source-bin
+            printf '%s\n' st st3 st3-migrate > expected-source-bin
             ls bin | sort > actual-source-bin
             cmp expected-source-bin actual-source-bin
             test "$(readlink bin/st)" = st3
@@ -560,7 +554,7 @@
             bin/st3 --help > st3.help
             cmp st.help st3.help
             bin/st3-migrate --help > /dev/null
-            bin/stui --help > /dev/null
+            bin/st ui --help > /dev/null
 
             bash ${self}/scripts/install-test
             touch $out
@@ -791,8 +785,7 @@
           # `checks.hooks-replacement`. Its test suite is `checks.st2`'s, on source that differs
           # only by an appended hook comment, so running it again buys nothing.
           doCheck = false;
-          CLI_BUILD_STAMP = builtins.toJSON {
-            type = "nix";
+          CLI_BUILD_STAMP = import ./nix/build-stamp.nix {
             inherit version;
             rev = "hook-successor";
             commitTs = sourceCommitUnix;
@@ -803,6 +796,9 @@
       {
         packages.st2 = st2;
         packages.st = st3;
+        # Release runners need a host linker for Cargo build scripts and stamp tests.
+        # The release target still links through the pinned Zig/glibc-baseline wrapper.
+        packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
@@ -831,6 +827,9 @@
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
         checks.debug-assertions = st2DebugAssertions;
+        checks.build-stamp-bounds =
+          assert import ./nix/build-stamp-tests.nix;
+          pkgs.runCommand "build-stamp-bounds" { } ''touch $out'';
         checks.hm-module-eval =
           let
             rendered = hmModuleEval.config;
@@ -1201,6 +1200,9 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.git
+            # Git evidence fixtures sign observations and serve API responses with Python.
+            pkgs.openssh
+            pkgs.python3
             pkgs.sccache
             pkgs.cargo-nextest
             pkgs.pkg-config
@@ -1226,7 +1228,9 @@
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           shellHook = ''
+            source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              source ${./scripts/ci-cargo-tools-env} || exit $?
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
           '';
@@ -1246,6 +1250,7 @@
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
           shellHook = ''
+            source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
@@ -1302,6 +1307,8 @@
             ];
             BUCK2_BIN = "${effectUtilsPackages.buck2}/bin/buck2";
             FRACTAL_WEB_BUCK_ROOT = "${buckRoot}";
+            PLAYWRIGHT_MODULE = "${webPkgs.playwright-driver}/index.mjs";
+            CHROMIUM_PATH = webPkgs.lib.optionalString webPkgs.stdenv.hostPlatform.isLinux "${webPkgs.chromium}/bin/chromium";
             shellHook = ''
               mkdir -p repos .buck2
               ln -sfn ${effect-utils} repos/effect-utils

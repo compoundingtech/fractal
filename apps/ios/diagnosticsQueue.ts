@@ -1,4 +1,5 @@
 import type { ClientDiagnosticEvent, ClientDiagnosticsAck, ClientDiagnosticsBatch } from '../../clients/typescript/st3-client';
+import { ClientError } from '../../clients/typescript/st3-client/Client.generated.ts';
 import { redactDiagnosticEvent } from './diagnosticsRedaction';
 
 export const DIAGNOSTICS_KEY = 'st3.client-diagnostics.v1';
@@ -24,7 +25,7 @@ export const decodeQueue = (text: string | null, now: number): QueueState => {
     if (value?.version !== 1 || !Array.isArray(value.events)) return empty();
     const events = value.events.slice(-QUEUE_REPORTS).flatMap((item: unknown) => { const event = redactDiagnosticEvent(item); return event ? [event] : []; });
     const failures = Number.isSafeInteger(value.failures) && value.failures >= 0 ? Math.min(16, value.failures) : 0;
-    const retry_at = Number.isSafeInteger(value.retry_at) && value.retry_at >= 0 ? Math.min(now + 5 * 60 * 1000, value.retry_at) : 0;
+    const retry_at = Number.isSafeInteger(value.retry_at) && value.retry_at >= 0 ? value.retry_at : 0;
     return boundQueue({ version: 1, events, failures, retry_at }, now);
   } catch { return empty(); }
 };
@@ -91,10 +92,18 @@ export class DiagnosticsQueue {
           await this.commit({ ...this.state, events: this.state.events.filter(event => !acknowledged.has(event.event_id)), failures: 0, retry_at: 0 });
           return this.state.events.length ? this.now() : undefined;
         });
-      } catch {
+      } catch (error) {
         return this.serialized(async () => {
+          if (error instanceof ClientError) {
+            if (error.status === 401 || error.status === 403) return undefined;
+            if (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429) {
+              const rejected = new Set(batch.events.map(event => event.event_id));
+              await this.commit({ ...this.state, events: this.state.events.filter(event => !rejected.has(event.event_id)), failures: 0, retry_at: 0 });
+              return this.state.events.length ? this.now() : undefined;
+            }
+          }
           const failures = Math.min(16, this.state.failures + 1);
-          const retry_at = this.now() + retryDelay(failures, this.random());
+          const retry_at = this.now() + Math.max(retryDelay(failures, this.random()), error instanceof ClientError && error.status === 429 ? error.retryAfterMs ?? 0 : 0);
           await this.commit({ ...this.state, failures, retry_at });
           return retry_at;
         });

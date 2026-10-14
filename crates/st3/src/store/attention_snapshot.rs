@@ -8,6 +8,14 @@ const FINAL_STEP_FAULT_MS: u128 = 24 * 60 * 60 * 1000;
 /// that never starts parks nothing and fails nothing, so nobody finds it by looking.
 const SEAT_NOT_STARTED_MS: u128 = 10 * 60 * 1000;
 
+/// The open steps assigned to a person (`?1` NULL for any person). A range on the assignee index,
+/// not `LIKE 'person/%'`: SQLite does not use an index for a case-insensitive LIKE, so that read
+/// every step run in the store. Assignees are written in lower case; the range also drops an
+/// upper-case `Person/` spelling that LIKE would have matched. A test pins the plan.
+const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
+    WHERE assignee>='person/' AND assignee<'person0'
+    AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
+
 impl Store {
     /// The mission context of a person ask a mission step made: its mission, and the step that
     /// waits on the answer with its goal. `None` for a standalone ask or an update, which belong
@@ -156,9 +164,15 @@ impl Store {
                 },
                 conversation: Some(seat.clone()),
                 title: format!("{seat} is waiting for {what}"),
-                // Codex names no tool: its reason only says it waits on an approval.
+                // Codex names what its request asks to do, not the call: that is the pending
+                // request in the seat's conversation.
                 detail: if answerable(&harness) && harness["driver"] == "codex" {
-                    "Codex asks for approval; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
+                    format!(
+                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.",
+                        codex_approval_words(prompt)
+                    )
+                } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
+                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable(&harness) {
                     format!(
                         "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
@@ -190,14 +204,7 @@ impl Store {
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let mut items = Vec::new();
-        let mut query = connection.prepare(
-            // A range on the assignee index, not `LIKE 'person/%'`: SQLite does not use an index
-            // for a case-insensitive LIKE, so that read every step run in the store. Assignees
-            // are written in lower case; the range also drops an upper-case `Person/` spelling
-            // that LIKE would have matched.
-            "SELECT subject FROM step_runs WHERE assignee>='person/' AND assignee<'person0'
-            AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject",
-        )?;
+        let mut query = connection.prepare(PERSON_STEPS_QUERY)?;
         let subjects = query
             .query_map([person], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -560,7 +567,7 @@ impl Store {
                 message_id: None, answers: Vec::new(), conversation: None,
                 title: format!("st cannot reconcile {source}"),
                 detail: format!(
-                    "{scope}: {}. Inspect with `st subject {source}`.",
+                    "{scope}: {}. Inspect with `st subject show {source}`.",
                     claim.body["fields"]["reason"].as_str().unwrap_or_default()
                 ),
                 mission: None,
@@ -594,6 +601,20 @@ impl Store {
             .unwrap_or_default();
         if !matches!(status, "failed" | "cancelled") {
             return Ok(None);
+        }
+        if status == "cancelled" {
+            // Cancellation before admission changes the loop step's state without ever
+            // starting a round. A stopped-loop fault needs round activity in that case;
+            // structural failures still need attention even before the first round.
+            smallclaims::touched::note_read(|| format!("children-of-step:{}", view.subject));
+            let has_round: bool = self.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE parent_step_run=?1)",
+                [&view.subject],
+                |row| row.get(0),
+            )?;
+            if !has_round {
+                return Ok(None);
+            }
         }
         let reason = state
             .body
@@ -992,9 +1013,18 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        self.broken_gate_items_from_failures(person, as_of, self.operational_failures()?)
+    }
+
+    pub(super) fn broken_gate_items_from_failures(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        failures: Vec<AttentionRequestView>,
+    ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let mut items = Vec::new();
-        for failure in self.operational_failures()? {
+        for failure in failures {
             if failure.status != "pending"
                 || failure.requested_at_unix_ms > as_of
                 || person.is_some_and(|person| person != failure.reviewer)
@@ -1037,18 +1067,32 @@ impl Store {
         Ok(items)
     }
 
+    // The independently folding operational reader is now used only by parity controls.
+    #[cfg(test)]
     pub(super) fn operational_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        let (items, _) = self.operational_attention_items_with_failures(person, as_of)?;
+        Ok(items)
+    }
+
+    /// Return this call's history cut for the broken-gate reducer, without caching authority.
+    /// Read it at its original first-use point, after the derived fault families below.
+    pub(super) fn operational_attention_items_with_failures(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
         let connection = self.readers.get();
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
         items.extend(self.parked_runtime_attention_items(person, as_of)?);
         items.extend(self.unstarted_seat_attention_items(person, as_of)?);
-        for failure in self.operational_failures()? {
+        let failures = self.operational_failures()?;
+        for failure in &failures {
             if failure.status != "pending"
                 || failure.requested_at_unix_ms > as_of
                 || person.is_some_and(|person| person != failure.reviewer)
@@ -1122,6 +1166,15 @@ impl Store {
                 {
                     continue;
                 }
+            } else if claim.body["fields"]["condition"] == "stop-deferred" {
+                // A retained stop belongs to a terminal run, so declaration_live deliberately
+                // excludes it. Its own revision, incarnation and runtime fences decide instead.
+                if !self
+                    .stop_deferral_faults_for(std::slice::from_ref(source), self.index()?)?
+                    .contains_key(source)
+                {
+                    continue;
+                }
             } else if !source.starts_with("daemon/")
                 && !person_work::declaration_live(&connection, source)?
             {
@@ -1176,14 +1229,14 @@ impl Store {
             // Diagnostic history stays immutable; current work/runtime state decides whether
             // this episode still needs an owner. This changes no canonical timing fold.
             let wake = if f["condition"] == "work-wake-exhausted" {
-                let Some(context) = self.current_exhausted_work_wake(&failure, as_of)? else {
+                let Some(context) = self.current_exhausted_work_wake(failure, as_of)? else {
                     continue;
                 };
                 Some(context)
             } else {
                 None
             };
-            let mut item = attention_item_from_failure(failure);
+            let mut item = attention_item_from_failure(failure.clone());
             item.kind = "fault".into();
             if f["condition"] == MISSING_AGENT_CONDITION {
                 item.mission_run = Some(source.clone());
@@ -1201,6 +1254,12 @@ impl Store {
                 "inspect source",
                 &["st", "subject", source],
             )];
+            if f["condition"] == "stop-deferred" {
+                item.actions = vec![attention_action(
+                    "inspect retained seat",
+                    &["st", "agents", "show", source, "--all"],
+                )];
+            }
             if let Some((step, diagnostic)) = wake {
                 item.step = Some(step.subject.clone());
                 item.mission_run = Some(step.run);
@@ -1211,7 +1270,7 @@ impl Store {
             }
             items.push(item);
         }
-        Ok(items)
+        Ok((items, failures))
     }
 
     fn current_exhausted_work_wake(
@@ -1413,17 +1472,31 @@ fn native_prompt_gone_operation(observation: &str) -> String {
 }
 
 /// Whether st can answer the prompt `harness` reports from a client: a permission prompt of
-/// Claude, whose hook waits for the answer, or of Codex, whose control connection sends it, that
-/// names its reason (Claude's tool; Codex's `waitingOnApproval`). The call's input is conversation
-/// content a client reads from the seat's conversation and shows beside the answers; it is never
-/// stored here. Other prompts are answered in the seat's terminal.
+/// Claude, whose hook waits for the answer, that names its tool; or of Codex, whose control
+/// connection sends it, that names the request it saw (`commandExecution`, `fileChange`,
+/// `permissions`). A Codex wait known only from its thread's `waitingOnApproval` flag has no
+/// request st could answer. The call's input is conversation content a client reads from the
+/// seat's conversation and shows beside the answers; it is never stored here. Other prompts are
+/// answered in the seat's terminal.
 fn answerable(harness: &Value) -> bool {
+    let reason = harness["reason"].as_str().unwrap_or_default();
     harness["blocked_on"] == "human"
         && harness["ask"] == "permission"
-        && matches!(harness["driver"].as_str(), Some("claude" | "codex"))
-        && harness["reason"]
-            .as_str()
-            .is_some_and(|reason| !reason.is_empty() && reason != "permissionRequest")
+        && match harness["driver"].as_str() {
+            Some("claude") => !reason.is_empty() && reason != "permissionRequest",
+            Some("codex") => matches!(reason, "commandExecution" | "fileChange" | "permissions"),
+            _ => false,
+        }
+}
+
+/// What a Codex approval request asks for, by the reason its observation names.
+fn codex_approval_words(reason: &str) -> &'static str {
+    match reason {
+        "commandExecution" => "to run a command",
+        "fileChange" => "to change files",
+        "permissions" => "for more permissions",
+        _ => "for approval",
+    }
 }
 
 /// The idempotency key of the person's answer to the native prompt `observation` opened.
@@ -1521,13 +1594,24 @@ impl Store {
         };
         // Claude and Codex show one prompt at a time: while every observation since the waiter's
         // own still waits on that permission, it is the same prompt, and an answer to any of them
-        // is the waiter's. Anything else in between means the prompt is gone.
+        // is the waiter's. Anything else in between means the prompt is gone, and so does a new
+        // transition that is not a credential edge: a driver writes each prompt as its own
+        // transition, so a later one waiting on the same tool is another prompt.
         let mut chain = Vec::new();
+        let mut newer: Option<Value> = None;
         for (claim, body) in &recent[..=own] {
             let body: Value = serde_json::from_str(body)?;
-            if !answerable(body.get("fields").unwrap_or(&body)) {
+            let fields = body.get("fields").unwrap_or(&body);
+            if !answerable(fields) {
                 return Ok(NativePromptState::Gone);
             }
+            if let Some(newer) = &newer
+                && newer["transition_sequence"] != fields["transition_sequence"]
+                && newer["provider_auth"] == fields["provider_auth"]
+            {
+                return Ok(NativePromptState::Gone);
+            }
+            newer = Some(fields.clone());
             chain.push(claim.clone());
         }
         for claim in &chain {
@@ -1597,5 +1681,32 @@ impl Store {
             expected_subject: None,
             idempotency_key: Some(native_prompt_answer_key(&claim)),
         })
+    }
+}
+
+#[cfg(test)]
+mod person_steps_plan_tests {
+    use super::*;
+
+    #[test]
+    fn the_person_step_read_is_a_search_of_the_assignee_index_not_a_scan() {
+        let store = Store::open_memory("alder").unwrap();
+        let connection = store.readers.get();
+        let plan: Vec<String> = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {PERSON_STEPS_QUERY}"))
+            .unwrap()
+            .query_map([None::<String>], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.starts_with("SEARCH step_runs") && line.contains("step_runs_assignee_index")),
+            "the person-step read must search step_runs_assignee_index: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.starts_with("SCAN step_runs")),
+            "the person-step read must not scan step_runs: {plan:?}"
+        );
     }
 }

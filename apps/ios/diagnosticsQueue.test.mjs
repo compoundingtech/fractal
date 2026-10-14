@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { BATCH_BYTES, DIAGNOSTICS_KEY, DiagnosticsQueue, MAX_AGE_MS, QUEUE_BYTES, QUEUE_REPORTS, boundQueue, decodeQueue, diagnosticBatch, retryDelay } from './diagnosticsQueue.ts';
+import { ClientError } from '../../clients/typescript/st3-client/Client.generated.ts';
 
 const now = 1_800_000_000_000;
 const report = (i, captured = now) => ({
@@ -42,7 +43,7 @@ test('persisted input is versioned, redacted, bounded, and expires after seven d
   const decoded = decodeQueue(JSON.stringify({ ...state([dirty]), failures: 999, retry_at: now + 999_999_999 }), now);
   assert.deepEqual(decoded.events, [report(1)]);
   assert.equal(decoded.failures, 16);
-  assert.equal(decoded.retry_at, now + 300_000);
+  assert.equal(decoded.retry_at, now + 999_999_999);
   assert.equal(decodeQueue(JSON.stringify(state([report(1, now - MAX_AGE_MS)])), now).events.length, 0);
   assert.equal(decodeQueue('{broken', now).events.length, 0);
   assert.equal(decodeQueue(JSON.stringify({ ...state([report(1)]), version: 0 }), now).events.length, 0);
@@ -126,4 +127,33 @@ test('in-flight upload remains single, a replacement context resumes pending wor
   await Promise.all([first, second]);
   assert.equal(replacementSends, 1);
   assert.equal(JSON.parse(storage.text).events.length, 0);
+});
+
+const refused = (status, retryAfter) => new ClientError({ message: 'refused', code: status === 429 ? 'rate-limited' : 'validation-failed', retryable: status === 429 }, status, retryAfter);
+
+test('terminal batch refusal removes only sent reports and unblocks later capture', async () => {
+  const storage = memoryStorage(); const queue = new DiagnosticsQueue(storage, () => now);
+  await queue.enqueue([report(1)]);
+  assert.equal(await queue.flush(async () => { await queue.enqueue([report(2)]); throw refused(422); }), now);
+  assert.deepEqual(JSON.parse(storage.text).events.map(event => event.sequence), [2]);
+});
+
+test('authentication refusal retains reports without scheduling retries', async () => {
+  for (const status of [401, 403]) {
+    const storage = memoryStorage(); const queue = new DiagnosticsQueue(storage, () => now);
+    await queue.enqueue([report(1)]);
+    assert.equal(await queue.flush(async () => { throw refused(status); }), undefined);
+    assert.equal(JSON.parse(storage.text).events.length, 1);
+    assert.equal(JSON.parse(storage.text).failures, 0);
+  }
+});
+
+test('rate limits preserve reports and honour Retry-After beyond normal backoff', async () => {
+  const storage = memoryStorage(); const queue = new DiagnosticsQueue(storage, () => now, () => 1);
+  await queue.enqueue([report(1)]);
+  assert.equal(await queue.flush(async () => { throw refused(429, '600'); }), now + 600_000);
+  assert.equal(JSON.parse(storage.text).events.length, 1);
+  const reopened = new DiagnosticsQueue(storage, () => now, () => 1);
+  assert.equal(await reopened.flush(async () => { assert.fail('must not retry before the persisted server deadline'); }), now + 600_000);
+  assert.equal(new ClientError({ message: 'x' }, 429, 'invalid').retryAfterMs, undefined);
 });

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add paired iOS launch, JavaScript error and native crash/hang diagnostics with bounded private capture and durable node-local ingestion.",
+  "replay": { "status": "none", "detail": "No replicated replay or backfill. Diagnostics and retry receipts are node-local." },
+  "schema": { "status": "changed", "detail": "Add the local client_diagnostic_receipts table, client subject family, and client.launch/client.js-error/client.native-crash/client.hang claim kinds. Registry digest changes; storage schema version is unchanged. Local retention policy and canonical audit exclude these facts from replicated projections." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet admission rule change." },
+  "compatibility": { "status": "changed", "detail": "POST /v1/client/diagnostics and write.client-diagnostics are new. Older daemons lack the route; the phone checks capability before upload. Existing paired grants remain unchanged. Rate-limit responses use the public rate-limited code; the phone drops terminal rejected batches, pauses on authentication refusal, and honours Retry-After." },
+  "downtime": { "status": "none", "detail": "No coordinated shutdown or service interruption required." },
+  "manual": { "status": "changed", "detail": "Previously paired devices must re-pair to acquire write.client-diagnostics. No automatic scope expansion of existing grants." },
+  "recovery": { "status": "none", "detail": "Rollback leaves node-local receipts and bounded captured diagnostics unused; no replicated conversion or recovery procedure is required." }
+}

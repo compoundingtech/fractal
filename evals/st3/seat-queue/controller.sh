@@ -228,7 +228,7 @@ jq -e --arg alpha "$alpha" '.value.runs[0].mission_run_id == $alpha and .value.r
   || fail "alpha was not the waiting head run when charlie was claimed"
 
 # Release alpha's gate while the seat still holds charlie's work.
-st3 attention approve "$alpha_sign_off" \
+st3 alerts approve "$alpha_sign_off" \
   --as "$REQUESTER" \
   --reason "the alpha draft is signed off" >/dev/null
 checkpoint sign-off-approved

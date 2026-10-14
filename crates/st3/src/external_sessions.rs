@@ -951,6 +951,7 @@ pub(crate) fn normalized_record(
                 *sequence,
                 timestamp,
                 *line_index,
+                false,
                 &mut items,
             );
         }
@@ -1180,7 +1181,22 @@ const MAX_FOLDED_TRANSCRIPTS: usize = 16;
 const MAX_FOLDED_SOURCE_BYTES: usize = 96 * 1024 * 1024;
 type SharedLineFold = Arc<Mutex<LineTimelineFold>>;
 type LineFoldCache = VecDeque<(PathBuf, ExternalDriver, SharedLineFold, usize)>;
+#[cfg(not(test))]
 static LINE_FOLDS: LazyLock<Mutex<LineFoldCache>> = LazyLock::new(Mutex::default);
+
+/// The fold cache serving `transcript`: the process-wide one, or under test the cache of the
+/// test's own scope, so parallel tests never evict or contend for each other's folds.
+#[cfg(not(test))]
+fn line_folds(_transcript: &Path) -> &'static Mutex<LineFoldCache> {
+    &LINE_FOLDS
+}
+
+#[cfg(test)]
+fn line_folds(transcript: &Path) -> Arc<Mutex<LineFoldCache>> {
+    static SCOPES: timeline_test_support::Scopes<Mutex<LineFoldCache>> =
+        LazyLock::new(Mutex::default);
+    timeline_test_support::scoped(&SCOPES, transcript, Mutex::default)
+}
 
 /// Process-random epoch for timeline generations. A restart draws a fresh epoch, so page
 /// cursors bound to a generation never carry into another process, matching the cursor MAC
@@ -1207,7 +1223,31 @@ pub(crate) mod timeline_test_support {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Condvar, LazyLock, Mutex};
+    use std::sync::{Arc, Condvar, LazyLock, Mutex};
+
+    /// Per-scope instances of a process-wide budget or cache.
+    pub(crate) type Scopes<T> = LazyLock<Mutex<HashMap<PathBuf, Arc<T>>>>;
+
+    /// A test's isolation scope: the temporary directory its transcripts live in. Paths
+    /// outside the temporary directory share one scope.
+    fn scope(path: &Path) -> PathBuf {
+        let temp = std::env::temp_dir();
+        path.strip_prefix(&temp)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .map_or_else(PathBuf::new, |first| temp.join(first))
+    }
+
+    /// The instance of a process-wide budget or cache for `path`'s scope, so each test owns
+    /// its own and parallel tests cannot affect each other through global state.
+    pub(crate) fn scoped<T>(scopes: &Scopes<T>, path: &Path, create: impl FnOnce() -> T) -> Arc<T> {
+        let mut scopes = scopes.lock().unwrap_or_else(|error| error.into_inner());
+        Arc::clone(
+            scopes
+                .entry(scope(path))
+                .or_insert_with(|| Arc::new(create())),
+        )
+    }
 
     static FOLD_WAITERS: AtomicUsize = AtomicUsize::new(0);
     static REFRESH_GATES: LazyLock<Mutex<HashMap<PathBuf, RefreshGate>>> =
@@ -1297,51 +1337,52 @@ pub(crate) mod timeline_test_support {
     }
 }
 
-fn line_fold(session: &ExternalSession) -> SharedLineFold {
-    let mut folds = match LINE_FOLDS.lock() {
+/// Run `use_folds` on the fold cache serving `transcript`. A poisoned cache starts empty.
+fn with_line_folds<R>(transcript: &Path, use_folds: impl FnOnce(&mut LineFoldCache) -> R) -> R {
+    let cache = line_folds(transcript);
+    let mut folds = match cache.lock() {
         Ok(folds) => folds,
         Err(error) => {
             let mut folds = error.into_inner();
             folds.clear();
-            LINE_FOLDS.clear_poison();
+            cache.clear_poison();
             folds
         }
     };
-    let found = folds
-        .iter()
-        .position(|(path, driver, _, _)| path == &session.transcript && *driver == session.driver);
-    let entry = found
-        .and_then(|index| folds.remove(index))
-        .unwrap_or_else(|| {
-            (
-                session.transcript.clone(),
-                session.driver,
-                SharedLineFold::default(),
-                0,
-            )
-        });
-    let fold = Arc::clone(&entry.2);
-    folds.push_back(entry);
-    trim_line_folds(&mut folds, MAX_FOLDED_SOURCE_BYTES);
-    fold
+    use_folds(&mut folds)
 }
 
-fn account_line_fold(fold: &SharedLineFold, bytes: usize) {
-    let mut folds = match LINE_FOLDS.lock() {
-        Ok(folds) => folds,
-        Err(error) => {
-            let mut folds = error.into_inner();
-            folds.clear();
-            LINE_FOLDS.clear_poison();
-            folds
-        }
-    };
-    if let Some(index) = folds.iter().position(|entry| Arc::ptr_eq(&entry.2, fold)) {
-        let mut entry = folds.remove(index).expect("located fold");
-        entry.3 = bytes;
+fn line_fold(session: &ExternalSession) -> SharedLineFold {
+    with_line_folds(&session.transcript, |folds| {
+        let found = folds.iter().position(|(path, driver, _, _)| {
+            path == &session.transcript && *driver == session.driver
+        });
+        let entry = found
+            .and_then(|index| folds.remove(index))
+            .unwrap_or_else(|| {
+                (
+                    session.transcript.clone(),
+                    session.driver,
+                    SharedLineFold::default(),
+                    0,
+                )
+            });
+        let fold = Arc::clone(&entry.2);
         folds.push_back(entry);
-    }
-    trim_line_folds(&mut folds, MAX_FOLDED_SOURCE_BYTES);
+        trim_line_folds(folds, MAX_FOLDED_SOURCE_BYTES);
+        fold
+    })
+}
+
+fn account_line_fold(session: &ExternalSession, fold: &SharedLineFold, bytes: usize) {
+    with_line_folds(&session.transcript, |folds| {
+        if let Some(index) = folds.iter().position(|entry| Arc::ptr_eq(&entry.2, fold)) {
+            let mut entry = folds.remove(index).expect("located fold");
+            entry.3 = bytes;
+            folds.push_back(entry);
+        }
+        trim_line_folds(folds, MAX_FOLDED_SOURCE_BYTES);
+    });
 }
 
 fn trim_line_folds(folds: &mut LineFoldCache, budget: usize) {
@@ -1413,7 +1454,7 @@ impl LineTimelineHeld<'_> {
             Some(state) => {
                 let result = state.read(session);
                 let fold = self.fold.expect("held fold state has its fold");
-                account_line_fold(fold, state.retained_source_bytes);
+                account_line_fold(session, fold, state.retained_source_bytes);
                 result
             }
             None => normalized_opencode_timeline(session),
@@ -1431,7 +1472,7 @@ impl LineTimelineHeld<'_> {
             Some(state) => {
                 let result = state.slice(session, order, before, limit);
                 let fold = self.fold.expect("held fold state has its fold");
-                account_line_fold(fold, state.retained_source_bytes);
+                account_line_fold(session, fold, state.retained_source_bytes);
                 result
             }
             None => opencode_timeline_slice(session, order, before, limit),
@@ -1508,6 +1549,7 @@ impl FoldedLine {
             sequence,
             timestamp,
             line_number,
+            true,
             &mut self.items,
         );
         let locator = NativeLocator::Jsonl {
@@ -1704,8 +1746,9 @@ impl LineTimelineFold {
         let window_start = len.saturating_sub(MAX_TIMELINE_BYTES);
         let identity = file_identity(&metadata);
         if !self.resumable(&identity, len, window_start, &mut file) {
-            // Any non-append change (replacement, shrink, edit, or a cold fold) draws a new
-            // generation, so outstanding page cursors stop applying their old boundary.
+            // Any non-append change (replacement, shrink, edit, or a cold fold, including one
+            // the fold cache evicted) draws a new generation, so outstanding page cursors are
+            // refused as expired instead of applying their old boundary to a re-read fold.
             *self = Self {
                 identity: Some(identity),
                 consumed: window_start,
@@ -1985,7 +2028,7 @@ fn normalize_native_line(
 /// object only opens after `:`, `,`, `[`, or at the start, so an object opening after anything
 /// else is where the torn record ends. The first such position whose remainder parses as one
 /// whole object is the recovered record. The search is bounded.
-fn recover_trailing_record(line: &str) -> Option<Value> {
+fn recover_trailing_record(line: &str, preview: bool) -> Option<Value> {
     let bytes = line.as_bytes();
     let mut attempts = 0;
     for (index, _) in line.match_indices('{') {
@@ -2003,28 +2046,123 @@ fn recover_trailing_record(line: &str) -> Option<Value> {
         if attempts > 16 {
             return None;
         }
-        if let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(&line[index..]) {
+        if let Ok(value @ Value::Object(_)) = parse_native_record(&bytes[index..], preview) {
             return Some(value);
         }
     }
     None
 }
 
+/// Native records above this size paint with bounded normalized strings. The fold still reads
+/// and retains the source bytes; a continuation normalizes their complete strings on demand.
+const PREVIEW_RECORD_BYTES: usize = 256 * 1024;
+/// The longest head a preview keeps of a string. With its marker it stays within the client
+/// display window (8 KiB), so the marker reports the size of the complete native string.
+const PREVIEW_STRING_BYTES: usize = 8 * 1024 - 128;
+
+/// Parse one native record. A preview of an oversized record retains all keys and elements,
+/// but bounds each normalized string. This avoids full long-string copies in typed bodies and
+/// source-record payloads; it does not bound total record memory or avoid scanning source bytes.
+fn parse_native_record(bytes: &[u8], preview: bool) -> serde_json::Result<Value> {
+    if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+        serde_json::from_slice::<PreviewValue>(bytes).map(|PreviewValue(value)| value)
+    } else {
+        serde_json::from_slice(bytes)
+    }
+}
+
+fn preview_text(text: &str) -> String {
+    if text.len() <= PREVIEW_STRING_BYTES {
+        return text.to_owned();
+    }
+    let mut end = PREVIEW_STRING_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[st truncated this native timeline value: size limit; {} bytes]",
+        &text[..end],
+        text.len()
+    )
+}
+
+struct PreviewValue(Value);
+
+impl<'de> Deserialize<'de> for PreviewValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(PreviewVisitor).map(Self)
+    }
+}
+
+struct PreviewVisitor;
+
+impl<'de> serde::de::Visitor<'de> for PreviewVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(preview_text(value)))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(PreviewValue(value)) = seq.next_element()? {
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut values = serde_json::Map::new();
+        while let Some((key, PreviewValue(value))) = map.next_entry::<String, PreviewValue>()? {
+            values.insert(key, value);
+        }
+        Ok(Value::Object(values))
+    }
+}
+
 /// Unparseable records preserve exact bytes, including newline, controls and invalid UTF-8.
+/// A `preview` of an oversized record bounds every retained string (see `parse_native_record`)
+/// and marks its entries with `_preview_of_bytes`; the owner serves the rest on request.
 fn normalize_native_bytes(
     driver: ExternalDriver,
     bytes: &[u8],
     sequence: u64,
     timestamp: &str,
     line_index: usize,
+    preview: bool,
     items: &mut Vec<Value>,
 ) {
-    match serde_json::from_slice::<Value>(bytes) {
+    let first = items.len();
+    match parse_native_record(bytes, preview) {
         Ok(value) => normalize_native_line(driver, &value, sequence, timestamp, items),
         Err(error) => {
             let recovered = std::str::from_utf8(bytes)
                 .ok()
-                .and_then(recover_trailing_record);
+                .and_then(|line| recover_trailing_record(line, preview));
             let mut item = timeline_item(
                 sequence,
                 timestamp,
@@ -2036,14 +2174,24 @@ fn normalize_native_bytes(
                     "retryable":false, "details":{"line_in_window":line_index.saturating_add(1),"parse_error":error.to_string()}
                 }),
             );
+            let kept = if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+                &bytes[..PREVIEW_STRING_BYTES]
+            } else {
+                bytes
+            };
             item["body"]["blocks"]
                 .as_array_mut()
                 .unwrap()
-                .insert(0, raw_bytes_block(sequence, driver.as_str(), bytes));
+                .insert(0, raw_bytes_block(sequence, driver.as_str(), kept));
             items.push(item);
             if let Some(value) = recovered {
                 normalize_native_line(driver, &value, sequence.saturating_add(1), timestamp, items);
             }
+        }
+    }
+    if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+        for item in &mut items[first..] {
+            item["_preview_of_bytes"] = json!(bytes.len());
         }
     }
 }
@@ -4770,7 +4918,10 @@ mod tests {
             let header = crate::conversation_header::derive(head, true);
             assert_eq!(header["cost"]["value"], json!({"usd": 0.5, "window": true}));
             assert_eq!(header["model"]["value"], "latest-model");
-            assert_eq!(header["context"]["value"], json!({"tokens": 23, "window": true}));
+            assert_eq!(
+                header["context"]["value"],
+                json!({"tokens": 23, "window": null})
+            );
             for field in ["cost", "model", "context"] {
                 assert_eq!(header[field]["as_of"], "2026-10-06T00:00:01Z");
             }
@@ -7428,6 +7579,7 @@ mod tests {
                 sequence,
                 &last_timestamp,
                 line_index,
+                true,
                 &mut items,
             );
             let source = serde_json::to_value(NativeLocator::Jsonl {
@@ -7572,6 +7724,45 @@ mod tests {
         let edited = timeline_slice(&session, order, None, 10).unwrap();
         assert_ne!(edited.generation, replaced.generation);
         assert_eq!(texts(&edited.items), ["edited"]);
+    }
+
+    #[test]
+    fn an_evicted_fold_reopens_under_a_new_generation_with_the_same_items() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("evicted.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}{}",
+                codex_record("one", "one"),
+                codex_record("two", "two")
+            ),
+        )
+        .unwrap();
+        let session = transcript_session(ExternalDriver::Codex, &path);
+        let order = TimelineOrder::Sequence;
+        let first = timeline_slice(&session, order, None, 10).unwrap();
+        for index in 0..MAX_FOLDED_TRANSCRIPTS {
+            let other = root.path().join(format!("other-{index}.jsonl"));
+            fs::write(&other, codex_record("other", "other")).unwrap();
+            timeline_slice(
+                &transcript_session(ExternalDriver::Codex, &other),
+                order,
+                None,
+                10,
+            )
+            .unwrap();
+        }
+        assert!(with_line_folds(&path, |folds| {
+            !folds.iter().any(|entry| entry.0 == path)
+        }));
+        // The re-read fold must not reuse the evicted generation: a cursor minted against
+        // it would otherwise page a rebuilt fold as if it were the old one.
+        let reopened = timeline_slice(&session, order, None, 10).unwrap();
+        assert_ne!(reopened.generation, first.generation);
+        assert_eq!(reopened.items, first.items);
+        // Slices are newest-first by sequence, even when native timestamps tie.
+        assert_eq!(texts(&reopened.items), ["two", "one"]);
     }
 
     #[test]

@@ -3,6 +3,7 @@ import * as Crypto from 'expo-crypto';
 import { requireOptionalNativeModule } from 'expo';
 import { AppState, Linking, Platform } from 'react-native';
 import type { Capabilities, ClientDiagnosticEvent, St3Client } from '../../clients/typescript/st3-client';
+import { ClientError } from '../../clients/typescript/st3-client/Client.generated.ts';
 import StDiagnostics from './modules/st-diagnostics';
 import app from './app.json';
 import { DIAGNOSTICS_KEY, DiagnosticsQueue } from './diagnosticsQueue';
@@ -38,6 +39,7 @@ let connectionOwner: object | undefined;
 const breadcrumbs: ClientDiagnosticEvent[] = [];
 const boundaryInjections = new Set<() => void>();
 const grantedClients = new WeakMap<St3Client, boolean>();
+const deniedClients = new WeakSet<St3Client>();
 
 /** Cache only grants: a denial is re-discovered on the next foreground or
  * reconnect, so a later grant needs no app restart. */
@@ -55,10 +57,17 @@ const scheduleUpload = (at = Date.now()): void => {
     timer = undefined;
     const current = () => sender === client && generation === currentGeneration && active;
     if (!current()) return;
+    if (deniedClients.has(client)) return;
     const flush = async (): Promise<number | undefined> => {
       if (!grantedClients.has(client)) recordDiagnosticCapabilities(client, (await client.discover()).value);
       if (!current() || grantedClients.get(client) !== true) return;
-      return queue.flush(async batch => (await client.diagnosticsSubmit(batch)).value, current);
+      return queue.flush(async batch => {
+        try { return (await client.diagnosticsSubmit(batch)).value; }
+        catch (error) {
+          if (error instanceof ClientError && (error.status === 401 || error.status === 403)) deniedClients.add(client);
+          throw error;
+        }
+      }, current);
     };
     void flush().then(next => { if (current() && next !== undefined) scheduleUpload(next); })
       .catch(() => { if (current()) scheduleUpload(Date.now() + 30_000); });
