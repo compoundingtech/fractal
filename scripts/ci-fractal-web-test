@@ -62,6 +62,9 @@ web_inputs = (
     "fixtures/clients/device-signing-v1.json",
     "fixtures/clients/transcripts/example.json",
     "fixtures/scenarios/example.json",
+    "megarepo.kdl",
+    "megarepo.lock",
+    "flake.lock",
 )
 non_web_inputs = (
     "crates/st3-client/src/lib.rs",
@@ -70,11 +73,13 @@ non_web_inputs = (
     "docs/st3/client-v0/x.md",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "flake.nix",
-    "flake.lock",
     "clients/typescript/st3-client/README.md",
     "clients/typescript/st3-client/contract.test.cjs",
     "clients/typescript/st3-client/schema.test.cjs",
     "clients/typescript/st3-client/fetch-receiver.test.ts",
+    "nested/megarepo.kdl",
+    "nested/megarepo.lock",
+    "nested/flake.lock",
 )
 unexpected = []
 for paths, expected in ((web_inputs, True), (non_web_inputs, False)):
@@ -112,6 +117,11 @@ with tempfile.TemporaryDirectory() as scratch:
     # main moved on with a web change; a Rust-only PR based on the older main stays Rust-only.
     git(repo, "checkout", "--quiet", "main")
     advanced = commit(repo, "main web", write=["pnpm-workspace.yaml"])
+    for index, path in enumerate(("megarepo.kdl", "megarepo.lock", "flake.lock")):
+        git(repo, "checkout", "--quiet", "-b", f"dependency-pin-{index}", base)
+        pin = commit(repo, f"dependency pin {path}", write=[path])
+        for event in ("pull_request", "merge_group"):
+            check(f"{event}: {path} change executes", detect(repo, event, base, pin), (0, "relevant=true"))
 
     check("Rust-only pull request schedules no web execution", detect(repo, "pull_request", base, rust), (0, "relevant=false"))
     check("pull requests diff from the merge base", detect(repo, "pull_request", advanced, rust), (0, "relevant=false"))
@@ -158,7 +168,7 @@ changes, execution, gate_job = blocks["fractal-web-changes"], blocks["fractal-we
 for pattern in detector_contract["PATTERNS"]:
     assert f'"{pattern}"' in changes, f"generated detector omits {pattern}"
 for pattern in ("clients/typescript/st3-client/**", "crates/st3-client*/**", "crates/st3-schema/**",
-                "docs/st3/client-v0/**", "flake.nix", "flake.lock"):
+                "docs/st3/client-v0/**", "flake.nix"):
     assert f'"{pattern}"' not in changes, f"generated detector retains broad input {pattern}"
 for block in (changes, execution, gate_job):
     assert "runs-on: ubuntu-latest" in block
@@ -189,3 +199,6 @@ sdk = root / "apps/fractal-web/packages/st3-sdk"
 assert "'src/**/*.perf.test.ts'" in (sdk / "vitest.config.ts").read_text()
 assert "include: ['src/**/*.perf.test.ts']" in (sdk / "vitest.perf.config.ts").read_text()
 print("passed: deterministic SDK tests and isolated frame CPU budgets have separate lanes")
+assert lanes.index('lane "CSS asset guard" node --test apps/fractal-web/scripts/vite-css-assets.node-test.mjs') < lanes.index('lane "App production build" production_build')
+assert "fractalCssAssets()" in (root / "apps/fractal-web/vite.config.ts").read_text()
+print("passed: the CSS asset guard proves its negatives before guarding the app production build")

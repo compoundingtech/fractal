@@ -201,6 +201,15 @@ describe('kit transcript turn mapping', () => {
     expect(turns[0]!.prompt?.sendState).toEqual({ _tag: 'Failed', reason: { _tag: tag }, detail })
   })
 
+  it('maps an unconfirmed send to the kit Unconfirmed state with fixed human copy, not a failure', () => {
+    const unconfirmed = prompt('p3', 'Retry me.', 12, { _tag: 'Unconfirmed', detail: 'raw-send-diagnostic-sentinel' })
+    const turns = transcriptTurnsForItems([unconfirmed], { firstTurnComplete: true })
+    expect(turns[0]!.prompt?.sendState).toEqual({
+      _tag: 'Unconfirmed',
+      detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.',
+    })
+  })
+
   it.each(['future-reason', 'constructor', '__proto__'])('maps unclassified send failure %s to the generic kit failure', reason => {
     expect(transcriptSendFailureReason(reason)).toEqual({ _tag: 'Failed' })
   })

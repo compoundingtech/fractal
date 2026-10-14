@@ -103,7 +103,7 @@
 
         # Cargo.toml is the single source of truth for the version, so a release
         # bump needs no matching edit here.
-        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
         # NixStamp for the shared build-versioning contract: the flake rev is a
         # pure input, so baking it lets a hermetic build know its own identity
@@ -120,8 +120,7 @@
             self.rev
           else
             "nix-dirty.${self.dirtyRev or self.dirtyShortRev or "unknown"}";
-        buildStamp = builtins.toJSON {
-          type = "nix";
+        buildStamp = import ./nix/build-stamp.nix {
           inherit version;
           rev = sourceRev;
           fullRev = self.rev or self.dirtyRev or sourceRev;
@@ -157,6 +156,13 @@
           postInstall = "";
           cargoBuildFlags = [ "-p" "st3" ];
         });
+
+        # Give the historical binary a distinct name in the check-only PATH.
+        # Resolving it there keeps its store identity out of the runtime derivation.
+        messagingCompat = pkgs.runCommand "st3-messaging-compat" { } ''
+          mkdir -p $out/bin
+          ln -s ${messagingBaseline}/bin/st3 $out/bin/st3-messaging-compat
+        '';
 
         # buildRustPackage compiles the workspace once per derivation, so a gate that differs from
         # an existing derivation only by test selection is folded into that derivation's check
@@ -221,9 +227,6 @@
           "st2-pty-stats-component"
           "--exclude"
           "st2-vista-component"
-          # The standalone decision model has its own hermetic gate.
-          "--exclude"
-          "st-decision-fold"
           # `checks.st3` gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
@@ -435,9 +438,6 @@
               -j "$NIX_BUILD_CORES" ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags}
             runHook postCheck
           '';
-          ST3_MESSAGING_COMPAT_BIN = "${messagingBaseline}/bin/st3";
-          ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
-          ST3_OTEL_REQUIRE = "1";
           # These two tests put an openpty(3) terminal into raw mode. In the macOS Nix build one
           # fails and the other hangs, so they run on Linux only until they pass on macOS.
           checkFlags = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
@@ -450,6 +450,14 @@
           # macOS /etc/profile otherwise puts host tools (such as /bin/ps, which
           # cannot execute in the sandbox) ahead of their declared Nix equivalents.
           preCheck = ''
+            # These tools enter PATH only through nativeCheckInputs. Do not put
+            # their store paths in attributes inherited by the unchecked package.
+            # Preserve the historical executable name for its CLI dispatch and
+            # fixtures that copy the binary: pass the original .../bin/st3 path.
+            ST3_MESSAGING_COMPAT_BIN=$(readlink -f "$(command -v st3-messaging-compat)")
+            ST3_OTELITE_BIN=$(command -v otelite)
+            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN
+            export ST3_OTEL_REQUIRE=1
             export HOME=$(mktemp -d)
             export SHELL=${pkgs.bashInteractive}/bin/bash
             printf 'export PATH=%q\n' "$PATH" > "$HOME/.bash_profile"
@@ -479,6 +487,7 @@
             pkgs.nodejs
             ptyPackage
             effect-utils.packages.${system}.otelite
+            messagingCompat
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.util-linux pkgs.systemd ]
           # Native session discovery lists processes with ps and lsof on macOS (Linux reads /proc).
@@ -506,7 +515,6 @@
         # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
         st3 = st3Check.overrideAttrs (_: {
           doCheck = false;
-          ST3_MESSAGING_COMPAT_BIN = "";
         });
 
         st3Help = pkgs.runCommand "st3-help-${version}" {
@@ -789,8 +797,7 @@
           # `checks.hooks-replacement`. Its test suite is `checks.st2`'s, on source that differs
           # only by an appended hook comment, so running it again buys nothing.
           doCheck = false;
-          CLI_BUILD_STAMP = builtins.toJSON {
-            type = "nix";
+          CLI_BUILD_STAMP = import ./nix/build-stamp.nix {
             inherit version;
             rev = "hook-successor";
             commitTs = sourceCommitUnix;
@@ -827,11 +834,20 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
+        checks.st3-runtime-inputs =
+          assert import ./nix/st3-runtime-input-tests.nix {
+            inherit self system;
+            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils messaging-baseline; };
+          };
+          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
         checks.st3-help = st3Help;
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
         checks.debug-assertions = st2DebugAssertions;
+        checks.build-stamp-bounds =
+          assert import ./nix/build-stamp-tests.nix;
+          pkgs.runCommand "build-stamp-bounds" { } ''touch $out'';
         checks.hm-module-eval =
           let
             rendered = hmModuleEval.config;
@@ -1309,6 +1325,8 @@
             ];
             BUCK2_BIN = "${effectUtilsPackages.buck2}/bin/buck2";
             FRACTAL_WEB_BUCK_ROOT = "${buckRoot}";
+            PLAYWRIGHT_MODULE = "${webPkgs.playwright-driver}/index.mjs";
+            CHROMIUM_PATH = webPkgs.lib.optionalString webPkgs.stdenv.hostPlatform.isLinux "${webPkgs.chromium}/bin/chromium";
             shellHook = ''
               mkdir -p repos .buck2
               ln -sfn ${effect-utils} repos/effect-utils

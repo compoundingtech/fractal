@@ -102,6 +102,14 @@ def validate(fragment, path):
 def version(repo, source, field):
     path, pattern = VERSIONS[field]
     content = source_text(repo, source, path)
+    if field == 'schema' and re.search(
+        r'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;', content
+    ):
+        # Read the authoritative constant from the candidate tree. Historical releases
+        # still keep their version in smallclaims' PRAGMA declaration.
+        path = 'crates/st-storage-version/src/lib.rs'
+        content = source_text(repo, source, path)
+        pattern = r'pub const STORAGE_VERSION:\s*u32\s*=\s*(\d+)'
     match = re.search(pattern, content)
     if not match:
         raise ImpactError(f'{source[:12]}: cannot identify {field} version in {path}')

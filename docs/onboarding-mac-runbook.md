@@ -53,13 +53,9 @@ SSH password and keyboard-interactive authentication and never invokes sudo.
 
 ## Run the candidate
 
-Use an `aarch64-apple-darwin` release/candidate archive containing `bin/st3`,
-`bin/st`, `bin/pty`, `install.sh`, `install-macos.py` and BUILD.json. Pin the archive
-with an adjacent .sha256 file or an explicit `--sha256 HEX`. The candidate must
-contain the composed setup/TUI/stui-removal work and the current install-story
-Mac caller recovery fix. The native Linux proof archive is not a Mac candidate.
-The recovery fix was source d438e033cba3f3efd2138d6097edd5380aa1d28c when this
-runbook was prepared; use its equivalent if the candidate has been rebased.
+Use any current `aarch64-apple-darwin` release archive. The runner refuses one without
+`install.sh` and `install-macos.py`. Pin the archive with an adjacent `.sha256` file
+or an explicit `--sha256 HEX`.
 
 ```sh
 scripts/onboarding-mac-test --scenario first-run \
@@ -76,7 +72,7 @@ scripts/onboarding-mac-test --scenario setup \
 
 `--scenario no-harness` is another flags-based run. All three cases require a
 clean base without providers; they verify the explicit no-harness explanation and
-absence of the built-in expert/mission. Provider transport and model/content
+absence of the built-in Smalltalk Assistant/mission. Provider transport and model/content
 completion remain separate tests. Multiple `--scenario` options create fresh
 clones sequentially. No task is scheduled in CI.
 

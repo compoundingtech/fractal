@@ -9,6 +9,7 @@ struct Renewal {
 
 fn request(key: &str, summary: Option<&str>) -> WorkRequest {
     WorkRequest {
+        wait_ms: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("current".into()),
         summary: summary.map(Into::into),
@@ -188,6 +189,7 @@ fn a_renewal_answers_what_the_writer_answered_when_it_enriched_the_view() {
             subject,
             "extend",
             &WorkRequest {
+                wait_ms: None,
                 reason: Some("more to do".into()),
                 ..request("renewal-extend", None)
             },
@@ -241,6 +243,7 @@ fn a_renewal_answers_what_the_writer_answered_when_it_enriched_the_view() {
                 subject,
                 "renew",
                 &WorkRequest {
+                    wait_ms: None,
                     incarnation: Some("old".into()),
                     ..request("parity-stale", None)
                 },
