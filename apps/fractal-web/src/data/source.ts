@@ -42,6 +42,7 @@ import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.
 import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
 import type { PromptAnswerPort } from '../conversation/alerts/prompt-answer-port.ts'
 import type { AlertActionPort } from '../conversation/alerts/alert-action-port.ts'
+import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
@@ -274,6 +275,8 @@ export interface DataSource {
   readonly terminalInterest?: (terminalRef: string) => Atom.Atom<void>
   /** Explicit recovery for a retryable terminal failure; never retries a healthy or permanent feed. */
   readonly retryTerminal?: (terminalRef: string) => void
+  /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
+  readonly documents?: DocumentPort
   /** Explicit geometry action; never tied to the browser pane dimensions. */
   readonly terminalResize?: TerminalResizePort
   /** Answers to native harness prompts (`prompt.respond`), one submission each. */
