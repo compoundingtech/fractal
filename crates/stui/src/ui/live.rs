@@ -968,7 +968,6 @@ pub fn run(context: Context) -> Result<()> {
                     }
                     if restored {
                         pending.retain(|entry| entry.token != token);
-                        changed = true;
                     }
                     // st took it. The copy here gives way once the conversation shows it, which
                     // may already have happened; with no id to look for, at once.
