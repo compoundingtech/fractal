@@ -2280,11 +2280,18 @@ pub async fn client_capabilities(
         let mut capabilities = capabilities;
         let state_for_push = state.clone();
         let session_for_push = session.clone();
-        let available = tokio::task::spawn_blocking(move || {
-            client_push_registration::paired(&state_for_push, &session_for_push).is_ok()
+        let available = match tokio::task::spawn_blocking(move || {
+            client_push_registration::paired(&state_for_push, &session_for_push)
         })
         .await
-        .unwrap_or(false);
+        {
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) if matches!(error.status, StatusCode::FORBIDDEN | StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY) => false,
+            _ => {
+                tracing::error!("push registration capability probe failed");
+                false
+            }
+        };
         capabilities.push(json!({"id":"push-registration", "version":1,
             "state":if available {"granted"} else {"ungranted"}}));
         capabilities
