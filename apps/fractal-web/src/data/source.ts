@@ -38,8 +38,7 @@ import type { MonitorSource } from '../monitor/source.ts'
 import type { AgentResourceSource } from '../resources/agent/source.ts'
 import type { SubjectEnvelope } from '../resources/envelope.ts'
 import type { TerminalHistoryFactory } from '../terminal/historySource.ts'
-import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
-import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
+import type { RawTerminalPort } from '../terminal/rawTerminalState.ts'
 import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
@@ -148,7 +147,6 @@ export interface ConversationPage {
 export interface Grants {
   readonly actions: 'granted' | 'ungranted'
   readonly messageSend: 'granted' | 'ungranted'
-  readonly terminalInput: 'granted' | 'ungranted'
 }
 
 /** One gateway activity line (`at` is ISO-8601) for the events feed. */
@@ -268,19 +266,17 @@ export interface DataSource {
   readonly prefetchConversation?: (agentRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */
   readonly retryConversation?: (agentRef: string) => void
-  /** Keyed by terminal ref; live attaches a read-only viewer. */
+  /** Keyed by terminal ref; the projected read-only screen, also the raw stream's fallback. */
   readonly terminal: (terminalRef: string) => Atom.Atom<Feed<TerminalScreen>>
   readonly terminalInterest?: (terminalRef: string) => Atom.Atom<void>
   /** Explicit recovery for a retryable terminal failure; never retries a healthy or permanent feed. */
   readonly retryTerminal?: (terminalRef: string) => void
   /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
   readonly documents?: DocumentPort
-  /** Explicit geometry action; never tied to the browser pane dimensions. */
-  readonly terminalResize?: TerminalResizePort
   /** Retained owner scrollback, with its own independently granted availability. */
   readonly terminalHistory?: TerminalHistoryFactory
-  /** Ordered input sessions bound to one terminal incarnation; absent when the source cannot type. */
-  readonly terminalInput?: TerminalInputPortFactory
+  /** Raw PTY stream (`st3.client.pty.v0`): interactive terminals; absent when the source has none. */
+  readonly terminalRaw?: RawTerminalPort
   /** Keyed by subject ref (PR, CI run, mission, pty …). */
   readonly envelope: (ref: string) => Atom.Atom<Feed<SubjectEnvelope>>
   /** Real graph observations, polled while visible until upstream adds resource subscriptions. */

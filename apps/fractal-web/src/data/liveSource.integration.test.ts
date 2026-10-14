@@ -10,7 +10,7 @@ import type {
   TerminalScreen,
 } from '@smalltalk/st3-client'
 import type { AttachmentSendRequest, MessageSendAction } from './source.ts'
-import { Effect, Layer } from 'effect'
+import { Effect, Layer, SubscriptionRef } from 'effect'
 import * as Option from 'effect/Option'
 import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
@@ -57,13 +57,12 @@ class Gateway {
   terminalReplacement = ''
   replaceOnAttach = false
   terminalAttachRefusal: string | undefined
-  readonly terminalInputs: unknown[] = []
+  readonly rawAttachments: Array<{ readonly path: string; readonly body: unknown }> = []
   terminalAttachRetryable = false
   terminalAttachStatus = 409
   terminalAttachTransportFailure = false
   runtimesWithoutTerminal = new Set<string>()
   messageGrant: 'granted' | 'ungranted' = 'granted'
-  terminalInputGrant: 'granted' | 'ungranted' = 'granted'
   transportFailure = false
   capabilityGate: Promise<void> | undefined
   capabilityFailure = false
@@ -116,7 +115,6 @@ class Gateway {
         capabilities: [
           { id: 'work.done', state: 'granted', version: 0 },
           { id: 'message.send', state: this.messageGrant, version: 0 },
-          { id: 'terminal.input', state: this.terminalInputGrant, version: 0 },
         ],
         event_cursor: 'cursor/current',
         oldest_event_cursor: 'cursor/oldest',
@@ -250,15 +248,17 @@ class Gateway {
             stream_capability: `capability-${action.parameters.target_id}`,
           },
         }
-      } else if (action.type === 'terminal.input') {
-        this.terminalInputs.push(action)
-        value = {
-          kind: 'action-result', action_id: action.id, operation_id: 'operation/input',
-          status: 'accepted', affected_ids: [action.parameters.terminal_id], snapshot_id: snapshot.id,
-        }
       } else {
         throw new Error(`Unexpected action ${action.type}`)
       }
+    } else if (path.endsWith('/raw-attachments') && typeof init?.body === 'string') {
+      this.rawAttachments.push({ path, body: JSON.parse(init.body) })
+      // Limited pairings on main lack `terminal.control`: the raw attach is refused.
+      return Response.json({
+        api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+        code: 'forbidden', message: 'This device may not control terminals', retryable: false,
+        request_id: 'request/raw-attachment', details: {},
+      }, { status: 403 })
     } else if (path === '/v1/client/usage') {
       value = { since_ms: 0, until_ms: 1000, rows: [] }
     } else {
@@ -1189,96 +1189,24 @@ describe('terminal dependent-read authority', () => {
   )
 })
 
-describe('terminal input', () => {
-  it.live('posts typed keys as fenced terminal.input actions bound to the observed incarnation', () =>
+describe('raw terminal stream', () => {
+  it.live('requests a fresh raw attachment through the gateway and reports a refusal for the read-only fallback', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
-        live.registry.mount(live.source.agents)
-        live.registry.mount(live.source.grants)
+        const session = yield* live.source.terminalRaw!.open({
+          target: { terminalId: 'terminal/example', incarnation: 'incarnation-example' },
+          size: { cols: 80, rows: 24 },
+          onOutput: () => {},
+        })
         yield* settle
-        gateway.fleet([agent])
-        yield* settle
-        live.registry.mount(live.source.terminalInterest!('terminal/example'))
-        yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$')
-        yield* settle
-        const port = yield* Effect.promise(() => live.source.terminalInput!({ subject: 'terminal/example', terminalRef: 'terminal/example', incarnation: 'incarnation-example', registry: live.registry }))
-        port.open()
-        yield* Effect.promise(() => port.send(new Uint8Array([3])))
-        expect(gateway.terminalInputs).toEqual([
-          expect.objectContaining({
-            type: 'terminal.input',
-            parameters: { terminal_id: 'terminal/example', mode: 'key', value: 'ctrl+c' },
-            fence: { snapshot_id: snapshot.id, subject_revisions: {}, runtime_incarnation: 'incarnation-example', terminal_sequence: 1 },
-          }),
-        ])
-        // A session bound to an older incarnation never reaches the current program.
-        const old = yield* Effect.promise(() => live.source.terminalInput!({ subject: 'terminal/example', terminalRef: 'terminal/example', incarnation: 'incarnation-previous', registry: live.registry }))
-        old.open()
-        const refused = yield* Effect.promise(() => old.send(new Uint8Array([3])).then(() => 'sent', () => 'refused'))
-        expect(refused).toBe('refused')
-        expect(gateway.terminalInputs).toHaveLength(1)
-      }),
-    ),
-  )
-
-  it.live('admits keys for the shown screen when the gateway terminal id differs from the subject address', () =>
-    withGateway((live, gateway) =>
-      Effect.gen(function* () {
-        live.registry.mount(live.source.agents)
-        live.registry.mount(live.source.grants)
-        yield* settle
-        // Real id shapes: the view addresses `terminal/<agent path>`, the daemon names `terminal/<agent id>`.
-        const seat = { ...agent, id: 'agent/example/input-subject' }
-        gateway.fleet([seat])
-        yield* settle
-        const subject = 'terminal/example/input-subject'
-        live.registry.mount(live.source.terminalInterest!(subject))
-        yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$', `terminal/${seat.id}`)
-        yield* settle
-        const shown = live.registry.get(live.source.terminal(subject))
-        if (shown._tag !== 'Observed') return yield* Effect.die(`terminal ${subject} was not observed`)
-        // Bind the session exactly as TerminalDetail does: from the shown screen's own identity.
-        const port = yield* Effect.promise(() => live.source.terminalInput!({
-          subject,
-          terminalRef: shown.value.terminal_id,
-          incarnation: shown.value.runtime_incarnation,
-          registry: live.registry,
-        }))
-        port.open()
-        const outcome = yield* Effect.promise(() => port.send(new Uint8Array([3])).then(() => 'sent', (error: Error) => error.message))
-        expect(outcome).toBe('sent')
-        expect(gateway.terminalInputs).toEqual([
-          expect.objectContaining({
-            parameters: { terminal_id: 'terminal/agent/example/input-subject', mode: 'key', value: 'ctrl+c' },
-            fence: { snapshot_id: snapshot.id, subject_revisions: {}, runtime_incarnation: 'incarnation-example', terminal_sequence: 1 },
-          }),
-        ])
-      }),
-    ),
-  )
-
-  it.live('posts nothing when the device does not hold the terminal input grant', () =>
-    withGateway((live, gateway) =>
-      Effect.gen(function* () {
-        gateway.terminalInputGrant = 'ungranted'
-        live.registry.mount(live.source.agents)
-        live.registry.mount(live.source.grants)
-        yield* settle
-        gateway.fleet([agent])
-        yield* settle
-        live.registry.mount(live.source.terminalInterest!('terminal/example'))
-        yield* settle
-        gateway.screen(gateway.subscription('terminal').id, 'example', 'prompt$')
-        yield* settle
-        expect(live.registry.get(live.source.grants).terminalInput).toBe('ungranted')
-        const port = yield* Effect.promise(() => live.source.terminalInput!({ subject: 'terminal/example', terminalRef: 'terminal/example', incarnation: 'incarnation-example', registry: live.registry }))
-        port.open()
-        const outcome = yield* Effect.promise(() => port.send(new Uint8Array([3])).then(() => 'sent', (error: Error) => error.message))
-        expect(outcome).toBe('This device is not allowed to type into terminals.')
-        expect(gateway.terminalInputs).toEqual([])
-      }),
+        expect(gateway.rawAttachments).toEqual([{
+          path: '/v1/client/terminals/example/raw-attachments',
+          body: { runtime_incarnation: 'incarnation-example', mode: 'attach' },
+        }])
+        const state = yield* SubscriptionRef.get(session.state)
+        expect(state).toMatchObject({ _tag: 'Refused', status: 403, code: 'forbidden' })
+        expect(session.send(new Uint8Array([3]))).toBe(false)
+      }).pipe(Effect.scoped),
     ),
   )
 })

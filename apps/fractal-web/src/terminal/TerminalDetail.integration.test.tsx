@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { St3Client } from '@smalltalk/st3-client'
 import { Agent, decodeUnknownSync, type TerminalScreen } from '@smalltalk/st3-client/schema'
+import type { PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@st3/sdk/effect'
+import { Effect, SubscriptionRef } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -11,13 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { observed, unavailable, waiting, type Feed, type Grants } from '../data/source.ts'
-import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
+import { observed, unavailable, waiting, type Feed } from '../data/source.ts'
 import { makeScreen } from './fixtures.ts'
-import type { TerminalInputPortFactory } from './orderedTerminalInput.ts'
+import type { RawTerminalPort } from './rawTerminalState.ts'
 import { TerminalDetail } from './TerminalDetail.tsx'
-import { gatewayTerminalInput } from './terminal-input-port.ts'
-import { makeTerminalInputFixture } from './terminalInputFixture.ts'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
@@ -27,12 +25,19 @@ const screen: TerminalScreen = { ...makeScreen({ scene: 'F3', columns: 40, rows:
 const other: `terminal/${string}` = 'terminal/other'
 const otherScreen: TerminalScreen = { ...screen, terminal_id: 'terminal/agent/other', runtime_incarnation: 'incarnation/other' }
 const agent = (reachability: 'reachable' | 'unreachable') => decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability, state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
+const utf8 = new TextEncoder()
 let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
+let frames: FrameRequestCallback[]
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  frames = []
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
+  vi.stubGlobal('cancelAnimationFrame', () => {})
+  // jsdom fetches no module assets; serve the committed Ghostty module the browser would load.
+  vi.stubGlobal('fetch', async () => new Response(new Uint8Array(await readFile(join(import.meta.dirname, 'assets/ghostty-key-encoder.generated.wasm'))), { headers: { 'content-type': 'application/wasm' } }))
   // jsdom has no font loading; the registered terminal faces resolve as loaded.
   Object.defineProperty(document, 'fonts', { configurable: true, value: ['Wf Terminal Mono', 'Wf Terminal Nerd Mono'].map((family) => ({ family, load: async () => [] })) })
   registry = AtomRegistry.make()
@@ -48,21 +53,81 @@ afterEach(async () => {
 })
 const isFeed = (terminal: Feed<TerminalScreen> | Readonly<Record<string, Feed<TerminalScreen>>>): terminal is Feed<TerminalScreen> =>
   typeof terminal._tag === 'string'
-const mount = async ({ terminal, reachability = 'reachable', grants, terminalInput, at = ref }: {
+const mount = async ({ terminal, reachability = 'reachable', terminalRaw, at = ref }: {
   readonly terminal: Feed<TerminalScreen> | Readonly<Record<string, Feed<TerminalScreen>>>
   readonly reachability?: 'reachable' | 'unreachable'
-  readonly grants?: Grants
-  readonly terminalInput?: TerminalInputPortFactory
+  readonly terminalRaw?: RawTerminalPort
   readonly at?: `terminal/${string}`
 }) => {
-  const source = fixtureSource({ world: { now: 0, agents: [agent(reachability)], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } }, overrides: { terminal: isFeed(terminal) ? { [ref]: terminal } : terminal, ...(grants === undefined ? {} : { grants }) } })
-  await act(async () => root.render(<DataSourceProvider source={terminalInput === undefined ? source : { ...source, terminalInput }} registry={registry}><React.Suspense fallback={<p>suspended</p>}><TerminalDetail key={at} address={{ ref: at, presentation: 'detail' }} visibility="visible" /></React.Suspense></DataSourceProvider>))
+  const source = fixtureSource({ world: { now: 0, agents: [agent(reachability)], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } }, overrides: { terminal: isFeed(terminal) ? { [ref]: terminal } : terminal } })
+  await act(async () => root.render(<DataSourceProvider source={terminalRaw === undefined ? source : { ...source, terminalRaw }} registry={registry}><React.Suspense fallback={<p>suspended</p>}><TerminalDetail key={at} address={{ ref: at, presentation: 'detail' }} visibility="visible" /></React.Suspense></DataSourceProvider>))
 }
-const button = (name: string) => [...host.querySelectorAll('button')].find((candidate) => candidate.textContent === name)
-const field = () => host.querySelector('textarea')!
-const type = (char: string) => act(async () => {
-  field().dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: char, code: `Key${char.toUpperCase()}` }))
+const chip = () => host.querySelector('[data-terminal-mode]')
+const field = () => host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Terminal input"]')
+const paint = () => act(async () => {
+  for (const callback of frames.splice(0)) callback(0)
 })
+
+interface FakeSession {
+  readonly target: PtyTarget
+  readonly size: PtySize
+  readonly sent: string[]
+  readonly resized: PtySize[]
+  readonly emit: (output: PtyOutput) => void
+  readonly go: (state: PtyState) => Promise<void>
+  closed: boolean
+}
+
+/** A raw port whose sessions the test drives: state transitions, output frames, and recorded DATA. */
+const rawSessions = () => {
+  const opened: FakeSession[] = []
+  const decode = new TextDecoder()
+  const port: RawTerminalPort = {
+    open: ({ target, size, onOutput }) =>
+      Effect.gen(function* () {
+        const state = yield* SubscriptionRef.make<PtyState>({ _tag: 'Connecting', attempt: 1 })
+        let current: PtyState = { _tag: 'Connecting', attempt: 1 }
+        const entry: FakeSession = {
+          target,
+          size,
+          sent: [],
+          resized: [],
+          emit: (output) => act(async () => onOutput(output)),
+          go: (next) => act(async () => {
+            current = next
+            Effect.runSync(SubscriptionRef.set(state, next))
+          }),
+          closed: false,
+        }
+        opened.push(entry)
+        yield* Effect.addFinalizer(() => Effect.sync(() => {
+          entry.closed = true
+        }))
+        const session: PtySession = {
+          state,
+          send: (bytes) => {
+            if (current._tag !== 'Live') return false
+            entry.sent.push(decode.decode(bytes))
+            return true
+          },
+          resize: (next) => {
+            entry.resized.push(next)
+          },
+          resetInputModes: () => false,
+        }
+        return session
+      }),
+  }
+  return { opened, port }
+}
+
+/** Attach, go live and paint the server's SCREEN replay. */
+const live = async (session: FakeSession, text: string) => {
+  await session.go({ _tag: 'Live', rows: 4, cols: 40 })
+  await session.emit({ _tag: 'Geometry', rows: 4, cols: 40 })
+  await session.emit({ _tag: 'Screen', bytes: utf8.encode(text) })
+  await paint()
+}
 
 describe('terminal detail', () => {
   it.each([
@@ -84,23 +149,23 @@ describe('terminal detail', () => {
     expect(host.textContent).not.toMatch(/\b(undefined|unknown)\b/i)
   })
 
-  it('renders the live grid with input gated exactly as the source publishes it and history honestly unavailable', async () => {
+  it('renders the projected grid read-only when the source has no raw stream, with history honestly unavailable', async () => {
     await mount({ terminal: observed({ value: screen }) })
     const grid = host.querySelector(`[aria-label="Terminal: ${screen.title}"]`)
     expect(grid?.getAttribute('data-terminal-renderer')).toBe('T1')
     expect(grid?.querySelectorAll('[data-terminal-row]')).toHaveLength(screen.lines.length)
     expect(grid?.textContent).toContain(screen.lines.find((line) => line.text.trim() !== '')?.text.trim())
     expect(host.querySelector('[aria-label="Live"]')).not.toBeNull()
-    expect(host.querySelector('textarea')?.disabled).toBe(true)
-    expect(host.textContent).toContain('Ordered terminal input is not available from this producer')
-    expect([...host.querySelectorAll('button')].map((button) => button.textContent)).not.toContain('Enable input')
+    expect(chip()?.textContent).toBe('Read-only')
+    expect(field()).toBeNull()
+    expect(host.textContent).not.toContain('Enable input')
+    expect(host.textContent).not.toContain('Terminal keyboard')
     expect(host.textContent).toContain('does not publish terminal history yet')
   })
 
-  it('marks the terminal ended and pauses input when its host is unreachable', async () => {
+  it('marks the terminal ended when its host is unreachable', async () => {
     await mount({ terminal: observed({ value: screen }), reachability: 'unreachable' })
     expect(host.querySelector('[aria-label="Ended"]')).not.toBeNull()
-    expect(host.textContent).toContain('Input is paused while this terminal is hidden, disconnected or stale.')
   })
 
   it('keeps the last grid but says it is stale', async () => {
@@ -112,86 +177,73 @@ describe('terminal detail', () => {
   })
 })
 
-describe('terminal detail input', () => {
-  beforeEach(() => {
-    // jsdom fetches no module assets; serve the committed encoder the browser would load.
-    vi.stubGlobal('fetch', async () => new Response(new Uint8Array(await readFile(join(import.meta.dirname, 'assets/ghostty-key-encoder.generated.wasm'))), { headers: { 'content-type': 'application/wasm' } }))
+describe('raw terminal', () => {
+  it('attaches to the shown incarnation, paints the replay through libghostty, and types on the same socket', async () => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    const session = opened[0]!
+    expect(session.target).toEqual({ terminalId: 'terminal/agent/example', incarnation: screen.runtime_incarnation })
+    expect(session.size).toEqual({ cols: 40, rows: 4 })
+    // Until the replay paints, the projected screen stands in.
+    expect(chip()?.textContent).toBe('Connecting…')
+    await live(session, 'raw \x1b[1mprompt\x1b[0m$ ')
+    expect(host.querySelector('[aria-roledescription="terminal"]')?.textContent).toContain('raw prompt$')
+    expect(chip()?.textContent).toBe('Click to type')
+    expect(host.querySelector('[aria-label="Live"]')).not.toBeNull()
+    await act(async () => field()!.focus())
+    expect(chip()?.textContent).toBe('Typing')
+    await act(async () => {
+      field()!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'l', code: 'KeyL' }))
+      field()!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'c', code: 'KeyC', ctrlKey: true }))
+      field()!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter' }))
+    })
+    expect(session.sent).toEqual(['l', '\x03', '\r'])
+    // Echo arrives as DATA and is painted on the next frame.
+    await session.emit({ _tag: 'Data', bytes: utf8.encode('l\r\n') })
+    await paint()
+    expect(host.querySelector('[aria-roledescription="terminal"]')?.textContent).toContain('raw prompt$ l')
   })
-  const sessions = () => {
-    const opened: Array<{ readonly subject: string; readonly terminalRef: string; readonly fixture: ReturnType<typeof makeTerminalInputFixture> }> = []
-    const factory: TerminalInputPortFactory = async ({ subject, terminalRef, registry: owner }) => {
-      const fixture = makeTerminalInputFixture({ registry: owner, autoDeliver: false })
-      opened.push({ subject, terminalRef, fixture })
-      return fixture.port
-    }
-    return { opened, factory }
-  }
 
-  it('keeps the keyboard disabled with an honest reason when terminal.input is not granted', async () => {
-    const { opened, factory } = sessions()
-    await mount({ terminal: observed({ value: screen }), grants: { actions: 'granted', messageSend: 'granted', terminalInput: 'ungranted' }, terminalInput: factory })
-    expect(field().disabled).toBe(true)
-    expect(host.textContent).toContain('This device is not allowed to type into terminals.')
-    expect(button('Enable input')).toBeUndefined()
-    expect(opened).toEqual([])
+  it('drops keys while reconnecting instead of queueing them, and says so', async () => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    const session = opened[0]!
+    await live(session, '$ ')
+    await session.go({ _tag: 'Reconnecting', attempt: 1, delayMs: 500, issue: 'PTY socket closed' })
+    expect(chip()?.textContent).toBe('Reconnecting…')
+    await act(async () => {
+      field()!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'x', code: 'KeyX' }))
+    })
+    expect(session.sent).toEqual([])
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe('The terminal is not connected. Nothing was sent, and keys are never replayed.')
+    await session.go({ _tag: 'Live', rows: 4, cols: 40 })
+    expect(session.sent).toEqual([])
   })
 
-  it('types only into the shown terminal and drops a queue when the view switches terminals', async () => {
-    const { opened, factory } = sessions()
+  it('falls back to the read-only projected screen with a clear chip when ATTACH is refused', async () => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    await opened[0]!.go({ _tag: 'Refused', message: 'forbidden', status: 403, code: 'forbidden' })
+    expect(chip()?.textContent).toBe('Read-only')
+    expect(chip()?.getAttribute('data-terminal-mode')).toBe('ReadOnly')
+    expect(host.textContent).toContain('This device may watch this terminal but not type into it.')
+    expect(host.querySelector(`[aria-label="Terminal: ${screen.title}"]`)?.querySelectorAll('[data-terminal-row]')).toHaveLength(screen.lines.length)
+    expect(field()).toBeNull()
+  })
+
+  it('detaches when the pane leaves and attaches the next terminal fresh', async () => {
+    const { opened, port } = rawSessions()
     const terminals = { [ref]: observed({ value: screen }), [other]: observed({ value: otherScreen }) }
-    await mount({ terminal: terminals, terminalInput: factory })
-    await vi.waitFor(() => expect(button('Enable input')).toBeDefined())
-    await act(async () => button('Enable input')!.click())
-    await type('a')
-    await type('b')
-    const first = opened[0]!
-    expect(first).toMatchObject({ subject: ref, terminalRef: screen.terminal_id })
-    expect(registry.get(first.fixture.writes)).toEqual([{ mode: 'raw', value: btoa('a') }])
-    await mount({ terminal: terminals, terminalInput: factory, at: other })
-    // Leaving the pane closes its session: the queued key is dropped, not carried over.
-    expect(registry.get(first.fixture.port.state)._tag).toBe('Closed')
-    await act(async () => first.fixture.answer({ _tag: 'Delivered' }))
-    expect(registry.get(first.fixture.writes)).toHaveLength(1)
-    await vi.waitFor(() => expect(button('Enable input')).toBeDefined())
-    const second = opened.at(-1)!
-    expect(second).toMatchObject({ subject: other, terminalRef: otherScreen.terminal_id })
-    expect(registry.get(second.fixture.writes)).toEqual([])
+    await mount({ terminal: terminals, terminalRaw: port })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    await live(opened[0]!, '$ ')
+    await mount({ terminal: terminals, terminalRaw: port, at: other })
+    await vi.waitFor(() => expect(opened).toHaveLength(2))
+    expect(opened[0]!.closed).toBe(true)
+    expect(opened[1]!.target).toEqual({ terminalId: otherScreen.terminal_id, incarnation: otherScreen.runtime_incarnation })
+    expect(opened[1]!.sent).toEqual([])
   })
-
-  it.each(['switches terminals', 'loses the terminal input grant'] as const)(
-    'posts nothing for a key whose snapshot read finishes after the view %s',
-    async (cut) => {
-      const terminals = { [ref]: observed({ value: screen }), [other]: observed({ value: otherScreen }) }
-      const posted: unknown[] = []
-      const read = Promise.withResolvers<string | undefined>()
-      const reads: Array<PromiseWithResolvers<string | undefined>> = [read]
-      const transport: typeof fetch = async (input, init) => {
-        if (new URL(String(input)).pathname.endsWith('/capabilities')) return Response.json(recording.capabilities)
-        posted.push(init?.body)
-        return Response.json({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/native' }, value: {} })
-      }
-      let granted = true
-      const terminalInput = gatewayTerminalInput({
-        connect: (fetchImpl) => new St3Client({ baseUrl: 'https://gateway.invalid', fetchImpl }),
-        transport,
-        snapshot: () => reads.shift()?.promise ?? Promise.resolve('snapshot/next'),
-        liveScreen: (subject) => {
-          const feed = terminals[subject]
-          return feed?._tag === 'Observed' ? feed.value : undefined
-        },
-        granted: () => granted,
-      })
-      await mount({ terminal: terminals, terminalInput })
-      await vi.waitFor(() => expect(button('Enable input')).toBeDefined())
-      await act(async () => button('Enable input')!.click())
-      await type('a')
-      if (cut === 'switches terminals') await mount({ terminal: terminals, terminalInput, at: other })
-      else {
-        granted = false
-        await mount({ terminal: terminals, terminalInput, grants: { actions: 'granted', messageSend: 'granted', terminalInput: 'ungranted' } })
-      }
-      await act(async () => read.resolve('snapshot/late'))
-      expect(posted).toEqual([])
-    },
-  )
 })

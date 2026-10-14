@@ -12,6 +12,7 @@ import {
   type St3Options,
   type SyncStatus,
   syncStatusFromFailure,
+  openPtySession,
 } from '@st3/sdk/effect'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
@@ -28,8 +29,6 @@ import { instrumentFetch } from '../telemetry/transport.ts'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { getDebug } from '../telemetry/measurement/index.ts'
 import { unavailableTerminalHistory } from '../terminal/historySource.ts'
-import { gatewayTerminalInput } from '../terminal/terminal-input-port.ts'
-import { gatewayTerminalResize } from '../terminal/terminal-resize-port.ts'
 import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
@@ -143,7 +142,6 @@ export const liveSource = ({
   const noGrants: Grants = {
     actions: 'ungranted',
     messageSend: 'ungranted',
-    terminalInput: 'ungranted',
   }
   setDebug('Wf.socketErrors', 0)
   setDebug('Wf.socketLive', 0)
@@ -1041,7 +1039,6 @@ export const liveSource = ({
             actions:
               allowed.has('message.send') || allowed.has('work.done') ? 'granted' : 'ungranted',
             messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
-            terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
           })
         }),
       )
@@ -1100,23 +1097,12 @@ export const liveSource = ({
         const feed = registry.get(entry.atom)
         if (feed._tag === 'Unavailable' && feed.retryable === true) retainTerminal(ref).retry()
       },
-      terminalResize: gatewayTerminalResize(client),
       documents: gatewayDocuments(client),
-      // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
-      terminalInput: gatewayTerminalInput({
-        // Same configuration as `client`; the session's transport admits each post at the fetch.
-        connect: (fetchImpl) => new St3Client({ baseUrl, fetchImpl }),
-        transport: fetch,
-        snapshot: async () => {
-          const current = await messageSnapshot()
-          return current._tag === 'Success' ? current.value : undefined
-        },
-        liveScreen: (subject) => {
-          const feed = registry.get(terminal(subject))
-          return feed._tag === 'Observed' && feed.freshness === 'live' ? feed.value : undefined
-        },
-        granted: () => registry.get(grants).terminalInput === 'granted',
-      }),
+      // Same origin and transport as `client`; the gateway injects the credential and keeps the
+      // capability subprotocol on the WebSocket upgrade.
+      terminalRaw: {
+        open: ({ target, size, onOutput }) => openPtySession({ baseUrl, target, size, onOutput, fetch }),
+      },
       terminalHistory: unavailableTerminalHistory,
       events: Atom.make(
         unavailable({
