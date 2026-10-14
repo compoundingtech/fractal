@@ -33830,19 +33830,15 @@ fn apply_effective_step_state_with_owner(
         .assigned_to
         .as_deref()
         .is_some_and(|person| person.starts_with("person/"))
-    {
-        if let Some(ask) = person_work::request(connection, &view.subject)
+        && let Some(ask) = person_work::request(connection, &view.subject)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
-        {
-            if matches!(view.status.as_str(), "ready" | "pending")
-                && !person_work::current(connection, &ask, snapshot_unix_ms)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
-            {
-                view.status = "cancelled".into();
-                view.blocked_reason =
-                    Some("the requester, originating attempt or owning run ended".into());
-            }
-        }
+        && matches!(view.status.as_str(), "ready" | "pending")
+        && !person_work::current(connection, &ask, snapshot_unix_ms)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+    {
+        view.status = "cancelled".into();
+        view.blocked_reason =
+            Some("the requester, originating attempt or owning run ended".into());
     }
     let generation_id = generation_id_from_subject(&view.generation);
     if is_terminal_run_state(&run_status)
