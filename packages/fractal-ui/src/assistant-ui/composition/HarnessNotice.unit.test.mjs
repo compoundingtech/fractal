@@ -96,12 +96,13 @@ for (const scheme of ['dark', 'light']) test(`${scheme} background jobs label ea
   Object.assign(container, sx.props(...baselineTheme, scheme === 'light' && lightTheme))
   const root = createRoot(container)
   try {
-    for (const state of ['running', 'completed', 'failed', 'cancelled', 'unknown']) {
-      const item = { ...harnessNoticeExamples.find(item => item.notice._tag === 'BackgroundJob'), title: `Background job ${state}` }
+    for (const [state, label] of [['running', 'running'], ['completed', 'completed'], ['failed', 'failed'], ['cancelled', 'cancelled'], ['unknown', 'status not reported']]) {
+      const item = { ...harnessNoticeExamples.find(item => item.notice._tag === 'BackgroundJob'), title: `Background job ${label}` }
       item.notice = { ...item.notice, state, payload: '', raw: '' }
       await act(async () => root.render(React.createElement(HarnessNotice, { item })))
-      assert.equal(container.querySelector('[data-testid=harness-kind]').textContent, state)
-      assert.match(container.querySelector('[data-testid=harness-notice]').textContent, new RegExp(`Background job ${state}`))
+      assert.equal(container.querySelector('[data-testid=harness-kind]').textContent, label)
+      assert.match(container.querySelector('[data-testid=harness-notice]').textContent, new RegExp(`Background job ${label}`))
+      assert.doesNotMatch(container.querySelector('[data-testid=harness-notice]').textContent, /\bunknown\b/i)
       assert.equal(container.querySelector('button').getAttribute('aria-expanded'), 'false')
     }
   } finally { await act(async () => root.unmount()); container.remove() }

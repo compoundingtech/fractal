@@ -1,6 +1,7 @@
 import type { TimelineBlock, TimelineEntry, TimelineView, UnknownCase } from '@smalltalk/st3-client/schema'
 import { Match } from 'effect'
 import type { ConversationItem, HarnessNotice } from './model.ts'
+import { backgroundJobStateLabel } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
 import { q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 
 export type Equals<TA, TB> = (<T>() => T extends TA ? 1 : 2) extends (<T>() => T extends TB ? 1 : 2) ? true : false
@@ -55,7 +56,7 @@ export const viewCases = {
       // Legacy payloads enrich only the same job and outcome; native facts remain authoritative.
       if (parsed?._tag === 'Event' && ((parsed.notice?._tag === 'BackgroundJob' && parsed.notice.jobId === job.id && parsed.notice.state === state)
         || (parsed.notice?._tag === 'SubagentResult' && parsed.notice.taskId === job.id && parsed.notice.status === job.state && jobOutcome({ id: job.id, state: parsed.notice.status }) === state))) return item(parsed)
-      const outcome = state === 'failed' && /^failed \(exit -?\d+\)$/.test(job.state ?? '') ? job.state : state
+      const outcome = state === 'failed' && /^failed \(exit -?\d+\)$/.test(job.state ?? '') ? job.state : backgroundJobStateLabel(state)
       return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title: `Background job ${outcome}`, text: job.name ?? job.id, sender: sender(ctx), data: {}, notice: {
         _tag: 'BackgroundJob', jobId: job.id, ...(job.name === undefined ? {} : { label: job.name }), state,
         ...(job.duration_ms === undefined ? {} : { duration: `${job.duration_ms} ms` }), payload: '', raw: '',
@@ -66,8 +67,9 @@ export const viewCases = {
       const state = jobOutcome(job)
       counts.set(state, (counts.get(state) ?? 0) + 1)
     }
-    const summary = [...counts].map(([state, count]) => `${count} ${state}`).join(', ')
-    const title = counts.size === 1 ? `${view.jobs.length} background jobs ${counts.keys().next().value}` : `${view.jobs.length} background jobs${summary === '' ? '' : ` · ${summary}`}`
+    const summary = [...counts].map(([state, count]) => `${count} ${backgroundJobStateLabel(state)}`).join(', ')
+    const only = counts.size === 1 ? [...counts.keys()][0] : undefined
+    const title = only !== undefined ? `${view.jobs.length} background jobs ${backgroundJobStateLabel(only)}` : `${view.jobs.length} background jobs${summary === '' ? '' : ` · ${summary}`}`
     return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title, text: view.jobs.map(job => job.name ?? job.id).join('\n'), sender: sender(ctx), data: {} })
   },
   irc: (view, ctx) => {

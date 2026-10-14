@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
-import type { EventItem, HarnessNotice as HarnessNoticeData, HarnessWeight } from '../embrace-data/model.ts'
+import { backgroundJobStateLabel, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessWeight } from '../embrace-data/model.ts'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
 import { Markdown } from './Markdown'
@@ -32,7 +32,7 @@ export function HarnessNotice({ item, weight = 'card' }: { readonly item: EventI
   const payload = /^[\s]*[\[{]/.test(notice.payload) ? `\`\`\`json\n${notice.payload}\n\`\`\`` : notice.payload
   const row = weight === 'row'
   return <Disclosure isExpanded={expanded} onExpandedChange={setExpanded} data-testid="harness-notice" data-harness-kind={item.kind} data-harness-weight={weight} data-item-id={item.id} {...stylex.props(styles.base, row ? styles.row : styles.card)}>
-    <div {...stylex.props(styles.header)}><Icon name={failed ? 'alert' : shown.icon} size={14} /><span {...stylex.props(styles.label)}>{item.title}</span><span data-testid="harness-kind" {...stylex.props(styles.pill, failed && styles.pillFailed)}>{notice._tag === 'SubagentResult' ? notice.status : notice._tag === 'BackgroundJob' ? notice.state : shown.kind}</span>{Number.isFinite(time) && <time dateTime={item.at} {...stylex.props(styles.time)}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>
+    <div {...stylex.props(styles.header)}><Icon name={failed ? 'alert' : shown.icon} size={14} /><span {...stylex.props(styles.label)}>{item.title}</span><span data-testid="harness-kind" {...stylex.props(styles.pill, failed && styles.pillFailed)}>{notice._tag === 'SubagentResult' ? notice.status : notice._tag === 'BackgroundJob' ? backgroundJobStateLabel(notice.state) : shown.kind}</span>{Number.isFinite(time) && <time dateTime={item.at} {...stylex.props(styles.time)}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>
     <p data-testid="harness-excerpt" {...stylex.props(styles.excerpt, row && styles.rowIndent)}>{item.text}</p>
     <Button slot="trigger" data-testid="harness-trigger" {...stylex.props(styles.trigger, row && styles.rowIndent)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={14} />{expanded ? `Hide ${noun}` : `Read ${noun}`}</Button>
     {/* The frame lives inside the panel: a collapsed hidden=until-found panel still keeps its own box in Chromium. */}

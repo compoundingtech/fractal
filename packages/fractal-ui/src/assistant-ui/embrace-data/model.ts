@@ -34,6 +34,18 @@ export type HarnessNotice =
   | { readonly _tag: 'SkillInvocation'; readonly skill: string; readonly by: string; readonly payload: string; readonly raw: string }
   | { readonly _tag: 'Delivery'; readonly from: string; readonly to: string; readonly subject?: string; readonly payload: string; readonly raw: string }
 
+export type BackgroundJobState = Extract<HarnessNotice, { readonly _tag: 'BackgroundJob' }>['state']
+/** The one reader-facing wording of a job outcome; `unknown` stays internal. A new state fails typecheck here. */
+export const backgroundJobStateLabel = (state: BackgroundJobState): string => {
+  switch (state) {
+    case 'running': return 'running'
+    case 'completed': return 'completed'
+    case 'failed': return 'failed'
+    case 'cancelled': return 'cancelled'
+    case 'unknown': return 'status not reported'
+  }
+}
+
 /** Visual weight of a harness event; the transcript default is one line in HarnessNotice. */
 export type HarnessWeight = 'row' | 'card'
 
