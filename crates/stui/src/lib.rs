@@ -9,6 +9,7 @@ mod version;
 mod voice;
 
 pub use ui::screens::HOME_IDLE_TEXT;
+pub use ui::checklist;
 pub use version::display_version;
 
 use st3_feed as feed;
@@ -989,6 +990,7 @@ pub fn run(mut options: Args) -> Result<()> {
         initial_subject: options.initial_subject.filter(|_| profile.is_none()),
         requests,
     })
+    .inspect_err(|error| ui::lastrun_note_exit(format!("error: {error:#}")))
 }
 
 #[cfg(test)]
@@ -1640,6 +1642,7 @@ mission "release" state="ready" {
                     &gate.step,
                     action,
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(worker.clone()),
                         incarnation: Some("worker-one".into()),
                         summary: Some("Drafted".into()),

@@ -1,7 +1,7 @@
 # Smalltalk terminal client
 
 `st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
-a mission, a terminal, Home or usage. `st ui --space NAME` opens a named space. `st ui --demo`
+a mission, a terminal, Now or usage. `st ui --space NAME` opens a named space. `st ui --demo`
 shows them on invented data and sends nothing. `st ui --classic` keeps the layout from before
 spaces for now; it is going away ([#1166](https://github.com/compoundingtech/smalltalk/issues/1166)).
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
@@ -30,13 +30,13 @@ display, shows the last connection time, queues no mutations, and offers `r` to 
 Keys (`?` shows them all): `Ctrl+K` opens anything (agents, missions, machines, spaces, and what
 was said in conversations); `Tab` and `Shift+Tab` move between a split's tabs; `Alt+arrows` move
 between splits; `Ctrl+T`, `Ctrl+V`, `Ctrl+X` and `Ctrl+W` open a tab, split right or below, and
-close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens Home over the space; `Ctrl+Q` quits.
+close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens Now over the space; `Ctrl+Q` quits.
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
 attaches the agent's terminal and `Ctrl+\` leaves it. A drag selects text in one pane and copies
-it on release. Scrolling to the top of a conversation loads the page before it. Home cards show
+it on release. Scrolling to the top of a conversation loads the page before it. Now cards show
 their own keys; `y` confirms what a card asks, and Enter never does.
 
 A seat can ask the interface to show something with `st ui open agent/NAME` (also `mission/NAME`,
@@ -58,13 +58,13 @@ cargo test -p stui --locked --lib
 cargo test -p st3 --locked --test integration typed_keys
 cargo test -p st3 --locked --test integration client_only
 cargo build -p st3 --locked
-ST3_PERSON=person/<your-id> python3 crates/stui/tests/pty_smoke.py target/debug/st3
+ST3_PERSON=person/<your-id> python3 crates/stui/tests/pty_smoke.py target/debug/st3 --ui
 ```
 
-The PTY smoke test runs with or without a local daemon. It checks first-frame and key-to-redraw
+The PTY smoke test runs with or without a local daemon or st config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
-binary, pass its path followed by `--no-panic`; the release build has no debug panic hook. The two
+binary, pass its path followed by `--ui --no-panic`; the release build has no debug panic hook. The two
 QA scripts need a live daemon and the `pty` executable: one opens an agent from `Ctrl+K`, scrolls
 it and drags to copy; the other attaches the agent's terminal and leaves it by `Ctrl+\` and by a
 click on its header. Use a person of their own (such as `person/<qa-name>`) so they mark nothing
@@ -78,7 +78,7 @@ both unset for ordinary use. The selector only observes the UI: it does not open
 change the actor/endpoint, attach a terminal or alter subscriptions. An existing file is
 never appended to or overwritten; a new file is mode 0600 on Unix.
 
-Start the installed `stui` once, using the person's ordinary pairing/configuration and
+Start the installed `st` once, using the person's ordinary pairing/configuration and
 space. Either restore a space with that conversation in front, or open it normally with
 Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
 attachment), `--demo`, or a headless test client as a conversation-render measurement.
@@ -150,7 +150,7 @@ subjects stay marked, and spaces keep their resource tabs.
 Opening a resource tab also reads that exact subject with the existing prefix filter so
 a catalog limit does not make an available detail vanish. Session and PTY IDs only navigate.
 
-On a member granting `inventory-collections` version 1, stui follows clients,
+On a member granting `inventory-collections` version 1, the terminal UI follows clients,
 the selected usage period, machines, devices, native sessions and terminal lists
 through the existing collections socket. Fleet, visible panes, sidebar and
 palette demand select the windows. Leaving keeps them for the same thirty-second
