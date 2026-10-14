@@ -415,6 +415,13 @@ the base has none yet, an empty list is used, so nothing signed is trusted but a
 degraded note can still be counted. Fork pull requests run the same job; since it only
 reports, a fork editing it gains nothing.
 
+**Limit that must be lifted before anything may skip:** the verifier comes from the base,
+but `scripts/ci-evidence-gate` itself, and the workflow that calls it, run from the checked-out
+change, so a change can alter the very script that decides the outcome. That is harmless
+here because the outcome is only reported. A job that skips a check has to run the gate script
+from the accepted base as well as the verifier (for example a required workflow, or a
+`pull_request_target` job that never checks out the change's code).
+
 Each job ends with exactly one of these steps running, which is how a collector reads the
 outcome from the jobs API without extra calls:
 
