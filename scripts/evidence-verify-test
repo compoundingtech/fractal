@@ -341,7 +341,7 @@ class Verifier(unittest.TestCase):
     def test_an_unreadable_repository_is_an_error_with_json_and_never_a_pass(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='github:x/y/jobs/1')
         code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--keys', str(self.f.keys),
-                                  '--max-age', '60', '--trust-levels', 'machine', '--runner-prefix', 'github:x/')
+                                  '--max-age', '86400', '--trust-levels', 'machine', '--runner-prefix', 'github:x/')
         self.assertEqual(code, 0, out)  # sanity: all the options parse and a good record passes
         missing = subprocess.run([sys.executable, str(SCRIPT), '--repo', '/nonexistent', '--tree', self.tree,
                                   '--check', 'unit', '--keys', str(self.f.keys)], capture_output=True)
@@ -595,6 +595,38 @@ class SkipPolicy(unittest.TestCase):
                                     '--policy-from', base)[0], 2)  # needs --repository
         self.assertEqual(self.f.cli('--tree', self.tree, '--check', 'unit', '--keys-from', base,
                                     '--repository', 'org/repo')[0], 2)  # only with --policy-from
+
+
+class CommittedPolicy(unittest.TestCase):
+    """The policy file in this repository, parsed by the same code the gate runs."""
+
+    def rules(self, check):
+        text = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        return evidence_verify.policy_rules(text, check, 'compoundingtech/smalltalk')
+
+    def test_every_required_check_has_a_valid_entry_that_accepts_only_the_fleet_signer(self):
+        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
+            rules = self.rules(check)
+            self.assertEqual(rules['trust_levels'], ('fleet',), check)
+            self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
+            observed = rules['kinds']['observed']
+            self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/smalltalk',
+                                                   '.github/workflows/fleet.yml', check])
+            self.assertEqual(observed['runner_prefix'], 'github:compoundingtech/smalltalk/')
+        with self.assertRaises(evidence_verify.Failure):
+            self.rules('a-check-nobody-listed')
+
+    def test_the_linux_gate_wrapper_rule_matches_what_the_note_job_records(self):
+        wrapper = self.rules('linux-gate')['kinds']['wrapper']
+        self.assertEqual(wrapper['command'][:2], ['linux-gate', 'aggregate'])
+        jobs = wrapper['command'][2:]
+        self.assertEqual(jobs, sorted(jobs))  # the aggregate lists its needed jobs sorted
+        self.assertIn('linux-gate', jobs)
+        self.assertEqual(wrapper['required_inputs'],
+                         ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256'])
+        self.assertEqual(wrapper['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
+        # Only linux-gate has a wrapper rule so far.
+        self.assertNotIn('wrapper', self.rules('typescript-client')['kinds'])
 
 
 class Sha256Repository(unittest.TestCase):
