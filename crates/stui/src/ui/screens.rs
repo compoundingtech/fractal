@@ -79,6 +79,15 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
     }
 }
 
+/// The word an agent row shows: st's state word, or, from an st too old to serve one, the state
+/// st reports, marked so.
+pub fn agent_shown_word(agent: &Agent) -> String {
+    match &agent.reported {
+        Some(state) => format!("{state} · older st"),
+        None => agent_word(agent.state).to_owned(),
+    }
+}
+
 pub fn agent_word(state: AgentState) -> &'static str {
     match state {
         AgentState::NeedsYou => "needs you",
@@ -1591,7 +1600,15 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             ("✕", theme::FAULT, "broken"),
             ("○", theme::QUIET, "stopped"),
             ("?", theme::QUIET, "unmanaged"),
-        ]),
+        ])
+        .into_iter()
+        .chain(world.agents.items().iter().any(|agent| agent.reported.is_some()).then(|| {
+            Line::from(span(
+                "This host's st is older: agent states show as st reports them.",
+                theme::dim(),
+            ))
+        }))
+        .collect(),
     }
 }
 
@@ -1621,7 +1638,7 @@ pub fn agent_header(world: &World, agent: &Agent, width: usize, spinner: &'stati
     let mut first = vec![
         span(format!(" {glyph} "), theme::strong(color)),
         span(agent.name.clone(), theme::bold()),
-        span(format!("  {}", agent_word(agent.state)), theme::fg(color)),
+        span(format!("  {}", agent_shown_word(agent)), theme::fg(color)),
     ];
     // The model rides beside the harness, as the harness reported it.
     let model = agent
@@ -2101,7 +2118,7 @@ pub fn mission_detail(
             });
             agents.line(Line::from(vec![
                 span(label, theme::fg(color)),
-                span(format!("{:<11}", agent_word(agent.state)), theme::fg(color)),
+                span(format!("{:<11}", agent_shown_word(agent)), theme::fg(color)),
                 span(
                     format!("{:<8}", agent.harness.name()),
                     theme::fg(harness_color(agent.harness)),
@@ -2630,7 +2647,7 @@ pub fn worktree_detail(
             });
             agents.line(Line::from(vec![
                 span(label, theme::fg(color)),
-                span(agent_word(agent.state), theme::fg(color)),
+                span(agent_shown_word(agent), theme::fg(color)),
             ]));
         }
     }
@@ -2739,7 +2756,7 @@ pub fn agent_actions_doc(agent: &Agent, width: usize, spinner: &'static str) -> 
     doc.line(Line::from(vec![
         span(format!("{glyph} "), theme::strong(color)),
         span(agent.name.clone(), theme::bold()),
-        span(format!("  {}", agent_word(agent.state)), theme::fg(color)),
+        span(format!("  {}", agent_shown_word(agent)), theme::fg(color)),
         span(format!("  {} · {}", agent.harness.name(), agent.host), theme::dim()),
     ]));
     doc.blank();
@@ -2782,7 +2799,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
         doc.line(Line::from(vec![
             span(format!("{glyph} "), theme::strong(color)),
             span(agent.name.clone(), theme::bold()),
-            span(format!("  {}", agent_word(agent.state)), theme::fg(color)),
+            span(format!("  {}", agent_shown_word(agent)), theme::fg(color)),
         ]));
         doc.line(Line::from(span(agent.id.clone(), theme::dim())));
         doc.blank();
@@ -3054,7 +3071,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     let (glyph, color) = agent_glyph(agent.state, spinner);
     doc.line(Line::from(vec![
         span(format!("{glyph} "), theme::fg(color)),
-        span(agent_word(agent.state), theme::fg(color)),
+        span(agent_shown_word(agent), theme::fg(color)),
     ]));
     let field = |doc: &mut Doc, label: &str, value: Option<&str>| {
         let mut spans = vec![span(format!("{label:<9}"), theme::dim())];

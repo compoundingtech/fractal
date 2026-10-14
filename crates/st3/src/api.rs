@@ -2748,9 +2748,14 @@ fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyh
             }
             overlay_down(item, launch_since, observation, client_now_ms() as u64);
             overlay_delivery_presence(item, &local_host);
-            // The presentation reads the facts settled just above, so it is settled with them.
-            let facts = st3_ui_model::agents::Facts::deserialize(&*item)?;
-            item["presentation"] = serde_json::to_value(st3_ui_model::agents::present(&facts))?;
+            // The presentation reads the facts settled just above, so it is settled with them. A
+            // row it cannot read goes without one; it never fails the read for every client.
+            match st3_ui_model::agents::Facts::deserialize(&*item) {
+                Ok(facts) => {
+                    item["presentation"] = serde_json::to_value(st3_ui_model::agents::present(&facts))?;
+                }
+                Err(error) => eprintln!("st3: WARN agent {} has no presentation: {error}", item["id"]),
+            }
         }
         overlay_subagents(store, items)?;
         Ok(())

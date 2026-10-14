@@ -320,9 +320,10 @@ same answer and one place is measured and optimized
 - **Unknown is not a value.** A fact the refresher cannot establish is `null`, with
   `unknown_reason` beside it. It is never a default.
 - **Optional on the wire.** `presentation` is optional in the schema. A daemon that serves it
-  advertises the `presentation` capability, version 1. Against a daemon without it, a client
-  shows the row's raw `state` and says this host's st is older. It does not keep a derivation
-  as a fallback.
+  advertises the `presentation` capability, version 1. A row without it, from a daemon without
+  the capability, shows the row's raw `state` and says this host's st is older. A client does
+  not keep a derivation as a fallback. The terminal UI reads each row's own field, so a row st
+  could not present (the daemon logs it) reads the same way.
 
 **SLOs.** The first frame of each projection's stream, and its list and get reads, are
 `person-read` paths: p99 100 ms, or 300 ms from another machine. `stream missions`,

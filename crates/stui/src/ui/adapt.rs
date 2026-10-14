@@ -767,6 +767,11 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                         age: subagent.started_at.as_deref().map(age).unwrap_or_default(),
                     })
                     .collect(),
+                // An st too old to serve a presentation: show the state it reports.
+                reported: agent
+                    .presentation
+                    .is_none()
+                    .then(|| agent.state.clone()),
             }
         })
         .collect::<Vec<_>>();
@@ -802,6 +807,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
             details: AgentDetails::default(),
             terminal: false,
             subagents: Vec::new(),
+            reported: None,
         }
     }));
     agents
@@ -2124,6 +2130,29 @@ mod tests {
         // Signed in again on the same run: it is simply idle, with nothing to restart.
         model.agents = window(vec![resource("running", "idle", None)]);
         assert_eq!(agents(&model, &[])[0].state, AgentState::Idle);
+    }
+
+    #[test]
+    fn an_older_st_without_presentations_shows_the_state_it_reports() {
+        let mut model = Model::default();
+        // An explicit null: st served no presentation for this row.
+        model.agents = window(vec![serde_json::json!({
+            "id": "agent/example/old", "kind": "agent", "revision": "r1",
+            "updated_at": "2026-10-14T09:00:00Z", "name": "example/old", "state": "running",
+            "reachability": "local", "harness_state": "working", "runtime_ids": [], "under": [],
+            "presentation": null,
+        })]);
+        let seat = &agents(&model, &[])[0];
+        assert_eq!((seat.state, seat.reported.as_deref()), (AgentState::Unknown, Some("running")));
+        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older st");
+        let world = world(&model, "person/avery", &Extras::default());
+        let legend = super::super::screens::agents_list(&world, "⠋", 80)
+            .legend
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(legend.contains("This host's st is older"), "{legend}");
     }
 
     #[test]
