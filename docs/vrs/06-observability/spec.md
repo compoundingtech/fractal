@@ -567,6 +567,7 @@ values map to `other`; routes are matched templates, not raw paths.
 | Reconcile `task` | `pass`, `deadline` |
 | Wake `cause`, FIFO `queue`, startup `phase`, replication `result` | Closed registries |
 | Replication `peer` | Fleet node membership |
+| Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -697,15 +698,24 @@ as does an unknown source. These exported labels do not replace the existing
 in-memory wake labels used by `/v1/performance` and `doctor`; request/detail
 attribution also remains unchanged.
 
+`st.reconcile.passes_per_wake` records the number of completed passes when an
+outer wake rests or reaches its 64-pass continuation cap. It includes the
+quiet confirmation pass, uses the outer wake's cause (not `continuation`),
+and has count boundaries `1, 2, 4, 8, 16, 32, 64`. A wake rests when its
+pass makes no writes of its own; unrelated concurrent store writes do not
+request continuation. Writes completed on helper threads use their existing
+notifications to request another outer wake.
+
 | Instrument | Type | Unit | Complete attribute set |
 | --- | --- | --- | --- |
 | `st.reconcile.pass.duration` | Histogram | `s` | `task=pass` or `task=deadline` |
 | `st.reconcile.wakes` | Counter | `{wake}` | `cause` from the 17-value wake registry |
+| `st.reconcile.passes_per_wake` | Histogram | `{pass}` | `cause` from the 17-value wake registry |
 | `st.fifo.depth` | Observable u64 gauge | `{item}` | `queue=writer`, `conversation`, or `terminal_emulation` |
 | `st.fifo.oldest_age` | Observable f64 gauge | `s` | `queue=writer`, `conversation`, or `terminal_emulation` |
 
 Every metric attribute is a constant closed value, never an identity.
-These instruments contribute at most `17 + 2 + 3 + 3 = 25` attribute series;
+These instruments contribute at most `17 + 17 + 2 + 3 + 3 = 42` attribute series;
 histogram bucket count is separate. Duration uses the seconds buckets above,
 and metrics are independent of trace sampling.
 
@@ -807,27 +817,22 @@ and root completion on serving or guard drop.
 
 ```text
 exchange(peer) → st.replication.round (detached root, one per exchange call)
-heal(peer)     → st.replication.heal  (detached root, one per heal call)
 ```
 
-Both roots use the OpenTelemetry API's `start_with_context` with an empty
+The root uses the OpenTelemetry API's `start_with_context` with an empty
 parent context. smallclaims depends on the OTel API only; st3 owns providers.
-A heal does not inherit the round, and neither inherits an ambient daemon or
-worker span. `span.label` is the bounded operation `round` or `heal`.
+The round does not inherit an ambient daemon or worker span. `span.label` is
+the bounded operation `round`.
 Span fields use the `st.replication.*` prefix. The round records `peer`,
-`outcome=moved|in_sync|failed|cancelled`, integer `moved_envelopes`, and boolean
-`heal_due`. `moved` follows the exchange's existing progress result,
+`outcome=moved|in_sync|failed|cancelled` and integer `moved_envelopes`.
+`moved` follows the exchange's existing progress result,
 including checkpoint adoption; it need not imply a nonzero envelope count.
 Envelope counts sum locally stored pulls and successful pushes whose peer
 inventory changed; push counts are sent batch sizes, not remote receipt counts.
-The heal records `peer`, integer `questions`, and
-`outcome=repaired|unchanged|failed|cancelled`. A heal is repaired when its graph matches
-after refetch, push, or replay; a matching graph without these changes is
-unchanged, and an unresolved, exhausted, or errored heal is failed.
 Failed operations set status `ERROR`
-without exporting raw error prose. There are no per-POST or per-question
-spans and no in-process sampling.
-Dropping an unfinished round or heal, including a dialer aborted after target
+without exporting raw error prose. There are no per-POST spans and no in-process
+sampling.
+Dropping an unfinished round, including a dialer aborted after target
 removal, finalizes it as `cancelled` with unset status, not `ERROR`. Explicit
 completion and Drop consume the same recording, so counters and durations
 are recorded once; cancellation does not itself increment the error counter.
@@ -838,8 +843,6 @@ are recorded once; cancellation does not itself increment the error counter.
 | `st.replication.round.duration` | Histogram | `s` | `peer`, `outcome=moved|in_sync|failed|cancelled` |
 | `st.replication.batch.size` | Histogram | `{envelope}` | `peer`, `direction=pull|push` |
 | `st.replication.errors` | Counter | `{error}` | `peer`, `reason=down|overloaded|auth_failed|refused|removed|timeout|invalid|other` |
-| `st.replication.heals` | Counter | `{heal}` | `peer`, `outcome=repaired|unchanged|failed|cancelled` |
-| `st.replication.heal.duration` | Histogram | `s` | `peer`, `outcome=repaired|unchanged|failed|cancelled` |
 
 Durations cover the whole call, including failed and cancelled calls, and use the seconds
 buckets above. Pull batch sizes are locally stored envelopes; push sizes are
@@ -857,8 +860,7 @@ reqwest failures to `down`, and JSON decoding, API-version mismatch, and
 inflate failures to `invalid`. The legacy dialer's signature/fleet/member
 authentication classification maps to `auth_failed`; unclassified errors map
 to `other`, while recognized legacy failure-kind strings retain their mappings.
-A signed HTTP refusal does not alone imply `refused`. A terminal unresolved or exhausted heal with
-no classified cause uses `other`. Reasons never include error text.
+A signed HTTP refusal does not alone imply `refused`. Reasons never include error text.
 
 Trace and metric enabled gates are independent: metrics record without a
 trace exporter, and traces record without a meter provider. Disabled paths
@@ -868,7 +870,7 @@ label shared between its span and metrics; only metrics require a monotonic
 start time. Batch/outcome/reason labels use static strings, and point
 recording shares the peer label without copying its bytes.
 Telemetry handles bind to the first provider in the process; production initializes once per process.
-Enabled paths reuse existing exchange, receipt, and heal data rather than
+Enabled paths reuse existing exchange and receipt data rather than
 querying the daemon for telemetry. `ReplicationReceipt` has no timing fields;
 cumulative daemon `ReplicationTimings` are not fetched or turned into per-round
 timings. No new IPC or derived timing math is added.
@@ -876,6 +878,59 @@ timings. No new IPC or derived timing math is added.
 There are no replication backlog or lag gauges: the worker has no
 `peer_only`/`local_only` counts and the store belongs to the daemon. This
 surface adds no store scans or queries to manufacture those observations.
+
+### Daemon process and allocator memory
+
+The `st-daemon` SDK meter registers these instruments only when metrics export is enabled.
+The CLI, hooks, and replication worker do not register them. The SDK's periodic reader
+samples them at export time (60 seconds by default; the standard
+`OTEL_METRIC_EXPORT_INTERVAL` override applies). They share the existing resource and
+have no point attributes except the heap gauge's closed `state` vocabulary.
+
+| Instrument | Type | Unit | Source / attributes |
+| --- | --- | --- | --- |
+| `st.process.memory.rss` | Observable gauge | `By` | Linux `/proc/self/statm` resident pages × system page size; no attributes |
+| `st.allocator.heap` | Observable gauge | `By` | Linux glibc `mallinfo2`; `state` = `allocated`, `free`, `mmapped`, `arena`, `releasable` |
+| `st.allocator.reclaim.count` | Observable counter | `{attempt}` | Process-lifetime checkpoint reclamation attempts; no attributes |
+| `st.allocator.reclaim.duration` | Observable counter | `s` | Cumulative checkpoint reclamation elapsed time; no attributes |
+
+One heap callback calls `mallinfo2` once and emits all five states. glibc visits
+arenas under their locks, not at an atomic all-arena instant. `allocated` is
+`uordblks`, allocated non-mmapped heap bytes including allocator overhead and
+tcache-retained chunks, not live application payload.
+`free` is `fordblks`, free bytes retained inside arenas; `mmapped` is `hblkhd`,
+separate mmapped allocations. `arena` is the total non-mmapped bytes obtained from
+the system and overlaps `allocated` and `free`. `releasable` is `keepcost`, an
+estimate of the main arena's top-most releasable block, not all free or reclaimable
+pages across arenas. These states are not a mutually exclusive partition.
+RSS also includes non-heap memory. The direct `mallinfo2` link requires glibc 2.33
+or newer for the Linux GNU binary even when metrics export is disabled; the documented
+Linux archive runtime floor is glibc 2.35+. RSS is registered only on Linux, and
+the heap gauge only on Linux GNU targets; unsupported targets do not report
+fabricated memory values. An unreadable RSS sample is omitted.
+
+The smallclaims public `allocator_reclaim_stats()` accessor reads relaxed atomic totals
+for attempts, actual native trim calls, and cumulative elapsed time without calling the
+allocator. An attempt occurs when an armed outermost checkpoint completion scope drops;
+nested work triggers one attempt, and skipped work triggers none. The exported count
+is attempts (including no-op unsupported platforms), not trim successes. The existing
+thread-local test counters remain isolated from concurrent completion proofs.
+The producer still takes the existing pair of clock readings and updates relaxed
+atomic totals when metrics export is disabled; only SDK registration and collection
+are opt-in. Observation adds no reclamation calls or changes to checkpoint cleanup.
+
+Proof: the completion-scope unit test checks production totals increase. Source
+review verifies the callback's single `mallinfo2` call. The Linux GNU `otel_export`
+integration test captures all five closed states with a common collection timestamp
+and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("st3")`;
+the timestamp proves a common SDK collection, not the number of native calls.
+A fresh-test-process proof initializes real daemon telemetry with traces enabled and
+metrics disabled, asserting no meter provider is created; it does not infer absence
+from elapsed time or daemon termination. A companion CLI proof checks non-daemon omission.
+The ignored `mallinfo2_fragmented_heap_cost` test measures
+101 snapshots after allocating and touching about 1 GiB in 4 KiB blocks and freeing
+alternate blocks; it reports median, p95, and maximum elapsed time without touching a
+live daemon.
 
 ### Attribute and context policy
 

@@ -7,6 +7,23 @@ It has two layers:
 - `.` (`kit.tsx`, `tokens.css`): token-driven component families. The workshop renders them in three switchable visual directions (**Folio**, **Relay**, **Orbit**), each with light and dark palettes and two densities.
 - `./assistant-ui` and its subpaths: the dark-first application surfaces the web app composes, built on assistant-ui 0.15.25. They cover the transcript, composer, tool calls and previews, the sidebar agent row and status glyph, the thread header, resizable splits, resource cards, the work log, the sync line and the workbench layout model, plus rich markdown with highlighted code, the thinking disclosure and the dismissible failure layer. Every surface is controlled: the host supplies data, clock and transport, and unknown values render as unknown.
 
+## Human-facing time
+
+Use `HumanTime` from `./human-time` for leaf-clock labels, and pure formatters from
+`./human-time/format` for clock-driven string projections. `kind="day"` represents
+date-only sources: today / yesterday / weekday within six calendar days / date.
+Its tooltip and accessible description contain only the exact date, never an invented
+time. Use `civilDate('2026-10-12', zone)` from `./human-time/format` with the same
+zone supplied to `HumanClockProvider` (for example `{ locale: 'en-GB', timeZone:
+'America/New_York' }`). It returns an instant inside the requested civil day, or
+`undefined` for unusable input; use it only with day formatters / `kind="day"`.
+Neither bare ISO-date parsing nor machine-local midnight respects a pinned zone.
+`aria-label` is a name prefix; `HumanTime` appends the complete visible text, including
+visible prefix/suffix, exactly once. Callers must not repeat the formatted value.
+String projections must receive a ticking `now`; the host may intentionally pause an
+observation clock while disconnected so retained facts do not imply that fresh
+observations are arriving.
+
 ## Run
 
 ```sh
@@ -17,7 +34,7 @@ pnpm --filter @smalltalk/fractal-ui typecheck
 pnpm --filter @smalltalk/fractal-ui build-storybook  # packages/fractal-ui/storybook-static/
 ```
 
-The package is an explicit member of the root pnpm workspace and uses its pinned toolchain, frozen lockfile and lifecycle-script suppression. `bash scripts/ci-fractal-web` runs its typecheck and the static Storybook build after the shared install.
+The package is an explicit member of the root pnpm workspace and uses its pinned toolchain, frozen lockfile and lifecycle-script suppression. `bash scripts/ci-fractal-web` runs its typecheck, static Storybook build and strict play gate after the shared install.
 The kit keeps TypeScript 6.0.3 and declares the Node types used by its Storybook configuration explicitly.
 
 The static kit book disables Vite CSS splitting only in its Storybook config.
@@ -40,7 +57,20 @@ not browser rendering or execution of story plays.
 
 The dev server binds to localhost on a fixed port (53705). To view it from another machine, forward the port, for example `ssh -L 53705:localhost:53705 <host>`, and open http://localhost:53705.
 
-Stories:
+## Strict play gate
+
+Every `ci-fractal-web` proof discovers every story from the built `index.json` and runs its play at 440×900 and 1440×900, each with dark and light browser color schemes. Each isolated page must report successful `storyFinished` evidence without play exceptions, page errors or unexpected console errors. Only the strict guard's two exact missing development/favicon resources are allowed; missing story assets still fail. The Nix web shell supplies Playwright and Chromium without npm dependencies. The gate serves the static build on an ephemeral localhost port and prints the complete JSON receipt (case evidence, failures and elapsed seconds) into the CI log, failing the proof if any case fails.
+The runner uses one Chromium with up to six concurrent isolated pages, bounded by the available CPU allowance. The receipt records the actual worker count; every indexed case is still required.
+Before selecting stories, the gate validates every index entry: its type must be `story` or `docs`, and both `id` and `importPath` must be nonempty strings. Unknown or malformed entries fail the gate instead of silently shrinking its required matrix. The CI index-contract test includes a malformed built-index fixture that must exit nonzero before browser execution.
+Navigation waits for DOM readiness, then the unchanged strict guard waits for the story's lifecycle completion; global network idleness is not substituted for a successful play.
+
+To run only the gate after building Storybook, inside `nix develop .#web`:
+
+```sh
+node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static /tmp/fractal-kit-play-receipt
+```
+
+## Stories
 
 - **Fractal UI / Visual language**: one working context rendered in the chosen direction. It contains a thread list, a conversation with a tool call and a diff, a terminal pane, a command palette and component specimens. `Explore` exposes direction, scheme and density as canvas controls and Storybook args. The `FolioLight` … `OrbitDark` and `Compact` stories are fixed comparison entries.
 - **Fractal UI / Component families**: every family on one canvas (`AllFamilies`, `FamiliesDark`), under the same three switches.
@@ -49,6 +79,7 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Human time**: all four kinds and unreported time, pinned to New York, at 440/1440 in light/dark plus a host-theme tooltip and a fake-timer live tick.
 
 ## Families
 
@@ -109,6 +140,9 @@ The host also states what it knows about the conversation itself. `availability`
 Both `Transcript` and `EmbraceThread` accept `onRetrySend?: (itemId: string) => void`. Failed-send Retry appears only when this callback is supplied; the host owns the transition to Pending and Sent. Keep the same item id throughout Failed→Pending→Sent to retain the row and its DOM identity. The dark/light `FailedRetry` stories exercise the callback and both transitions.
 `TranscriptTurn.prompt?: TextItem & { readonly role: 'user' }` is optional: truncated history or standing-seat output can begin mid-turn. An omitted prompt renders no prompt bubble; the host does not need to invent a message. `MidTurnHistory` covers a first promptless turn below the `HasOlder` boundary.
 Omit `onOpenTool?: (call: WorkLogCall) => void` for a read-only transcript: tool rows have no host navigation action; the raw disclosure still reveals recorded details in full. A turn with neither tool calls nor reasoning has no work summary. Initial loading shows **Loading conversation…**; synchronization copy uses user-facing loading and update wording rather than transport phase names.
+`WorkLogCall.rawInput?: string` carries the verbatim tool input; `workLogTurnFromItems` fills it with pretty-printed JSON, or the string itself when the input is a string, and omits it for empty input. Expanding a tool row shows intent, status and a compact error reason; the second **Show raw input/output** disclosure reveals exact raw input (`data-testid="tool-raw-input"`), never the row label or failure overlay. Raw input alone makes a row expandable, so a running call, a failed call without output, and a silent success can still show their input without an empty-output placeholder.
+The raw disclosure retains the readable command beside exact input: a subprocess diagnostic can reveal its unescaped command/script without replacing the observed input. Input-only calls never invent output or an empty-output placeholder.
+Tool headers omit absent-output placeholders. `LongCommandRow` checks each row against the rendered `geometryVars.toolRow` token, rejects both wrapping and equally oversized-row controls, then restores and rechecks. Silent-row plays reject a reinjected **No output** placeholder before restoring the production row.
 Failed sends carry `reason: { _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }`. Unknown host causes map to `Failed`, shown as **Couldn't send**. Reason tags stay in a data attribute; optional diagnostic `detail` stays behind the disclosure. Retry requires a callback and a `Failed`, `StaleFence`, or `SnapshotUnavailable` reason; rejection, permission and invalid-message failures never expose Retry.
 Agent-authored Markdown never loads images automatically. Each image defaults to an alt-text/host placeholder with a per-image **Load image** action; links use `target="_blank"` and `rel="noopener noreferrer"` without prefetch, and raw HTML is skipped. `Markdown`, `Transcript`, and `EmbraceThread` accept `resolveImage?: (src: string) => { _tag: 'Load'; src: string } | { _tag: 'Defer' }`. A host can explicitly allow its attachment URLs; no URL shape or origin is implicitly trusted. Loaded images suppress referrers, and `srcset`, raw HTML/CSS URLs and content-driven previews are not rendered. `Content network safety` stories exercise both transcript boundaries under request interception.
 Hosts whose CSP blocks remote images inline (for example `img-src 'self' data: blob:`) pass `onLoadImage?: (src: string) => void` alongside `resolveImage` on `Markdown`, `Transcript`, `EmbraceThread` and `EmbraceMarkdownPreview`. The placeholder action then reads **Open image · host** and calls the host with the source instead of loading it inline; the host opens it in a new tab with `noopener,noreferrer`. Nothing is fetched before the click, and with `onLoadImage` set nothing is fetched after it either (`*HostOpens*` stories). Without it, the inline load after consent is unchanged.
@@ -168,7 +202,7 @@ The composer preserves kit send, cancellation, byte-limit and token-history cont
 
 The Workbench thread dock uses the reviewed route's composition composer policy, distinct from `ComposerSession`'s R3 choice: idle Enter sends immediately; during a run Enter queues and modified Enter explicitly steers. `IdleSample` seeds the route's exact `designItems('idle', 'sample')` messages with explicit idle host facts. `RunningQueueAndSteer` keeps the running case separate and asserts both actions without changing the queue. Neither fixture infers a runtime state from a header label.
 
-State and draft codecs use the workspace's single `effect@4.0.0-rc.118` runtime and the matching `@effect/atom-react@4.0.0-rc.118` binding. `react-aria@3.52.1` is declared explicitly for the separator and portal APIs already used by the kit. Performance counters and `RenderProfiler` stay internal rather than becoming package-root exports.
+State and draft codecs use the workspace's single `effect@4.0.0` stable runtime and the matching `@effect/atom-react@4.0.0` binding. `react-aria@3.52.1` is declared explicitly for the separator and portal APIs already used by the kit. Performance counters and `RenderProfiler` stay internal rather than becoming package-root exports; internal counter increments use `incrDebug`.
 
 The codecs use native `Schema.optional`, preserving both absent fields and explicitly present `undefined` fields from the original Effect 3 contract. `OptionalSnapshotFields` exercises the real pane-key parser and snapshot encode/read path, including form-only, view-only and undefined-ratio inputs.
 

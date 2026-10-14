@@ -22,6 +22,13 @@ test.each([
     fault: 'runtime exited',
     activity: 'errored',
   },
+  {
+    state: 'down',
+    harness_state: 'indeterminate',
+    blocked_on: null,
+    fault: null,
+    activity: 'errored',
+  },
 ] as const)(
   'observed harness activity respects human blocking and failure ($activity)',
   ({ activity, ...observation }) => {

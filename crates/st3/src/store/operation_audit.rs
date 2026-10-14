@@ -88,13 +88,29 @@ fn page(
 }
 
 impl Store {
-    pub(super) fn operation_audit(&self, observer: &mut dyn FnMut(Duration)) -> Result<Vec<String>> {
+    pub(super) fn operation_audit(
+        &self,
+        observer: &mut dyn FnMut(Duration),
+    ) -> Result<Vec<String>> {
+        self.operation_audit_observed(
+            observer,
+            #[cfg(feature = "test-support")]
+            None,
+        )
+    }
+
+    fn operation_audit_observed(
+        &self,
+        observer: &mut dyn FnMut(Duration),
+        #[cfg(feature = "test-support")] mut snapshots: Option<&mut dyn FnMut(&'static str, usize)>,
+    ) -> Result<Vec<String>> {
         smallclaims::read_budget::check()?;
         let connection = self.readers.get();
         let mut claim_cut = 0_i64;
         let mut checkpoint_cut = 0_i64;
         let mut operation_cut = 0_i64;
-        page(&connection,
+        let _frontier_rows = page(
+            &connection,
             "SELECT COALESCE((SELECT MAX(store_index) FROM claims),0),
                     COALESCE((SELECT MAX(rowid) FROM checkpoint_claims),0),
                     COALESCE((SELECT MAX(rowid) FROM operations),0)",
@@ -103,7 +119,13 @@ impl Store {
                 checkpoint_cut = row.get(1)?;
                 operation_cut = row.get(2)?;
                 Ok(())
-            }, observer)?;
+            },
+            observer,
+        )?;
+        #[cfg(feature = "test-support")]
+        if let Some(snapshots) = snapshots.as_mut() {
+            snapshots("frontiers", _frontier_rows);
+        }
         let mut expected = BTreeMap::<String, OperationMetadata>::new();
         let mut operation = String::new();
         let mut claim_rowid = 0_i64;
@@ -118,14 +140,27 @@ impl Store {
             } else {
                 CLAIM_NEXT_PAGE
             };
-            let count = page(&connection, sql, &[&cursor, &rowid, &claim_cut], &mut |row| {
-                operation = row.get(0)?;
-                let digest: String = row.get(1)?;
-                let id: String = row.get(2)?;
-                claim_rowid = row.get(3)?;
-                expected.entry(operation.clone()).or_default().include(digest, id, true);
-                Ok(())
-            }, observer)?;
+            let count = page(
+                &connection,
+                sql,
+                &[&cursor, &rowid, &claim_cut],
+                &mut |row| {
+                    operation = row.get(0)?;
+                    let digest: String = row.get(1)?;
+                    let id: String = row.get(2)?;
+                    claim_rowid = row.get(3)?;
+                    expected
+                        .entry(operation.clone())
+                        .or_default()
+                        .include(digest, id, true);
+                    Ok(())
+                },
+                observer,
+            )?;
+            #[cfg(feature = "test-support")]
+            if let Some(snapshots) = snapshots.as_mut() {
+                snapshots("claims", count);
+            }
             if count == 0 {
                 if !remainder { break; }
                 remainder = false;
@@ -155,10 +190,21 @@ impl Store {
                     }
                     tombstone_rowid = row.get(0)?;
                     Ok(())
-                }, observer)?;
-            if count == 0 { break; }
+                },
+                observer,
+            )?;
+            #[cfg(feature = "test-support")]
+            if let Some(snapshots) = snapshots.as_mut() {
+                snapshots("checkpoints", count);
+            }
+            if count == 0 {
+                break;
+            }
         }
-        let mut expected: BTreeMap<_, _> = expected.into_iter().filter_map(|(id, value)| value.row().map(|row| (id, row))).collect();
+        let mut expected: BTreeMap<_, _> = expected
+            .into_iter()
+            .filter_map(|(id, value)| value.row().map(|row| (id, row)))
+            .collect();
         let mut drift = Vec::new();
         let mut actual_cursor: Option<String> = None;
         loop {
@@ -171,15 +217,24 @@ impl Store {
                     if expected.remove(&id).as_ref() != Some(&actual) { drift.push(id.clone()); }
                     actual_cursor = Some(id);
                     Ok(())
-                }, observer)?;
-            if count == 0 { break; }
+                },
+                observer,
+            )?;
+            #[cfg(feature = "test-support")]
+            if let Some(snapshots) = snapshots.as_mut() {
+                snapshots("operations", count);
+            }
+            if count == 0 {
+                break;
+            }
         }
         drift.extend(expected.into_keys());
         drift.sort();
         let mut verified = Vec::new();
         for id in drift {
             let mut current_drift = false;
-            page(&connection,
+            let _recheck_rows = page(
+                &connection,
                 "SELECT (SELECT request_digest FROM operations WHERE id=?1),
                         (SELECT canonical_claim_id FROM operations WHERE id=?1),
                         (SELECT state FROM operations WHERE id=?1)",
@@ -191,10 +246,29 @@ impl Store {
                     };
                     current_drift = expected_operation(&connection, &id)? != actual;
                     Ok(())
-                }, observer)?;
-            if current_drift { verified.push(id); }
+                },
+                observer,
+            )?;
+            #[cfg(feature = "test-support")]
+            if let Some(snapshots) = snapshots.as_mut() {
+                snapshots("recheck", _recheck_rows);
+            }
+            if current_drift {
+                verified.push(id);
+            }
         }
         Ok(verified)
+    }
+
+    /// Observe completed pages after their read snapshots end. The phases are `frontiers`,
+    /// `claims`, `checkpoints`, `operations` and `recheck`; rows count the metadata consumed
+    /// in this page. Empty seeks count zero. Page sizes and deadlines stay unchanged.
+    #[cfg(feature = "test-support")]
+    pub fn operation_projection_drift_with_snapshot_observer(
+        &self,
+        observer: &mut dyn FnMut(&'static str, usize),
+    ) -> Result<Vec<String>> {
+        self.operation_audit_observed(&mut |_| {}, Some(observer))
     }
 
     #[cfg(feature = "test-support")]

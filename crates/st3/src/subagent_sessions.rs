@@ -44,6 +44,9 @@ fn valid_task_id(task_id: &str) -> bool {
 }
 
 /// The child transcript the harness writes for `task_id`, when it exists as a regular file.
+/// The entry itself is never followed through a symlink: the harness writes it as a file, so a
+/// link there could only point a client at a file outside the session. The task directory may
+/// be a link, as st's managed seats link the companion directory to the original transcript's.
 pub(crate) fn child_transcript(parent: &ExternalSession, task_id: &str) -> Option<PathBuf> {
     if !valid_task_id(task_id) {
         return None;
@@ -52,7 +55,7 @@ pub(crate) fn child_transcript(parent: &ExternalSession, task_id: &str) -> Optio
         .transcript
         .with_extension("")
         .join(format!("{task_id}.jsonl"));
-    std::fs::metadata(&path)
+    std::fs::symlink_metadata(&path)
         .ok()
         .filter(|metadata| metadata.is_file())
         .map(|_| path)
@@ -74,7 +77,7 @@ pub(crate) fn resolve_child(
     let Some(transcript) = child_transcript(&parent, &task_id) else {
         return Ok(None);
     };
-    let metadata = std::fs::metadata(&transcript)?;
+    let metadata = std::fs::symlink_metadata(&transcript)?;
     let updated = metadata.modified().ok();
     let started = metadata.created().ok().or(updated);
     let unix = |time: Option<std::time::SystemTime>| {
@@ -182,6 +185,28 @@ mod tests {
             child_transcript(&parent, "task-1"),
             Some(child_transcript_path(&parent, "task-1"))
         );
+    }
+
+    #[test]
+    fn symlinked_child_transcripts_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = parent(root.path());
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("elsewhere.jsonl");
+        std::fs::write(&target, "{\"type\":\"session\",\"id\":\"elsewhere\"}\n").unwrap();
+        // A symlinked transcript in the task directory is not the child's transcript.
+        let link = child_transcript_path(&parent, "linked");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(link.is_file(), "the link resolves");
+        assert!(child_transcript(&parent, "linked").is_none());
+        let id = child_session_id(&parent, "linked");
+        assert!(resolve_child(Some(root.path()), &id).unwrap().is_none());
+        // A regular child file beside it still resolves.
+        assert!(child_transcript(&parent, "task-1").is_none());
+        let file = child_file(&parent, "task-1");
+        assert_eq!(child_transcript(&parent, "task-1"), Some(file));
     }
 
     #[test]

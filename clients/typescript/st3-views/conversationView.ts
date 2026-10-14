@@ -13,7 +13,7 @@ export type Body =
   | { kind: 'assistant'; text: string }
   | { kind: 'tool'; title: string; state: ToolState; output: string[] }
   /** `delivered`: the recipient's harness has it, seen in the agent's own transcript. */
-  | { kind: 'mail'; from: string; to: string; subject: string; text: string; delivered?: boolean; dictated?: boolean; signed?: string; images?: MailImage[] }
+  | { kind: 'mail'; from: string; to: string; subject: string; text: string; delivered?: boolean; dictated?: boolean; signed?: string; images?: MailImage[]; whole?: WholeText }
   | { kind: 'event'; text: string; tone: 'quiet' | 'warning' | 'fault' };
 export type ConversationEntry = { id: string; at: string; timestamp: string; body: Body; content?: ConversationContentRef[]; contentSources?: Entry[] };
 
@@ -339,6 +339,9 @@ export function toolTitle(name: string, args: unknown): string {
   return ['Bash', 'bash', 'shell', 'exec_command'].includes(name) ? `$ ${first}` : `${name} ${first}`;
 }
 
+// Keep this line budget and marker in sync with st3-conversation-ui's tool_output.
+const PREVIEW_LINES = 400;
+
 export function toolOutput(content: unknown, full = false): string[] {
   let text: string;
   if (typeof content === 'string') text = content;
@@ -349,7 +352,11 @@ export function toolOutput(content: unknown, full = false): string[] {
   const lines = text ? text.split('\n') : [];
   while (lines.length && !lines[0]?.trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1]?.trim()) lines.pop();
-  return full ? lines : lines.slice(0, 400);
+  if (full || lines.length <= PREVIEW_LINES) return lines;
+  return [
+    ...lines.slice(0, PREVIEW_LINES),
+    `… ${lines.length - PREVIEW_LINES} more lines not shown in the timeline preview`,
+  ];
 }
 
 function contentText(body: unknown): string {
@@ -699,6 +706,9 @@ export function unreadableTranscript(timeline: Entry[]): string | null {
  * One conversation as st joined it: the harness's turns and the agent's Small Talk, in time
  * order. `names` maps graph ids to what a person calls them; the viewer is `you`.
  */
+/** A long message shows only its start; the whole text (`bytes` long, in UTF-8) is read from st by `message`. */
+export type WholeText = { message: string; bytes: number };
+
 /** An image a message carries; its bytes are read from st by `sha256`, naming `message`. */
 export type MailImage = { sha256: string; message: string; mediaType: string; name?: string; size: number };
 
@@ -788,6 +798,7 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
           ...(Array.isArray(message.tags) && message.tags.includes('dictated') ? { dictated: true } : {}),
           ...(signatureMark(message.provenance) ? { signed: signatureMark(message.provenance)! } : {}),
           ...(images.length ? { images } : {}),
+          ...(typeof message.body_bytes === 'number' && message.body_bytes > 0 ? { whole: { message: str(message.message_id)!, bytes: message.body_bytes } } : {}),
         });
       }
       const content = contentReferences(message);
@@ -943,8 +954,10 @@ export function shownToolLines(body: Extract<Body, { kind: 'tool' }>, open: bool
   return { hidden: body.output.length - COLLAPSED_TOOL_LINES, lines: head ? body.output.slice(0, COLLAPSED_TOOL_LINES) : body.output.slice(-COLLAPSED_TOOL_LINES) };
 }
 
-/** What a problem means for what is shown: how old it is and that the phone keeps trying. */
-export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number): string {
+/** What a problem means for what is shown: how old it is and that the phone keeps trying, or,
+ * once st refused for good (`stopped`), that nothing retries until the person asks again. */
+export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number, stopped = false): string {
+  if (stopped) return `Could not load this conversation: ${issue} · tap to try again`;
   if (!loaded) return `Not loaded yet: ${issue}. Trying again.`;
   if (lastFrame === null) return `${issue} · trying again`;
   const seconds = Math.max(0, Math.round((now - lastFrame) / 1000));

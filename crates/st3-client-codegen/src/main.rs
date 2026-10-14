@@ -29,13 +29,15 @@ fn main() -> Result<()> {
         .as_object()
         .context("actions object")?;
     let reads = operations["reads"].as_array().context("reads array")?;
+    let constants = contract_constants(&operations)?;
     let digest = hex_digest(&[&schema_bytes, &operations_bytes]);
     let rust = format_rust(&rust_contract(
         &digest,
         actions.keys().map(String::as_str),
         reads,
+        &constants,
     )?)?;
-    let swift = swift_contract(actions.keys().map(String::as_str), reads)?;
+    let swift = swift_contract(actions.keys().map(String::as_str), reads, &constants)?;
     let rust_models = format_rust(&render_marker(
         RUST_MODELS_TEMPLATE,
         "    // @st3-codegen:rust-action-constructors",
@@ -56,7 +58,7 @@ fn main() -> Result<()> {
         "    // @st3-codegen:swift-operation-methods",
         &swift_operation_methods(reads, actions)?,
     )?;
-    let typescript_models = typescript_models(&schema, &operations)?;
+    let typescript_models = typescript_models(&schema, &operations, &constants)?;
     let typescript_schema = rich::models(&schema)?;
     let typescript_client = render_marker(
         TYPESCRIPT_CLIENT_TEMPLATE,
@@ -221,6 +223,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn subject_definition(&self, subject: &str, show_env_values: bool) -> Result<Envelope<SubjectDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/subject-definition?subject={{}}&show_env_values={{show_env_values}}\", percent_encode(subject))).await }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -268,6 +272,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn terminal_screen(&self, terminal_id: &str) -> Result<Envelope<TerminalScreen>, ClientError> {{ self.terminal_screen_internal(terminal_id).await }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {{ self.get(&format!(\"/v1/client/message-bodies/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "agent-queue.get" {
@@ -380,6 +386,8 @@ fn swift_operation_methods(
                 out,
                 "    public func conversationSearch(text: String, agent: String? = nil, since: String? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ConversationSearch> {{ var query: [URLQueryItem] = [.init(name: \"text\", value: text)]; for (name, value) in [(\"agent\", agent), (\"since\", since), (\"cursor\", cursor)] {{ if let value {{ query.append(.init(name: name, value: value)) }} }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/conversations/search\", query: query) }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -402,6 +410,8 @@ fn swift_operation_methods(
                 out,
                 "    public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> {{ try await get(\"v1/client/agent-workspaces/\\(id)\") }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> {{ try await get(\"v1/client/message-bodies/\\(id)\") }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> {{ try await get(\"v1/client/status-history/\\(id)\") }}")?;
         } else if id == "agent-declaration.get" {
@@ -631,12 +641,15 @@ fn validate_surfaces(
         bail!("KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}", known.len());
     }
     for definition in [
+        "DirectiveNote",
+        "DirectiveNotes",
         "ResourceObservation",
         "ResourcesFilter",
         "ResourcesPage",
         "AttentionBlocked",
         "AttentionTargetState",
         "DocumentContent",
+        "MessageBody",
         "AgentDeclaration",
         "AgentWorkspace",
         "StatusHistory",
@@ -867,10 +880,43 @@ fn pascal(value: &str) -> String {
         .collect()
 }
 
+/// A named value every generated client exposes, from the manifest's `constants`.
+struct Constant {
+    /// The manifest key, in snake case.
+    name: String,
+    value: String,
+    about: String,
+}
+
+fn contract_constants(operations: &Value) -> Result<Vec<Constant>> {
+    let Some(constants) = operations.get("constants") else {
+        return Ok(Vec::new());
+    };
+    constants
+        .as_object()
+        .context("constants object")?
+        .iter()
+        .map(|(name, constant)| {
+            Ok(Constant {
+                name: name.clone(),
+                value: constant["value"]
+                    .as_str()
+                    .with_context(|| format!("constant `{name}` value"))?
+                    .to_owned(),
+                about: constant["about"]
+                    .as_str()
+                    .with_context(|| format!("constant `{name}` about"))?
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
 fn rust_contract<'a>(
     digest: &str,
     actions: impl Iterator<Item = &'a str>,
     reads: &[Value],
+    constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
     // The contract digest lives here alone: every generated file carrying it made any two
@@ -900,12 +946,22 @@ fn rust_contract<'a>(
         )?;
     }
     writeln!(out, "];")?;
+    for constant in constants {
+        writeln!(
+            out,
+            "/// {}\n#[rustfmt::skip]\npub const {}: &str = {:?};",
+            constant.about,
+            constant.name.to_ascii_uppercase(),
+            constant.value
+        )?;
+    }
     Ok(out)
 }
 
 fn swift_contract<'a>(
     actions: impl Iterator<Item = &'a str>,
     reads: &[Value],
+    constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
     let mut out = format!(
@@ -945,6 +1001,15 @@ fn swift_contract<'a>(
         )?;
     }
     writeln!(out, "]\n")?;
+    for constant in constants {
+        writeln!(
+            out,
+            "/// {}\npublic let st3{}: String = {:?}\n",
+            constant.about,
+            pascal(&constant.name),
+            constant.value
+        )?;
+    }
     Ok(out)
 }
 
@@ -1101,11 +1166,20 @@ fn ts_loose_json_fields(definition: &Value, fields: &[&str]) -> Value {
     loose
 }
 
-fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
+fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     let mut out = format!(
         "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n"
     );
+    for constant in constants {
+        writeln!(
+            out,
+            "/** {} */\nexport const {} = {:?} as const;\n",
+            constant.about,
+            constant.name.to_ascii_uppercase(),
+            constant.value
+        )?;
+    }
     for (name, definition) in defs {
         if name == "ActionRequest" {
             continue;
@@ -1222,6 +1296,8 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(options: EventOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events'); }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    async notesList(): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes'); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -1343,7 +1419,7 @@ mod tests {
             include_bytes!("../../../docs/st3/client-v0/schemas/client-v0.schema.json"),
             include_bytes!("../../../docs/st3/client-v0/schemas/operations.json"),
         ]);
-        let ts_models = typescript_models(&schema, &operations)?;
+        let ts_models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
         let ts_schema = rich::models(&schema)?;
         let ts_client = render_marker(
             TYPESCRIPT_CLIENT_TEMPLATE,

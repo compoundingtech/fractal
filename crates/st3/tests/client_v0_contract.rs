@@ -734,6 +734,16 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
 }
 
 #[test]
+fn directive_note_wire_fixture_conforms_to_typed_read_contract() {
+    let fixture = json(asset_root().join("fixtures/directive-notes.json"));
+    assert!(contract_validator("Envelope").is_valid(&fixture));
+    assert!(contract_validator("DirectiveNotes").is_valid(&fixture["value"]));
+    let mut invalid = fixture["value"].clone();
+    invalid["notes"][0]["author"] = serde_json::json!("agent/worker");
+    assert!(!contract_validator("DirectiveNotes").is_valid(&invalid));
+}
+
+#[test]
 fn manifest_names_existing_json_fixtures_and_schema_definitions() {
     let root = asset_root();
     let manifest = json(root.join("fixtures/manifest.json"));
@@ -3207,6 +3217,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                     &step.subject,
                     "claim",
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
                         summary: None,
@@ -3222,6 +3233,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                     &step.subject,
                     "progress",
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
                         summary: Some("Building the release".into()),
@@ -3351,6 +3363,7 @@ mission "ios-proof" state="ready" {
     let subject = run.steps[0].subject.clone();
     state.store.set_step_state(&subject, "ready", None).unwrap();
     let request = |key: &str, reason: Option<&str>| st3::model::WorkRequest {
+        wait_ms: None,
         actor: Some("agent/client-v0-baseline.ios-owner".into()),
         incarnation: Some("ios-owner-one".into()),
         summary: None,
@@ -3468,6 +3481,7 @@ mission "release-proof" state="ready" {
             &subject,
             "claim",
             &st3::model::WorkRequest {
+                wait_ms: None,
                 actor: Some(actor.into()),
                 incarnation: Some("release-owner-one".into()),
                 summary: None,
@@ -4064,6 +4078,18 @@ async fn client_structured_decision_carries_named_answers_both_ways() {
     );
 }
 
+#[test]
+fn a_dismissed_person_answer_conforms_and_an_unknown_outcome_does_not() {
+    let validator = contract_validator("PersonAnswer");
+    for answer in [
+        serde_json::json!({"type": "decision", "outcome": "dismissed"}),
+        serde_json::json!({"type": "choice", "outcome": "dismissed", "text": "Not now."}),
+    ] {
+        assert_conforms(&validator, "a dismissed answer", &answer);
+    }
+    assert!(!validator.is_valid(&serde_json::json!({"type": "decision", "outcome": "vanished"})));
+}
+
 #[tokio::test]
 async fn native_agent_person_asks_use_source_authority_and_reject_malformed_evidence() {
     let root = tempfile::tempdir().unwrap();
@@ -4335,6 +4361,7 @@ mission "timing/run" state="ready" {
     state.store.set_step_state(ready, "ready", None).unwrap();
     state.store.set_step_state(held, "ready", None).unwrap();
     state.store.work_action(held, "claim", &st3::model::WorkRequest {
+        wait_ms: None,
         actor: Some("agent/timing/worker".into()),
         incarnation: Some("timing-worker-one".into()),
         summary: None,
