@@ -22,6 +22,8 @@ mod mailbox_lease;
 mod message_send_tests;
 #[cfg(test)]
 mod message_thread_legacy_rank_dependency_tests;
+#[cfg(test)]
+mod actual_state_sorter_tests;
 pub mod owned_sets;
 #[cfg(test)]
 mod owned_sets_tests;
@@ -23160,8 +23162,11 @@ fn latest_actual_at(
     // Folded in canonical order, so two nodes holding the same claims agree however they
     // received them. `NOT LIKE` also leaves out harness kinds in any letter case, as it always
     // has; the ranges let SQLite seek past the subject's harness reports.
+    // Only the integer identity and canonical keys enter SQLite's sorter. Keep its cursor
+    // open while fetching each body on this same connection: even an unpinned caller then
+    // reads both statements from one SQLite read cut, without retaining history bodies.
     let mut statement = connection.prepare_cached(&format!(
-        "SELECT claims.kind, claims.body
+        "SELECT claims.store_index
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
@@ -23169,35 +23174,40 @@ fn latest_actual_at(
            AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
          ORDER BY {CANONICAL_ORDER}"
     ))?;
-    let rows = statement
-        .query_map(params![subject, at_index], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    fold_latest_actual(rows)
+    let mut rows = statement.query(params![subject, at_index])?;
+    let mut bodies = connection
+        .prepare_cached("SELECT kind, body FROM claims WHERE store_index=?1")?;
+    fold_latest_parsed_values(std::iter::from_fn(|| {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error.into())),
+        };
+        Some((|| {
+            let index: u64 = row.get(0)?;
+            let (kind, body): (String, String) =
+                bodies.query_row([index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok((kind, serde_json::from_str::<Value>(&body)?))
+        })())
+    }))
 }
 
-/// A subject's actual state from its actual-state claims, `(kind, body)` in canonical order.
-fn fold_latest_actual(
-    rows: impl IntoIterator<Item = (String, String)>,
-) -> Result<Option<Value>> {
-    let rows = rows
-        .into_iter()
-        .map(|(kind, body)| Ok((kind, serde_json::from_str::<Value>(&body)?)))
-        .collect::<Result<Vec<_>>>()?;
-    fold_latest_values(rows)
-}
-
-/// [`fold_latest_actual`] of claims already parsed, `(kind, body)` in canonical order. It takes
+/// A subject's actual state from already parsed claims in canonical order. It takes
 /// the bodies, so each field moves into the folded state instead of being copied.
 fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result<Option<Value>> {
-    let mut rows = rows.into_iter().peekable();
-    if rows.peek().is_none() {
-        return Ok(None);
-    }
+    fold_latest_parsed_values(rows.into_iter().map(Ok))
+}
+
+/// Fold one body at a time, propagating SQL/JSON errors without caching a partial answer.
+fn fold_latest_parsed_values(
+    rows: impl IntoIterator<Item = Result<(String, Value)>>,
+) -> Result<Option<Value>> {
     let mut merged = serde_json::Map::new();
     let registry = st3_schema::registry();
-    for (kind, value) in rows {
+    let mut any = false;
+    for row in rows {
+        let (kind, value) = row?;
+        any = true;
         let source = match value {
             Value::Object(mut body) => match body.remove("fields") {
                 Some(fields) => fields,
@@ -23227,7 +23237,7 @@ fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result
             }
         }
     }
-    Ok(Some(Value::Object(merged)))
+    Ok(any.then_some(Value::Object(merged)))
 }
 
 /// `columns` of subject `?1`'s claims of one `kind` at or before store index `?2`, newest first
