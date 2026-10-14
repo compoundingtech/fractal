@@ -669,13 +669,25 @@ class CommittedPolicy(unittest.TestCase):
         self.assertEqual(canaries['required_inputs'], sorted(common + ['job', 'stage']))
         self.assertEqual(canaries['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
 
-    def test_only_the_checks_with_a_defined_wrapper_note_have_a_wrapper_rule(self):
-        for check in ('typescript-client', 'isolation-vm', 'genie-freshness'):
-            self.assertEqual(sorted(self.rules(check)['kinds']), ['observed'], check)
-        for check in ('linux-gate', 'mail-redelivery-canaries'):
-            self.assertEqual(sorted(self.rules(check)['kinds']), ['observed', 'wrapper'], check)
-            self.assertEqual(self.rules(check)['trust_levels'], ('fleet',))  # the wrapper signs as fleet/ci
-            self.assertIsNone(self.rules(check)['kinds']['wrapper']['trust_levels'])  # no weaker signer is admitted
+    def test_the_step_outcome_notes_of_the_other_three_checks_have_their_own_exact_rules(self):
+        expected = {
+            'genie-freshness': ['bash', 'scripts/ci-genie-freshness'],
+            'typescript-client': ['bash', 'scripts/ci-typescript-client'],
+            'isolation-vm': ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'],
+        }
+        required = ['attempt', 'flake_lock_sha256', 'job', 'step_outcomes', 'steps', 'system', 'toolchain_sha256', 'wrapper_sha256']
+        for check, command in expected.items():
+            wrapper = self.rules(check)['kinds']['wrapper']
+            self.assertEqual(wrapper['command'], command, check)
+            self.assertEqual(wrapper['required_inputs'], required, check)
+            self.assertEqual(wrapper['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
+
+    def test_every_required_check_lists_observed_and_wrapper_and_only_the_fleet_signer(self):
+        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
+            rules = self.rules(check)
+            self.assertEqual(sorted(rules['kinds']), ['observed', 'wrapper'], check)
+            self.assertEqual(rules['trust_levels'], ('fleet',), check)  # the wrapper signs as fleet/ci
+            self.assertIsNone(rules['kinds']['wrapper']['trust_levels'], check)  # no weaker signer is admitted
 
 
 class Sha256Repository(unittest.TestCase):

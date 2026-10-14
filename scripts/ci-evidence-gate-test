@@ -40,6 +40,13 @@ GATE_ARGV = ['linux-gate', 'aggregate', 'linux-clippy', 'linux-fleet-compat', 'l
              'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
              'mail-redelivery-canaries', 'upgrade-impact']
 CANARIES_ARGV = ['bash', 'scripts/ci-linux', 'mail-redelivery-canaries']
+# The step-outcome notes of the other three checks (nix-evidence, agent/evidence-more-checks).
+STEP_ARGV = {
+    'genie-freshness': ['bash', 'scripts/ci-genie-freshness'],
+    'typescript-client': ['bash', 'scripts/ci-typescript-client'],
+    'isolation-vm': ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'],
+}
+ARGV = {'linux-gate': GATE_ARGV, 'mail-redelivery-canaries': CANARIES_ARGV, **STEP_ARGV}
 LOCK = 'fake flake.lock contents\n'
 # Written out here, not read from the script, so removing a path from the script cannot hide it.
 EXPECTED_PROTECTED = (
@@ -498,11 +505,13 @@ class EndToEnd(unittest.TestCase):
         return base, commit, tree, hashlib.sha256(LOCK.encode()).hexdigest()
 
     def wrapper_note(self, commit, tree, lock, check='linux-gate', argv=None, **kwargs):
-        argv = argv or (GATE_ARGV if check == 'linux-gate' else CANARIES_ARGV)
+        argv = argv or ARGV[check]
         inputs = {'flake_lock_sha256': lock, 'toolchain_sha256': 't' * 64, 'wrapper_sha256': 'w' * 64,
                   'system': 'x86_64-linux', 'attempt': '1'}
-        if check != 'linux-gate':
-            inputs.update(stage=argv[-1], job=check)
+        if check == 'mail-redelivery-canaries':
+            inputs.update(stage=ARGV[check][-1], job=check)
+        elif check in STEP_ARGV:
+            inputs.update(job=check, steps='client,install', step_outcomes='client=success,install=success')
         inputs.update(kwargs.pop('inputs', {}))
         for drop in kwargs.pop('drop', ()):
             inputs.pop(drop, None)
@@ -512,7 +521,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_exact_wrapper_notes_from_the_fleet_signer_skip_their_own_check(self):
         base, commit, tree, lock = self.wrapper_scenario()
-        for check in ('linux-gate', 'mail-redelivery-canaries'):
+        for check in CHECKS:
             with self.subTest(check):
                 self.wrapper_note(commit, tree, lock, check=check)
                 fields, outputs = self.run_gate(base, check=check)
@@ -521,20 +530,25 @@ class EndToEnd(unittest.TestCase):
                 self.assertRegex(outputs['record'], r'^[0-9a-f]{40}$')
 
     def test_a_wrapper_note_counts_only_for_its_own_check(self):
+        # Every check's note, filed under every OTHER check's name, is a different command: never a skip.
+        for noted, filed_under in itertools.permutations(CHECKS, 2):
+            with self.subTest(f'{noted} filed under {filed_under}'):
+                base, commit, tree, lock = self.wrapper_scenario()
+                self.wrapper_note(commit, tree, lock, check=filed_under, argv=ARGV[noted])
+                self.assertEqual(self.assertRuns(base, check=filed_under)['reason'], 'wrong_command')
+
+    def test_a_check_whose_policy_requires_the_observer_is_never_satisfied_by_a_wrapper_note(self):
         base, commit, tree, lock = self.wrapper_scenario()
-        self.wrapper_note(commit, tree, lock, check='linux-gate')
-        # The same note filed under a check whose policy lists no wrapper rule, or another wrapper check.
-        for other in ('typescript-client', 'isolation-vm', 'genie-freshness'):
-            self.f.git('update-ref', '-d', 'refs/notes/evidence/' + self.f.git('for-each-ref', '--format=%(objectname)',
-                                                                              'refs/notes/evidence/').split()[0])
-            self.wrapper_note(commit, tree, lock, check=other, argv=GATE_ARGV)
-            self.assertEqual(self.assertRuns(base, other, check=other)['reason'], 'unsupported_kind')
-        base2, commit2, tree2, lock2 = self.wrapper_scenario()
-        self.wrapper_note(commit2, tree2, lock2, check='mail-redelivery-canaries', argv=GATE_ARGV)
-        self.assertEqual(self.assertRuns(base2, check='mail-redelivery-canaries')['reason'], 'wrong_command')
-        base3, commit3, tree3, lock3 = self.wrapper_scenario()
-        self.wrapper_note(commit3, tree3, lock3, check='linux-gate', argv=CANARIES_ARGV)
-        self.assertEqual(self.assertRuns(base3)['reason'], 'wrong_command')
+        # Same repository but the base lists only the observer for every check.
+        self.f.git('checkout', '-q', '--detach', 'HEAD~1')
+        (self.f.repo / '.st/evidence-skip-policy.json').write_text(skip_policy())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'observer-only policy')
+        observer_only_base = self.f.git('rev-parse', 'HEAD')
+        (self.f.repo / 'flake.lock').write_text(LOCK)
+        commit, tree = self.head()
+        self.wrapper_note(commit, tree, lock, check='isolation-vm')
+        self.assertEqual(self.assertRuns(observer_only_base, check='isolation-vm')['reason'], 'unsupported_kind')
 
     def test_a_wrapper_note_for_another_tree_never_skips(self):
         base, commit, tree, lock = self.wrapper_scenario()
@@ -622,10 +636,6 @@ class EndToEnd(unittest.TestCase):
         base, commit, tree, lock = self.wrapper_scenario()
         self.wrapper_note(commit, tree, lock, argv=['github-actions', REPOSITORY, '.github/workflows/fleet.yml', 'linux-gate'])
         self.assertEqual(self.assertRuns(base)['reason'], 'wrong_command')
-        # A check whose policy requires the observer (no wrapper rule) is never satisfied by a wrapper note.
-        base, commit, tree, lock = self.wrapper_scenario()
-        self.wrapper_note(commit, tree, lock, check='isolation-vm', argv=['isolation-vm'])
-        self.assertEqual(self.assertRuns(base, check='isolation-vm')['reason'], 'unsupported_kind')
 
     # ---- the gate comes from the accepted base, and files that decide skipping are protected ---
 
