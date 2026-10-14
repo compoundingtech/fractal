@@ -27,6 +27,130 @@ pub struct DirectiveNotes {
     pub notes: Vec<DirectiveNote>,
 }
 
+/// Audiences are open: unfamiliar values retain their original neutral label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoteAudience {
+    SelfOnly,
+    Agent,
+    Other(String),
+}
+impl NoteAudience {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::SelfOnly => "self",
+            Self::Agent => "agent",
+            Self::Other(value) => value,
+        }
+    }
+}
+impl Serialize for NoteAudience {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+impl<'de> Deserialize<'de> for NoteAudience {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(deserializer)? {
+            value if value == "self" => Self::SelfOnly,
+            value if value == "agent" => Self::Agent,
+            value => Self::Other(value),
+        })
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SubjectNote {
+    pub id: String,
+    pub target: String,
+    pub author: String,
+    pub text: String,
+    pub audience: NoteAudience,
+    #[serde(default)]
+    pub session: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    pub revision: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SubjectNotes {
+    pub notes: Vec<SubjectNote>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SubjectNoteResult {
+    pub note: Option<SubjectNote>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SubjectNoteCreate {
+    pub target: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<NoteAudience>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+/// Outer None preserves the existing value; Some(None) clears or archives it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SubjectNoteUpdate {
+    #[serde(
+        default,
+        deserialize_with = "note_patch_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub text: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<NoteAudience>,
+    #[serde(
+        default,
+        deserialize_with = "note_patch_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "note_patch_field",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expires_at: Option<Option<String>>,
+}
+fn note_patch_field<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Note {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub target: String,
+    pub author: String,
+    pub text: String,
+    pub audience: NoteAudience,
+    #[serde(default)]
+    pub session: Option<String>,
+    pub created_at: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+impl From<Note> for SubjectNote {
+    fn from(note: Note) -> Self {
+        Self {
+            id: note.header.id,
+            revision: note.header.revision,
+            updated_at: note.header.updated_at,
+            target: note.target,
+            author: note.author,
+            text: note.text,
+            audience: note.audience,
+            session: note.session,
+            created_at: note.created_at,
+            expires_at: note.expires_at,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Envelope<T> {
     pub api_version: String,
@@ -1747,6 +1871,7 @@ pub struct SummaryAgentsAsOf {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Resource {
+    Note(Note),
     ConnectedClient(ConnectedClient),
     Usage(Usage),
     Summary(Summary),
@@ -1780,6 +1905,7 @@ pub enum Resource {
 
 /// The resource kinds this client models; any other kind reads as [`Resource::Unknown`].
 pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
+    "note",
     "connected-client",
     "usage",
     "summary",
@@ -1847,6 +1973,7 @@ impl<'de> Deserialize<'de> for UnknownResource {
 impl Resource {
     pub fn header(&self) -> &ResourceHeader {
         match self {
+            Self::Note(v) => &v.header,
             Self::ConnectedClient(v) => &v.header,
             Self::Usage(v) => &v.header,
             Self::Summary(v) => &v.header,

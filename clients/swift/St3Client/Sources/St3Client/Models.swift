@@ -21,6 +21,84 @@ public struct DirectiveNotes: Codable, Sendable, Equatable {
     public let notes: [DirectiveNote]
 }
 
+public enum NoteAudience: Codable, Sendable, Equatable {
+    case selfOnly, agent, other(String)
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = switch value { case "self": .selfOnly; case "agent": .agent; default: .other(value) }
+    }
+    public var label: String {
+        switch self { case .selfOnly: "self"; case .agent: "agent"; case .other(let value): value }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer(); try container.encode(label)
+    }
+}
+public struct SubjectNote: Codable, Sendable, Equatable, Identifiable {
+    public let id, target, author, text: String
+    public let audience: NoteAudience
+    public let session: String?
+    public let createdAt, updatedAt: String
+    public let expiresAt: String?
+    public let revision: String
+    enum CodingKeys: String, CodingKey { case id, target, author, text, audience, session, revision, createdAt = "created_at", updatedAt = "updated_at", expiresAt = "expires_at" }
+}
+public struct SubjectNotes: Codable, Sendable, Equatable {
+    public let notes: [SubjectNote]
+}
+public struct SubjectNoteResult: Codable, Sendable, Equatable {
+    public let note: SubjectNote?
+    enum CodingKeys: String, CodingKey { case note }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(note, forKey: .note)
+    }
+}
+public struct SubjectNoteCreate: Codable, Sendable {
+    public let target, text: String
+    public let audience: NoteAudience?
+    public let session, expiresAt: String?
+    public init(target: String, text: String, audience: NoteAudience? = nil, session: String? = nil, expiresAt: String? = nil) {
+        self.target = target; self.text = text; self.audience = audience; self.session = session; self.expiresAt = expiresAt
+    }
+    enum CodingKeys: String, CodingKey { case target, text, audience, session, expiresAt = "expires_at" }
+}
+/// Nil patch fields preserve values; clear explicitly sends JSON null.
+public enum NotePatch: Codable, Sendable, Equatable {
+    case clear, value(String)
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        self = container.decodeNil() ? .clear : .value(try container.decode(String.self))
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self { case .clear: try container.encodeNil(); case .value(let value): try container.encode(value) }
+    }
+}
+public struct SubjectNoteUpdate: Codable, Sendable {
+    public let text, session, expiresAt: NotePatch?
+    public let audience: NoteAudience?
+    public init(text: NotePatch? = nil, audience: NoteAudience? = nil, session: NotePatch? = nil, expiresAt: NotePatch? = nil) {
+        self.text = text; self.audience = audience; self.session = session; self.expiresAt = expiresAt
+    }
+    enum CodingKeys: String, CodingKey { case text, audience, session, expiresAt = "expires_at" }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = container.contains(.text) ? try container.decode(NotePatch.self, forKey: .text) : nil
+        session = container.contains(.session) ? try container.decode(NotePatch.self, forKey: .session) : nil
+        expiresAt = container.contains(.expiresAt) ? try container.decode(NotePatch.self, forKey: .expiresAt) : nil
+        audience = try container.decodeIfPresent(NoteAudience.self, forKey: .audience)
+    }
+}
+public struct NoteResource: Codable, Sendable, Identifiable {
+    public let id, kind, revision, updatedAt: String
+    public let target, author, text: String
+    public let audience: NoteAudience
+    public let session, expiresAt: String?
+    public let createdAt: String
+    enum CodingKeys: String, CodingKey { case id, kind, revision, target, author, text, audience, session, updatedAt = "updated_at", createdAt = "created_at", expiresAt = "expires_at" }
+}
+
 public struct Envelope<Value: Codable & Sendable>: Codable, Sendable {
     public let apiVersion: String
     public let requestID: String
@@ -352,6 +430,7 @@ public struct UsageResource: Codable, Sendable, Identifiable {
 }
 public enum Resource: Codable, Sendable, Identifiable {
     case connectedClient(ConnectedClientResource), usage(UsageResource)
+    case note(NoteResource)
     case summary(SummaryResource)
     case attention(AttentionResource), message(MessageResource), launch(LaunchResource), launchVariant(LaunchVariantResource), launchDecision(LaunchDecisionResource), launchApproval(LaunchApprovalResource), mission(MissionResource), work(WorkResource), agent(AgentResource), runtime(RuntimeResource), observer(ObserverResource), subscription(SubscriptionResource), lane(LaneResource), machine(MachineResource), device(DeviceResource), operation(OperationResource), history(HistoryResource), session(SessionResource), glass(GlassResource), ownedSet(OwnedSetResource)
     /// A kind this client does not know, from a member newer than it: kept whole so an older
@@ -361,6 +440,7 @@ public enum Resource: Codable, Sendable, Identifiable {
     private struct Discriminator: Decodable { let kind: String }
     public init(from decoder: Decoder) throws {
         switch try Discriminator(from: decoder).kind {
+        case "note": self = .note(try NoteResource(from: decoder))
         case "connected-client": self = .connectedClient(try ConnectedClientResource(from: decoder))
         case "usage": self = .usage(try UsageResource(from: decoder))
         case "summary": self = .summary(try SummaryResource(from: decoder))
@@ -390,6 +470,7 @@ public enum Resource: Codable, Sendable, Identifiable {
     }
     public func encode(to encoder: Encoder) throws {
         switch self {
+        case .note(let v): try v.encode(to: encoder)
         case .connectedClient(let v): try v.encode(to: encoder)
         case .usage(let v): try v.encode(to: encoder)
         case .summary(let v): try v.encode(to: encoder)
@@ -417,7 +498,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .unknown(let v): try v.encode(to: encoder)
         }
     }
-    public var id: String { switch self { case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
+    public var id: String { switch self { case .note(let v): v.id; case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
 }
 /// A resource of a kind this client does not model: its header, and every field as sent.
 public struct UnknownResource: Codable, Sendable, Identifiable {

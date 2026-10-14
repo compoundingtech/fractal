@@ -1208,7 +1208,7 @@ export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","notes","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId) }),
   Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id }),
@@ -1218,7 +1218,7 @@ export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
 export type CollectionCommand = typeof CollectionCommand.Type
 export type CollectionCommandEncoded = typeof CollectionCommand.Encoded
 
-export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements","summary","clients","usage","machines","devices","sessions","terminals"]).annotate({ identifier: "CollectionName" }))()
+export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","notes","work","glasses","arrangements","summary","clients","usage","machines","devices","sessions","terminals"]).annotate({ identifier: "CollectionName" }))()
 export type CollectionName = typeof CollectionName.Type
 export type CollectionNameEncoded = typeof CollectionName.Encoded
 
@@ -1749,6 +1749,28 @@ export const Mission = /*#__PURE__*/ (() => Schema.Struct({
 export type Mission = typeof Mission.Type
 export type MissionEncoded = typeof Mission.Encoded
 
+/** Open audience; unfamiliar values are rendered neutrally, not as Unknown. */
+export const NoteAudience = /*#__PURE__*/ (() => openEnum(["self","agent"]).annotate({ identifier: "NoteAudience", description: "Open audience; unfamiliar values are rendered neutrally, not as Unknown." }))()
+export type NoteAudience = typeof NoteAudience.Type
+export type NoteAudienceEncoded = typeof NoteAudience.Encoded
+
+export const Note = /*#__PURE__*/ (() => Schema.Struct({
+  "audience": NoteAudience,
+  "author": Schema.String,
+  "created_at": Timestamp,
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "id": Id,
+  "kind": Schema.Literal("note"),
+  "operational": optionalKey(Operational),
+  "revision": Revision,
+  "session": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "target": Schema.String,
+  "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)),
+  "updated_at": Timestamp
+}).annotate({ identifier: "Note" }))()
+export type Note = typeof Note.Type
+export type NoteEncoded = typeof Note.Encoded
+
 export const ObserverSpec = /*#__PURE__*/ (() => Schema.Struct({
   "fields": Schema.Array(Schema.String),
   "locator": Schema.String,
@@ -1905,7 +1927,7 @@ export type SummaryEncoded = typeof Summary.Encoded
 
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage"]),
+  "kind": unknownCase(["note","attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -2073,6 +2095,7 @@ export type Work = typeof Work.Type
 export type WorkEncoded = typeof Work.Encoded
 
 export const Resource = /*#__PURE__*/ (() => Schema.Union([
+  Note,
   ConnectedClient,
   Usage,
   Summary,
@@ -2994,6 +3017,34 @@ export const SubjectDefinition = /*#__PURE__*/ (() => Schema.Struct({
 export type SubjectDefinition = typeof SubjectDefinition.Type
 export type SubjectDefinitionEncoded = typeof SubjectDefinition.Encoded
 
+export const SubjectNote = /*#__PURE__*/ (() => Schema.Struct({
+  "audience": NoteAudience,
+  "author": Schema.String,
+  "created_at": Timestamp,
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "id": Schema.String.check(Schema.isPattern(new RegExp("^note/", "u"))),
+  "revision": Schema.String,
+  "session": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "target": Schema.String,
+  /** Nonblank; at most 1024 UTF-8 bytes. */
+  "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)).annotate({ description: "Nonblank; at most 1024 UTF-8 bytes." }),
+  "updated_at": Timestamp
+}).annotate({ identifier: "SubjectNote" }))()
+export type SubjectNote = typeof SubjectNote.Type
+export type SubjectNoteEncoded = typeof SubjectNote.Encoded
+
+export const SubjectNoteResult = /*#__PURE__*/ (() => Schema.Struct({
+  "note": Schema.OptionFromNullOr(SubjectNote)
+}).annotate({ identifier: "SubjectNoteResult" }))()
+export type SubjectNoteResult = typeof SubjectNoteResult.Type
+export type SubjectNoteResultEncoded = typeof SubjectNoteResult.Encoded
+
+export const SubjectNotes = /*#__PURE__*/ (() => Schema.Struct({
+  "notes": Schema.Array(SubjectNote)
+}).annotate({ identifier: "SubjectNotes" }))()
+export type SubjectNotes = typeof SubjectNotes.Type
+export type SubjectNotesEncoded = typeof SubjectNotes.Encoded
+
 export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
   /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
   "header": optionalKey(ConversationHeader),
@@ -3009,7 +3060,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
+  "value": Schema.Union([Schema.Union([DirectiveNotes, SubjectNotes]), SubjectNoteResult, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
@@ -3136,7 +3187,7 @@ export const PairingBegin = /*#__PURE__*/ (() => Schema.Struct({
   "full_control": optionalKey(Schema.Boolean),
   "person_id": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/]+$", "u"))),
   /** Narrows the default limited grant. Must not be combined with full_control. */
-  "scopes": optionalKey(Schema.Array(Schema.Literals(["read.projections","read.glasses","control.glasses","terminal.read","control.attention","control.launches"])).check(Schema.isMinLength(1)).check(Schema.isUnique())).annotate({ description: "Narrows the default limited grant. Must not be combined with full_control." })
+  "scopes": optionalKey(Schema.Array(Schema.Literals(["read.projections","read.glasses","control.glasses","control.notes","terminal.read","control.attention","control.launches"])).check(Schema.isMinLength(1)).check(Schema.isUnique())).annotate({ description: "Narrows the default limited grant. Must not be combined with full_control." })
 }).annotate({ identifier: "PairingBegin" }))()
 export type PairingBegin = typeof PairingBegin.Type
 export type PairingBeginEncoded = typeof PairingBegin.Encoded
@@ -3168,3 +3219,22 @@ export const ResourcesFilter = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ResourcesFilter" }))()
 export type ResourcesFilter = typeof ResourcesFilter.Type
 export type ResourcesFilterEncoded = typeof ResourcesFilter.Encoded
+
+export const SubjectNoteCreate = /*#__PURE__*/ (() => Schema.Struct({
+  "audience": optionalKey(NoteAudience),
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "session": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "target": Schema.String,
+  "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024))
+}).annotate({ identifier: "SubjectNoteCreate" }))()
+export type SubjectNoteCreate = typeof SubjectNoteCreate.Type
+export type SubjectNoteCreateEncoded = typeof SubjectNoteCreate.Encoded
+
+export const SubjectNoteUpdate = /*#__PURE__*/ (() => Schema.Struct({
+  "audience": optionalKey(NoteAudience),
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "session": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "text": Schema.OptionFromOptionalNullOr(Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(1024)), NULL_NONE)
+}).annotate({ identifier: "SubjectNoteUpdate" }))()
+export type SubjectNoteUpdate = typeof SubjectNoteUpdate.Type
+export type SubjectNoteUpdateEncoded = typeof SubjectNoteUpdate.Encoded

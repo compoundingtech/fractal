@@ -1572,6 +1572,27 @@ impl Client {
     ) -> Result<Envelope<ActionResult>, ClientError> {
         self.post("/v1/client/actions", request).await
     }
+    pub async fn subject_notes_create(
+        &self,
+        note: &SubjectNoteCreate,
+    ) -> Result<Envelope<SubjectNoteResult>, ClientError> {
+        self.post("/v1/subject-notes", note).await
+    }
+    pub async fn subject_notes_update(
+        &self,
+        id: &str,
+        note: &SubjectNoteUpdate,
+    ) -> Result<Envelope<SubjectNoteResult>, ClientError> {
+        let body =
+            serde_json::to_vec(note).map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request_with_key(
+            Method::PUT,
+            &format!("/v1/subject-notes/{}", percent_encode(id)),
+            Some(body),
+            None,
+        )
+        .await
+    }
     pub async fn list_glasses(
         &self,
         cursor: Option<&str>,
@@ -1639,6 +1660,26 @@ impl Client {
 
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
+    }
+    pub async fn subject_notes_list(
+        &self,
+        target: Option<&str>,
+    ) -> Result<Envelope<SubjectNotes>, ClientError> {
+        let path = target.map_or_else(
+            || "/v1/client/subject-notes".to_owned(),
+            |target| format!("/v1/client/subject-notes?target={}", percent_encode(target)),
+        );
+        self.get(&path).await
+    }
+    pub async fn subject_notes_mine(
+        &self,
+        author: &str,
+    ) -> Result<Envelope<SubjectNotes>, ClientError> {
+        self.get(&format!(
+            "/v1/client/subject-notes?author={}",
+            percent_encode(author)
+        ))
+        .await
     }
     pub async fn custom_subjects_list(
         &self,
