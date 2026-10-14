@@ -197,7 +197,7 @@ export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render:
   await waitFor(() => expect(rows[2]!.querySelector('[aria-current="page"]')).not.toBeNull())
   await assertRowNames(canvasElement)
 } }
-export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main>, play: async ({ canvasElement }) => {
+export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /><div data-frame-rows {...stylex.props(styles.list)}>{contextRowElements}</div><MetricWidths /></main>, play: async ({ canvasElement }) => {
   await assertRowNames(canvasElement)
   await assertHelperDescriptions(canvasElement)
   await assertSingleHoverDisclosure(canvasElement)
@@ -220,7 +220,6 @@ export const DensitiesAndChildren: Story = { name: 'Names and descriptions · SR
   await waitFor(() => expect(within(canvasElement).queryByRole('button', { name: 'Subagent two' })).toBeNull())
   await assertRowNames(canvasElement)
 } }
-export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /><div data-frame-rows {...stylex.props(styles.list)}>{contextRowElements}</div><MetricWidths /></main> }
 
 /** The row's accessible description, whichever ARIA attribute carries it. */
 const rowDescription = (element: Element): string => element.getAttribute('aria-description') ?? document.getElementById(element.getAttribute('aria-describedby') ?? '')?.textContent ?? ''
