@@ -634,5 +634,11 @@ class WorkflowStructure(unittest.TestCase):
             self.assertIn("- name: evidence skip taken\n        if: steps.gate.outputs.skip == 'true'", body, name)
 
 
+    def test_every_evidence_test_script_runs_in_the_required_genie_freshness_check(self):
+        listed = (ROOT / 'scripts/ci-genie-freshness').read_text()
+        for path in sorted((ROOT / 'scripts').iterdir()):
+            if re.fullmatch(r'(?:ci-)?evidence-[a-z-]*test', path.name):
+                self.assertRegex(listed, rf'(?<![\w-]){re.escape(path.name)}(?![\w-])', f'{path.name} is not run by scripts/ci-genie-freshness')
+
 if __name__ == '__main__':
     unittest.main()
