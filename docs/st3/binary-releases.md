@@ -138,4 +138,3 @@ three tags: push release tags individually from a person or app credential.
 
 The runner and trigger choices follow GitHub's [runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 and [push event rules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push).
-The prior `release-portable.yml` remains the separate manual st2 release path.

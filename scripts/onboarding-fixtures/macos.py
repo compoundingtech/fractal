@@ -221,7 +221,7 @@ print(json.dumps({"app":str(app),"cli_realpath":str(st.resolve()),"executable":i
         self.check('permissions-guidance',r['exit']==0 and all(x in self.text(r) for x in ('Full Disk Access','Developer Tools','st service restart',APP+'/Contents/MacOS/st3')),'guidance names actual app executable and manual approvals; no approval is inferred')
         r=self.cli('No harness setup explanation','setup','--person','ada','--node','studio','--yes','--service','true')
         self.check('no-harness-explained',r['exit']==0 and 'No supported harness is installed' in self.text(r) and 'No onboarding seat was created' in self.text(r),'missing providers are explained without creating onboarding')
-        for kind,subject in [('agents','agent/st/expert'),('missions','mission/st/onboarding')]:
+        for kind,subject in [('agents','agent/st/assistant'),('missions','mission/st/onboarding')]:
             r=self.cli('No built-in '+kind,kind,'ls','--all','--json')
             try: page=json.loads(r['stdout']); page=page.get('value',page); absent=not any(x['id']==subject for x in page['items'])
             except (ValueError,KeyError,TypeError): absent=False

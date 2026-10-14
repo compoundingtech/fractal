@@ -17,6 +17,7 @@ pub mod conversation;
 pub mod demo;
 mod direct;
 pub mod doc;
+pub mod checklist;
 mod edit;
 mod glass;
 mod hover;
@@ -26,6 +27,7 @@ mod hyperlinks;
 mod terminal_tab;
 pub use glass::set_glasses_version;
 pub use lastrun::log_panics as lastrun_log_panics;
+pub use lastrun::note_exit as lastrun_note_exit;
 mod glass_store;
 mod lastrun;
 pub(crate) mod open_timing;
@@ -1156,6 +1158,28 @@ impl Ui {
 
     pub(crate) fn conversation_failed(&mut self, target: &str, error: &str) {
         self.stalled.insert(target.to_owned(), error.to_owned());
+    }
+
+    /// What is on screen, as kinds and counts only, for a slow-turn note: which pane has focus,
+    /// whether Home or the palette floats over it, and how much st has sent.
+    pub(crate) fn slow_context(&self) -> String {
+        let pane = self
+            .focused_pane()
+            .map(|pane| pane.key())
+            .map(|key| key.split(':').next().unwrap_or("").to_owned())
+            .unwrap_or_else(|| "none".to_owned());
+        let area = self.frame.borrow().area;
+        format!(
+            "pane {pane}, {}x{}, home {}, palette {}, terminal {}, agents {}, missions {}, attention {}",
+            area.width,
+            area.height,
+            self.home_open(),
+            self.palette_open(),
+            self.native_terminal().is_some(),
+            self.world.agents.items().len(),
+            self.world.missions.items().len(),
+            self.world.attention.items().len(),
+        )
     }
 
     /// The agent whose message box has the keyboard: the selected agent while the Agents tab
@@ -2721,7 +2745,7 @@ impl Ui {
         };
         // What waits on the person in this conversation is one line above the box, a card only
         // when asked for. The box keeps its place and its size either way: the band takes its
-        // rows from the conversation and never more than half of the pane.
+        // rows from the conversation and never more than three fifths of the pane.
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
@@ -2730,7 +2754,7 @@ impl Ui {
         let room = area
             .height
             .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize / 2).max(1)));
+        band.truncate(room.min((area.height as usize * 3 / 5).max(1)));
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -3732,6 +3756,20 @@ impl Ui {
         }
     }
 
+    /// An answer that asks for changes needs them in words: open the box for them at once, with
+    /// the answer remembered, so a person who chose it can type (Nathan, 2026-10-12: "it says it
+    /// needs my words but I can't type anywhere"). False for an answer that needs none.
+    fn ask_for_words(&mut self, answer: &st3_client::RequestAnswerOption) -> bool {
+        if answer.outcome.as_deref() != Some("request_changes") {
+            return false;
+        }
+        self.changes_answer = Some(answer.id.clone());
+        self.answering = None;
+        self.editing = true;
+        self.flash(format!("“{}”: write the changes, then Enter", answer.label));
+        true
+    }
+
     fn answer_key(&mut self, key: KeyEvent) -> bool {
         let Some(index) = self.answering else {
             return false;
@@ -3751,10 +3789,7 @@ impl Ui {
                     return true;
                 };
                 // Requesting changes needs the changes in words: write them, then Enter sends both.
-                if answer.outcome.as_deref() == Some("request_changes") {
-                    self.changes_answer = Some(answer.id.clone());
-                    self.editing = true;
-                    self.flash(format!("“{}”: write the changes, then Enter", answer.label));
+                if self.ask_for_words(answer) {
                     return true;
                 }
                 if self.live {
@@ -3771,6 +3806,16 @@ impl Ui {
                         answer.label
                     ));
                 }
+            }
+            // An option that needs the person's words has its box on the card: the first letter
+            // typed opens it and goes into it, whatever the letter is (Nathan, 2026-10-12: the
+            // box should appear when the option is selected).
+            KeyCode::Char(_)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && request.answers.get(index).is_some_and(|answer| self.ask_for_words(answer)) =>
+            {
+                return false;
             }
             // The other ways to answer or set the card aside are always reachable: write in
             // words (c), chat about it (t), dismiss it (x), go to the agent (g).
@@ -6139,7 +6184,15 @@ impl Ui {
                 }
             }
             Hit::Help => self.help = !self.help,
-            Hit::Answer(index) => self.answering = Some(index),
+            Hit::Answer(index) => {
+                self.answering = Some(index);
+                // A click chooses; one that needs words opens its box too, ready to type in.
+                if let Some((_, request)) = self.structured_request()
+                    && let Some(answer) = request.answers.get(index)
+                {
+                    self.ask_for_words(answer);
+                }
+            }
             Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
             Hit::Alert(id, AlertTap::Answer(answer)) => self.answer_alert(&id, &answer),
             Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
@@ -7955,6 +8008,31 @@ mod tests {
             ui.flash
         );
         assert!(ui.effects.is_empty());
+        // Choosing it with a click opens the box for the words at once, and the person can type
+        // (Nathan, 2026-10-12: "it says it needs my words but I can't type anywhere").
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!ui.editing);
+        ui.click(Hit::Answer(0));
+        assert!(ui.editing, "a click on an answer that needs words opens its box");
+        for letter in "keep the brief".chars() {
+            ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+        }
+        assert_eq!(ui.conversation_state.drafts["attention/decide"], "keep the brief");
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("in your own words") && screen.contains("◉ Follow the brief"), "{screen}");
+        // Selected with the keys, its box is already on the card, and the first letter typed
+        // opens it and goes into it (even one that is otherwise a command).
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        ui.conversation_state.drafts.remove("attention/decide");
+        ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(ui.answering, Some(0));
+        assert!(!ui.editing);
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("in your own words") && screen.contains("Start typing"), "{screen}");
+        ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(ui.editing && ui.confirm.is_none(), "x typed into the box, not a dismissal");
+        assert_eq!(ui.conversation_state.drafts["attention/decide"], "xy");
     }
 
     #[test]

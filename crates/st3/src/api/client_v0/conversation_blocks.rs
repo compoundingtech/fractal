@@ -503,15 +503,20 @@ pub(super) fn read_slice(
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
 ) -> Result<PreparedSlice, ApiError> {
+    let queue = crate::profile::span("conversation/native-fold-queue");
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
     let mut held = timeline.hold();
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
     let slots = read_slots(&source.transcript);
     let _slot = read_slot(slots)?;
+    drop(queue);
     let basis = basis(source)?;
+    let fold = crate::profile::span("conversation/native-fold");
     let mut slice = held
         .slice(source, order, before, limit)
         .map_err(ApiError::internal)?;
+    drop(fold);
+    let _preparation = crate::profile::span("conversation/native-display-preparation");
     for item in &mut slice.items {
         prepare_one(source, session, session_id, &basis, item)?;
     }
