@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise scripts/evidence-verify against real Git repositories and real SSH signatures."""
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -59,7 +60,7 @@ class Fixture:
         return self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'HEAD^{tree}')
 
     def note(self, commit, tree, key, signer, check='unit', command=('make', 'test'), exit_code=0,
-             runner='nix', tier='full', seconds=0, sign=True, naive=False):
+             runner='nix', tier='full', seconds=0, sign=True, naive=False, inputs=None):
         statement = {
             '_type': 'https://in-toto.io/Statement/v1',
             'subject': [{'name': commit, 'digest': {'gitTree': tree}}],
@@ -68,7 +69,7 @@ class Fixture:
                 'schema_version': 1, 'change_id': 'change-1', 'signer': signer, 'tier': tier,
                 're_attests': None, 'producer_sha256': 'a' * 64,
                 'observed_at': (NOW + timedelta(seconds=seconds)).replace(tzinfo=None if naive else timezone.utc).isoformat(),
-                'observed': {'kind': 'tests', 'runner': runner, 'inputs': {},
+                'observed': {'kind': 'tests', 'runner': runner, 'inputs': inputs or {},
                              'checks': {check: {'command': list(command), 'exit_code': exit_code,
                                                 'output_sha256': 'b' * 64}}},
             },
@@ -82,11 +83,11 @@ class Fixture:
         self.git('update-ref', f'refs/notes/evidence/{record}', record)
         return record
 
-    def verify(self, tree, check='unit', command=None):
+    def verify(self, tree, check='unit', command=None, **options):
         try:
-            return 0, evidence_verify.verify(str(self.repo), tree, check, str(self.keys), command)
+            return 0, evidence_verify.verify(str(self.repo), tree, check, str(self.keys), command, **options)
         except evidence_verify.Failure as failure:
-            return 1, {'satisfied': False, 'reason': failure.reason, 'detail': failure.detail}
+            return 1, {'satisfied': False, 'reason': failure.reason, 'detail': failure.detail, **failure.extra}
 
     def cli(self, *args):
         done = subprocess.run([sys.executable, str(SCRIPT), '--repo', str(self.repo), *args],
@@ -174,6 +175,39 @@ class Verifier(unittest.TestCase):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=2, naive=True)
         self.assertEqual(self.f.verify(self.tree)[0], 0)
 
+    def test_a_check_names_the_kinds_it_accepts(self):
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='wrapper')
+        self.assertEqual(self.f.verify(self.tree, kinds=('nix', 'wrapper'))[0], 0)
+        code, result = self.f.verify(self.tree, kinds=('nix',))
+        self.assertEqual((code, result['reason']), (1, 'unsupported_kind'))
+
+    def test_an_environment_input_must_match_the_file_in_the_verified_tree(self):
+        good = hashlib.sha256(b'one').hexdigest()
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', inputs={'flake_lock_sha256': good})
+        self.assertEqual(self.f.verify(self.tree, bind=[('flake_lock_sha256', 'file.txt')])[0], 0)
+        # A record made against a different environment does not satisfy this tree.
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=1,
+                    inputs={'flake_lock_sha256': hashlib.sha256(b'other').hexdigest()})
+        self.assertEqual(self.reason(self.tree, bind=[('flake_lock_sha256', 'file.txt')]), 'wrong_input')
+        # Missing key, and a path the tree does not have, both fail rather than pass.
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=2, inputs={'system': 'x86_64-linux'})
+        self.assertEqual(self.reason(self.tree, bind=[('flake_lock_sha256', 'file.txt')]), 'wrong_input')
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=3, inputs={'flake_lock_sha256': good})
+        self.assertEqual(self.reason(self.tree, bind=[('flake_lock_sha256', 'no-such-file')]), 'wrong_input')
+
+    def test_inputs_that_are_not_nonempty_strings_make_a_record_malformed(self):
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', inputs={'attempt': 1})
+        self.assertEqual(self.reason(self.tree), 'no_record')
+
+    def test_the_number_of_trusted_records_is_reported_for_loop_protection(self):
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=0)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=1)
+        code, result = self.f.verify(self.tree)
+        self.assertEqual((code, result['reason'], result['attempts']), (1, 'check_failed', 2))
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=2)
+        code, result = self.f.verify(self.tree)
+        self.assertEqual((code, result['attempts']), (0, 3))
+
     def test_only_full_tier_counts(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', tier='test')
         self.assertEqual(self.reason(self.tree), 'untrusted_tier')
@@ -212,6 +246,8 @@ class Verifier(unittest.TestCase):
                                     '--keys', str(self.f.keys))[0], 2)
         self.assertEqual(self.f.cli('--tree', self.tree, '--check', 'unit', '--keys', str(self.f.keys),
                                     '--command', 'not json')[0], 2)
+        for bad in (['--kinds', 'nix,hand-typed'], ['--kinds', ''], ['--bind-input', 'novalue']):
+            self.assertEqual(self.f.cli('--tree', self.tree, '--check', 'unit', '--keys', str(self.f.keys), *bad)[0], 2)
         code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--keys', '/nonexistent')
         self.assertEqual((code, json.loads(out)['reason']), (1, 'error'))
 

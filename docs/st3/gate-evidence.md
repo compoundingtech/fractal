@@ -363,11 +363,21 @@ trusted record for the tree and check decides, so a newer failure supersedes an 
 pass. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
 `wrong_check`, `bad_signature` (forged or unsigned), `untrusted_signer` (a valid
 signature from a key not on the list, or a principal that differs from the record's
-signer), `untrusted_tier`, `unsupported_kind`, `check_failed`, `wrong_command` and
+signer), `untrusted_tier`, `unsupported_kind`, `check_failed`, `wrong_command`, `wrong_input` and
 `error` (unreadable input: no decision was made, count it separately). Notes are found
 by the tree they name with one `git cat-file --batch-check`, so the cost grows with the
 number of evidence refs; pack refs, or add a per-tree index, before they reach the
 thousands.
+
+`--kinds nix,wrapper` limits the record kinds a check accepts. `--bind-input KEY=PATH`
+(repeatable) requires the record's input `KEY` to equal the sha256 of `PATH` as it is in
+the tree being verified, for example `flake_lock_sha256=flake.lock`, so an environment
+fingerprint is tied to the tree and not to a claim; any mismatch, missing key or missing
+file is `wrong_input`. Record inputs are opaque nonempty strings; the producers use
+`flake_lock_sha256`, `toolchain_sha256` and `wrapper_sha256` (digests) and `system` and
+`attempt` (plain strings), and only keys named by `--bind-input` are interpreted. Success
+and most failures report `attempts`, the number of trusted records for the tree and
+check, so a producer can refuse to run a third time.
 
 A check that calls the script must pass `--command` with the argument vector it
 expects; without it, any command a trusted signer recorded under that check name
