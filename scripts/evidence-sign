@@ -17,7 +17,13 @@ record states that this machine's wrapper reported it. That is the cooperative v
 Configuration, outside any checkout: $HOME/.config/st/evidence-sign.json
   {"signer": "fleet/dev", "ssh_key": "/abs/key", "scratch_repo": "/abs/bare.git"}
 git and ssh-keygen are looked up only in the signer's own path (the fixed system directories, or the
-configuration's `path`), never through the caller's PATH, and run with that PATH.
+configuration's `path`), never through the caller's PATH, and run with that PATH. Each resolved tool FILE
+must be a regular, executable file owned by root and closed to group and others, as well as its directory.
+The programs it starts get an explicit environment (PATH, LC_ALL, HOME, TMPDIR and the git settings it
+sets itself) and nothing else; it refuses to start at all when the loader or the interpreter was told to
+load code (LD_PRELOAD, LD_AUDIT, DYLD_INSERT_LIBRARIES, GCONV_PATH, NLSPATH, PYTHONPATH, PYTHONSTARTUP,
+PYTHONHOME). That refusal is a tripwire, not a repair: by the time this script runs the interpreter has
+already started, so scrubbing the environment and fixing the interpreter belong to whatever launches it.
 There is no command-line argument, no --config and no environment variable that changes the key,
 the configuration path or the clock (EVIDENCE_SIGN_NOW counts only when the configuration itself
 says test_clock: true).
@@ -32,6 +38,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -100,6 +107,22 @@ def unsafe_directory(directory):
         current = os.path.dirname(current)
 
 
+def unsafe_file(real, status=None):
+    """Why the resolved tool file itself may not be run with the key in reach, or None: not a regular
+    executable file, not owned by root, or writable by group or others. (A closed directory does not make
+    a file inside it safe.) `status` is for tests."""
+    status = os.stat(real) if status is None else status
+    if not stat.S_ISREG(status.st_mode):
+        return 'is not a regular file'
+    if status.st_uid != 0:
+        return 'is not owned by root'
+    if status.st_mode & 0o022:
+        return 'is writable by group or others'
+    if not status.st_mode & 0o100:
+        return 'is not executable by its owner'
+    return None
+
+
 def checked_path(path, strict):
     """The directories of `path` that pass unsafe_directory. A configured path must pass entirely;
     the built-in default skips directories this host lacks or that are unsafe here."""
@@ -125,19 +148,48 @@ def trusted_tools(path, strict=False):
         reason = unsafe_directory(os.path.dirname(os.path.realpath(found)))
         if reason:
             raise Refused(f'{name} resolves to {os.path.realpath(found)}, whose directory {reason}')
+        reason = unsafe_file(os.path.realpath(found))
+        if reason:
+            raise Refused(f'{name} resolves to {os.path.realpath(found)}, which {reason}')
         TOOLS[name] = found
     TOOLS['PATH'] = path
 
 
+# Variables that make the loader or the interpreter run code this script did not choose. Seeing one means the
+# launcher did not scrub the environment, and this script cannot repair that, so it refuses.
+REFUSED_ENVIRONMENT = ('LD_PRELOAD', 'LD_AUDIT', 'DYLD_INSERT_LIBRARIES', 'GCONV_PATH', 'NLSPATH',
+                       'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME')
+# The only variables of the caller that reach git and ssh-keygen. Everything else (LD_LIBRARY_PATH, SSH_AUTH_SOCK,
+# GIT_*, PYTHON*, proxies, ...) is dropped, not inherited.
+PASSED_ENVIRONMENT = ('HOME', 'TMPDIR')
+
+
+def refuse_loader_environment(environ=None):
+    environ = os.environ if environ is None else environ
+    found = sorted(name for name in REFUSED_ENVIRONMENT if name in environ)
+    if found:
+        raise Refused(f'refusing to run with {", ".join(found)} set: the launcher must scrub the environment '
+                      '(this script cannot undo what the loader or interpreter already did)')
+
+
+def child_environment(extra=None, environ=None):
+    """The complete environment of git and ssh-keygen: the signer's own PATH and locale, the two variables
+    they need, git settings that remove ambient configuration, and whatever `extra` the caller passes."""
+    environ = os.environ if environ is None else environ
+    child = {name: environ[name] for name in PASSED_ENVIRONMENT if name in environ}
+    child.update(PATH=TOOLS['PATH'], LC_ALL='C', GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0',
+                 GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+    child.update(extra or {})
+    return child
+
+
 def git(repo, *args, stdin=None, env=None):
-    # No GIT_* variable of the caller reaches git, and the caller's repository cannot name programs
+    # Only the allowlisted environment reaches git, and the caller's repository cannot name programs
     # for it to run (fsmonitor, hooks, pager, external diff).
-    clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
-    clean['PATH'] = TOOLS['PATH']
     done = subprocess.run([TOOLS['git'], '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat',
                            '-c', f'gpg.ssh.program={TOOLS["ssh-keygen"]}', '-C', str(repo), *args], input=stdin,
                           capture_output=True, timeout=300,
-                          env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C', **(env or {})))
+                          env=child_environment(env))
     if done.returncode != 0:
         raise Refused(f'git {args[0]} failed: {done.stderr.decode(errors="replace").strip()[-500:]}')
     return done.stdout
@@ -174,6 +226,7 @@ def validate(request):
 
 
 def main():
+    refuse_loader_environment()
     config = json.loads((Path.home() / '.config/st/evidence-sign.json').read_text())
     if not {'signer', 'ssh_key', 'scratch_repo'} <= set(config) or set(config) - {'signer', 'ssh_key', 'scratch_repo', 'test_clock', 'path'}:
         raise Refused('configuration must have signer, ssh_key, scratch_repo (optionally path; for tests only test_clock)')
@@ -194,7 +247,7 @@ def main():
         raise Refused('flake_lock_sha256 does not match flake.lock in the commit')
 
     if not scratch.exists():
-        subprocess.run([TOOLS['git'], 'init', '--quiet', '--bare', str(scratch)], check=True, env={'PATH': TOOLS['PATH'], 'LC_ALL': 'C'})
+        subprocess.run([TOOLS['git'], 'init', '--quiet', '--bare', str(scratch)], check=True, env=child_environment())
     git(scratch, 'fetch', '--quiet', '--no-tags', str(checkout), commit)
 
     body = {

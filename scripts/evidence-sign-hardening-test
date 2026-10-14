@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""The signer's own controls: the tool files it runs, the environment it passes on, the one it refuses.
+
+Throwaway fixtures only: no key, no privileged install, nothing outside a temporary directory.
+"""
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import stat as stat_module
+import subprocess
+import sys
+import tempfile
+from types import SimpleNamespace
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from evidence_test_support import LOADER_VARIABLES, clean_loader_environment  # noqa: E402
+clean_loader_environment()
+SIGN = Path(__file__).resolve().parent / 'evidence-sign'
+signer = importlib.machinery.SourceFileLoader('evidence_sign', str(SIGN)).load_module()
+
+
+def fake(mode, uid=0):
+    return SimpleNamespace(st_mode=mode, st_uid=uid)
+
+
+# --- the tool file itself: regular, executable, root-owned, closed to group and others
+REG = stat_module.S_IFREG
+assert signer.unsafe_file('x', fake(REG | 0o755)) is None
+assert signer.unsafe_file('x', fake(REG | 0o555)) is None, 'a Nix store file is 0555 and root-owned'
+assert 'not owned by root' in signer.unsafe_file('x', fake(REG | 0o755, uid=1000))
+assert 'writable by group or others' in signer.unsafe_file('x', fake(REG | 0o775))
+assert 'writable by group or others' in signer.unsafe_file('x', fake(REG | 0o757))
+assert 'not owned by root' in signer.unsafe_file('x', fake(REG | 0o777, uid=1000)), 'the owner is reported first'
+assert 'not a regular file' in signer.unsafe_file('x', fake(stat_module.S_IFDIR | 0o755))
+assert 'not a regular file' in signer.unsafe_file('x', fake(stat_module.S_IFLNK | 0o777))
+assert 'not executable' in signer.unsafe_file('x', fake(REG | 0o644))
+print('passed: a resolved tool file must be a regular executable root-owned file closed to group and others')
+
+# the same rules on real files in a throwaway directory
+with tempfile.TemporaryDirectory() as directory:
+    tool = Path(directory) / 'tool'
+    tool.write_text('#!/bin/sh\n')
+    tool.chmod(0o755)
+    if os.geteuid() != 0:
+        assert 'not owned by root' in signer.unsafe_file(str(tool)), 'a file owned by the running user is not root-owned'
+    tool.chmod(0o777)
+    assert 'writable by group or others' in signer.unsafe_file(str(tool)) or os.geteuid() != 0
+    link = Path(directory) / 'link'
+    link.symlink_to(tool)
+    assert signer.unsafe_file(os.path.realpath(link)) is not None
+    real_git = next((str(Path(d) / 'git') for d in os.environ['PATH'].split(':') if 'recorder' not in d and (Path(d) / 'git').exists()), None)
+    assert real_git is None or signer.unsafe_file(os.path.realpath(real_git)) is None, 'the host git passes (system or Nix store file)'
+print('passed: the same rules hold on real files; the host git and its symlinks resolve to an acceptable file')
+
+# trusted_tools refuses a directory-clean path whose tool file is wrong (the directory rule is stubbed, the file rule is real)
+with tempfile.TemporaryDirectory() as directory:
+    bin_dir = Path(directory) / 'bin'
+    bin_dir.mkdir()
+    for name in ('git', 'ssh-keygen'):
+        (bin_dir / name).write_text('#!/bin/sh\n')
+        (bin_dir / name).chmod(0o755)
+    saved = signer.unsafe_directory
+    signer.unsafe_directory = lambda d: None
+    try:
+        if os.geteuid() != 0:
+            try:
+                signer.trusted_tools(str(bin_dir), strict=True)
+            except signer.Refused as refusal:
+                assert 'not owned by root' in str(refusal) and 'git resolves to' in str(refusal), str(refusal)
+            else:
+                raise AssertionError('a user-owned git in a clean-looking directory must be refused')
+    finally:
+        signer.unsafe_directory = saved
+print('passed: a tool file that is not root-owned is refused even when its directory looks clean')
+
+# --- the environment passed on is an allowlist
+signer.TOOLS['PATH'] = '/usr/bin:/bin'
+hostile = {'LD_LIBRARY_PATH': '/evil', 'LD_PRELOAD': '/evil.so', 'SSH_AUTH_SOCK': '/agent', 'GIT_DIR': '/evil', 'GIT_CONFIG_COUNT': '1',
+           'GIT_SSH_COMMAND': 'evil', 'PYTHONUNBUFFERED': '1', 'PERL5OPT': '-Mevil', 'HTTPS_PROXY': 'http://evil', 'PATH': '/evil/bin',
+           'LC_ALL': 'evil', 'HOME': '/home/x', 'TMPDIR': '/var/tmp/x', 'FOO': 'bar'}
+child = signer.child_environment(environ=hostile)
+assert set(child) == {'HOME', 'TMPDIR', 'PATH', 'LC_ALL', 'GIT_NO_REPLACE_OBJECTS', 'GIT_TERMINAL_PROMPT', 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL'}, sorted(child)
+assert child['PATH'] == '/usr/bin:/bin' and child['LC_ALL'] == 'C' and child['HOME'] == '/home/x' and child['TMPDIR'] == '/var/tmp/x'
+assert child['GIT_CONFIG_GLOBAL'] == '/dev/null' and child['GIT_CONFIG_NOSYSTEM'] == '1'
+extra = signer.child_environment({'GIT_AUTHOR_NAME': 'Evidence signer'}, environ=hostile)
+assert extra['GIT_AUTHOR_NAME'] == 'Evidence signer', 'settings the signer supplies itself are kept'
+print('passed: git and ssh-keygen get PATH, LC_ALL, HOME, TMPDIR and the signer\'s own git settings; loader, agent, proxy and GIT_* variables are dropped')
+
+# --- the signer refuses to start with a loader or interpreter variable set
+for name in LOADER_VARIABLES:
+    try:
+        signer.refuse_loader_environment({name: 'x'})
+    except signer.Refused as refusal:
+        assert name in str(refusal) and 'scrub' in str(refusal)
+    else:
+        raise AssertionError(f'{name} must be refused')
+signer.refuse_loader_environment({'LD_LIBRARY_PATH': '/x', 'PYTHONUNBUFFERED': '1', 'PATH': '/bin'})  # dropped for children, not fatal
+print('passed: LD_PRELOAD, LD_AUDIT, DYLD_INSERT_LIBRARIES, GCONV_PATH, NLSPATH, PYTHONPATH, PYTHONSTARTUP and PYTHONHOME stop the signer; harmless variables do not')
+
+# end to end: the real script, with one such variable, writes nothing and says why before it reads anything
+with tempfile.TemporaryDirectory() as directory:
+    home = Path(directory) / 'home'
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if k not in LOADER_VARIABLES}
+    clean = subprocess.run([sys.executable, str(SIGN)], input=b'{}', capture_output=True, env=dict(env, HOME=str(home)))
+    assert clean.returncode != 0 and b'evidence-sign.json' in clean.stderr, 'without the variable it proceeds as far as its missing configuration'
+    refused = subprocess.run([sys.executable, str(SIGN)], input=b'{}', capture_output=True, env=dict(env, HOME=str(home), LD_PRELOAD='/nonexistent.so'))
+    assert refused.returncode != 0 and b'LD_PRELOAD' in refused.stderr and b'scrub' in refused.stderr, refused
+    assert b'evidence-sign.json' not in refused.stderr, 'it refused before touching its configuration'
+print('passed: the real script refuses LD_PRELOAD before it reads its configuration')

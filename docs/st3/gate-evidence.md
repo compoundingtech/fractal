@@ -354,6 +354,15 @@ pull requests; `configure` writes the signer configuration and key as mode 0600 
 directory and masks every key line; `once CHECK` refuses a second signature for a check in one job;
 `cleanup` overwrites and removes the key, and runs even when earlier steps failed. The wrapper and
 signer scripts must come from the base commit of the change, never from the tree under test.
+Signer launch controls (`scripts/evidence-sign`): each resolved git and ssh-keygen file must be a regular executable file owned
+by root and closed to group and others, in addition to the directory rules; git and ssh-keygen receive only PATH (the
+signer's own), LC_ALL, HOME, TMPDIR and git settings the signer sets itself (no system or global git configuration);
+and the signer refuses to start when LD_PRELOAD, LD_AUDIT, DYLD_INSERT_LIBRARIES, GCONV_PATH, NLSPATH, PYTHONPATH,
+PYTHONSTARTUP or PYTHONHOME is set. The refusal is a tripwire, not a repair: the interpreter has started before the script
+runs. Scrubbing the environment, running a root-owned interpreter in isolated mode and fixing the ownership of the signer
+file and its directories belong to the launcher, and neither this change nor the CI helper does them. The same-user
+and passwordless-sudo gaps below are unchanged.
+
 Accepted gap: code under test in a job that holds the key can read it.
 
 An aggregate job records what it knows: `scripts/ci-evidence-signing aggregate FILE` builds, from
