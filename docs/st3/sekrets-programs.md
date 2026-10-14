@@ -78,8 +78,11 @@ CI's `/w` is a private per-runner bind mount. The gateway takes the received
 checkout descriptor, resolves its relative path under that unit's configured
 backing root, and compares device/inode with a descriptor-relative, no-symlink
 walk of that root. Wrong owner, outside root, symlink, missing path or mismatched
-mount refuses the call. Only the received checkout is bound read-only at its
-logical `/w/...` path inside the gateway's protected execution namespace. All
+mount refuses the call. The gateway retains its verified backing-directory
+descriptor, identifying the same directory as the received descriptor, and binds
+it read-only at the logical `/w/...` path inside its protected execution namespace.
+Bubblewrap resolves the source in the gateway namespace and checks the mounted
+inode against that retained descriptor. All
 configured backing roots and mount anchors are otherwise hidden. No runner unit
 BindPaths, WorkingDirectory or restart is required by this source algorithm.
 
@@ -164,3 +167,4 @@ Existing people/agent/host callers keep their behavior. Upgrade the gateway befo
 adding `[programs]`: older gateways reject the unknown config and caller kind.
 Rollback removes program enrollment/grants first; never convert a program into a
 person mapping. No st graph/schema/replay or gateway DB migration is introduced.
+

@@ -996,15 +996,13 @@ impl Gateway {
             .flat_map(|checkout| [checkout.backing_root.clone(), checkout.mount_root.clone()])
             .collect();
         for fd in fds {
-            let path = if let Some(checkout) = program.and_then(|program| program.checkout.as_ref())
-            {
-                program_checkout_path(&fd, caller.uid, checkout)?
-            } else {
-                let path = sandbox::descriptor_path(&fd)?;
-                sandbox::check_checkout_path(&path, &self.config.checkout_roots)?;
-                reachable(&path)?;
-                path
-            };
+            if let Some(checkout) = program.and_then(|program| program.checkout.as_ref()) {
+                directories.push(program_checkout_directory(&fd, caller.uid, checkout)?);
+                continue;
+            }
+            let path = sandbox::descriptor_path(&fd)?;
+            sandbox::check_checkout_path(&path, &self.config.checkout_roots)?;
+            reachable(&path)?;
             let metadata = fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
             if !metadata.is_dir() {
                 bail!("{} is not a directory", path.display());
@@ -1706,7 +1704,11 @@ fn open_checkout_beneath(root: &Path, relative: &Path, uid: u32) -> Result<Owned
     Ok(directory)
 }
 
-fn program_checkout_path(fd: &OwnedFd, uid: u32, checkout: &ProgramCheckout) -> Result<PathBuf> {
+fn program_checkout_directory(
+    fd: &OwnedFd,
+    uid: u32,
+    checkout: &ProgramCheckout,
+) -> Result<BoundDirectory> {
     // The backing root's parent is operator-controlled. Only the root itself belongs to the
     // runner; it cannot replace its parent or redirect this gateway-side anchor.
     let parent = checkout
@@ -1733,7 +1735,15 @@ fn program_checkout_path(fd: &OwnedFd, uid: u32, checkout: &ProgramCheckout) -> 
     if !received.is_dir() || expected.dev() != received.dev() || expected.ino() != received.ino() {
         bail!("passed checkout does not match the configured runner backing directory");
     }
-    Ok(checkout.mount_root.join(relative))
+    // Bubblewrap resolves --ro-bind-fd through realpath before mounting it. A descriptor
+    // received from the runner's private /w mount names a path absent in this namespace.
+    // Keep the descriptor opened beneath the configured backing root instead, after proving
+    // that it identifies exactly the same directory as the caller's descriptor. Bubblewrap
+    // also compares the mounted inode to this retained descriptor, refusing replacement races.
+    Ok(BoundDirectory {
+        fd: opened,
+        path: checkout.mount_root.join(relative),
+    })
 }
 
 fn check_policy(policy: &Policy) -> Result<(), String> {
