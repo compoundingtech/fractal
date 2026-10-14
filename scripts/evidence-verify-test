@@ -60,7 +60,7 @@ class Fixture:
         return self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'HEAD^{tree}')
 
     def note(self, commit, tree, key, signer, check='unit', command=('make', 'test'), exit_code=0,
-             runner='nix', tier='full', seconds=0, sign=True, naive=False, inputs=None):
+             runner='nix', tier='full', seconds=0, sign=True, naive=False, inputs=None, omit_inputs=False):
         statement = {
             '_type': 'https://in-toto.io/Statement/v1',
             'subject': [{'name': commit, 'digest': {'gitTree': tree}}],
@@ -74,6 +74,8 @@ class Fixture:
                                                 'output_sha256': 'b' * 64}}},
             },
         }
+        if omit_inputs:
+            del statement['predicate']['observed']['inputs']
         blob = self.git('hash-object', '-w', '--stdin', stdin=json.dumps(statement).encode())
         notes = self.git('mktree', stdin=f'100644 blob {blob}\t{tree}\n'.encode())
         args = ['-c', 'gpg.format=ssh', '-c', f'user.signingKey={key}', 'commit-tree']
@@ -194,6 +196,19 @@ class Verifier(unittest.TestCase):
         self.assertEqual(self.reason(self.tree, bind=[('flake_lock_sha256', 'file.txt')]), 'wrong_input')
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=3, inputs={'flake_lock_sha256': good})
         self.assertEqual(self.reason(self.tree, bind=[('flake_lock_sha256', 'no-such-file')]), 'wrong_input')
+
+    def test_a_bind_never_passes_when_the_file_and_the_key_are_both_absent(self):
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        self.assertEqual(self.reason(self.tree, bind=[('flake_lock_sha256', 'no-such-file')]), 'wrong_input')
+        # An empty-string input cannot match anything either (such a record is malformed).
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=1, inputs={'flake_lock_sha256': ''})
+        self.assertEqual(self.reason(self.tree, bind=[('flake_lock_sha256', 'no-such-file')]), 'wrong_input')
+
+    def test_a_record_without_an_inputs_field_is_valid_and_reports_empty_inputs(self):
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', omit_inputs=True)
+        code, result = self.f.verify(self.tree)
+        self.assertEqual((code, result['inputs']), (0, {}))
+        self.assertEqual(self.reason(self.tree, bind=[('flake_lock_sha256', 'file.txt')]), 'wrong_input')
 
     def test_inputs_that_are_not_nonempty_strings_make_a_record_malformed(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', inputs={'attempt': 1})

@@ -203,16 +203,19 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
     if command is not None and result['command'] != command:
         raise Failure('wrong_command', f'latest record for check {check} ran a different command',
                       attempts=attempts)
+    inputs = observed.get('inputs', {})
     for key, path in bind:
         actual = blob_sha256(repo, tree, path)
-        if observed['inputs'].get(key) != actual:
+        recorded = inputs.get(key)
+        # Both must exist: a missing file and a missing key must never count as equal.
+        if actual is None or not isinstance(recorded, str) or not recorded or recorded != actual:
             raise Failure('wrong_input', f'record input {key} does not match {path} in this tree',
                           attempts=attempts)
     return {
         'satisfied': True, 'tree': tree, 'check': check, 'record': commit,
         'kind': observed['runner'], 'signer': principal, 'trust_level': principal.split('/', 1)[0],
         'tier': predicate['tier'], 'observed_at': predicate['observed_at'],
-        'command': result['command'], 'inputs': observed['inputs'], 'attempts': attempts,
+        'command': result['command'], 'inputs': inputs, 'attempts': attempts,
     }
 
 

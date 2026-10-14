@@ -372,7 +372,8 @@ thousands.
 The notes may be fetched shallow, as a CI checkout does: the note commit's parent is read
 from the raw commit, and when the subject commit is not in the local repository the signed
 statement's tree stands. When the subject commit is present its tree must equal the
-statement's, so a record cannot be rebound to a different tree.
+statement's, so a record cannot be rebound to a different tree. The tree claim is the
+signer's: the signature covers the statement, so only a key on the list can make it.
 
 `--kinds nix,wrapper` limits the record kinds a check accepts. `--bind-input KEY=PATH`
 (repeatable) requires the record's input `KEY` to equal the sha256 of `PATH` as it is in
