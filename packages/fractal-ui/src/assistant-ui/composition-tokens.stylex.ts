@@ -127,6 +127,7 @@ export const geometryVars = stylex.defineVars({
   transcriptFrameHeight: '640px',
   threadViewportMin: '96px',
   polishNarrow: '440px', polishWide: '1440px',
+  changelogMax: '420px', changelogHeight: '560px',
   estimatedMessageHeight: '160px',
 
 })

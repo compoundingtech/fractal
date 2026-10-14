@@ -26,7 +26,12 @@ export type MarkdownImageResolution = { readonly _tag: 'Load'; readonly src: str
 export type MarkdownImageResolver = (src: string) => MarkdownImageResolution
 /** Host handoff for a deferred image. When set, the placeholder action calls it instead of loading the image inline. */
 export type MarkdownImageOpener = (src: string) => void
-export interface MarkdownImageOptions { readonly resolveImage?: MarkdownImageResolver; readonly onLoadImage?: MarkdownImageOpener }
+export interface MarkdownImageOptions {
+  readonly resolveImage?: MarkdownImageResolver
+  readonly onLoadImage?: MarkdownImageOpener
+  /** A host's own inline references (for example `doc/…` names), for every Markdown below it. */
+  readonly renderInlineReference?: InlineReferenceRenderer
+}
 const NO_IMAGE_OPTIONS: MarkdownImageOptions = {}
 export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_IMAGE_OPTIONS)
 /** `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted, as it does inside quotes. */
@@ -58,7 +63,7 @@ function markStreamingTail() {
 
 export const Markdown = React.memo(function Markdown({ text, streaming = false, tone = 'default', resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
   const inherited = React.useContext(MarkdownImagePolicy)
-  const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
+  const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference: renderInlineReference ?? inherited.renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
   const source = React.useMemo(() => streaming ? completeStreamingTail(text) : text, [text, streaming])
   return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}><ReactMarkdown skipHtml urlTransform={(url, key) => key === 'src' ? url : defaultUrlTransform(url)} remarkPlugins={REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div></MutedTone.Provider></ReferenceContext.Provider>
 })

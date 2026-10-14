@@ -25,6 +25,12 @@ describe('workspace body', () => {
     const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view: workspaceView({ ref: 'monitor/quota' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
     expect(html).toMatch(/View unavailable\./)
   })
+  it('opens a document subject, by name or exact reference, as a document view', () => {
+    expect(workspaceView({ ref: 'doc/garden-notes' })).toEqual({ _tag: 'Document', ref: 'doc/garden-notes' })
+    const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view: workspaceView({ ref: 'doc/garden-notes' }), agentName: 'Fixture', onOpenTool: vi.fn(), onOpenDocument: vi.fn() }))
+    expect(html).toMatch(/Loading document…/)
+    expect(html).not.toMatch(/View unavailable/)
+  })
   it('keeps the thread for the thread tab', () => {
     expect(workspaceView(undefined)).toEqual({ _tag: 'Thread' })
   })

@@ -3,7 +3,7 @@ import { linuxActionlintConfig } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
-// Preserve the public-content guard on ready PRs and main pushes.
+// Label changes refresh the changelog opt-out; drafts still allocate no runners.
 export default githubWorkflow(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Public repository check",
@@ -12,14 +12,35 @@ export default githubWorkflow(readyPRJobs(auditCaches({
     'cancel-in-progress': "${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}",
   },
   "on": {
-    "pull_request": { types: readyPullRequestTypes },
+    "pull_request": { types: [...readyPullRequestTypes, 'labeled', 'unlabeled'] },
     "push": {
       "branches": [
         "main"
       ]
     }
   },
+  permissions: { contents: 'read' },
   "jobs": {
+    'fractal-changelog': {
+      name: 'fractal-changelog',
+      if: "github.event_name == 'pull_request'",
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      permissions: { contents: 'read' },
+      steps: [
+        // PR code executes only on a disposable hosted runner, with no secrets or write token.
+        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        { name: 'Test changelog requirement policy', run: 'node --test apps/fractal-web/scripts/ci/changelog-policy.unit.test.mjs' },
+        {
+          name: 'Require a new changelog entry for UI changes',
+          env: {
+            PR_MERGE_SHA: '${{ github.sha }}',
+            PR_LABELS: '${{ toJSON(github.event.pull_request.labels.*.name) }}',
+          },
+          run: 'node apps/fractal-web/scripts/ci/changelog-requirement.mjs --base "$PR_MERGE_SHA^1" --head "$PR_MERGE_SHA" --labels "$PR_LABELS"',
+        },
+      ],
+    },
     "public-repo": {
       "runs-on": 'ubuntu-latest',
       "steps": [
@@ -37,4 +58,4 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ]
     }
   }
-}, {"public-repo": "Runs standard-library source checks without downloads or compilation."})))
+}, {"public-repo": "Runs standard-library source checks without downloads or compilation.", "fractal-changelog": "Checks the full Git diff and pure changelog policy without dependencies or compilation."})))
