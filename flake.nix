@@ -482,6 +482,9 @@
             pkgs.which
             pkgs.cargo-nextest
             pkgs.python3
+            # Evidence fixtures make throwaway SSH signing keys and let Git verify the signed
+            # notes; git itself comes from nativeBuildInputs above.
+            pkgs.openssh
             # Boot cleanup fixtures query their isolated daemon with curl.
             pkgs.curl
             pkgs.nodejs
