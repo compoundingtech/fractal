@@ -14,7 +14,7 @@ import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars, textVars, typeVars } from './assistant-ui/composition-tokens.stylex'
 
 type Phase = 'pending' | 'arrival' | 'readonly' | 'answered'
-interface Args { scheme: Scheme; phase: Phase; multiple: boolean; drawer: boolean; prompt?: string }
+interface Args { scheme: Scheme; phase: Phase; multiple: boolean; drawer: boolean; prompt?: string; empty?: boolean }
 const longPrompt = 'The orchestration plan spans several worktrees and independent agents. Before continuing, choose the verification coverage that should run across the touched packages, explain how the full application suite relates to narrow checks, and account for the existing terminal session and pending release-note validation. '.repeat(4)
 const headerStatusSince = viewedAt - 120_000
 const requestFor = (phase: Phase): QuestionRequestView => ({
@@ -23,9 +23,10 @@ const requestFor = (phase: Phase): QuestionRequestView => ({
   ...(phase === 'answered' ? { state: { _tag: 'answered', by: 'You', at: submittedAt, answers: { checks: { selected: ['typecheck'], note: 'Run the narrow checks first.' } } } } : {}),
 })
 /** Real dock, transcript, runtime and composer. Settlement is explicitly story-only, not a live transport. */
-function QuestionsStory({ scheme, phase, multiple, drawer, prompt }: Args) {
+function QuestionsStory({ scheme, phase, multiple, drawer, prompt, empty }: Args) {
   const [request, setRequest] = React.useState(() => {
     const request = requestFor(phase)
+    if (empty === true) return { ...request, id: 'ask-empty', title: 'Empty ask', questions: [] }
     return prompt !== undefined ? { ...request, questions: request.questions.map(question => ({ ...question, prompt })) } : request
   })
   const [arrived, setArrived] = React.useState(phase !== 'arrival')
@@ -136,24 +137,46 @@ export const HeaderSignals: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const page = within(canvasElement.ownerDocument.body)
   const sentence = `Question pending. Observed status since ${new Date(headerStatusSince).toISOString()}. Observation live.`
+  // The kit Tooltip opens after a 350 ms delay; each wait gets an explicit budget instead of the 1 s default.
+  const tooltip = async (text: string) => {
+    const tip = await page.findByRole('tooltip', { name: text }, { timeout: 2000 })
+    await expect(tip).toHaveTextContent(text)
+    await expect(page.getAllByRole('tooltip')).toHaveLength(1)
+  }
   const status = canvas.getByRole('group', { name: 'Agent status' })
   const needs = canvas.getByRole('img', { name: 'Needs your attention' })
   await expect(needs.textContent).toBe('')
   await expect(needs.querySelector('svg')).not.toBeNull()
   await expect(canvas.getByTestId('thread-header').querySelectorAll('[data-header-signal][title], [data-header-signal] [title]')).toHaveLength(0)
+  // React Aria only treats a hover as a tooltip hover in pointer modality, which a pointer move sets before the pointer enters the trigger.
+  await userEvent.pointer({ target: canvas.getByTestId('thread-header') })
   await userEvent.hover(needs)
-  await expect(await page.findByRole('tooltip')).toHaveTextContent('Needs your attention')
+  await tooltip('Needs your attention')
   await userEvent.unhover(needs)
+  await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull(), { timeout: 2000 })
   await userEvent.hover(status)
-  await waitFor(() => expect(page.getByRole('tooltip')).toHaveTextContent(sentence))
+  await tooltip(sentence)
   await userEvent.unhover(status)
-  await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull())
+  await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull(), { timeout: 2000 })
   for (let step = 0; step < 12 && canvasElement.ownerDocument.activeElement !== status; step++) await userEvent.tab()
   await expect(status).toHaveFocus()
-  await expect(await page.findByRole('tooltip')).toHaveTextContent(sentence)
+  await tooltip(sentence)
   await userEvent.tab()
   await expect(needs).toHaveFocus()
-  await waitFor(() => expect(page.getByRole('tooltip')).toHaveTextContent('Needs your attention'))
+  await tooltip('Needs your attention')
+} }
+/** An ask with no questions still renders its dock, and the form mounts no tablist at all (not an empty one). */
+export const EmptyQuestions: Story = { args: { empty: true }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByTestId('question-dock')).toBeVisible()
+  const form = canvas.getByRole('region', { name: 'Empty ask' })
+  await expect(form).toHaveAttribute('data-state', 'pending')
+  await expect(form.querySelectorAll('[data-question-panel]')).toHaveLength(0)
+  await expect(within(form).queryByRole('checkbox')).toBeNull()
+  await expect(within(form).queryByRole('tablist', { hidden: true })).toBeNull()
+  await expect(within(form).queryByRole('tab', { hidden: true })).toBeNull()
+  await expect(within(form).queryByRole('tabpanel', { hidden: true })).toBeNull()
+  await expect(canvasElement.querySelectorAll('[role="tablist"], [role="tab"], [role="tabpanel"]')).toHaveLength(0)
 } }
 export const AllStates: Story = { render: args => <div>{(['pending', 'readonly', 'answered'] as const).map(phase => <section key={phase} aria-label={phase}><QuestionsStory {...args} phase={phase} /></section>)}</div> }
 const styles = stylex.create({
