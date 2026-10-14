@@ -251,7 +251,24 @@ pub(super) fn message_allowed(
     connection: &Connection,
     message: &MessageView,
 ) -> Result<bool, St3Error> {
-    let Some(operation) = operation(connection, &message.to)?.filter(|o| o.holds_intake()) else {
+    if message.status != "sent" {
+        return Ok(true);
+    }
+    let hold = intake_hold(connection, &message.to)?;
+    message_allowed_under(connection, hold.as_ref(), message)
+}
+
+fn intake_hold(connection: &Connection, subject: &str) -> Result<Option<Operation>, St3Error> {
+    Ok(operation(connection, subject)?.filter(|o| o.holds_intake()))
+}
+
+/// `hold` is the recipient's `intake_hold`, read once by a caller checking many messages.
+fn message_allowed_under(
+    connection: &Connection,
+    hold: Option<&Operation>,
+    message: &MessageView,
+) -> Result<bool, St3Error> {
+    let Some(operation) = hold else {
         return Ok(true);
     };
     if message.status != "sent" {
@@ -311,6 +328,18 @@ impl Store {
     pub fn rollout_message_allowed(&self, message: &MessageView) -> Result<bool, St3Error> {
         message_allowed(&self.readers.get(), message)
     }
+    /// The seat's current intake hold, if a rollout holds its independent mail.
+    pub(crate) fn rollout_intake_hold(&self, subject: &str) -> Result<Option<Operation>, St3Error> {
+        intake_hold(&self.readers.get(), subject)
+    }
+    /// `rollout_message_allowed` for a message to the seat whose `rollout_intake_hold` is `hold`.
+    pub(crate) fn rollout_message_allowed_under(
+        &self,
+        hold: Option<&Operation>,
+        message: &MessageView,
+    ) -> Result<bool, St3Error> {
+        message_allowed_under(&self.readers.get(), hold, message)
+    }
     pub fn rollout_selection(&self, subject: &str) -> Result<Option<Selection>, St3Error> {
         selection(&self.readers.get(), subject)
     }
@@ -352,6 +381,15 @@ impl Store {
         policy
             .validate()
             .map_err(|e| St3Error::new("invalid-rollout-policy", e.to_string()))?;
+        if crate::suspension::current(self, subject)
+            .map_err(internal)?
+            .is_some_and(|suspension| suspension.holds_seat())
+        {
+            return Err(St3Error::new(
+                "rollout-suspended",
+                "the seat is suspended; resume it before requesting a rollout",
+            ));
+        }
         self.connection.batched(|tx| -> Result<ClaimRecord, St3Error> {
             if let Some(prior) = tx.query_row(
                 "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims
@@ -367,6 +405,10 @@ impl Store {
             let selected = selection(tx, subject)?.ok_or_else(|| St3Error::new("rollout-not-enabled", "publish an owned set with --rollout when-idle or a rollout manual seat first"))?;
             if selected.desired_token != expected_token {
                 return Err(St3Error::new("stale-rollout-target", "selected declaration changed; read it again"));
+            }
+            if let Some(member) = selected.desired.member.as_ref() {
+                crate::native_resume::rollout_support(member)
+                    .map_err(|refusal| St3Error::new(refusal.code, refusal.reason))?;
             }
             let actual = latest_actual(tx, subject).map_err(internal)?.unwrap_or(Value::Null);
             let prior = operation(tx,subject)?;

@@ -430,6 +430,7 @@ fn normal_claim_and_inclusive_lease_deadline_require_writer_maintenance() {
                 summary: None,
                 reason: None,
                 evidence: vec![],
+                wait_ms: None,
                 idempotency_key: "sample-claim".into(),
             },
         )
@@ -606,6 +607,7 @@ fn real_generation_cut_and_carried_priority_then_claim_match_existing_reader() {
         summary: None,
         reason: None,
         evidence: vec![],
+        wait_ms: None,
         idempotency_key: key.into(),
     };
     store
@@ -734,6 +736,7 @@ fn populated_queue_and_labels_match_ordered_permuted_duplicate_replication() {
                 summary: None,
                 reason: None,
                 evidence: vec![],
+                wait_ms: None,
                 idempotency_key: "replicated-claim".into(),
             },
         )

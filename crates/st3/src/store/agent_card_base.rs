@@ -556,6 +556,11 @@ mod tests {
             desired.and_then(|d| d.owner_generation.as_deref()),
             actual,
             Some(index),
+            // The owners' states come from the same captured owner fields the card reads.
+            &mut |owner| {
+                let field = |name: &str| owner_field(&connection, "live", owner, name);
+                Ok(Some(json!({"fields": {"status": field("status")?, "mode": field("mode")?}})))
+            },
         )
         .unwrap();
         let result = annotation(&connection, "live", "agent/node.amber", desired, actual).unwrap();

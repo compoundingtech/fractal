@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { unreadableTranscript, cleanMessageText, conversationEntries, entryMatches, foldDeliveryFlaps, fromHarness, shownToolLines, toolTitle, DEFAULT_FILTERS, SHOW_EVERYTHING } from '@smalltalk/st3-views/conversationView';
+import { unreadableTranscript, cleanMessageText, conversationEntries, fetchedConversationEntries, entryMatches, foldDeliveryFlaps, fromHarness, headerLine, shownToolLines, subagentSession, toolTitle, DEFAULT_FILTERS, SHOW_EVERYTHING } from '@smalltalk/st3-views/conversationView';
 
 let sequence = 0;
 const at = minute => `2026-09-30T12:${String(minute).padStart(2, '0')}:00Z`;
@@ -66,6 +66,21 @@ assert.equal(shownToolLines(tool, false).lines.at(-1), 'line 19');
 assert.equal(shownToolLines(tool, true).lines.length, 20);
 assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'failed calls fold too, as in stui');
 
+// Timeline previews name the lines beyond the shared 400-line budget; full output stays intact.
+{
+  const lines = Array.from({ length: 407 }, (_, n) => `synthetic line ${n}`);
+  const result = e('tool_result', 'tool', { call_id: 'preview-call', status: 'success', content: `\n${lines.join('\n')}\n\n` });
+  const preview = conversationEntries([result], names, DEFAULT_FILTERS, false)[0].body;
+  assert.equal(preview.kind, 'tool');
+  assert.deepEqual(preview.output.slice(0, 400), lines.slice(0, 400));
+  assert.equal(preview.output.length, 401);
+  assert.equal(preview.output.at(-1), '… 7 more lines not shown in the timeline preview');
+  const full = conversationEntries([result], names, DEFAULT_FILTERS, true)[0].body;
+  assert.deepEqual(full.output, lines);
+  const withinBudget = e('tool_result', 'tool', { call_id: 'within-budget', status: 'success', content: lines.slice(0, 400).join('\n') });
+  assert.deepEqual(conversationEntries([withinBudget], names)[0].body.output, lines.slice(0, 400));
+}
+
 // Half a conversation is not shown: st's notice that it could not read the transcript becomes
 // one reason, with the transcript's path.
 {
@@ -81,7 +96,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   const notYet = { id: 'n', role: 'system', timestamp: '2026-10-01T10:00:01Z', type: 'error', body: { code: 'transcript-not-bound', message: 'transcript not bound: Claude session 0190 has no transcript file yet', retryable: true, details: { driver: 'claude', not_yet: true } } };
   assert.equal(unreadableTranscript([notYet]), null);
   const shown = conversationEntries([notYet], new Map());
-  assert.deepEqual(shown.map(entry => entry.body), [{ kind: 'event', tone: 'quiet', text: 'nothing in the harness yet since this seat started' }]);
+  assert.deepEqual(shown.map(entry => entry.body), [{ kind: 'event', tone: 'quiet', text: 'starting · transcript unavailable until the harness writes its first line' }]);
 }
 
 
@@ -173,6 +188,16 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.equal(staleLine('st asked to slow down for a moment', true, 10_000, 22_000), 'st asked to slow down for a moment · shown as of 12s ago · trying again');
 }
 
+// A conversation st refused for good never claims to be loading or retrying: it says why and offers a retry.
+{
+  const { staleLine } = await import('@smalltalk/st3-views/conversationView');
+  for (const loaded of [false, true]) {
+    const line = staleLine('session/example-child was not found', loaded, null, 0, true);
+    assert.equal(line, 'Could not load this conversation: session/example-child was not found · tap to try again');
+    assert.doesNotMatch(line, /Loading|Trying again|trying again/);
+  }
+}
+
 // A compacted conversation's summary is one folded tool-like line, never a giant message with tags.
 {
   const [summary] = conversationEntries([
@@ -207,6 +232,12 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.deepEqual(bodies.map(body => [body.kind, body.text]), [['mail', 'is this a watcher?']]);
 }
 
+// Both the earlier delivery sentence and the current one are st's own notes, not words the person typed.
+for (const note of ["The person reads replies in st, not in the agent's session.", 'Answer the person in this conversation; people have no inbox, so do not reply with st.']) {
+  const turn = `<smalltalk-message id="e6" from="person/example" to="agent/example/quay" subject="(no subject)" sha256="00" graph="message/e6">\nis this a watcher?\n</smalltalk-message>\n${note}`;
+  assert.deepEqual(fromHarness(true, turn).map(body => [body.kind, body.text]), [['mail', 'is this a watcher?']]);
+}
+
 const exposed = '<analysis>invented-token</analysis><thinking>visible</thinking>';
 assert.equal(JSON.parse(conversationEntries([{id:'raw',timestamp:'2026-10-06T12:00:00Z',role:'assistant',type:'content',body:{text:exposed}}], new Map(), SHOW_EVERYTHING)[0].body.text).body.text, exposed);
 
@@ -223,3 +254,106 @@ assert.equal(conversationEntries([rawEntry], names, DEFAULT_FILTERS)[0].body.tex
 assert.deepEqual(JSON.parse(conversationEntries([rawEntry], names, SHOW_EVERYTHING)[0].body.text), original);
 assert.deepEqual(rawEntry, original);
 assert.equal(cleanMessageText(rawText, SHOW_EVERYTHING), rawText);
+
+// Blocks that expose native data (#1574) are data: the markup cleanup must not eat reasoning
+// text or raw JSON, while plain prose without them is still cleaned, as stui does.
+{
+  const base = { id: 'r', timestamp: '2026-10-06T12:00:00Z', role: 'assistant', type: 'content', final: true, sequence: 1 };
+  const reasoning = conversationEntries([{ ...base, body: { media_type: 'text/plain', text: '<thinking>the plan: check the fixtures</thinking>', blocks: [{ id: 'b', kind: 'reasoning', source_type: 'synthetic', payload: { text: 'the plan: check the fixtures' } }] } }], new Map());
+  assert.equal(reasoning[0].body.text, '<thinking>the plan: check the fixtures</thinking>', 'reasoning text arrives as data');
+  const thought = text => ({ ...base, body: { media_type: 'text/plain', text: `[reasoning]${text}`, blocks: [{ id: 'b', kind: 'reasoning', source_type: 'synthetic', payload: { text } }] } });
+  assert.deepEqual(conversationEntries([thought('')], new Map()), [], 'empty normalized reasoning is bookkeeping');
+  assert.equal(conversationEntries([thought('the plan')], new Map())[0].body.text, 'Thinking · the plan', 'shared reasoning keeps the human-readable label');
+  const prose = conversationEntries([{ ...base, body: { media_type: 'text/plain', text: '<thinking>private</thinking>visible' } }], new Map());
+  assert.equal(prose[0].body.text, 'visible', 'prose without data blocks is still cleaned');
+  const raw = conversationEntries([{ ...base, role: 'system', body: { media_type: 'text/plain', text: '<tool_result>{"output":1}</tool_result>', blocks: [{ id: 'b', kind: 'unknown', source_type: 'synthetic', payload: {} }] } }], new Map());
+  assert.equal(raw[0].body.text, '<tool_result>{"output":1}</tool_result>', 'unknown raw JSON arrives as data');
+}
+
+// A subagent card's `open session/…` line is the link to that conversation (q2).
+{
+  assert.equal(subagentSession(['Review synthetic code', 'duration 1200ms', 'open session/child']), 'session/child');
+  assert.equal(subagentSession(['open session/child', 'open session/other']), 'session/child', 'the first link wins');
+  assert.equal(subagentSession(['reviewed, nothing to open']), undefined);
+}
+
+// Hand-built mixed-source header: only the register field gets an individual marker.
+{
+  const asOf = '2026-10-06T12:00:00Z';
+  const field = (value, source = 'transcript') => ({ value, source, as_of: asOf });
+  assert.equal(headerLine({
+    model: field('synthetic/model'),
+    context: field({ tokens: 50, window: null }),
+    cost: field({ usd: 0.02 }),
+    todos: field([{ phase: 'Render', items: [{ content: 'Render cards', status: 'completed' }] }]),
+    jobs: field([{ id: 'job-2', state: 'running' }]),
+    subagents: field([{ id: 'child-live', status: 'running' }]),
+    ask: field({ call_id: 'active', questions: [{ question: 'Continue?', options: [], multi: false }] }),
+    working: field(true, 'register'),
+  }, asOf), 'model synthetic/model · context 50 tokens · cost $0.02 · todo 1/1 · jobs 1 · agents 1 · ask Continue? · working [register · 0s ago] · transcript · 0s ago');
+  assert.equal(headerLine({ cost: { value: { usd: 3 }, source: 'register', as_of: '2026-10-06T11:30:00Z' } }, asOf), 'cost $3.00 · register · 30m ago');
+  assert.equal(headerLine({ model: field('synthetic/model ') }, '2026-10-06T12:59:30Z'), 'model synthetic/model · transcript · 1h ago', 'rounded minutes promote to hours without extra spaces');
+  assert.equal(headerLine({ working: field(false, 'register') }, '2026-10-07T11:30:00Z'), 'idle · register · 1d ago', 'rounded hours promote to days');
+  assert.equal(headerLine({ working: field(false, 'register') }, asOf), 'idle · register · 0s ago');
+  assert.equal(headerLine({ ask: field(null) }, asOf), null, 'a header with nothing to say says nothing');
+  assert.equal(headerLine(undefined, asOf), null);
+}
+
+// Shared provenance conservatively ages from its oldest field, even with a live register cost.
+{
+  const header = {
+    model: { value: 'm', source: 'transcript', as_of: '2026-10-06T11:59:00Z' },
+    context: { value: { tokens: 50 }, source: 'transcript', as_of: '2026-10-06T11:00:00Z' },
+    cost: { value: { usd: 0.02 }, source: 'register', as_of: '2026-10-06T11:30:00Z' },
+  };
+  assert.equal(headerLine(header, '2026-10-06T12:00:00Z'), 'model m · context 50 tokens · cost $0.02 [register · 30m ago] · transcript · 1h ago');
+  assert.equal(headerLine({ todos: { value: [], source: 'transcript', as_of: '2026-10-06T12:00:00Z' } }, '2026-10-06T12:00:00Z'), 'todo 0/0 · transcript · 0s ago');
+}
+
+// Parity gaps: expanded calls retain invocation rows after the receipt arrives.
+{
+  const block = (kind, view, extra = {}) => ({ id: 'synthetic-block', kind, source_type: 'synthetic', payload: {}, view, ...extra });
+  const cases = [
+    [{ type: 'bash', command: 'echo synthetic', cwd: '/synthetic', timeout_s: 30 }, ['cwd: /synthetic', 'timeout: 30s']],
+    [{ type: 'write', path: 'demo', content: 'first\nlast', line_count: 2, bytes: 10 }, ['first', 'last']],
+    [{ type: 'eval', language: 'py', code: '1 + 2\n3 + 4', timeout_s: 5, reset: false }, ['language: py', 'timeout: 5s', 'reset: false', '1 + 2', '3 + 4']],
+    [{ type: 'hub', op: 'send', target: 'Child', message: 'sent\nbody' }, ['sent', 'body']],
+    [{ type: 'search', engine: 'grep', pattern: 'needle', case: false, gitignore: true, skip: 2 }, ['case: false', 'gitignore: true', 'skip: 2']],
+  ];
+  for (const [view, expected] of cases) {
+    const call = e('tool_call', 'assistant', { call_id: view.type, name: view.type, arguments: {}, blocks: [block('tool_call', view)] });
+    const result = e('tool_result', 'tool', { call_id: view.type, status: 'success', content: 'receipt' });
+    const [entry] = conversationEntries([call, result], names);
+    for (const line of expected) assert(entry.body.output.includes(line), `${view.type}: ${line}`);
+    assert.equal(entry.body.output.at(-1), 'receipt');
+  }
+  const grep = e('tool_result', 'tool', { call_id: 'g', status: 'success', content: 'native matches', blocks: [block('tool_output', { type: 'search', match_count: 7, file_count: 3, truncated: true, file_limit_reached: 3, per_file_limit_reached: 2 })] });
+  assert.deepEqual(conversationEntries([grep], names)[0].body.output, ['7 matches / 3 files', 'warning: search results truncated', 'warning: file limit reached (3)', 'warning: per-file limit reached (2)', 'native matches']);
+  const compaction = e('content', 'system', { media_type: 'text/plain', blocks: [block('status', { type: 'compaction', summary: Array.from({ length: 10 }, (_, i) => `summary-${i}`).join('\n') })] });
+  const [summary] = conversationEntries([compaction], names);
+  assert.deepEqual(shownToolLines(summary.body, false).lines, ['summary-0', 'summary-1', 'summary-2', 'summary-3', 'summary-4', 'summary-5']);
+  assert.equal(shownToolLines(summary.body, true).lines.at(-1), 'summary-9');
+  const error = e('content', 'assistant', { blocks: [block('error', { type: 'assistant_error', status: 'recovered', presentation: 'compact-recovered', is_error: false, message: 'synthetic error', retry: { note: 'retried successfully' } })] });
+  assert.deepEqual(conversationEntries([error], names)[0].body.output, ['synthetic error', 'retried successfully']);
+  const hiddenError = e('content', 'assistant', { blocks: [block('error', { type: 'assistant_error', presentation: 'none' })] });
+  assert.equal(conversationEntries([hiddenError], names).length, 0);
+  const reference = { ref: 'full-write', media_type: 'application/json', reason: 'size-limit' };
+  const view = { type: 'write', path: 'demo', content: 'first\n[st truncated this native timeline value: size limit; 20000 bytes]', line_count: 2, bytes: 20000 };
+  const call = e('tool_call', 'assistant', { call_id: 'large-write', name: 'write', arguments: {}, blocks: [block('tool_call', view, { continuation: reference })] });
+  const [entry] = conversationEntries([call], names);
+  const hydrated = fetchedConversationEntries(entry, reference, { ...view, content: 'first\nlast' });
+  assert.deepEqual(hydrated[0].body.output, ['first', 'last'], 'view-only continuations hydrate written content through the typed adapter');
+}
+
+// A conversation says how fresh it is, and that the phone is asking again.
+{
+  const { freshnessLine } = await import('@smalltalk/st3-views/conversationView');
+  const base = { issue: '', loaded: true, refreshing: false, lastFrame: 1_000, now: 61_000 };
+  assert.deepEqual(freshnessLine(base), { text: '● live · updated 1m ago', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, now: 5_000 }), { text: '● live · updated 4s ago', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, now: 7_300_000 }), { text: '● live · updated 2h ago', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, refreshing: true }), { text: '↻ refreshing… · updated 1m ago', tone: 'refreshing' });
+  assert.deepEqual(freshnessLine({ ...base, loaded: false, lastFrame: null }), { text: '↻ loading…', tone: 'refreshing' });
+  assert.deepEqual(freshnessLine({ ...base, lastFrame: null }), { text: '● live · waiting for st', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, issue: 'unreachable' }), { text: '⚠ retrying · updated 1m ago', tone: 'warn' });
+}

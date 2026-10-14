@@ -225,7 +225,10 @@ fn raw_gap_commit_fences_same_index_and_changed_evidence_without_restoring_ready
     assert!(matches!(first.availability.readiness, Readiness::Fenced));
     assert_eq!(first.source_cut, before.source_cut);
     assert_eq!(first.keys, before.keys);
-    assert_eq!(first.snapshot.semantic_generation, before.snapshot.semantic_generation);
+    assert_eq!(
+        first.snapshot.semantic_generation,
+        before.snapshot.semantic_generation
+    );
     assert_eq!(
         first.availability.error.as_deref(),
         Some("raw source mutation")

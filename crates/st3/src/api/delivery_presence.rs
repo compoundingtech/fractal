@@ -104,16 +104,16 @@ fn record_in(presence: &Presence, recipient: &str, report: &str) {
 
 /// Title updates cannot establish delivery readiness. They can report the outer driver's
 /// attachment check, including a missing plugin for which no delivery process exists.
-pub(super) fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) {
-    record_fenced_in(presence(), fence, raw);
+pub(super) fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
+    record_fenced_in(presence(), fence, raw)
 }
 
-fn record_fenced_in(presence: &Presence, fence: &crate::mailbox::Fence, raw: &str) {
+fn record_fenced_in(presence: &Presence, fence: &crate::mailbox::Fence, raw: &str) -> bool {
     let Ok(report) = serde_json::from_str::<Report>(raw) else {
-        return;
+        return false;
     };
     if fence.component != "delivery" && report.transport.as_deref() != Some("claude-channel") {
-        return;
+        return false;
     }
     let clear_monitor =
         fence.component == "delivery" && report.transport.as_deref() != Some("claude-channel");
@@ -123,7 +123,7 @@ fn record_fenced_in(presence: &Presence, fence: &crate::mailbox::Fence, raw: &st
         report,
         Some(fence.clone()),
         clear_monitor,
-    );
+    )
 }
 
 pub(super) fn attachment(recipient: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
@@ -173,8 +173,8 @@ fn replace_in(
     report: Report,
     fence: Option<crate::mailbox::Fence>,
     clear_monitor: bool,
-) {
-    let (change, updated) = {
+) -> bool {
+    let (change, updated, recorded) = {
         let mut monitors = clear_monitor.then(|| presence.monitors.lock());
         let target = if fence.as_ref().is_some_and(|f| f.component != "delivery") {
             &presence.monitors
@@ -194,7 +194,7 @@ fn replace_in(
                 Err(_) => updated = false,
             }
         }
-        match &mut beats {
+        let recorded = match &mut beats {
             Ok(beats) => {
                 beats.insert(
                     recipient.to_owned(),
@@ -204,14 +204,19 @@ fn replace_in(
                         fence,
                     },
                 );
+                true
             }
-            Err(_) => updated = false,
-        }
-        (change, updated)
+            Err(_) => {
+                updated = false;
+                false
+            }
+        };
+        (change, updated, recorded)
     };
     if let Some(change) = change {
         change.finish(updated);
     }
+    recorded
 }
 
 /// How one seat's delivery path looks from this daemon.
@@ -240,18 +245,43 @@ impl Assessment {
 
 /// Assess the delivery path of a local native seat, independently of harness readiness.
 pub(crate) fn assess(recipient: &str, driver: &str) -> Assessment {
+    assess_selected(recipient, driver, None, false)
+}
+
+pub(crate) fn assess_current(recipient: &str, driver: &str, incarnation: Option<&str>) -> Assessment {
+    assess_selected(recipient, driver, incarnation, true)
+}
+
+fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, current: bool) -> Assessment {
     let presence = presence();
+    let eligible = |beat: &&Beat| {
+        if !current { return true; }
+        let transport = match driver {
+            "claude" => "claude-channel", "codex" => "app-server", "opencode" => "opencode-server",
+            "omp" => "omp-channel", "pi" => "pi-channel", _ => return false,
+        };
+        beat.report.transport.as_deref() == Some(transport)
+            && beat.fence.as_ref().is_none_or(|fence| incarnation.is_none_or(|incarnation| fence.incarnation == incarnation))
+    };
+    let captured = |beat: &Beat| {
+        let mut report = beat.report.clone();
+        if current && beat.fence.is_none() && report.ready != Some(false) {
+            report.legacy = true;
+        }
+        (beat.at, report)
+    };
     let mut beat = presence.beats.lock().ok().and_then(|beats| {
         beats
             .get(recipient)
-            .map(|beat| (beat.at, beat.report.clone()))
+            .filter(eligible)
+            .map(captured)
     });
     if driver == "claude"
         && let Ok(monitors) = presence.monitors.lock()
-        && let Some(monitor) = monitors.get(recipient)
+        && let Some(monitor) = monitors.get(recipient).filter(eligible)
         && monitor.report.ready == Some(false)
     {
-        beat = Some((monitor.at, monitor.report.clone()));
+        beat = Some(captured(monitor));
     }
     assess_beat(
         presence.started.elapsed(),
@@ -420,6 +450,27 @@ mod tests {
     const DAEMON: Option<&str> = Some("new");
 
     #[test]
+    fn malformed_report_does_not_replace_a_beat_or_prove_recording() {
+        let recipient = "agent/malformed-report-control";
+        let mut fence = crate::mailbox::Fence::new(recipient, "current", "delivery");
+        fence.epoch = 1;
+        assert!(record_fenced(
+            &fence,
+            &json!({"transport":"omp-channel", "ready":false}).to_string()
+        ));
+        let mut malformed = fence.clone();
+        malformed.epoch = 2;
+        assert!(!record_fenced(
+            &malformed,
+            &json!({"transport":"omp-channel", "ready":true, "image":42}).to_string()
+        ));
+        let beats = presence().beats.lock().unwrap();
+        let beat = beats.get(recipient).unwrap();
+        assert_eq!(beat.report.ready, Some(false));
+        assert_eq!(beat.fence.as_ref().unwrap().epoch, 1);
+    }
+
+    #[test]
     fn attachment_requires_current_initialized_delivery_and_not_a_title_report() {
         let recipient = "agent/attachment-proof";
         let mut delivery = crate::mailbox::Fence::new(recipient, "current", "delivery");
@@ -466,6 +517,22 @@ mod tests {
         assert!(reason(&assessment).contains("claude-channel-unattached"));
         record_legacy(recipient, "claude-channel", 7);
         assert_eq!(known(recipient).unwrap().state, "legacy");
+        // A legacy poll proves transport liveness without asserting a fenced incarnation.
+        assert_eq!(assess_current(recipient, "claude", Some("current")).state, "legacy");
+        assert!(assess_current(recipient, "codex", Some("current")).state != "legacy");
+    }
+
+    #[test]
+    fn unfenced_reports_preserve_legacy_liveness_but_never_current_native_readiness() {
+        let recipient = "agent/eval.unfenced-report";
+        record(recipient, &json!({"transport":"omp-channel","pid":7,"ready":true}).to_string());
+        assert_eq!(assess_current(recipient, "omp", Some("current")).state, "legacy");
+        assert_ne!(assess_current(recipient, "codex", Some("current")).state, "legacy");
+        let old = crate::mailbox::Fence::new(recipient, "old", "delivery");
+        record_fenced(&old, &json!({"transport":"omp-channel","pid":7,"ready":true}).to_string());
+        let current = assess_current(recipient, "omp", Some("current"));
+        assert!(matches!(current.state, "unknown" | "stale"));
+        assert_eq!(current.transport, None);
     }
 
     fn report(image: Option<&str>, channel: Option<(Option<&str>, u64)>) -> Report {
