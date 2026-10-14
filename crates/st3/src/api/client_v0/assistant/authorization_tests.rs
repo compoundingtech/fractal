@@ -214,7 +214,7 @@ fn concrete_path(path:&str)->String {
 #[tokio::test]
 async fn assistant_four_scopes_forbid_all_other_catalog_routes_and_mutations() {
     let fixture=fixture(&SCOPES[..4],true).await;
-    let catalog:Value=serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),"/../../docs/st3/client-v0/schemas/operations.json"))).unwrap();
+    let catalog:Value=serde_json::from_str(&std::fs::read_to_string(test_env!("CARGO_MANIFEST_DIR","/../../docs/st3/client-v0/schemas/operations.json")).unwrap()).unwrap();
     for section in ["reads","commands","streams"] {
         for operation in catalog[section].as_array().unwrap() {
             let path=concrete_path(operation["path"].as_str().unwrap());
@@ -238,10 +238,10 @@ async fn assistant_revocation_and_policy_change_invalidate_signed_read_proofs() 
     let fixture=fixture(SCOPES,true).await;
     let payload=fixture.payload("summary","");let header=fixture.header(&payload,&fixture.attestor);
     let mut trust=fixture.trust_request();trust.key_id="approval-key/rotated".into();
-    pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+    let _=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
         AxumPath(fixture.grant.clone()),Json(trust)).await.unwrap();
     assert_eq!(fixture.request("/v1/client/assistant/summary",Some(&header)).await.0,StatusCode::FORBIDDEN);
-    super::super::revoke(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+    let _=super::super::revoke(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
         AxumPath(fixture.grant.clone())).await.unwrap();
     assert_eq!(fixture.request("/v1/client/assistant/summary",Some(&header)).await.0,StatusCode::FORBIDDEN);
 }
@@ -267,9 +267,9 @@ async fn assistant_final_delivery_denials_leave_durable_receipts() {
             OriginalUri("/v1/client/assistant/summary".parse().unwrap()),headers).await.unwrap();
         match reason {
             "expiry"=>receipt.proof_expiry=1,
-            "policy"=>{pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            "policy"=>{let _=pin(State(fixture.state.clone()),Extension(ClientSession::local(Some(OWNER)).unwrap()),
                 AxumPath(fixture.grant.clone()),Json(fixture.trust_request())).await.unwrap();},
-            "revocation"=>{super::super::revoke(State(fixture.state.clone()),
+            "revocation"=>{let _=super::super::revoke(State(fixture.state.clone()),
                 Extension(ClientSession::local(Some(OWNER)).unwrap()),AxumPath(fixture.grant.clone())).await.unwrap();},
             _=>unreachable!(),
         }
