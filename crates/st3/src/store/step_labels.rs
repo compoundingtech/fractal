@@ -2,28 +2,12 @@
 //! This accessor adds neither a readiness certificate nor a separate view registry.
 use super::*;
 
-// One limit-plus-one agent window, with both held and upcoming previews per card.
-pub(crate) const MAX_SELECTED: usize = 501 * AGENT_WORK_PREVIEW_LIMIT * 2;
 const QUERY: &str =
     "SELECT s.subject, s.run_id, r.mission_id, s.step_path, s.title, s.goals, s.status,
                     s.updated_at_unix_ms
              FROM step_runs s
              JOIN mission_runs r ON r.id=s.run_id
              WHERE s.subject IN (SELECT value FROM json_each(?1))";
-
-/// Bounded selected labels for composing cards inside an authorized snapshot. The caller
-/// must verify complete projection and all card/authority dependencies in that same cut.
-#[allow(dead_code)]
-pub(crate) fn rows(
-    connection: &Connection,
-    subjects: &[String],
-) -> Result<BTreeMap<String, StepLabel>> {
-    anyhow::ensure!(
-        subjects.len() <= MAX_SELECTED,
-        "step label selected batch bound"
-    );
-    read(connection, subjects)
-}
 
 // The existing public Store reader retains its original accepted batch sizes.
 pub(super) fn read(

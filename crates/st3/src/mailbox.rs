@@ -15,6 +15,17 @@ pub struct Fence {
     pub token: String,
 }
 
+/// Captured by the daemon from its authenticated Unix peer, never from a request body.
+/// Provider ownership comes from the current driver record under the runtime's paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Authority {
+    pub provider: String,
+    pub session: String,
+    pub sequence: u64,
+    pub pid: u32,
+    pub process_token: u64,
+}
+
 impl Fence {
     pub fn new(subject: &str, incarnation: &str, component: &str) -> Self {
         let mut token = [0_u8; 16];
@@ -41,12 +52,12 @@ impl Fence {
                 }
                 Err(error)
                     if crate::client::api_error_code(&error).is_some_and(|code| {
-                        !matches!(code, "internal" | "database-busy" | "database-locked" | "mailbox-session-starting")
+                        !matches!(code, "internal" | "database-busy" | "database-locked" | "mailbox-session-starting" | "mailbox-authority-unavailable")
                     }) =>
                 {
                     return Err(error);
                 }
-                Err(_) => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+                Err(_) => tokio::time::sleep(crate::client::driver_retry_pause()).await,
             }
         }
     }
@@ -87,6 +98,8 @@ pub enum Frame {
     Fenced {
         reason: String,
     },
+    /// Ordered after the mailbox snapshot; only its consumer can acknowledge this nonce.
+    Replay { nonce: String },
     /// Ordered after the gated mailbox snapshot. The delivery loop acknowledges consumption.
     Drain {
         operation: Option<String>,
@@ -119,7 +132,8 @@ impl Drop for Subscription {
     }
 }
 impl Subscription {
-    pub fn start(client: crate::client::Client, fence: Fence, report: Value) -> Self {
+    pub fn start(client: crate::client::Client, fence: Fence, mut report: Value) -> Self {
+        report["mailbox_replay_ack"] = serde_json::json!(true);
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let (report_tx, mut report_rx) = tokio::sync::watch::channel(report);
         let task = tokio::spawn(async move {
@@ -155,11 +169,19 @@ impl Subscription {
                         }
                     }
                 }.await;
+                if let Err(error) = &result
+                    && matches!(crate::client::api_error_code(error), Some(
+                        "stale-mailbox-session" | "foreign-mailbox" | "unbound-mailbox" | "invalid-mailbox-token"
+                    ))
+                {
+                    let _ = sender.send(Frame::Fenced { reason: error.to_string() }).await;
+                    return;
+                }
                 if result.is_ok() || sender.is_closed() {
                     return;
                 }
                 // Transport loss changes no delivery state. The next connection replays the graph.
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(crate::client::driver_retry_pause()).await;
             }
         });
         Self {
@@ -168,14 +190,21 @@ impl Subscription {
             task,
         }
     }
+    pub fn acknowledge_replay(&self, nonce: String) {
+        self.report.send_modify(|report| report["mailbox_replay_nonce"] = serde_json::json!(nonce));
+    }
     pub fn acknowledge_drain(&self, operation: Option<String>) {
         self.report.send_modify(|report| {
             report["drain_operation"] = serde_json::json!(operation);
         });
     }
     pub fn report(&self, mut value: Value) {
-        value["drain_operation"] = self.report.borrow()["drain_operation"].clone();
-        self.report.send_replace(value);
+        value["mailbox_replay_ack"] = serde_json::json!(true);
+        self.report.send_modify(|current| {
+            value["mailbox_replay_nonce"] = current["mailbox_replay_nonce"].clone();
+            value["drain_operation"] = current["drain_operation"].clone();
+            *current = value;
+        });
     }
 }
 
@@ -360,6 +389,7 @@ pub(crate) mod tests {
     #[test]
     fn seat_label_appends_launcher_persona_short_without_space_and_strips_controls() {
         let seat = DesiredSubject {
+            accountable: None,
             subject: "agent/eval.worker".into(),
             kind: "agent".into(),
             desired: json!({"display_name":"Qu\u{1b}]0;x\u{7}artz"}),
@@ -392,6 +422,77 @@ pub(crate) mod tests {
         ready(&store, "session-2");
         assert_eq!(store.bind_mailbox(&request).unwrap_err().code, "stale-mailbox-session");
         assert_eq!(store.check_mailbox(&bound).unwrap_err().code, "stale-mailbox-session");
+    }
+
+    #[test]
+    fn startup_hook_activity_waits_for_runtime_evidence_without_allocating_ownership() {
+        for (state, expected_error) in [
+            ("starting", "mailbox-session-starting"),
+            ("ready", "mailbox-session-starting"),
+            ("idle", "mailbox-session-starting"),
+            ("working", "mailbox-session-starting"),
+            ("blocked", "mailbox-session-starting"),
+            ("indeterminate", "stale-mailbox-session"),
+        ] {
+            let store = Store::open_memory("node").unwrap();
+            ready(&store, "previous");
+            let previous = store
+                .bind_mailbox(&Fence::new("agent/eval.worker", "previous", "delivery"))
+                .unwrap();
+            store
+                .append_claim(&claim(
+                    "agent/eval.worker",
+                    "harness.observed",
+                    json!({"state":state,"driver":"claude","incarnation_id":"replacement"}),
+                    "replacement-hook",
+                ))
+                .unwrap();
+            let replacement = Fence::new("agent/eval.worker", "replacement", "delivery");
+            assert_eq!(
+                store.bind_mailbox(&replacement).unwrap_err().code,
+                expected_error,
+                "{state}"
+            );
+            assert_eq!(
+                store
+                    .bind_mailbox(&Fence::new("agent/eval.worker", "foreign", "delivery"))
+                    .unwrap_err()
+                    .code,
+                "stale-mailbox-session"
+            );
+            let mut already_bound = replacement.clone();
+            already_bound.epoch = 1;
+            assert_eq!(
+                store.bind_mailbox(&already_bound).unwrap_err().code,
+                "stale-mailbox-session",
+                "a bound owner is never a pending startup"
+            );
+            store
+                .append_claim(&claim(
+                    "agent/eval.worker",
+                    "harness.observed",
+                    json!({"state":"ended","driver":"claude","incarnation_id":"replacement"}),
+                    "replacement-ended",
+                ))
+                .unwrap();
+            assert_eq!(
+                store.bind_mailbox(&replacement).unwrap_err().code,
+                "stale-mailbox-session"
+            );
+            ready(&store, "replacement");
+            let bound = store.bind_mailbox(&replacement).unwrap();
+            assert_eq!(bound.epoch, 2, "hook activity never allocated an owner");
+            assert_eq!(
+                store.check_mailbox(&previous).unwrap_err().code,
+                "stale-mailbox-session"
+            );
+            store.append_claim(&claim("agent/eval.worker", "runtime.observed",
+                    json!({"status":"exited","runtime_id":"eval.worker","incarnation_id":"replacement"}), "replacement-exited")).unwrap();
+            assert_eq!(
+                store.bind_mailbox(&bound).unwrap_err().code,
+                "stale-mailbox-session"
+            );
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ not close an unresolved delivery alert.
 
 Boots and channel reconnects hold earlier mail, including old probe messages.
 Those messages stay in the mailbox and contribute to the aged unread count
-in doctor and stui. Preview and close that backlog with the commands in
+in doctor and the terminal UI. Preview and close that backlog with the commands in
 [seat deploys](seat-deploys.md), including
 `st conversations cleanup --all --older-than 1h`. Cleanup does not count as a
 successful native probe; recovery still requires a fresh recipient read.
@@ -39,9 +39,18 @@ records the recipient's accepted read timestamp, but does not subtract clocks
 from different machines. `delivered` without `read` never passes the probe.
 
 The latest results and a heartbeat are replicated as immutable document versions
-under `doc/delivery-probes/NODE`, every 30 seconds and on state changes. `st doctor`
+under `doc/delivery-probes/NODE`. Every version is kept on every member, so the probe
+publishes one only when a route's outcome changes (overdue, a late read, an alert, a
+recovery) and as a heartbeat every five minutes with the newest latencies. An ordinary
+cycle, a read followed by a new send and its read, publishes nothing new: each latency
+is a point of a series and stays in the probe's local `events.jsonl`. A send stops being
+in flight once its deadline passes or it raises an alert, even while it keeps retrying,
+and that publishes at once. A heartbeat waits, for at most one deadline, until no send
+is in flight, and a report that showed a send in flight is replaced as soon as it
+resolves, so doctor never sees a stale wait as overdue.
+`st doctor`
 shows each direction's latest message, measured latency or pending age, overdue
-results, missing configured source nodes, and heartbeats older than 90 seconds.
+results, missing configured source nodes, and heartbeats older than 15 minutes.
 A reported success must match the actual sender, recipient and accepted read
 claim in the graph; a document alone cannot manufacture a successful read.
 A late receipt remains visible until the next probe completes successfully.

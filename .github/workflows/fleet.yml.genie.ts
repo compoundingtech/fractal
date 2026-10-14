@@ -1,4 +1,6 @@
-import { buildSnapshotSave } from './build-snapshot.ts'
+import { withQueueWatch } from './queue-watch.ts'
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
+import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave, optionalQueueCacheSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { readFileSync } from 'node:fs'
 import {
@@ -10,17 +12,29 @@ import {
   afterPickRunner,
   buildEnv,
   commonSetupSteps,
+  fractalWebJobs,
+  nixCacheStep,
   linuxRunner,
   linuxStageJob as namespaceStageJob,
+  evidenceStageJob,
+  evidenceEnvironment,
+  evidenceStageNames,
+  evidenceStageSteps,
+  evidenceStepJob,
+  evidenceStepNames,
+  evidenceStepSteps,
   linuxStageRunner,
   linuxStageRunsOn,
   perfStoresCache,
   mailStageRunsOn,
   pickRunnerJob,
   pickRunnerJobId,
+  primaryTestRunsOn,
+  pnpmStoreEnv,
   supportingLinuxRunsOn,
   supportingStageRunsOn,
   secondaryStageRunsOn,
+  extraMergeTestRunsOn,
   workspacePreparationSteps,
   testArchiveConsumerSetup,
 } from './workspace-ci.ts'
@@ -67,6 +81,7 @@ const linuxStageJob = ({
   name,
   ...afterPickRunner,
   'runs-on': runsOn,
+  ...evidenceStageJob(name),
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, ...env, CI_CACHE_DEV_SHELL: 'default' },
@@ -80,7 +95,7 @@ const linuxStageJob = ({
     nixDevelopStep({ name: description ?? 'Run nextest', command: ['bash', 'scripts/ci-linux', stage] }),
     {
       name: 'Save Nix outputs to the local Nix cache',
-      if: "success() && env.CI_LOCAL_CACHES != '1'",
+      if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`,
       run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"',
     },
     ...(setup === testArchiveConsumerSetup ? [] : buildSnapshotSave),
@@ -94,14 +109,15 @@ const linuxStageJob = ({
         'if-no-files-found': 'ignore',
       },
     },
+    ...evidenceStageSteps(name, stage),
   ],
 })
 
 // Required gate. Label events belong to macos.yml so they never restart or cancel this workflow.
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
   name: 'Workspace CI',
   on: {
-    pull_request: {},
+    pull_request: { types: readyPullRequestTypes },
     // GitHub's merge queue runs the required checks on each queued entry; without this trigger the
     // queue never receives them and merges freeze.
     merge_group: {},
@@ -122,6 +138,34 @@ export default githubWorkflow(auditCaches({
   },
   jobs: {
     [pickRunnerJobId]: pickRunnerJob,
+    // Non-required provenance only: it runs alongside the gate and has no signer or key.
+    // Retain the complete effective merge tree even after its ephemeral ref disappears.
+    'evidence-source': {
+      name: 'evidence-source',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      'continue-on-error': true,
+      permissions: { contents: 'read' },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        {
+          name: 'Retain effective tested source',
+          // Execute the workflow's embedded producer outside the checkout. It observes Git
+          // objects only; it never executes source or carries a production signing key.
+          run: `cat > "$RUNNER_TEMP/ci-evidence-source-producer.py" <<'EVIDENCE_SOURCE_PY'\n${readFileSync(new URL('../../scripts/ci-evidence-source', import.meta.url), 'utf8').trimEnd()}\nEVIDENCE_SOURCE_PY\npython3 "$RUNNER_TEMP/ci-evidence-source-producer.py"`,
+        },
+        {
+          name: 'Upload effective tested source',
+          uses: 'actions/upload-artifact@v4',
+          with: {
+            name: 'ci-evidence-source-${{ github.run_attempt }}',
+            path: '${{ runner.temp }}/ci-evidence-source/',
+            'if-no-files-found': 'error',
+            'retention-days': 14,
+          },
+        },
+      ],
+    },
     // Start immediately on hosted capacity: no Nix setup, downloads or compilation.
     'upgrade-impact': {
       name: 'upgrade-impact',
@@ -153,7 +197,7 @@ fi`,
     'namespace-capacity': {
       name: 'namespace-capacity',
       if: "github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group'",
-      'runs-on': `\${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('${JSON.stringify(linuxRunner).replaceAll('${{ github.run_id }}', '{0}')}', github.run_id)) }}`,
+      'runs-on': `\${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('${JSON.stringify(linuxRunner).replaceAll('${{ github.run_id }}', '{0}').replaceAll("${{ github.event_name == 'merge_group' && 1 || 3 }}", '{1}')}', github.run_id, github.event_name == 'merge_group' && 1 || 3)) }}`,
       'timeout-minutes': 120,
       permissions: { contents: 'read', actions: 'write' },
       defaults: { run: { shell: 'bash' } },
@@ -197,13 +241,14 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       name: 'genie-freshness',
       env: { CI_CACHE_DEV_SHELL: 'genie' },
       ...afterPickRunner,
-      'runs-on': supportingLinuxRunsOn,
+      'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
+      ...evidenceStepJob(),
       steps: [
-        ...commonSetupSteps.filter((step) => !('id' in step && step.id === 'cargo-cache')),
-        nixDevelopStep({ name: 'Check runner selection and generated files', flake: '.#genie', command: ['bash', '-c', 'python3 scripts/check-ci-runner-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-cache-audit-test && genie --check'] }),
-        { name: 'Save Nix outputs', if: "success() && env.CI_LOCAL_CACHES != '1'", run: 'bash scripts/ci-nix-cache save' },
-        ...buildSnapshotSave,
+        ...commonSetupSteps.filter((step) => !('id' in step && step.id === 'cargo-cache') && step !== buildSnapshotPrepare && step !== buildSnapshotRestore),
+        { ...nixDevelopStep({ name: 'Check license coverage, runner selection and generated files', flake: '.#genie', command: ['bash', 'scripts/ci-genie-freshness'] }), id: 'freshness' },
+        { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
+        ...evidenceStepSteps('genie-freshness', ['bash', 'scripts/ci-genie-freshness'], ['freshness']),
       ],
     },
     // Check the shared client and its iOS consumer before merge.
@@ -212,9 +257,11 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       // Keep generated-file validation ahead of its consumers.
       needs: ['pick-runner', 'genie-freshness'],
       if: "${{ !cancelled() && needs.genie-freshness.result == 'success' }}",
-      'runs-on': supportingLinuxRunsOn,
+      'runs-on': 'ubuntu-latest',
       'timeout-minutes': 10,
+      ...evidenceStepJob(),
       defaults: { run: { shell: 'bash' } },
+      env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
         // Node 24, as in the workspace shell; schema tests use its native TypeScript loading.
@@ -223,7 +270,7 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
           name: 'Fingerprint the locked dependencies',
           id: 'lockfiles',
           // ci1's Nix runner lacks the Node 20 helper used by GitHub's hashFiles expression.
-          run: `lockfiles_hash=$(sha256sum apps/ios/package-lock.json clients/typescript/st3-client/package-lock.json clients/typescript/st3-views/package-lock.json | sha256sum | cut -d ' ' -f1)
+          run: `lockfiles_hash=$(sha256sum pnpm-lock.yaml | cut -d ' ' -f1)
 printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         },
         {
@@ -231,30 +278,14 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           id: 'typescript-cache',
           uses: 'actions/cache@v5',
           with: {
-            path: 'apps/ios/node_modules\nclients/typescript/st3-client/node_modules\nclients/typescript/st3-views/node_modules',
-            key: 'typescript-client-${{ runner.os }}-node24.18.0-${{ steps.lockfiles.outputs.hash }}',
+            path: pnpmStoreEnv.pnpm_config_store_dir,
+            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}',
           },
         },
-        {
-          name: 'Install locked client dependencies',
-          if: "steps.typescript-cache.outputs.cache-hit != 'true'",
-          run: 'npm ci --prefix clients/typescript/st3-client --ignore-scripts --no-audit --no-fund',
-        },
-        {
-          name: 'Run client contracts, schemas and strict typechecks',
-          run: 'npm test --prefix clients/typescript/st3-client\nnpm run typecheck --prefix clients/typescript/st3-client',
-        },
-        {
-          name: 'Install locked view dependencies',
-          if: "steps.typescript-cache.outputs.cache-hit != 'true'",
-          run: 'npm ci --prefix clients/typescript/st3-views --ignore-scripts --no-audit --no-fund',
-        },
-        {
-          name: 'Install locked iOS dependencies',
-          if: "steps.typescript-cache.outputs.cache-hit != 'true'",
-          run: 'npm ci --prefix apps/ios --ignore-scripts --no-audit --no-fund',
-        },
-        { name: 'Check shared views, fixtures and iOS consumers', run: 'npm test --prefix clients/typescript/st3-views\nnpm run typecheck --prefix clients/typescript/st3-views\napps/ios/node_modules/.bin/tsc --noEmit -p apps/ios\nnpm test --prefix apps/ios' },
+        // Corepack provisions the root manifest's pnpm@12.7.0; the workspace forbids install scripts.
+        { name: 'Install the frozen workspace', id: 'install', env: pnpmStoreEnv, run: 'corepack enable\npnpm install --frozen-lockfile' },
+        { name: 'Check the client, shared views and iOS consumers', id: 'client', run: 'bash scripts/ci-typescript-client' },
+        ...evidenceStepSteps('typescript-client', ['bash', 'scripts/ci-typescript-client'], ['install', 'client']),
       ],
     },
     'linux-test-build': {
@@ -286,19 +317,19 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         ...buildSnapshotSave,
       ],
     },
-    // Two test partitions and the two supporting stages retain independent CPU capacity.
+    // Four merge partitions (two for other events) reuse the one producer archive.
     // `linux-gate` below is the single required check that collects them.
     'linux-tests': {
       ...linuxStageJob({
         name: 'linux-tests',
         stage: 'tests',
         setup: testArchiveConsumerSetup,
-        runsOn: linuxStageRunsOn,
+        runsOn: primaryTestRunsOn,
         // CI_RUN_ID keeps the messaging-fault evidence under target/messaging-faults and a failed
         // boot canary's evidence under target/boot-canaries.
-        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:1/2', CI_TEST_THREADS: '8' },
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: "${{ github.event_name == 'merge_group' && 'hash:1/4' || 'hash:1/2' }}", CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
-        before: [nixDevelopStep({ name: 'Prove both shards cover every selected test', command: ['python3', 'scripts/ci-test-partitions'] })],
+        before: [nixDevelopStep({ name: 'Prove shards form the complete selected inventory', command: ['python3', 'scripts/ci-test-partitions'] })],
       }),
       needs: [pickRunnerJobId, 'linux-test-build'],
       if: "${{ !cancelled() }}",
@@ -309,11 +340,31 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         stage: 'tests',
         runsOn: secondaryStageRunsOn,
         setup: testArchiveConsumerSetup,
-        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:2/2', CI_TEST_THREADS: '8' },
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: "${{ github.event_name == 'merge_group' && 'hash:2/4' || 'hash:2/2' }}", CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
       }),
       needs: [pickRunnerJobId, 'linux-test-build'],
       if: "${{ !cancelled() }}",
+    },
+    'linux-tests-shard-3': {
+      ...linuxStageJob({
+        name: 'linux-tests-shard-3', stage: 'tests', setup: testArchiveConsumerSetup,
+        runsOn: extraMergeTestRunsOn,
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:3/4', CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
+    },
+    'linux-tests-shard-4': {
+      ...linuxStageJob({
+        name: 'linux-tests-shard-4', stage: 'tests', setup: testArchiveConsumerSetup,
+        runsOn: extraMergeTestRunsOn,
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:4/4', CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
     },
     'linux-clippy': linuxStageJob({
       name: 'linux-clippy',
@@ -336,6 +387,8 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         runsOn: mailStageRunsOn,
         description: 'Require every harness to hold old mail across boot and reconnect',
         setup: testArchiveConsumerSetup,
+        // Restore shared fixtures, but keep main-upkeep as their single cache writer.
+        cacheSaveSetup: [nixCacheStep],
         env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
       }),
@@ -344,7 +397,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     },
     'linux-gate': {
       name: 'linux-gate',
-      needs: [pickRunnerJobId, 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries'],
+      needs: [pickRunnerJobId, 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
       // Aggregation needs no build caches and must not queue behind the work it summarizes.
@@ -354,12 +407,98 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         {
           name: 'Require every Linux stage to pass',
           // The stages only: pick-runner is skipped whenever ci1 is off.
-          env: { RESULTS: '${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}' },
-          run: `echo "stage results: $RESULTS"
+          env: { RESULTS: '${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}', EVENT: '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
+          run: `set -eu
+set -- $RESULTS
+[ "$#" = 7 ] || { echo "incomplete base-stage results"; exit 1; }
+if [ "$EVENT" = merge_group ]; then
+  set -- $MERGE_RESULTS
+  [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
+  RESULTS="$RESULTS $MERGE_RESULTS"
+else
+  [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
+fi
+echo "stage results: $RESULTS"
 for result in $RESULTS; do
   [ "$result" = success ] || exit 1
 done`,
         },
+      ],
+    },
+    // Signs what the aggregate gate knows, with the key of the `evidence-signing` environment. It is a
+    // separate job so the required `linux-gate` never depends on the environment, the key or the push:
+    // every step is fail-soft and a signing outage changes nothing about the gate. Forks never get the
+    // key. The signer scripts come from the BASE commit of the change, never from the tree under test.
+    'evidence-note-linux-gate': {
+      name: 'evidence-note-linux-gate',
+      needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries', ...evidenceStepNames],
+      // Only the merge queue and main sign; a pull request, even from this repository, never gets the key.
+      if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}",
+      'runs-on': 'ubuntu-latest',
+      environment: evidenceEnvironment,
+      permissions: { contents: 'write' },
+      'timeout-minutes': 15,
+      defaults: { run: { shell: 'bash' } },
+      env: {
+        EVIDENCE_PUSH_TOKEN: '${{ github.token }}',
+        PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        NEEDS_JSON: '${{ toJSON(needs) }}',
+      },
+      steps: [
+        // The tested commit with its whole history: a note's parent is that commit, and the server
+        // refuses a push from a shallow repository.
+        { name: 'Check out the tested commit', 'continue-on-error': true, uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        {
+          name: 'Take the signer scripts from the base commit',
+          id: 'base',
+          'continue-on-error': true,
+          env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+          run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet origin "$BASE_SHA"
+git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+        },
+        { name: 'May this job use the signing key?', id: 'guard', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard' },
+        {
+          name: 'Write the signer configuration and key',
+          id: 'configure',
+          if: "${{ steps.guard.outcome == 'success' }}",
+          'continue-on-error': true,
+          env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
+          run: `set -o pipefail
+python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+        },
+        {
+          name: 'Sign the linux-gate note',
+          id: 'sign',
+          if: "${{ steps.configure.outcome == 'success' }}",
+          'continue-on-error': true,
+          run: `helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+python3 "$helper" once linux-gate
+python3 "$helper" aggregate "$RUNNER_TEMP/gate-facts.json"
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \\
+  --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"`,
+        },
+        // The stage jobs' signed notes, written as packs by each stage's own signing steps.
+        {
+          name: 'Collect the stage notes',
+          if: "${{ steps.sign.outcome == 'success' }}",
+          'continue-on-error': true,
+          uses: 'actions/download-artifact@v4',
+          with: { pattern: 'evidence-note-*', path: '${{ runner.temp }}/evidence-notes/stages', 'merge-multiple': true },
+        },
+        {
+          name: 'Publish the notes that verify',
+          if: "${{ steps.sign.outcome == 'success' }}",
+          'continue-on-error': true,
+          env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+          run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
+  --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames].join(',')}" --remote origin`,
+        },
+        { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
       ],
     },
     // The cost check: SQLite work per daemon request on a small and a ten times larger generated
@@ -388,21 +527,25 @@ done`,
       if: "${{ !cancelled() }}",
       'runs-on': supportingLinuxRunsOn,
       'timeout-minutes': 60,
+      ...evidenceStepJob(),
       defaults: { run: { shell: 'bash' } },
       env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
       steps: [
-        ...testArchiveConsumerSetup,
-        { name: 'Probe KVM', run: kvmProbe },
+        // The VM's own warm cache also contains its driver; keep that primary entry.
+        ...testArchiveConsumerSetup.map((step: any) => step.id === 'nix-cache' ? nixCacheStep : step),
+        { name: 'Probe KVM', id: 'kvm', run: kvmProbe },
         {
           name: 'Build the NixOS VM test driver',
+          id: 'driver',
           run: `start=$SECONDS
 nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
 printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
         {
           name: 'Run all three systemd-scope tests in the VM',
+          id: 'vmtest',
           env: {
-            ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/st2.tar.zst',
+            ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
             ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
             ST_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
             ST_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
@@ -417,20 +560,27 @@ printf '| VM test driver total | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_ST
         // VM runs it with this st binary (nix/sekrets-vm.nix).
         {
           name: 'Build the sekrets VM test driver',
+          id: 'sekrets-driver',
           run: `start=$SECONDS
 nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
 printf '| sekrets VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
         {
           name: 'Run the sekrets gateway test in the VM',
+          id: 'sekrets-test',
           env: { ST_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}' },
           run: `start=$SECONDS
 mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
 "$RUNNER_TEMP/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/sekrets-vm-out"
 printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
-        { name: 'Save Nix outputs', if: "success() && env.CI_LOCAL_CACHES != '1'", run: 'bash scripts/ci-nix-cache save' },
+        { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
+        ...evidenceStepSteps('isolation-vm', ['isolation-vm', 'nixos-test-driver', 'transport-isolation-vm', 'sekrets-vm'], ['kvm', 'driver', 'vmtest', 'sekrets-driver', 'sekrets-test']),
       ],
     },
+    // Not yet a required check: the ruleset gains `fractal-web` after both PR and merge-group
+    // runs have emitted it successfully.
+    // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
+    ...fractalWebJobs,
   },
-}, {"pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing."}))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing."}))))

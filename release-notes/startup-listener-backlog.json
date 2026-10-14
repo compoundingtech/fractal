@@ -1,11 +1,32 @@
 {
   "version": 1,
-  "summary": "Queue local connections while the daemon initializes its store",
-  "replay": { "status": "none", "detail": "Canonical projection catch-up still completes before requests are accepted." },
-  "schema": { "status": "none", "detail": "No database schema or migration changes." },
-  "rules": { "status": "none", "detail": "No checkpoint rule changes or coordinated upgrade requirement." },
-  "compatibility": { "status": "none", "detail": "Both Unix listeners bind before store initialization with a requested backlog of 1024. HTTP requests wait until the existing initialization sequence finishes; client deadlines and protocols are unchanged." },
-  "downtime": { "status": "none", "detail": "The stop-to-bind window and existing stream disconnects remain. Early binding removes connection refusals during subsequent store initialization, within the kernel backlog and client deadline limits." },
-  "manual": { "status": "none", "detail": "No configuration or migration steps required." },
-  "recovery": { "status": "none", "detail": "No new persistent state. A failed startup closes its queued connections; existing binary swap-back behavior is unchanged." }
+  "summary": "Reserve daemon socket addresses during initialization without listening or queueing clients",
+  "replay": {
+    "status": "none",
+    "detail": "Canonical projection catch-up still completes before requests are accepted."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema or migration changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule changes or coordinated upgrade requirement."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Socket paths and discovery exist before store initialization, but listen and request acceptance remain after readiness. Startup clients retain connection refusal and the existing daemon-starting phase diagnostics. No queued initialization requests or client deadline changes. A per-address advisory lock protects bound-but-not-listening addresses and is retained during serving."
+  },
+  "downtime": {
+    "status": "unknown",
+    "detail": "Connection refusal and established-stream disconnects remain until initialization completes. Original early-listen connection-time measurements do not apply to this semantic port. No new startup latency or interruption budget is measured."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or migration steps required."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Each endpoint keeps a small reservation lock sidecar; close releases its advisory lock, and ordinary stopped-daemon uninstall removes the sidecars. Existing live-listener protection remains. No database migration or deployment rollback qualification is introduced."
+  }
 }
