@@ -184,7 +184,12 @@ send the existing `resync`/`error` frames, never inferred zero counts. Clients k
 behavior on older daemons.
 A daemon serves these counts from published rows. What no person changes (missions,
 working agents, machines) is computed once for every selection, at one cut, and again
-when the cut, the roster or the 30-second clock period changes. Each selection counts
+when the cut, the roster or the 30-second clock period changes. The machines they count
+are read again only when a claim about a host, or a run or generation that owns runtimes,
+arrives, when a runtime with new claims (other than its harness reports) starts on, stops
+on or moves to another host so that the set of runtime hosts changes, when operations
+conflict or fleet membership changes, and each clock period, when peers' replication
+successes are read again. Each selection counts
 its alerts from the published attention rows, the same rows its
 attention window shows. The row carries the shared counts' cut. A window that opens a
 new selection is served at once. Before the first publication, the window gets a

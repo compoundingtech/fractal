@@ -157,11 +157,7 @@ impl Store {
                 launch_id: None,
                 variant_id: None,
                 message_id: None,
-                answers: if answerable(&harness) {
-                    vec!["allow".into(), "deny".into()]
-                } else {
-                    Vec::new()
-                },
+                answers: prompt_answers(&harness),
                 conversation: Some(seat.clone()),
                 title: format!("{seat} is waiting for {what}"),
                 // Codex names what its request asks to do, not the call: that is the pending
@@ -173,6 +169,13 @@ impl Store {
                     )
                 } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
                     "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
+                } else if answerable(&harness) && subagent_prompt(&harness) {
+                    format!(
+                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (Ctrl+] in stui), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
+                        prompt.trim_start_matches(st_drivers::claude_prompts::SUBAGENT_PREFIX)
+                    )
+                } else if answerable(&harness) && ask == "question" {
+                    "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable(&harness) {
                     format!(
                         "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
@@ -1478,15 +1481,68 @@ fn native_prompt_gone_operation(observation: &str) -> String {
 /// request st could answer. The call's input is conversation content a client reads from the
 /// seat's conversation and shows beside the answers; it is never stored here. Other prompts are
 /// answered in the seat's terminal.
+///
+/// A Claude question (`AskUserQuestion`) is answered too: its hook returns the person's choices
+/// as the tool's answers (measured on Claude Code 2.1.296, multi-select included).
 fn answerable(harness: &Value) -> bool {
     let reason = harness["reason"].as_str().unwrap_or_default();
     harness["blocked_on"] == "human"
-        && harness["ask"] == "permission"
-        && match harness["driver"].as_str() {
-            Some("claude") => !reason.is_empty() && reason != "permissionRequest",
-            Some("codex") => matches!(reason, "commandExecution" | "fileChange" | "permissions"),
+        && match (harness["driver"].as_str(), harness["ask"].as_str()) {
+            (Some("claude"), Some("permission")) => {
+                !reason.is_empty() && reason != "permissionRequest"
+            }
+            (Some("claude"), Some("question")) => reason == "AskUserQuestion",
+            (Some("codex"), Some("permission")) => {
+                matches!(reason, "commandExecution" | "fileChange" | "permissions")
+            }
             _ => false,
         }
+}
+
+/// The answers a client may send to the prompt `harness` reports: `allow` or `deny` to a
+/// permission; to a question, `answer` (its choices, see [`question_answers`]) or `deny`. None
+/// when the prompt is answered in the terminal.
+fn prompt_answers(harness: &Value) -> Vec<String> {
+    if !answerable(harness) {
+        return Vec::new();
+    }
+    // A subagent's call is not in the seat's conversation, where a client shows the call beside
+    // an allow: st offers only deny for it, never an allow of a call the person cannot see.
+    if subagent_prompt(harness) {
+        return vec!["deny".into()];
+    }
+    let first = if harness["ask"] == "question" { "answer" } else { "allow" };
+    vec![first.into(), "deny".into()]
+}
+
+/// The most a question's choices may hold: a few indices, so a replicated record stays small.
+const QUESTION_ANSWERS_MAX_BYTES: usize = 1024;
+/// The most questions, and options per question, a choice may name.
+const QUESTION_INDEX_LIMIT: u64 = 64;
+
+/// A question's choices as a client sends them: a JSON object of each question's position in the
+/// pending `AskUserQuestion` call to the positions of the options chosen (several for a
+/// multi-select), such as `{"0":[1],"1":[0,2]}`. Positions only: the questions and labels are
+/// conversation content, which stays in the conversation; the waiting hook turns positions back
+/// into labels from the call it holds. A person's own words are given in the terminal.
+fn question_answers(answer: &str) -> Option<serde_json::Map<String, Value>> {
+    if answer.len() > QUESTION_ANSWERS_MAX_BYTES {
+        return None;
+    }
+    let Ok(Value::Object(answers)) = serde_json::from_str::<Value>(answer) else {
+        return None;
+    };
+    let index = |value: &Value| value.as_u64().filter(|index| *index < QUESTION_INDEX_LIMIT);
+    (!answers.is_empty()
+        && answers.iter().all(|(question, options)| {
+            question.parse::<u64>().is_ok_and(|question| question < QUESTION_INDEX_LIMIT)
+                && options.as_array().is_some_and(|options| {
+                    !options.is_empty()
+                        // Every position is in range and none repeats.
+                        && options.iter().filter_map(index).collect::<std::collections::BTreeSet<_>>().len() == options.len()
+                })
+        }))
+    .then_some(answers)
 }
 
 /// What a Codex approval request asks for, by the reason its observation names.
@@ -1499,6 +1555,15 @@ fn codex_approval_words(reason: &str) -> &'static str {
     }
 }
 
+/// Whether the prompt `harness` reports is a Claude subagent's: its call is not in the seat's
+/// conversation, so st answers it only with deny.
+fn subagent_prompt(harness: &Value) -> bool {
+    harness["driver"] == "claude"
+        && harness["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with(st_drivers::claude_prompts::SUBAGENT_PREFIX))
+}
+
 /// The idempotency key of the person's answer to the native prompt `observation` opened.
 fn native_prompt_answer_key(observation: &str) -> String {
     format!("native-prompt-answer:{observation}")
@@ -1509,11 +1574,19 @@ fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Op
     let operation = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(observation));
     Ok(connection
         .prepare_cached(
-            "SELECT json_extract(body, '$.fields.status') FROM claims INDEXED BY claims_operation_index
+            "SELECT json_extract(body, '$.fields.status'), json_extract(body, '$.fields.reason')
+               FROM claims INDEXED BY claims_operation_index
              WHERE json_extract(body, '$._operation.id') IS NOT NULL
                AND json_extract(body, '$._operation.id')=?1 LIMIT 1",
         )?
-        .query_row([operation], |row| row.get::<_, Option<String>>(0))
+        .query_row([operation], |row| {
+            let status = row.get::<_, Option<String>>(0)?;
+            // A question's answer is its choices, which the reason holds.
+            Ok(match status.as_deref() {
+                Some("answer") => row.get::<_, Option<String>>(1)?,
+                _ => status,
+            })
+        })
         .optional()?
         .flatten())
 }
@@ -1643,8 +1716,11 @@ impl Store {
         actor: &str,
     ) -> std::result::Result<ClaimRecord, St3Error> {
         let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
-        if !matches!(answer, "allow" | "deny") {
-            return Err(St3Error::new("invalid-answer", "answer allow or deny"));
+        if !matches!(answer, "allow" | "deny") && question_answers(answer).is_none() {
+            return Err(St3Error::new(
+                "invalid-answer",
+                "answer allow or deny, or a question's choices as a JSON object of question position to option positions",
+            ));
         }
         if self.agent_person(seat).map_err(internal)?.as_deref() != Some(actor) {
             return Err(St3Error::new(
@@ -1665,18 +1741,49 @@ impl Store {
                 "that prompt can only be answered in the seat's terminal",
             ));
         }
+        if answer == "allow" && subagent_prompt(&harness) {
+            return Err(St3Error::new(
+                "invalid-answer",
+                "a subagent's call is not shown in the seat's conversation: deny it here, or allow it in the terminal",
+            ));
+        }
+        // A question takes its choices or a refusal; a permission, allow or deny.
+        let question = harness["ask"] == "question";
+        let choices = (question && answer != "deny").then(|| question_answers(answer)).flatten();
+        let valid = if question {
+            answer == "deny" || choices.is_some()
+        } else {
+            matches!(answer, "allow" | "deny")
+        };
+        if !valid {
+            return Err(St3Error::new(
+                "invalid-answer",
+                if question {
+                    "answer this question with its choices, or deny it"
+                } else {
+                    "answer allow or deny"
+                },
+            ));
+        }
         let incarnation = harness["incarnation_id"].as_str().unwrap_or_default();
         let driver = harness["driver"].as_str().unwrap_or_default();
+        let mut fields = BTreeMap::from([
+            ("code".into(), Value::String("native-prompt-answered".into())),
+            ("status".into(), Value::String(answer.into())),
+            ("driver".into(), Value::String(driver.into())),
+            ("incarnation_id".into(), Value::String(incarnation.into())),
+        ]);
+        // A question's choices are positions, never the questions' or options' words: they ride
+        // as the reason, and the status says only that it was answered.
+        if let Some(choices) = choices {
+            fields.insert("status".into(), Value::String("answer".into()));
+            fields.insert("reason".into(), Value::Object(choices).to_string().into());
+        }
         self.append_claim(&ClaimInput {
             subject: seat.to_owned(),
             kind: "harness.diagnostic".into(),
             actor: Some(actor.to_owned()),
-            fields: BTreeMap::from([
-                ("code".into(), Value::String("native-prompt-answered".into())),
-                ("status".into(), Value::String(answer.into())),
-                ("driver".into(), Value::String(driver.into())),
-                ("incarnation_id".into(), Value::String(incarnation.into())),
-            ]),
+            fields,
             evidence: vec![claim.clone()],
             expected_subject: None,
             idempotency_key: Some(native_prompt_answer_key(&claim)),
