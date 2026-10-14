@@ -8,6 +8,8 @@ import sys
 import tempfile
 
 sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from evidence_test_support import tool_path  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 PUBLISH, WRAP, SIGN = ROOT / 'scripts/evidence-publish', ROOT / 'scripts/evidence-wrap', ROOT / 'scripts/evidence-sign'
 ENV = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
@@ -23,18 +25,6 @@ def git(repo, *args):
 def keygen(path, comment):
     subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', comment, '-f', str(path)], check=True)
     return path.with_suffix('.pub').read_text().split()
-
-
-def tool_path():
-    """Directories of the real git and ssh-keygen on this machine, as the signer's own path. A Nix
-    sandbox keeps them in /nix/store, outside the signer's fixed system directories."""
-    found = []
-    for tool in ('git', 'ssh-keygen'):
-        for directory in os.environ['PATH'].split(':'):
-            if 'recorder' not in directory and (Path(directory) / tool).exists():
-                found.append(directory)
-                break
-    return ':'.join(dict.fromkeys(found))
 
 
 with tempfile.TemporaryDirectory() as directory:

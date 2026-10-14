@@ -14,6 +14,8 @@ import sys
 import tempfile
 
 sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from evidence_test_support import tool_path  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WRAP, SIGN = ROOT / 'scripts/evidence-wrap', ROOT / 'scripts/evidence-sign'
 FIXTURES = ROOT / 'scripts/testdata/evidence/wrapper-note'
@@ -33,18 +35,6 @@ def git(repo, *args, stdin=None):
 def run(command, cwd, home, **extra):
     env = dict(ENV, HOME=str(home), EVIDENCE_SIGN_NOW=DATE, **extra)
     return subprocess.run(command, cwd=cwd, capture_output=True, env=env)
-
-
-def tool_path():
-    """Directories of the real git and ssh-keygen on this machine, as the signer's own path. A Nix
-    sandbox keeps them in /nix/store, outside the signer's fixed system directories."""
-    found = []
-    for tool in ('git', 'ssh-keygen'):
-        for directory in os.environ['PATH'].split(':'):
-            if 'recorder' not in directory and (Path(directory) / tool).exists():
-                found.append(directory)
-                break
-    return ':'.join(dict.fromkeys(found))
 
 
 def main(argv):
@@ -248,6 +238,49 @@ def main(argv):
         assert not marker.exists(), 'no program named by the caller\'s PATH, GIT_CONFIG_* or checkout configuration may run in the signer'
         for name in ('core.fsmonitor', 'core.hooksPath', 'core.pager', 'uploadpack.packObjectsHook', 'core.sshCommand', 'gpg.ssh.program'):
             git(repo, 'config', '--unset', name)
+        # The signer enforces the rules for its own tool path, wherever the configuration came from.
+        def sign_with_path(path_value, name):
+            h = tmp / f'path-home-{name}'
+            (h / '.config/st').mkdir(parents=True)
+            (h / '.config/st/evidence-sign.json').write_text(json.dumps(
+                {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / f'path-{name}.git'), 'path': path_value}))
+            return subprocess.run([sys.executable, str(SIGN)], cwd=repo, input=json.dumps(good).encode(), capture_output=True,
+                                  env=dict(ENV, HOME=str(h)))
+
+        assert sign_with_path(tool_path(), 'good').returncode == 0, 'a vetted path works'
+        writable = tmp / 'writable-tools'
+        writable.mkdir()
+        for tool in ('git', 'ssh-keygen'):
+            (writable / tool).symlink_to(next(str(Path(d) / tool) for d in tool_path().split(':') if (Path(d) / tool).exists()))
+        shm = Path('/dev/shm')
+        cases = {
+            'relative': 'bin',
+            'dotdot': tool_path().split(':')[0] + '/../' + Path(tool_path().split(':')[0]).name,
+            'empty segment': tool_path().split(':')[0].replace('/', '//', 1),
+            'empty entry': tool_path() + '::',
+            'under the temporary directory': str(writable),
+            'under HOME': str(home),
+        }
+        if shm.is_dir() and os.access(shm, os.W_OK):
+            shm_tools = shm / f'evidence-tools-{os.getpid()}'
+            shm_tools.mkdir()
+            try:
+                for tool in ('git', 'ssh-keygen'):
+                    (shm_tools / tool).symlink_to(next(str(Path(d) / tool) for d in tool_path().split(':') if (Path(d) / tool).exists()))
+                refused = sign_with_path(str(shm_tools), 'shm')
+                assert refused.returncode == 1 and b'writable by the user' in refused.stderr, refused.stderr
+            finally:
+                for tool in ('git', 'ssh-keygen'):
+                    (shm_tools / tool).unlink()
+                shm_tools.rmdir()
+        for label, value in cases.items():
+            refused = sign_with_path(value, label.replace(' ', '-'))
+            assert refused.returncode == 1 and b'refused' in refused.stderr, (label, refused.stderr)
+        # An attacker-chosen path that merely mentions a good one is refused as a whole.
+        mixed = sign_with_path(str(writable) + ':' + tool_path(), 'mixed')
+        assert mixed.returncode == 1, 'one bad directory refuses the whole configured path'
+        print('passed: the signer refuses a tool path that is relative, has . or .. or empty segments, lies under HOME or a temporary directory, or is writable by its user')
+
         print('passed: the signer accepts extra named inputs, and refuses extra keys, a wrong flake.lock hash, an unknown commit and malformed fields')
 
         if write_fixture:

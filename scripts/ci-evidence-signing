@@ -84,8 +84,10 @@ def configure(root):
     if tool_path:
         # Where this host keeps git and ssh-keygen when it is not in a standard system directory
         # (a Nix sandbox, for instance). The signer never uses the caller's PATH; this is its own.
-        if not all(part.startswith('/') for part in tool_path.split(':')):
-            raise Refused('EVIDENCE_TOOL_PATH must list absolute directories')
+        for directory in tool_path.split(':'):
+            segments = directory.split('/')[1:]
+            if not directory.startswith('/') or any(part in ('', '.', '..') for part in (segments[:-1] if segments[-1:] == [''] else segments)):
+                raise Refused('EVIDENCE_TOOL_PATH must list absolute directories without empty, . or .. segments')
         config['path'] = tool_path
     with os.fdopen(descriptor, 'w') as stream:
         json.dump(config, stream)

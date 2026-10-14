@@ -545,7 +545,7 @@ printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
           name: 'Run all three systemd-scope tests in the VM',
           id: 'vmtest',
           env: {
-            ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/st2.tar.zst',
+            ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
             ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
             ST_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
             ST_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',

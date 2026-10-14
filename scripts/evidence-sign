@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 sys.dont_write_bytecode = True
@@ -57,7 +58,54 @@ class Refused(Exception):
     pass
 
 
-def trusted_tools(path):
+def unsafe_directory(directory):
+    """Why a directory may not hold the tools the signer runs with the key in reach, or None.
+
+    Absolute, no empty, `.` or `..` segment; an existing directory; not under the caller's checkout, HOME
+    or a temporary directory (code under test writes there); and not writable by the user running the
+    signer, unless it is in the immutable Nix store.
+    """
+    if not directory.startswith('/'):
+        return 'not an absolute path'
+    segments = directory.split('/')[1:]
+    if segments and segments[-1] == '':
+        segments = segments[:-1]
+    if any(part in ('', '.', '..') for part in segments):
+        return 'has an empty, . or .. segment'
+    real = os.path.realpath(directory)
+    if not os.path.isdir(real):
+        return 'is not a directory'
+    writable_by_workspace = [Path.cwd(), Path.home(), Path(tempfile.gettempdir()), Path('/tmp'), Path('/var/tmp'),
+                             Path(os.environ.get('RUNNER_TEMP') or '/nonexistent'),
+                             Path(os.environ.get('GITHUB_WORKSPACE') or '/nonexistent')]
+    for root in writable_by_workspace:
+        for base in {root, root.resolve()}:
+            if real == str(base) or real.startswith(str(base).rstrip('/') + '/') or directory.startswith(str(base).rstrip('/') + '/'):
+                return f'is under {base}, where code under test can write'
+    if real.startswith('/nix/store/'):
+        return None
+    if os.access(real, os.W_OK):
+        return 'is writable by the user running the signer'
+    return None
+
+
+def checked_path(path, strict):
+    """The directories of `path` that pass unsafe_directory. A configured path must pass entirely;
+    the built-in default skips directories this host lacks or that are unsafe here."""
+    kept = []
+    for directory in path.split(':'):
+        reason = unsafe_directory(directory)
+        if reason is None:
+            kept.append(directory)
+        elif strict:
+            raise Refused(f'tool path directory {directory!r} {reason}')
+    if not kept:
+        raise Refused('no usable directory in the signer\'s own path')
+    return ':'.join(kept)
+
+
+def trusted_tools(path, strict=False):
+    path = checked_path(path, strict)
     for name in ('git', 'ssh-keygen'):
         found = shutil.which(name, path=path)
         if not found:
@@ -114,7 +162,7 @@ def main():
     config = json.loads((Path.home() / '.config/st/evidence-sign.json').read_text())
     if not {'signer', 'ssh_key', 'scratch_repo'} <= set(config) or set(config) - {'signer', 'ssh_key', 'scratch_repo', 'test_clock', 'path'}:
         raise Refused('configuration must have signer, ssh_key, scratch_repo (optionally path; for tests only test_clock)')
-    trusted_tools(config.get('path') or ':'.join(TRUSTED_PATH))
+    trusted_tools(config.get('path') or ':'.join(TRUSTED_PATH), strict=bool(config.get('path')))
     signer, key, scratch = config['signer'], Path(config['ssh_key']), Path(config['scratch_repo'])
     if not (re.fullmatch(r'\S+', signer) and key.is_absolute() and scratch.is_absolute()):
         raise Refused('invalid signer configuration')
