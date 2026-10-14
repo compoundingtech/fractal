@@ -137,6 +137,12 @@ const stepSkips: Record<string, { gates: string[]; skip: string }> = {
   'mail-redelivery-canaries': { gates: ['linux-gate', 'mail-redelivery-canaries'], skip: `${gateSkip('linux-gate')} || ${gateSkip('mail-redelivery-canaries')}` },
   'isolation-vm': { gates: ['isolation-vm'], skip: gateSkip('isolation-vm') },
 }
+// The aggregate's RESULTS are positional. Exactly the stages skipped at job level may report `skipped` under an
+// evidence skip (derived here from the same list that skips them); every other stage, `upgrade-impact` and the
+// canaries among them, must succeed. Positions after the base stages are the merge-only shards.
+const aggregateStages = ['linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries']
+const mergeShards = ['linux-tests-shard-3', 'linux-tests-shard-4']
+const skippablePositions = [...aggregateStages, ...mergeShards].flatMap((id, index) => (id === 'linux-test-build' || jobSkips[id] ? [index + 1] : []))
 const skipStepsWhen = (steps: readonly any[], rule: { gates: string[]; skip: string }) => [
   ...steps.map((step) =>
     String(step.uses ?? '').startsWith('actions/checkout') ? step : { ...step, if: step.if == null ? `!(${rule.skip})` : `(${bareCondition(step.if)}) && !(${rule.skip})` },
@@ -548,7 +554,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         {
           name: 'Require every Linux stage to pass',
           // The stages only: pick-runner is skipped whenever ci1 is off.
-          env: { GATE_SKIP: '${{ needs.evidence-gate-linux-gate.outputs.skip }}', RESULTS: '${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}', EVENT: '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
+          env: { GATE_SKIP: '${{ needs.evidence-gate-linux-gate.outputs.skip }}', RESULTS: aggregateStages.map((id) => `\${{ needs.${id}.result }}`).join(' '), EVENT: '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
           run: `set -eu
 set -- $RESULTS
 [ "$#" = 7 ] || { echo "incomplete base-stage results"; exit 1; }
@@ -560,11 +566,15 @@ else
   [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
 fi
 echo "stage results: $RESULTS (evidence skip: \${GATE_SKIP:-none})"
+position=0
 for result in $RESULTS; do
+  position=$((position + 1))
   [ "$result" = success ] && continue
-  # A stage the evidence gate skipped reports \`skipped\`; accepted only when this gate decided to skip,
-  # and never a failure or a cancellation.
-  [ "\${GATE_SKIP:-}" = true ] && [ "$result" = skipped ] && continue
+  # A stage the evidence gate skipped reports \`skipped\`: accepted only when this gate decided to skip, only
+  # in the positions of stages skipped at job level, and never for a failure or a cancellation.
+  if [ "\${GATE_SKIP:-}" = true ] && [ "$result" = skipped ]; then
+    case "$position" in ${skippablePositions.join('|')}) continue ;; esac
+  fi
   exit 1
 done`,
         },
