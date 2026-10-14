@@ -1,5 +1,5 @@
-//! The sync worker: who it dials and how it backs off, the exchange, heal and checkpoint
-//! adoption it runs with each peer, and the signed routes it answers on.
+//! The sync worker: who it dials and how it backs off, the exchange and checkpoint adoption it
+//! runs with each peer, and the signed routes it answers on.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -22,7 +22,7 @@ use tokio::sync::watch;
 
 use super::{
     Backend, CHECKPOINT_PATH, DEFLATE_MIN_BYTES, EXCHANGE_ENCODING, EXCHANGE_PATH, FleetAuth,
-    HEADER_SIGNATURE, HEAL_PATH, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES, PEER_API_VERSION,
+    HEADER_SIGNATURE, JOIN_PATH, MAX_EXCHANGE_BYTES, MAX_JOIN_BYTES, PEER_API_VERSION,
     PeerResponse, accepts_deflate, deflate, deflated, inflate,
 };
 use crate::fleet::transport::{
@@ -31,10 +31,7 @@ use crate::fleet::transport::{
     routes_from_endpoints, tailscale_addresses,
 };
 use crate::fleet::{Acceptance, FleetFile, FleetView, MemberKey, PeerConfig, Refusal, Sender};
-use crate::replication::{
-    InventoryCheckpoint, ReplicationExchange, ReplicationHealAnswer, ReplicationHealQuery,
-    ReplicationHealRequest, ReplicationHealStep, ReplicationInventory,
-};
+use crate::replication::{InventoryCheckpoint, ReplicationExchange, ReplicationInventory};
 use crate::store::{CheckpointManifest, CheckpointManifestPage, CheckpointManifestRequest};
 
 const REPLICATION_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -73,13 +70,6 @@ const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Recently working HTTP routes can return without any transport presence event. Probe
 /// briefly without exporting inventories or writing failures; long absences stay quiet.
 const PEER_PROBE_WINDOW: Duration = Duration::from_secs(5 * 60);
-
-/// A heal question can make the peer replay its graph from nothing, which takes 41 seconds on a
-/// 2 GB store and longer under load.
-const HEAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-
-/// Questions one heal asks before it gives up until the next.
-const HEAL_QUESTION_LIMIT: usize = 48;
 
 /// What every route on the peer listener shares: the store, this node, its fleet auth, and
 /// what it knows of the fleet. A runtime adds its own routes with this as their state.
@@ -406,7 +396,7 @@ impl WorkerConfig {
 }
 
 /// Keep `backend`'s store in step with the fleet until the process ends: dial every listening
-/// member, answer members that dial in, heal, adopt checkpoints, and redeem joins. Bump `wake`
+/// member, answer members that dial in, adopt checkpoints, and redeem joins. Bump `wake`
 /// whenever the store has something new to send. `routes` serve beside the sync routes on the
 /// same listener, with the same state.
 pub async fn run<B: Backend>(
@@ -988,7 +978,6 @@ async fn keep_fleet_view_current<B: Backend>(
 pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>) -> Router {
     Router::new()
         .route(EXCHANGE_PATH, post(receive_exchange))
-        .route(HEAL_PATH, post(receive_heal))
         .route(
             CHECKPOINT_PATH,
             post(receive_checkpoint_request).layer(DefaultBodyLimit::max(16_384)),
@@ -1268,16 +1257,12 @@ async fn dial_peer<B: Backend>(
             url,
         };
         match exchange(&http, &backend, &node, &peer, &auth, &fleet).await {
-            Ok((moved, heal_now)) => {
+            Ok(moved) => {
                 if is_http {
                     last_http_success = Some((peer.url.clone(), tokio::time::Instant::now()));
                 }
                 backoff = PeerBackoff::default();
                 must_send = false;
-                if heal_now {
-                    record_worker(&backend, &name, "heal", attempt_unix_ms, None).await;
-                    heal(&backend, &node, &peer, &auth, &fleet).await;
-                }
                 record_worker(&backend, &name, "idle", attempt_unix_ms, None).await;
                 if moved {
                     // One exchange carries a bounded batch. Keep going at once while envelopes
@@ -1785,78 +1770,6 @@ fn signed_overload<B>(state: &PeerState<B>, request_digest: &str) -> Response {
     }
 }
 
-async fn receive_heal<B: Backend>(
-    State(state): State<PeerState<B>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let body = if deflated(&headers) {
-        match inflate(&body) {
-            Ok(body) => Bytes::from(body),
-            Err(error) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("heal request body: {error:#}"),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        body
-    };
-    let sender = match state
-        .auth
-        .verify_sender(&headers, "POST", HEAL_PATH, &body, None, None)
-    {
-        Ok(sender) => sender,
-        Err(error) => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                format!("heal authentication failed: {error:#}"),
-            )
-                .into_response();
-        }
-    };
-    let request_digest = FleetAuth::body_digest(&body);
-    if let Err(refusal) = state.fleet.accept(&sender) {
-        return signed_refusal(&state, &request_digest, &refusal)
-            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-    }
-    state.fleet.note_activity(&sender.name);
-    let result = async {
-        let request: ReplicationHealRequest =
-            serde_json::from_slice(&body).context("decode the heal request")?;
-        anyhow::ensure!(
-            request.fleet_id == state.auth.fleet_id(),
-            "the peer belongs to another fleet"
-        );
-        let answer = state
-            .backend
-            .heal_answer(&sender.name, state.auth.fleet_id(), &request.query)
-            .await?;
-        if matches!(
-            answer,
-            ReplicationHealAnswer::Swapped { .. } | ReplicationHealAnswer::Replayed { .. }
-        ) {
-            state.backend.changed().await;
-        }
-        let response = signed_response_for(&state, HEAL_PATH, &request_digest, 0, answer)?;
-        deflate_response(response, accepts_deflate(&headers)).await
-    }
-    .await;
-    result.unwrap_or_else(|error| {
-        signed_error_response_for(
-            &state,
-            HEAL_PATH,
-            &request_digest,
-            0,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &format!("heal request failed: {error:#}"),
-        )
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-    })
-}
-
 /// Answer a member or config peer with one page of a checkpoint's manifest. It is authenticated
 /// exactly like an exchange, and the answer is signed for this path.
 async fn receive_checkpoint_request<B: Backend>(
@@ -2183,8 +2096,7 @@ pub fn signed_error_response_for<B: Backend>(
 }
 
 /// Run one exchange with `peer`: send this node's summary, take what the peer sends, push what
-/// it lacks, and adopt a checkpoint it advertises. Returns whether envelopes moved either way and
-/// whether a heal is due.
+/// it lacks, and adopt a checkpoint it advertises. Returns whether envelopes moved either way.
 pub async fn exchange<B: Backend>(
     http: &reqwest::Client,
     backend: &B,
@@ -2192,7 +2104,7 @@ pub async fn exchange<B: Backend>(
     peer: &PeerConfig,
     auth: &FleetAuth,
     fleet: &FleetContext,
-) -> Result<(bool, bool)> {
+) -> Result<bool> {
     let mut telemetry = super::telemetry::Round::new(&peer.name);
     let result = exchange_inner(http, backend, node, peer, auth, fleet, &mut telemetry).await;
     telemetry.finish(&result);
@@ -2207,101 +2119,89 @@ async fn exchange_inner<B: Backend>(
     auth: &FleetAuth,
     fleet: &FleetContext,
     telemetry: &mut super::telemetry::Round,
-) -> Result<(bool, bool)> {
-    let mut heal_now = false;
-    // One compact round, then at most one full-inventory round if the compact prefix
-    // cannot make progress. Payloadless checkpoint identities can differ indefinitely.
-    for full_inventory in [false, true] {
-        let first = backend
-            .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+) -> Result<bool> {
+    // One compact round. Each side lists the ranges that differ a few at a time, from a different
+    // range on each answer, so successive rounds compare every range without either side ever
+    // sending its whole inventory (a million identities, 228 MB, on a busy fleet). Ranges that
+    // differ only by payloadless checkpoint identities never settle this way; checkpoint-lineage
+    // reconciliation, not more envelope requests, settles those.
+    let first = backend
+        .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+        .await?
+        .exchange;
+    let own_checkpoint = first.inventory.checkpoint.clone();
+    let query = ReplicationExchange {
+        envelopes: Vec::new(),
+        ..first
+    };
+    let started = std::time::Instant::now();
+    let (remote, peer_inflates) =
+        post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+    let round_trip = started.elapsed();
+    let different = remote.inventory.digest != query.inventory.digest;
+    let received = backend
+        .receive(&peer.name, auth.fleet_id(), &remote, Some(round_trip))
+        .await?;
+    telemetry.pull(received.receipt.received);
+    // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
+    // or keeps being sent, envelopes that are never stored must not keep the worker busy.
+    let pulled = received.receipt.received != 0;
+    if received.changed {
+        backend.changed().await;
+    }
+    let mut pushed = false;
+    let mut pulled_follow_up = false;
+    // A follow-up also carries the signatures the peer asked for, even when both sides hold
+    // the same envelopes.
+    if different || !remote.signature_requests.is_empty() {
+        let push = backend
+            .export(
+                auth.fleet_id(),
+                &remote.inventory,
+                false,
+                &remote.signature_requests,
+            )
             .await?
             .exchange;
-        let own_checkpoint = first.inventory.checkpoint.clone();
-        let mut query = ReplicationExchange {
-            envelopes: Vec::new(),
-            ..first
-        };
-        if full_inventory {
-            // Keep the digest: an empty listing is not proof of an empty inventory.
-            // Existing peers answer a request without buckets with their complete inventory.
-            query.inventory.buckets.clear();
-        }
         let started = std::time::Instant::now();
-        let (remote, peer_inflates) =
-            post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+        // A peer that says it takes compressed requests gets a large push compressed.
+        let (response, _) =
+            post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
         let round_trip = started.elapsed();
-        let different = remote.inventory.digest != query.inventory.digest;
+        // The peer stores a push before it answers, so its inventory moved if the push landed.
+        pushed =
+            !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
+        telemetry.push(push.envelopes.len(), pushed);
         let received = backend
-            .receive(&peer.name, auth.fleet_id(), &remote, Some(round_trip))
+            .receive(&peer.name, auth.fleet_id(), &response, Some(round_trip))
             .await?;
         telemetry.pull(received.receipt.received);
-        // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
-        // or keeps being sent, envelopes that are never stored must not keep the worker busy.
-        let pulled = received.receipt.received != 0;
-        heal_now |= received.receipt.heal;
+        pulled_follow_up = received.receipt.received != 0;
         if received.changed {
             backend.changed().await;
         }
-        let mut pushed = false;
-        let mut pulled_follow_up = false;
-        // A follow-up also carries the signatures the peer asked for, even when both sides hold
-        // the same envelopes.
-        if different || !remote.signature_requests.is_empty() {
-            let push = backend
-                .export(
-                    auth.fleet_id(),
-                    &remote.inventory,
-                    false,
-                    &remote.signature_requests,
-                )
-                .await?
-                .exchange;
-            let started = std::time::Instant::now();
-            // A peer that says it takes compressed requests gets a large push compressed.
-            let (response, _) =
-                post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
-            let round_trip = started.elapsed();
-            // The peer stores a push before it answers, so its inventory moved if the push landed.
-            pushed =
-                !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
-            telemetry.push(push.envelopes.len(), pushed);
-            let received = backend
-                .receive(&peer.name, auth.fleet_id(), &response, Some(round_trip))
-                .await?;
-            telemetry.pull(received.receipt.received);
-            pulled_follow_up = received.receipt.received != 0;
-            heal_now |= received.receipt.heal;
-            if received.changed {
-                backend.changed().await;
-            }
-        }
-        let adopted = match &remote.inventory.checkpoint {
-            Some(advertised) => {
-                adopt_advertised_checkpoint(
-                    http,
-                    backend,
-                    node,
-                    peer,
-                    auth,
-                    fleet,
-                    own_checkpoint.as_ref(),
-                    advertised,
-                )
-                .await
-            }
-            None => false,
-        };
-        if adopted {
-            backend.changed().await;
-        }
-        let progressed = pulled || pulled_follow_up || pushed || adopted;
-        if progressed || !different || remote.inventory.buckets.is_empty() {
-            return Ok((progressed, heal_now));
-        }
     }
-    // A full comparison can still differ only by tombstones. Let the worker rest;
-    // checkpoint-lineage reconciliation, not more envelope requests, must settle those.
-    Ok((false, heal_now))
+    let adopted = match &remote.inventory.checkpoint {
+        Some(advertised) => {
+            adopt_advertised_checkpoint(
+                http,
+                backend,
+                node,
+                peer,
+                auth,
+                fleet,
+                own_checkpoint.as_ref(),
+                advertised,
+            )
+            .await
+        }
+        None => false,
+    };
+    if adopted {
+        backend.changed().await;
+    }
+    let progressed = pulled || pulled_follow_up || pushed || adopted;
+    Ok(progressed)
 }
 
 /// When an adoption last failed, by this node and the checkpoint's drop digest, so a manifest
@@ -2386,69 +2286,6 @@ async fn adopt_advertised_checkpoint<B: Backend>(
             false
         }
     }
-}
-
-/// Heal with one peer: carry each question the main daemon asks to the peer, and each answer
-/// back, until the main daemon reports the heal. A peer that cannot be asked ends the heal with
-/// the reason, which the main daemon reports.
-pub async fn heal<B: Backend>(
-    backend: &B,
-    node: &str,
-    peer: &PeerConfig,
-    auth: &FleetAuth,
-    fleet: &FleetContext,
-) {
-    let mut telemetry = super::telemetry::Heal::new(&peer.name);
-    heal_inner(backend, node, peer, auth, fleet, &mut telemetry).await;
-    telemetry.finish();
-}
-
-async fn heal_inner<B: Backend>(
-    backend: &B,
-    node: &str,
-    peer: &PeerConfig,
-    auth: &FleetAuth,
-    fleet: &FleetContext,
-    telemetry: &mut super::telemetry::Heal,
-) {
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(HEAL_TIMEOUT)
-        .build()
-        .expect("the heal HTTP client configuration is valid");
-    let mut query = ReplicationHealQuery::Ranges;
-    for _ in 0..HEAL_QUESTION_LIMIT {
-        telemetry.question();
-        let request = ReplicationHealRequest {
-            fleet_id: auth.fleet_id().to_owned(),
-            query,
-        };
-        let answer = match post_signed_to::<_, ReplicationHealAnswer>(
-            &http, peer, node, auth, fleet, HEAL_PATH, &request, true,
-        )
-        .await
-        {
-            Ok((answer, _)) => answer,
-            Err(error) => {
-                telemetry.error(&error);
-                ReplicationHealAnswer::Failed {
-                    message: format!("{} could not answer: {error:#}", peer.name),
-                }
-            }
-        };
-        match backend.heal_next(&peer.name, answer).await {
-            Ok(ReplicationHealStep::Ask { query: next }) => query = next,
-            Ok(ReplicationHealStep::Done { report }) => {
-                telemetry.complete(&report);
-                break;
-            }
-            Err(error) => {
-                telemetry.error(&error);
-                break;
-            }
-        }
-    }
-    backend.changed().await;
 }
 
 #[derive(Debug)]

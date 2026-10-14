@@ -117,6 +117,44 @@ pub fn supervise_test() -> bool {
     false
 }
 
+/// The guardian captures this root after reaping its writers, even after SIGKILL.
+/// Runtime roots stay short for Unix sockets; only diagnostics go in the CI artifact tree.
+pub fn evidence_tempdir() -> tempfile::TempDir {
+    use std::io::Write as _;
+
+    let mut root = tempfile::Builder::new()
+        .prefix("restart-")
+        .tempdir()
+        .unwrap();
+    let Some(manifest) = std::env::var_os("SMALLTALK_TEST_EVIDENCE_MANIFEST") else {
+        return root;
+    };
+    let artifacts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/boot-canaries");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let thread = std::thread::current();
+    let name = thread.name().unwrap_or("daemon-restart").replace("::", "-");
+    let evidence = tempfile::Builder::new()
+        .prefix(&format!("{name}-"))
+        .tempdir_in(artifacts)
+        .unwrap()
+        .keep()
+        .join("evidence");
+    std::fs::create_dir_all(&evidence).unwrap();
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(manifest)
+        .unwrap();
+    let mut registration = serde_json::to_vec(&serde_json::json!({
+        "root": root.path(), "evidence": evidence,
+    }))
+    .unwrap();
+    registration.push(b'\n');
+    journal.write_all(&registration).unwrap();
+    root.disable_cleanup(true);
+    eprintln!("daemon-process evidence: {}", evidence.display());
+    root
+}
+
 /// Git for throwaway repositories. Keep this on the command, never in the runner environment,
 /// so real repository commits still obey the host's identity, hook and signing policy.
 pub fn git() -> Command {
