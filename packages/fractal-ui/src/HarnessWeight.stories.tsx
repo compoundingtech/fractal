@@ -69,6 +69,26 @@ export const UnsupportedDark: Story = {
 }
 export const UnsupportedLight: Story = { ...UnsupportedDark, args: { scheme: 'light' } }
 
+/** Native jobs keep unknown and cancellation distinct from success at both weights. */
+export const JobOutcomesDark: Story = {
+  render: ({ scheme }) => <section data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    {variants.map(({ weight, name }) => <section key={weight} aria-label={name} {...stylex.props(styles.column)}>
+      <h2 {...stylex.props(styles.title)}>{name}</h2>
+      {(['running', 'completed', 'failed', 'cancelled', 'unknown'] as const).map(state => <HarnessNotice key={state} weight={weight} item={{
+        _tag: 'Event', id: `job-outcome/${weight}/${state}`, kind: 'background-job', title: `Background job ${state}`, text: 'Native job', sender: { kind: 'harness', label: 'OMP' }, data: {},
+        notice: { _tag: 'BackgroundJob', jobId: state, state, payload: '', raw: '' },
+      }} />)}
+    </section>)}
+  </section>,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    for (const state of ['running', 'completed', 'failed', 'cancelled', 'unknown']) {
+      await expect(canvas.getAllByTestId('harness-kind').filter(node => node.textContent === state)).toHaveLength(2)
+    }
+  },
+}
+export const JobOutcomesLight: Story = { ...JobOutcomesDark, args: { scheme: 'light' } }
+
 const styles = stylex.create({
   root: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(22rem, 1fr))', gap: s.section, minHeight: '100vh', padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
   column: { display: 'flex', flexDirection: 'column', gap: s.lg, minWidth: 0 },

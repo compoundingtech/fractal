@@ -91,6 +91,21 @@ for (const adopted of [true, false]) test(`Transcript renders an explicit unsupp
     if (adopted) assert.equal(container.querySelector('[data-item-kind=Unsupported]').dataset.testid, 'transcript-message')
   } finally { await act(async () => root.unmount()); container.remove() }
 })
+for (const scheme of ['dark', 'light']) test(`${scheme} background jobs label each actual outcome`, async () => {
+  const container = document.createElement('section'); document.body.append(container)
+  Object.assign(container, sx.props(...baselineTheme, scheme === 'light' && lightTheme))
+  const root = createRoot(container)
+  try {
+    for (const state of ['running', 'completed', 'failed', 'cancelled', 'unknown']) {
+      const item = { ...harnessNoticeExamples.find(item => item.notice._tag === 'BackgroundJob'), title: `Background job ${state}` }
+      item.notice = { ...item.notice, state, payload: '', raw: '' }
+      await act(async () => root.render(React.createElement(HarnessNotice, { item })))
+      assert.equal(container.querySelector('[data-testid=harness-kind]').textContent, state)
+      assert.match(container.querySelector('[data-testid=harness-notice]').textContent, new RegExp(`Background job ${state}`))
+      assert.equal(container.querySelector('button').getAttribute('aria-expanded'), 'false')
+    }
+  } finally { await act(async () => root.unmount()); container.remove() }
+})
 
 after(async () => { await server.close(); dom.window.close(); for (const [name, descriptor] of saved) { if (descriptor === undefined) Reflect.deleteProperty(globalThis, name); else Object.defineProperty(globalThis, name, descriptor) } })
 for (const scheme of ['dark', 'light']) test(`curated ${scheme} harness cards disclose real Markdown with keyboard semantics`, async () => {

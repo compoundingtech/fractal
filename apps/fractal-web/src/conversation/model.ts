@@ -103,7 +103,7 @@ export const HarnessNotice = Schema.TaggedUnion({
     payload: Schema.String, raw: Schema.String,
   },
   BackgroundJob: {
-    jobId: Schema.String, label: Schema.optional(Schema.String), state: Schema.Literals(['completed', 'failed']),
+    jobId: Schema.String, label: Schema.optional(Schema.String), state: Schema.Literals(['running', 'completed', 'failed', 'cancelled', 'unknown']),
     duration: Schema.optional(Schema.String),
     payload: Schema.String, raw: Schema.String,
   },

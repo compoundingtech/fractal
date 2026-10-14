@@ -28,7 +28,7 @@ export type NoticeKind = 'error' | 'redaction' | 'truncation' | 'event' | 'unkno
 export type HarnessNotice =
   | { readonly _tag: 'SubagentResult'; readonly taskId: string; readonly agent: string; readonly status: string; readonly duration: string; readonly payload: string; readonly raw: string; readonly lines?: number; readonly size?: string; readonly fullOutput?: string; readonly abortReason?: string; readonly error?: string; readonly mergeSummary?: string; readonly followUp?: string }
   | { readonly _tag: 'Irc'; readonly from: string; readonly to?: string; readonly replyTo?: string; readonly payload: string; readonly raw: string }
-  | { readonly _tag: 'BackgroundJob'; readonly jobId: string; readonly label?: string; readonly state: 'completed' | 'failed'; readonly duration?: string; readonly payload: string; readonly raw: string }
+  | { readonly _tag: 'BackgroundJob'; readonly jobId: string; readonly label?: string; readonly state: 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown'; readonly duration?: string; readonly payload: string; readonly raw: string }
   | { readonly _tag: 'Compaction'; readonly payload: string; readonly raw: string }
   | { readonly _tag: 'Interjection'; readonly from: string; readonly to?: string; readonly payload: string; readonly raw: string }
   | { readonly _tag: 'SkillInvocation'; readonly skill: string; readonly by: string; readonly payload: string; readonly raw: string }

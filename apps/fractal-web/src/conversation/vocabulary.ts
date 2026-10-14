@@ -1,6 +1,6 @@
 import type { TimelineBlock, TimelineEntry, TimelineView, UnknownCase } from '@smalltalk/st3-client/schema'
 import { Match } from 'effect'
-import type { ConversationItem } from './model.ts'
+import type { ConversationItem, HarnessNotice } from './model.ts'
 import { q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 
 export type Equals<TA, TB> = (<T>() => T extends TA ? 1 : 2) extends (<T>() => T extends TB ? 1 : 2) ? true : false
@@ -38,21 +38,37 @@ const item = (value: ConversationItem): ViewMeaning => ({ _tag: 'Item', item: va
 const quiet = (ctx: ViewContext, text: string): ViewMeaning => item({ _tag: 'Notice', id: ctx.id, at: ctx.at, kind: 'event', text })
 const stopgap = (ctx: ViewContext) => q101OmpEnvelopeStopgap({ id: ctx.id, at: ctx.at, role: 'system', text: ctx.text })
 const sender = (ctx: ViewContext) => ({ kind: 'harness', label: ctx.harness } as const)
+type JobOutcome = Extract<HarnessNotice, { readonly _tag: 'BackgroundJob' }>['state']
+const jobOutcome = (job: ViewOf<'job'>['jobs'][number]): JobOutcome => {
+  if (job.state === 'running' || job.state === 'cancelled' || job.state === 'unknown') return job.state
+  if (job.state === 'failed' || /^failed \(exit -?\d+\)$/.test(job.state ?? '') || (job.exit_code !== undefined && job.exit_code !== 0)) return 'failed'
+  return job.state === 'completed' ? 'completed' : 'unknown'
+}
 export const viewCases = {
   bash: tool, edit: tool, write: tool, read: tool, search: tool, todo: tool, ask: tool, task: tool, hub: tool, eval: tool, generic: tool,
   tool_start: drop, credential_pin: drop,
   job: (view, ctx) => {
-    const parsed = stopgap(ctx)
-    if (parsed?._tag === 'Event' && (parsed.notice?._tag === 'SubagentResult' || parsed.notice?._tag === 'BackgroundJob')) return item(parsed)
     const job = view.jobs[0]
     if (view.jobs.length === 1 && job !== undefined) {
-      const failed = job.state === 'failed' || (job.exit_code !== undefined && job.exit_code !== 0)
-      return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title: `Background job ${failed ? 'failed' : 'completed'}`, text: job.name ?? job.id, sender: sender(ctx), data: {}, notice: {
-        _tag: 'BackgroundJob', jobId: job.id, ...(job.name === undefined ? {} : { label: job.name }), state: failed ? 'failed' : 'completed',
+      const state = jobOutcome(job)
+      const parsed = stopgap(ctx)
+      // Legacy payloads enrich only the same job and outcome; native facts remain authoritative.
+      if (parsed?._tag === 'Event' && ((parsed.notice?._tag === 'BackgroundJob' && parsed.notice.jobId === job.id && parsed.notice.state === state)
+        || (parsed.notice?._tag === 'SubagentResult' && parsed.notice.taskId === job.id && parsed.notice.status === job.state && jobOutcome({ id: job.id, state: parsed.notice.status }) === state))) return item(parsed)
+      const outcome = state === 'failed' && /^failed \(exit -?\d+\)$/.test(job.state ?? '') ? job.state : state
+      return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title: `Background job ${outcome}`, text: job.name ?? job.id, sender: sender(ctx), data: {}, notice: {
+        _tag: 'BackgroundJob', jobId: job.id, ...(job.name === undefined ? {} : { label: job.name }), state,
         ...(job.duration_ms === undefined ? {} : { duration: `${job.duration_ms} ms` }), payload: '', raw: '',
       } })
     }
-    return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title: `${view.jobs.length} background jobs completed`, text: view.jobs.map(job => job.name ?? job.id).join('\n'), sender: sender(ctx), data: {} })
+    const counts = new Map<JobOutcome, number>()
+    for (const job of view.jobs) {
+      const state = jobOutcome(job)
+      counts.set(state, (counts.get(state) ?? 0) + 1)
+    }
+    const summary = [...counts].map(([state, count]) => `${count} ${state}`).join(', ')
+    const title = counts.size === 1 ? `${view.jobs.length} background jobs ${counts.keys().next().value}` : `${view.jobs.length} background jobs${summary === '' ? '' : ` · ${summary}`}`
+    return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title, text: view.jobs.map(job => job.name ?? job.id).join('\n'), sender: sender(ctx), data: {} })
   },
   irc: (view, ctx) => {
     const parsed = stopgap(ctx)

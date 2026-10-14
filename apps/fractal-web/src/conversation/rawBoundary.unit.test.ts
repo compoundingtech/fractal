@@ -5,6 +5,7 @@ import { LiveTimeline } from './fromTimeline.ts'
 import { inspectPreview } from './inspect.ts'
 import { degradedCounter, unsupportedCounter } from './telemetry.ts'
 import { prepareTranscriptTurns } from '../web/conversationTranscript.ts'
+import { viewCases, type ViewOf } from './vocabulary.ts'
 
 const block = (kind: string, fields: object = {}) => ({ id: `block/${kind}`, kind, source_type: 'omp', payload: {}, ...fields })
 const entry = (blocks: readonly unknown[], fields: object = {}) => ({ id: 'timeline-entry/raw/1', sequence: 1, revision: 1, final: true, role: 'system', timestamp: '2026-10-12T12:00:00Z', type: 'content', body: { text: '[omp raw]\n{"raw":{}}', media_type: 'text/plain', blocks }, ...fields })
@@ -101,6 +102,60 @@ describe('native closed transcript boundary', () => {
   })
   it('lists multiple jobs without copying the envelope', () => {
     expect(project(entry([block('job', { view: { type: 'job', jobs: [{ id: 'a', name: 'Alpha', state: 'completed' }, { id: 'b', name: 'Beta', state: 'completed' }] } })]))).toMatchObject([{ _tag: 'Event', title: '2 background jobs completed', text: 'Alpha\nBeta' }])
+  })
+  it.each([
+    ['unknown', undefined, 'unknown', 'unknown'],
+    ['cancelled', undefined, 'cancelled', 'cancelled'],
+    ['failed (exit 2)', undefined, 'failed', 'failed (exit 2)'],
+    ['running', undefined, 'running', 'running'],
+    ['completed', undefined, 'completed', 'completed'],
+    ['failed', undefined, 'failed', 'failed'],
+    ['completed', 0, 'completed', 'completed'],
+    ['completed', 2, 'failed', 'failed'],
+    ['failed', 0, 'failed', 'failed'],
+    ['failed (exit 2)', 0, 'failed', 'failed (exit 2)'],
+    ['running', 0, 'running', 'running'],
+    ['running', 2, 'running', 'running'],
+    ['cancelled', 0, 'cancelled', 'cancelled'],
+    ['cancelled', 2, 'cancelled', 'cancelled'],
+    ['unknown', 0, 'unknown', 'unknown'],
+    ['unknown', 2, 'unknown', 'unknown'],
+    ['future-state', 0, 'unknown', 'unknown'],
+  ])('preserves native job outcome %s / exit %s without inferring success', (state, exit_code, outcome, title) => {
+    const job = { id: 'j', name: 'Native job', duration_ms: 123, state, ...(exit_code === undefined ? {} : { exit_code }) }
+    expect(viewCases.job({ type: 'job', jobs: [job] }, { id: 'native/job', at: '2026-10-14T13:00:00Z', text: '', harness: 'omp' })).toMatchObject({
+      _tag: 'Item', item: { _tag: 'Event', title: `Background job ${title}`, text: 'Native job', notice: { _tag: 'BackgroundJob', jobId: 'j', state: outcome, duration: '123 ms', payload: '', raw: '' } },
+    })
+    expect(project(entry([block('job', { view: { type: 'job', jobs: [job] } })]))).toMatchObject([{ _tag: 'Event', title: `Background job ${title}`, notice: { state: outcome, payload: '', raw: '' } }])
+  })
+  it.each([
+    [[{ id: 'j', state: 'failed' }, { id: 'k', state: 'completed' }], '2 background jobs · 1 failed, 1 completed'],
+    [[{ id: 'j', state: 'unknown' }, { id: 'k', state: 'cancelled' }, { id: 'l', state: 'running' }], '3 background jobs · 1 unknown, 1 cancelled, 1 running'],
+    [[{ id: 'j', state: 'failed (exit 2)' }, { id: 'k', state: 'failed' }], '2 background jobs failed'],
+    [[], '0 background jobs'],
+  ] satisfies readonly (readonly [ViewOf<'job'>['jobs'], string])[])('summarizes every native job outcome', (jobs, title) => {
+    expect(viewCases.job({ type: 'job', jobs }, { id: 'native/jobs', at: '2026-10-14T13:00:00Z', text: '', harness: 'omp' })).toMatchObject({
+      _tag: 'Item', item: { _tag: 'Event', title, text: jobs.map(job => job.id).join('\n') },
+    })
+  })
+  it.each(['unknown', 'cancelled', 'running', 'failed', 'failed (exit 2)'])('does not let a completed legacy envelope override native %s', state => {
+    const text = '<system-notice>\nBackground job j has completed. Resume your work using the result below.\nLEGACY_PAYLOAD\n</system-notice>'
+    expect(viewCases.job({ type: 'job', jobs: [{ id: 'j', state }] }, { id: 'native/job', at: '2026-10-14T13:00:00Z', text, harness: 'omp' })).toMatchObject({
+      _tag: 'Item', item: { _tag: 'Event', title: `Background job ${state}`, text: 'j', notice: { payload: '', raw: '' } },
+    })
+  })
+  it('enriches a legacy job only when native identity and outcome match', () => {
+    const text = '<system-notice>\nBackground job j has completed. Resume your work using the result below.\nLEGACY_PAYLOAD\n</system-notice>'
+    const ctx = { id: 'native/job', at: '2026-10-14T13:00:00Z', text, harness: 'omp' }
+    expect(viewCases.job({ type: 'job', jobs: [{ id: 'j', state: 'completed' }] }, ctx)).toMatchObject({ _tag: 'Item', item: { notice: { jobId: 'j', state: 'completed', payload: 'LEGACY_PAYLOAD' } } })
+    expect(viewCases.job({ type: 'job', jobs: [{ id: 'other', state: 'completed' }] }, ctx)).toMatchObject({ _tag: 'Item', item: { text: 'other', notice: { jobId: 'other', state: 'completed', payload: '', raw: '' } } })
+    expect(viewCases.job({ type: 'job', jobs: [{ id: 'j', state: 'failed' }, { id: 'k', state: 'completed' }] }, ctx)).toMatchObject({ _tag: 'Item', item: { title: '2 background jobs · 1 failed, 1 completed', text: 'j\nk' } })
+  })
+  it.each(['unknown', 'failed', 'cancelled'])('does not let a completed task envelope override native %s', state => {
+    const text = '<task-result id="j" agent="task" status="completed" duration="1s">\n<output>\nLEGACY_PAYLOAD\n</output>\n</task-result>'
+    expect(viewCases.job({ type: 'job', jobs: [{ id: 'j', state }] }, { id: 'native/job', at: '2026-10-14T13:00:00Z', text, harness: 'omp' })).toMatchObject({
+      _tag: 'Item', item: { _tag: 'Event', title: `Background job ${state}`, notice: { _tag: 'BackgroundJob', state, payload: '', raw: '' } },
+    })
   })
   it('marks unsupported native and injected kinds, even with system events hidden', () => {
     for (const [kind, source, reason] of [['unknown', 'model_usage', 'unrecognized-record'], ['future-kind', 'future', 'unknown-block-kind']]) {
