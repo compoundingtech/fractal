@@ -866,6 +866,7 @@ pub(crate) fn parse_declared_resource(
             reason,
         },
         Some(DesiredSubject {
+            accountable: None,
             subject,
             kind: "resource".into(),
             desired: canonical_node(&resource)?,

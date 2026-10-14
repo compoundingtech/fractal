@@ -230,6 +230,8 @@ pub(crate) fn backfill_step(
         run,
         profile: None,
         wait: None,
+        holder: smallclaims::windows::holds::Holder::current(),
+        enqueued: std::time::Instant::now(),
         done,
     })
     .map_err(|_| "the writer queue is closed".to_owned())?;
