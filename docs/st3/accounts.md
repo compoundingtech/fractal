@@ -6,7 +6,7 @@ both: an account has an owner, a seat binds an account or a pool of its owner's 
 at its limit moves to another account in its pool.
 
 A fleet that declares no account is unchanged. A seat whose harness block binds nothing runs on the
-harness's default login, exactly as before.
+harness's default login.
 
 ## Declare an account
 
@@ -72,6 +72,17 @@ agent "ada/builder" {
 }
 ```
 
+An agent declared inside a mission or step binds an account the same way, so a mission can run on
+an allowance that is about to reset. Only the `account` declaration stays at the root: an `account`
+that declares one inside a mission or step is refused with `account-inside-mission`.
+
+A binding is also an authority fact, not only a choice of allowance. A bound account's owner (or a
+pool's person) decides whose person the agent is: asks the agent raises and its own-ask authority
+are attributed to that person ahead of the declaration author or the mission requester. A mission
+agent that binds another person's account is therefore treated as acting for that person, exactly
+as a top-level seat is. st checks that the account exists, belongs to the harness's provider and
+has a login on the host; it does not check that the declarer owns it.
+
 Only `claude` and `codex` harness blocks take a binding. st sets the harness's login variable and
 `ST3_ACCOUNT` on the seat, so an `env` entry for the same variable is refused. A restart on the same
 account continues the native session the driver last bound. The session binding records the
@@ -87,7 +98,7 @@ logins.
 ## Usage and limits per account
 
 A bound seat's limits readings carry the declared account's name (`account_ref`) next to the
-opaque account label, so `st usage` and stui name the account:
+opaque account label, so `st usage` and the terminal UI name the account:
 
 ```
 LIMITS  2 · the freshest reading of each account
@@ -95,7 +106,7 @@ WEEKLY  5-HOUR  WEEKLY RESET  MEASURED  account
 97%  ?  2026-10-05 21:34 UTC  2026-10-02 21:34 UTC  ada/claude-1 (claude/aaaa000000000001)
 ```
 
-Spend rows by account carry the same name. Seats that run on no declared account read as before.
+Spend rows by account carry the same name. Seats that run on no declared account show the provider's label.
 An account keeps its last limits reading after its last seat switches away, until its window
 resets. Declared accounts have separate readings even when the provider reports no account label.
 Their spend and limits use a stable label derived from the declared name; unbound seats keep the
@@ -115,7 +126,7 @@ last known reading, not the current one. `st --json usage` marks it `stale: true
 ends its row with `stale`. The pool chooses by the account's freshest reading.
 
 Limits include `identified`: true when the source names a provider identity or a declared account,
-false when it names neither. Older servers omit this additive metadata. Identity and quota
+false when it names neither. Identity and quota
 freshness are separate: a missing identity does not make a reading stale. Once a driver has
 identified evidence, its identity-less historical group is hidden if none of its latest reporting
 seats is still declared active. Unknown evidence from active seats remains visible, as does unknown
@@ -132,7 +143,7 @@ a member restart in the durable graph and remains available to other members thr
 `[limits]` in the node's config stops an account's seats at its weekly percentage ([configuration below](#usage-totals-and-automatic-stops)). With
 accounts:
 
-- A seat bound to one account stops, as before.
+- A seat bound to one account stops.
 - A seat bound to a pool restarts on another account in the pool whose weekly reading is under the
   percentage, the one with the most left, instead of stopping. It is switched once per weekly
   window. If every account in the pool is at its limit, it stops like any other seat.
@@ -156,7 +167,7 @@ quota has no fabricated row in `st usage`; its missing evidence is reported by d
 
 External backstops must read `st --json usage` (`limits`), or the client-v0 usage endpoint, rather
 than scanning driver directories, status-line files, or provider transcripts. Fresh harnesses
-commit observations through a SQLite outbox and need not produce those legacy files; a relaunch
+commit observations through a SQLite outbox and need not produce those files; a relaunch
 can remove every source a file collector sees. For each account:
 
 - Use `weekly_percent` alone; a missing `five_hour_percent` does not invalidate weekly evidence.
@@ -175,15 +186,6 @@ A switch is a fresh start: a harness cannot resume a native session from another
 directory, and a seat's work lives in the graph. For that reason a pooled seat cannot declare
 Claude session flags (`--continue`, `--resume`, `--session-id`) or Codex `resume`/`fork`
 subcommands in its `args`. Codex configuration overrides (`-c`) are allowed.
-
-## Not yet
-
-Account declarations and seat bindings pass through smallclaims' existing rules for
-`intent.desired`, including namespace rules in audit mode. Account-specific grants (who may start
-seats on a particular account, under which namespace) still await smallclaims' content-aware
-grants; its current rules match actor, kind and subject. Once those grants land, account use will
-use them in audit mode. Once sekrets holds model logins, an account will name the sekrets profile
-that holds its login instead of a directory.
 
 ## Usage totals and automatic stops
 
@@ -241,8 +243,3 @@ without listing it; `keep` still names single seats. The daemon reads `[limits]`
 two-minute pass, so an edit (including enabling the policy) applies without a restart. A file that
 does not parse or validate leaves the last good policy running and is logged. `st usage` marks
 exempt accounts and prints an `EXEMPT` line for the policy.
-
-A person who owns more than one Claude or Codex account declares them and binds a seat to one or to
-a pool; a pooled seat at its limit restarts on another account instead of stopping, and `st usage`
-names each declared account. A seat that binds nothing runs on the
-harness's default login.

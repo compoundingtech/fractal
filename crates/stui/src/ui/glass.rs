@@ -377,6 +377,23 @@ impl Glasses {
             .any(|tab| matches!(Pane::parse(&tab.pane), Some(Pane::Machine(_))))
     }
 
+    pub(crate) fn inventories_wanted(&self, tab: usize, hours: u64) -> crate::feed::Inventories {
+        use crate::feed::Inventories;
+        let glass = self.glass();
+        let panes = (0..glass.layout.groups().len()).filter_map(|index| glass.shown(index))
+            .filter_map(|tab| Pane::parse(&tab.pane)).collect::<Vec<_>>();
+        let fleet = tab == 3 || panes.iter().any(|pane| matches!(pane, Pane::List(3)));
+        let machines = fleet || self.sidebar.shown || self.palette.is_some() || self.shows_machine();
+        Inventories {
+            clients: fleet || self.shows_machine(),
+            usage_hours: self.shows_usage().then_some(hours),
+            machines, devices: fleet,
+            sessions: fleet || tab == 1 || self.sidebar.shown || self.palette.is_some()
+                || panes.iter().any(|pane| matches!(pane, Pane::List(1))),
+            terminals: self.sidebar.shown || self.palette.is_some(),
+        }
+    }
+
     /// Whether a list or card of missions is on screen: a Missions list or a mission's card in a
     /// shown tab, the palette (which offers every mission) or the sidebar's Missions section.
     pub(crate) fn shows_missions(&self) -> bool {
@@ -583,6 +600,7 @@ enum Action {
     ToggleSimple,
     /// Agents open on their terminal, or on their conversation.
     ToggleTerminalFirst,
+    ToggleTerminalFallback,
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -959,6 +977,16 @@ impl Ui {
             "this device; the conversation is the default",
             "terminal conversation default view open agents attach tui".into(),
             Action::ToggleTerminalFirst,
+        ));
+        choices.push(start(
+            if self.terminal_fallback {
+                "Fabric only, no fallback".into()
+            } else {
+                "Fall back through the daemon".into()
+            },
+            "terminal routes on this device; daemon fallback is the default",
+            "terminal fabric direct daemon gateway fallback setting".into(),
+            Action::ToggleTerminalFallback,
         ));
         choices.extend(self.said_choices(name));
         let Some(glasses) = &self.glasses else {
@@ -3013,6 +3041,7 @@ impl Ui {
             Action::NewMission => self.open_new_mission(),
             Action::ToggleSimple => self.toggle_simple(),
             Action::ToggleTerminalFirst => self.toggle_terminal_first(),
+            Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);
@@ -4591,6 +4620,16 @@ mod tests {
     }
 
     #[test]
+    fn terminal_fallback_defaults_on_and_the_palette_changes_it_locally() {
+        let mut ui = glass();
+        assert!(ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(!ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(ui.terminal_fallback);
+    }
+
+    #[test]
     fn a_terminal_first_device_attaches_an_agent_after_the_tab_stays_in_front() {
         // Nathan, 2026-10-07: a setting for the terminal as the default view; the conversation
         // stays the default, and flicking through tabs attaches nothing.
@@ -5239,6 +5278,25 @@ mod tests {
         assert!(!ui.home_open());
         // The sidebar has no Usage section any more.
         assert!(SIDEBAR_SECTIONS.iter().all(|(_, name)| *name != "Usage"));
+    }
+
+    #[test]
+    fn inventory_demand_tracks_the_shown_sidebar_and_usage_overlay() {
+        let mut ui = glass();
+        let initial = ui.inventories_wanted();
+        assert!(!initial.terminals && initial.usage_hours.is_none());
+        ctrl(&mut ui, 's');
+        let sidebar = ui.inventories_wanted();
+        assert!(sidebar.machines && sidebar.sessions && sidebar.terminals);
+        ui.click(Hit::Usage);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(24));
+        ui.usage_period_next();
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.glasses.as_ref().unwrap().sidebar.focused);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168), "changing focus keeps the visible usage overlay followed");
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(ui.inventories_wanted().usage_hours, None);
     }
 
     #[test]
@@ -6738,6 +6796,17 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_turn_is_described_by_kinds_and_counts_never_names() {
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
+        screen(&ui);
+        let context = ui.slow_context();
+        assert!(context.starts_with("pane agent, 120x32"), "{context}");
+        assert!(context.contains("agents ") && context.contains("missions "), "{context}");
+        assert!(!context.contains("atlas") && !context.contains('/'), "{context}");
+    }
+
+    #[test]
     fn ctrl_h_opens_home_and_closes_it_again() {
         let mut ui = glass();
         ctrl(&mut ui, 'h');
@@ -7343,6 +7412,27 @@ mod tests {
         // A failure keeps it for the next try.
         ui.glass_saved(&local, sent[0].key(), Err("member restarting".into()));
         assert_eq!(ui.unsent_glass_writes(), sent);
+    }
+
+    #[test]
+    fn initial_subject_waits_for_a_restored_glass_then_opens_its_conversation_tab() {
+        let mut ui = glass();
+        let agent = ui.world.agents.items()[0].id.clone();
+        let before = tabs(&ui);
+        let mut subject = Some(agent.clone());
+        super::super::live::focus_initial_subject(&mut ui, &mut subject, true, false);
+        assert_eq!(tabs(&ui), before);
+        assert!(subject.is_some());
+        let world = ui.world.clone();
+        ui.glasses_from_graph(vec![graph_glass("0190-main", "r1", "main", &[WEEKLY])]);
+        ui.set_world(world);
+        super::super::live::focus_initial_subject(&mut ui, &mut subject, true, true);
+        assert_eq!(tabs(&ui).2, vec![vec![WEEKLY.to_owned(), format!("agent:{agent}")]]);
+        assert_eq!(ui.focus(), (1, Some(agent.clone())));
+        assert_eq!(ui.live_conversations()[0], agent);
+        assert!(!ui.editing);
+        assert!(ui.terminal.is_none());
+        assert!(subject.is_none());
     }
 
     #[test]

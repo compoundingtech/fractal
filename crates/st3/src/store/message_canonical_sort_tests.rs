@@ -23,6 +23,16 @@ fn old_sort(connection: &Connection, messages: &mut [MessageView]) -> Result<()>
     Ok(())
 }
 
+// Exact immediate pre-batching sorter: one fused lookup per message.
+fn single_key_sort(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
+    let mut keys = BTreeMap::new();
+    for message in messages.iter() {
+        keys.insert(message.subject.clone(), message_canonical_key_tx(connection, &message.subject)?);
+    }
+    messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
+    Ok(())
+}
+
 fn schema(connection: &mut Connection) {
     smallclaims::sqlite::observe(connection);
     connection.execute_batch(
@@ -64,7 +74,7 @@ fn message(subject: &str, index: usize) -> MessageView {
             sha256: format!("{index:064x}"), media_type: "text/plain".into(),
             name: Some(format!("attachment-{index}.txt")), size: index as u64,
             origin: "host/fixture".into(),
-        }], created_index: index as u64,
+        }], body_ref: None, body_bytes: None, body_origin: None, created_index: index as u64,
     }
 }
 
@@ -112,9 +122,12 @@ fn assert_keys(connection: &Connection, messages: &[MessageView]) {
 fn parity(connection: &Connection, messages: &[MessageView]) -> Vec<MessageView> {
     assert_keys(connection, messages);
     let mut old = messages.to_vec();
+    let mut single = messages.to_vec();
     let mut new = messages.to_vec();
     old_sort(connection, &mut old).unwrap();
+    single_key_sort(connection, &mut single).unwrap();
     sort_messages_canonically(connection, &mut new).unwrap();
+    assert_eq!(serde_json::to_value(&old).unwrap(), serde_json::to_value(&single).unwrap());
     assert_eq!(serde_json::to_value(&old).unwrap(), serde_json::to_value(&new).unwrap());
     new
 }
@@ -134,7 +147,7 @@ fn fused_message_keys_preserve_full_views_and_every_shared_canonical_key() {
 }
 
 #[test]
-fn fused_message_sort_removes_exactly_one_statement_per_message_after_both_warmups() {
+fn batched_message_sort_uses_one_statement_per_bounded_group_after_warmups() {
     let mut connection = Connection::open_in_memory().unwrap();
     schema(&mut connection);
     batch(&connection, "batch", "writer", 1);
@@ -150,13 +163,87 @@ fn fused_message_sort_removes_exactly_one_statement_per_message_after_both_warmu
     let old_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     old_sort(&connection, &mut old).unwrap();
     let old_work = old_scope.finish();
+    let mut single = messages.clone();
+    let single_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    single_key_sort(&connection, &mut single).unwrap();
+    let single_work = single_scope.finish();
     let mut new = messages.clone();
     let new_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     sort_messages_canonically(&connection, &mut new).unwrap();
     let new_work = new_scope.finish();
     assert_eq!(serde_json::to_value(old).unwrap(), serde_json::to_value(new).unwrap());
     assert!(messages.len() >= 40 && new_work.statements > 0);
-    assert_eq!(old_work.statements, new_work.statements + messages.len() as u64);
+    assert_eq!(old_work.statements, 2 * messages.len() as u64);
+    assert_eq!(single_work.statements, messages.len() as u64);
+    assert_eq!(new_work.statements, 1);
+}
+
+#[test]
+fn batched_message_sort_preserves_duplicates_and_bounds_every_group_size() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    schema(&mut connection);
+    batch(&connection, "batch", "writer", 1);
+    for index in 0..257 {
+        let subject = format!("message/{index}");
+        let id = format!("claim-{index}");
+        claim(&connection, index + 1, &id, "batch", &subject, "message.sent", "10");
+        position(&connection, &id, 257 - index);
+    }
+    for count in [0_usize, 1, 127, 128, 129, 256, 257] {
+        // Repeated subjects carry distinct content. Stable sorting must preserve
+        // their occurrence order; the SQL result ordinal is not a subject key.
+        let messages = (0..count)
+            .map(|index| message(&format!("message/{}", index / 2), index))
+            .collect::<Vec<_>>();
+        let expected = parity(&connection, &messages);
+        let mut actual = messages.clone();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        sort_messages_canonically(&connection, &mut actual).unwrap();
+        let work = scope.finish();
+        assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+        assert_eq!(work.statements, count.div_ceil(MESSAGE_CANONICAL_KEY_BATCH_SIZE) as u64,
+            "count={count}, work={work:?}");
+    }
+}
+
+#[test]
+fn batched_message_sort_refuses_coexisting_faults_without_reordering() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    schema(&mut connection);
+    batch(&connection, "batch", "writer", 1);
+    for index in 0..6 {
+        let subject = format!("message/{index}");
+        claim(&connection, index + 1, &format!("claim-{index}"), "batch", &subject, "message.sent", "10");
+    }
+    // The earliest claim on the third input has no batch, even though a younger
+    // valid candidate exists. The fifth input independently has a decode fault.
+    connection.execute("UPDATE claims SET batch_id='absent' WHERE id='claim-2'", []).unwrap();
+    claim(&connection, 7, "younger", "batch", "message/2", "message.sent", "20");
+    connection.execute("UPDATE claims SET accepted_at_unix_ms=x'00' WHERE id='claim-4'", []).unwrap();
+    let mut messages = (0..6).map(|index| message(&format!("message/{index}"), index)).collect::<Vec<_>>();
+    let before = serde_json::to_value(&messages).unwrap();
+    let error = sort_messages_canonically(&connection, &mut messages).unwrap_err();
+    assert_eq!(error.to_string(), rusqlite::Error::QueryReturnedNoRows.to_string());
+    assert_eq!(serde_json::to_value(&messages).unwrap(), before);
+    // This proves this missing-row/decode combination. It does not promise error
+    // precedence when SQLite itself fails while materializing a later row.
+}
+
+#[test]
+fn batched_message_key_plan_drives_only_requested_subjects_and_indexed_claims() {
+    let store = Store::open_memory("node").unwrap();
+    let connection = store.readers.get();
+    let subjects = serde_json::to_string(&["message/a", "message/b", "message/a"]).unwrap();
+    let result = explain(&connection, message_canonical_keys_query(), &subjects);
+    println!("BATCH full plan: {result:#?}");
+    let plan = result.expect("batched EXPLAIN failed (full result printed)");
+    let context = format!("BATCH full plan: {plan:#?}");
+    assert!(plan.iter().any(|step| step.detail.starts_with("SCAN requested VIRTUAL TABLE")), "{context}");
+    assert!(plan.iter().any(|step| step.detail == "SEARCH claims USING INDEX claims_subject_kind_index (subject=? AND kind=?)"), "{context}");
+    assert!(plan.iter().any(|step| step.detail == "SEARCH chosen USING INDEX sqlite_autoindex_claims_1 (id=?)"), "{context}");
+    assert!(plan.iter().any(|step| step.detail == "SEARCH batches USING INDEX sqlite_autoindex_batches_1 (id=?)"), "{context}");
+    assert!(!plan.iter().any(|step| step.detail.starts_with("SCAN ")
+        && !step.detail.starts_with("SCAN requested VIRTUAL TABLE")), "{context}");
 }
 
 #[test]
