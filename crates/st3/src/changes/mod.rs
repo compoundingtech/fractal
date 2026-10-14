@@ -2,6 +2,10 @@
 //! cooperative scheduling data, not signed gate evidence or permission to move main.
 
 pub mod transport;
+pub mod config;
+pub mod service;
+pub mod discovery;
+pub mod view;
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -105,7 +109,7 @@ pub(super) fn random_hex<const N: usize>() -> Result<String> {
     Ok(hex::encode(bytes))
 }
 
-pub(super) fn oid(value: &str) -> Result<()> {
+pub(crate) fn oid(value: &str) -> Result<()> {
     ensure!(
         matches!(value.len(), 40 | 64)
             && value

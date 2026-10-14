@@ -5,6 +5,102 @@ use smallclaims::store::checkpoint_agreement::*;
 const FLEET: &str = "fleet/test";
 const CUT: u128 = 20 * DAY_MS;
 
+#[test]
+fn startup_revisions_are_display_metadata_in_a_mixed_checkpoint_round() {
+    fn started(store: &Store, subject: &str, version: Option<&str>) {
+        let mut fields = BTreeMap::from([("status".into(), json!("running"))]);
+        if let Some(version) = version {
+            fields.insert("version".into(), json!(version));
+        }
+        // Both old and new startup strings use the existing closed registry unchanged.
+        st3_schema::registry()
+            .validate_claim(subject, "daemon.started", &fields)
+            .unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "daemon.started".into(),
+                actor: None,
+                fields,
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let [alder, birch, cedar, dogwood] =
+        ["alder", "birch", "cedar", "dogwood"].map(|name| Store::open_memory(name).unwrap());
+    started(&alder, "daemon/alder", Some("0.1.0+local.abc1234.dirty"));
+    started(&birch, "daemon/birch", Some("0.1.0"));
+    started(&cedar, "daemon/cedar", None);
+    started(&dogwood, "daemon/dogwood", Some("0.1.0+dev"));
+    // A newer foreign-origin startup must not replace the member's own advertisement.
+    started(&birch, "daemon/alder", Some("0.1.0+decaf00"));
+    let nodes = [&alder, &birch, &cedar, &dogwood];
+    sync(&nodes);
+    for node in nodes {
+        assert_eq!(kinds(&step(node, &context)), ["sealed"]);
+    }
+    sync(&nodes);
+    let status = birch.checkpoint_status(context.now_unix_ms, &[]).unwrap();
+    let advertised = BTreeMap::from([("alder".into(), "0.1.0+local.abc1234.dirty".into())]);
+    assert_eq!(status.machine_version, advertised);
+    assert_eq!(
+        status.pending.as_ref().unwrap().builds,
+        nodes
+            .iter()
+            .map(|node| (node.origin.clone(), checkpoint_build()))
+            .collect()
+    );
+    let mut json = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        json["machine_version"]["alder"],
+        "0.1.0+local.abc1234.dirty"
+    );
+    json.as_object_mut().unwrap().remove("machine_version");
+    assert!(
+        serde_json::from_value::<CheckpointStatusView>(json)
+            .unwrap()
+            .machine_version
+            .is_empty()
+    );
+    for node in nodes {
+        assert_eq!(kinds(&step(node, &context)), ["verified"]);
+    }
+    sync(&nodes);
+    for node in nodes {
+        assert_eq!(stable_cuts(node), [newest_due_cut(context.now_unix_ms)]);
+        assert_eq!(kinds(&step(node, &context)), ["trimmed"]);
+        let status = node.checkpoint_status(context.now_unix_ms, &[]).unwrap();
+        assert!(status.pending.is_none());
+        assert_eq!(status.machine_version, advertised);
+    }
+    // Restart on another stamped revision republishes at each start.
+    started(&alder, "daemon/alder", Some("0.1.0+def5678-dirty"));
+    sync(&nodes);
+    assert_eq!(
+        birch
+            .checkpoint_status(context.now_unix_ms, &[])
+            .unwrap()
+            .machine_version["alder"],
+        "0.1.0+def5678-dirty"
+    );
+    // Rolling back to an older binary replaces the revision with a bare announcement.
+    started(&alder, "daemon/alder", Some("0.1.0"));
+    sync(&nodes);
+    let status = birch.checkpoint_status(context.now_unix_ms, &[]).unwrap();
+    assert!(status.machine_version.is_empty());
+    assert!(
+        serde_json::to_value(status)
+            .unwrap()
+            .get("machine_version")
+            .is_none()
+    );
+}
+
 fn claim(kind: &str, subject: &str, writer: &str, fields: Value) -> CheckpointClaim {
     CheckpointClaim {
         id: format!("{kind}:{subject}:{writer}:{fields}"),
@@ -854,7 +950,7 @@ fn status_names_what_differs_between_verifications() {
         .unwrap();
     plan.retained_digest = "another".into();
     birch
-        .publish_verification(&checkpoint, &terms, &plan, &proof)
+        .publish_verification(&checkpoint, &terms, &smallclaims::store::checkpoint_staging::StagedPlan::of(&plan), &proof)
         .unwrap();
     sync(&[&alder, &birch]);
 
@@ -974,6 +1070,52 @@ fn a_trim_that_stops_anywhere_finishes_the_same_after_a_restart() {
             "{fault:?}"
         );
     }
+}
+
+/// A trim stops part way through recording, and a repair then changes what the node seals before
+/// the cut, so its own plan no longer gives the drop it verified. The tombstones it recorded go
+/// before it turns to a peer's manifest.
+#[test]
+fn a_plan_that_changes_after_an_interrupted_recording_leaves_no_tombstones_behind() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let cut = newest_due_cut(context.now_unix_ms);
+    let path = scratch.path().join("alder.sqlite3");
+    let alder = Store::open(&path, "alder").unwrap();
+    let birch = Store::open_memory("birch").unwrap();
+    let checkpoint = stable_pair(&alder, &birch, &context);
+    assert_eq!(kinds(&step(&birch, &context)), ["trimmed"]);
+    alder.set_trim_chunk_envelopes(2);
+    alder.set_trim_row_cost(std::time::Duration::from_millis(12));
+    alder.set_trim_fault(Some(TrimFault::AfterTombstoneChunk(1)));
+    assert!(alder.checkpoint_step(&context).is_err());
+    drop(alder);
+
+    let alder = Store::open(&path, "alder").unwrap();
+    let recorded = |store: &Store| -> u64 {
+        store.readers.get().query_row(
+            "SELECT (SELECT COUNT(*) FROM checkpoint_envelopes) + (SELECT COUNT(*) FROM checkpoint_claims)",
+            [], |row| row.get(0),
+        ).unwrap()
+    };
+    assert!(recorded(&alder) > 0, "the crash left tombstones recorded");
+    let manifest = birch.checkpoint_manifest(&checkpoint, cut).unwrap();
+    alder.connection.write().execute(
+        "UPDATE replica_records SET state='repaired' WHERE claim_id=?1",
+        [&manifest.claims[0].id],
+    ).unwrap();
+    assert_eq!(kinds(&step(&alder, &context)), ["manifest-needed"]);
+    assert_eq!(recorded(&alder), 0, "no tombstone outlives the plan it came from");
+    assert_eq!(
+        smallclaims::store::checkpoint_trim::local_checkpoint(&alder.readers.get(), &checkpoint)
+            .unwrap()
+            .map(|(state, _)| state)
+            .as_deref(),
+        Some("plan-changed")
+    );
+    // Adopting the peer's manifest from here is what any node does that cannot trim from its
+    // own plan; `a_node_that_did_not_take_part_adopts_the_manifest_and_nothing_else` covers it.
+    assert_eq!(alder.checkpoint_manifest_need().unwrap().map(|need| need.checkpoint), Some(checkpoint));
 }
 
 #[test]

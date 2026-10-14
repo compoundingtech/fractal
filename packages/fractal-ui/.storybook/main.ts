@@ -4,6 +4,7 @@ import stylex from '@stylexjs/unplugin'
 
 const config: StorybookConfig = {
   stories: ['../src/**/*.stories.tsx', '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx'],
+  staticDirs: ['./fixtures'],
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],
   core: { disableTelemetry: true },

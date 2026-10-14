@@ -4,7 +4,8 @@
 name: Workspace CI
 
 on:
-  pull_request: {}
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   merge_group: {}
   workflow_dispatch: {}
 
@@ -19,7 +20,7 @@ concurrency:
 jobs:
   pick-runner:
     name: pick-runner
-    if: vars.CI1_RUNNERS == 'on'
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on') }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -28,9 +29,6 @@ jobs:
       ci1: ${{ steps.pick.outputs.ci1 }}
       ci1_secondary: ${{ steps.pick.outputs.ci1_secondary }}
       ci1_mail: ${{ steps.pick.outputs.ci1_mail }}
-      merge_ci1: ${{ steps.pick.outputs.merge_ci1 }}
-      merge_primary: ${{ steps.pick.outputs.merge_primary }}
-      merge_mail: ${{ steps.pick.outputs.merge_mail }}
     steps:
       - name: Keep reserved primary lanes and use idle general runners for tests and canaries
         id: pick
@@ -41,98 +39,128 @@ jobs:
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           OWNER: ${{ github.repository_owner }}
-          MERGE_LOCAL_ONLY: ${{ vars.CI_MERGE_CI1 }}
           NEED: ${{ vars.CI1_MIN_IDLE || '1' }}
+          MERGE_OVERFLOW: ${{ vars.CI_MERGE_OVERFLOW }}
+          MERGE_NEED: ${{ vars.CI_MERGE_MIN_IDLE || '3' }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          primary_label=
-          namespace() {
-            echo "$1: Namespace"
-            printf 'Unpicked runners: **Namespace** (%s)\n' "$1" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          }
-          primary() {
-            primary_label=$1
-            printf 'ci1=["%s"]\n' "$primary_label" >> "$GITHUB_OUTPUT"
-            printf 'Primary runner: **ci1** (%s)\n' "$primary_label" >> "$GITHUB_STEP_SUMMARY"
-          }
-          if [ "$EVENT" = pull_request ] && [ "$HEAD_REPOSITORY" != "$REPOSITORY" ]; then
-            namespace "a pull request from a fork never runs on ci1"
-          fi
-          if [ "$EVENT" = pull_request ] && jq -e 'index("ci-priority") != null' <<< "$PR_LABELS" >/dev/null 2>&1; then
-            primary ci1-priority
-            echo "priority PR: reserved ci1-priority capacity"
-            printf 'Runner: **ci1** (ci1-priority, ahead of ordinary PRs)\n' >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ "$EVENT" = merge_group ] && [ "$MERGE_LOCAL_ONLY" != on ]; then
-            # Choose once for the whole group. Five simultaneous workload jobs fit locally
-            # only if two general workers remain; priority-only workers are never borrowed.
-            # This is an admission snapshot, not an atomic runner reservation.
-            [ -n "$GH_TOKEN" ] || namespace "merge overflow: no runner status token"
-            if ! runners=$(timeout 20s gh api --paginate --slurp "orgs/$OWNER/actions/runners?per_page=100" 2>/dev/null); then
-              namespace "merge overflow: runner status unavailable"
-            fi
-            if ! capacity=$(jq -ec '
-              [.[].runners[] | select(.status == "online" and .busy == false)] | unique_by(.id) |
-              def has($label): any(.labels[]; .name == $label);
-              ([.[] | select(has("ci1-merge") and (has("ci1-priority") | not))]) as $merge |
-              ([.[] | select(has("ci1") and (has("ci1-priority") | not))] | length) as $general |
-              ([$merge[] | select(has("ci1") | not)] | length) as $dedicated |
-              {whole: (($merge | length) >= 5 and ($general - ([0, 5 - $dedicated] | max)) >= 2),
-               partial: ([2, ($merge | length), ([0, $general - 2] | max)] | min)}' <<< "$runners"); then
-              namespace "merge overflow: invalid runner status"
-            fi
-            if [ "$(jq -r '.whole' <<< "$capacity")" = true ]; then
-              printf 'merge_ci1=["ci1-merge"]\n' >> "$GITHUB_OUTPUT"
-              printf 'Merge group: **ci1** (five idle workers, two general PR slots retained)\n' >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-            partial=$(jq -r '.partial' <<< "$capacity")
-            [ "$partial" -ge 1 ] || namespace "merge overflow: retain two PR slots or wait for local capacity"
-            printf 'merge_primary=["ci1-merge"]\n' >> "$GITHUB_OUTPUT"
-            if [ "$partial" -ge 2 ]; then
-              printf 'merge_mail=["ci1-merge"]\n' >> "$GITHUB_OUTPUT"
-            fi
-            printf 'Merge consumers: **ci1** (primary shard%s; two general PR slots retained); producer and other jobs: **Namespace**\n' "$( [ "$partial" -ge 2 ] && printf ' and mail canaries' || true )" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          if [ "$EVENT" = merge_group ]; then
-            # Merge groups never borrow the PR priority lane: it can have PR work ahead of them.
-            primary ci1-merge
-            echo "merge queue: reserved ci1-merge runners"
-            printf 'Runner: **ci1** (ci1-merge, reserved merge-queue capacity)\n' >> "$GITHUB_STEP_SUMMARY"
-          fi
-          [ -n "$GH_TOKEN" ] || namespace "no runner status token"
-          [[ "$NEED" =~ ^[1-9][0-9]*$ ]] || namespace "invalid minimum idle runner count"
-          if ! runners=$(timeout 20s gh api --paginate --slurp "orgs/$OWNER/actions/runners?per_page=100" 2>&1); then
-            echo "::warning::could not list ci1's runners: $runners"
-            namespace "the runner list is unavailable"
-          fi
-          if ! idle=$(jq -e '[.[].runners[] | select(.status == "online" and .busy == false and any(.labels[]; .name == "ci1"))] | length' <<< "$runners"); then
-            namespace "the runner list is invalid"
-          fi
-          if [ -z "$primary_label" ]; then
-            if [ "$idle" -ge "$NEED" ]; then
-              primary ci1
-            else
-              printf 'Primary runner: **Namespace** (%s general runners idle, %s needed)\n' "$idle" "$NEED" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
-          # A primary on ci1 or ci1-merge may take a general worker. Account for that worker
-          # before offering separate slots to the second shard and canaries. A priority
-          # primary has its own reserved label; general workers temporarily lent to priority
-          # work no longer carry ci1 and therefore were excluded from the idle count above.
-          available=$idle
-          case "$primary_label" in ci1|ci1-merge) available=$((available - 1));; esac
-          echo "$idle general runners idle; primary minimum $NEED; extra slots $available"
-          for output in ci1_secondary ci1_mail; do
-            if [ "$available" -gt 0 ]; then
-              printf '%s=["ci1"]\n' "$output" >> "$GITHUB_OUTPUT"
-              printf '%s runner: **ci1** (idle general slot)\n' "$output" >> "$GITHUB_STEP_SUMMARY"
-              available=$((available - 1))
-            else
-              printf '%s runner: **Namespace** (no idle general slot)\n' "$output" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
+          python3 - <<'CI_PICK_RUNNER'
+          #!/usr/bin/env python3
+          """Choose roles from the shared owned pool; execute inline on a hosted picker."""
+          import json
+          import os
+          import subprocess
+
+
+          def main():
+              env = os.environ
+              event = env.get("EVENT", "")
+              priority = event == "merge_group" or env.get("MODE") == "priority"
+              try:
+                  priority = priority or (event == "pull_request" and "ci-priority" in json.loads(env.get("PR_LABELS", "[]")))
+              except (ValueError, TypeError):
+                  pass
+              output = open(env["GITHUB_OUTPUT"], "a")
+              summary = open(env["GITHUB_STEP_SUMMARY"], "a")
+              def emit(key, label):
+                  print(f'{key}={json.dumps([label], separators=(",", ":"))}', file=output)
+                  print(f'{key}: **{label.split("-")[0]}** ({label})', file=summary)
+              def unavailable(reason):
+                  print(reason)
+                  if priority:
+                      emit("ci1", "ci1-priority")
+                  else:
+                      print(f'Unpicked runners: **Namespace** ({reason})', file=summary)
+              if event == "pull_request" and env.get("HEAD_REPOSITORY") != env.get("REPOSITORY"):
+                  print('Unpicked runners: **Namespace** (fork pull request)', file=summary)
+                  return
+              if not env.get("GH_TOKEN"):
+                  unavailable("no runner status token")
+                  return
+              need = env.get("NEED", "1")
+              if not need.isascii() or not need.isdigit() or int(need) < 1:
+                  unavailable("invalid minimum idle runner count")
+                  return
+              try:
+                  result = subprocess.run(["gh", "api", "--paginate", "--slurp",
+                      f'orgs/{env["OWNER"]}/actions/runner-groups/3/runners?per_page=100'],
+                      check=True, capture_output=True, text=True, timeout=20)
+                  pages = json.loads(result.stdout)
+                  if not isinstance(pages, list):
+                      raise ValueError("runner pages")
+                  by_id = {}
+                  for page in pages:
+                      if not isinstance(page, dict) or not isinstance(page.get("runners"), list):
+                          raise ValueError("runner page")
+                      for runner in page["runners"]:
+                          if not isinstance(runner, dict) or type(runner.get("id")) is not int:
+                              raise ValueError("runner identity")
+                          if not isinstance(runner.get("labels"), list):
+                              raise ValueError("runner labels")
+                          labels = {label["name"] for label in runner["labels"]}
+                          if not all(isinstance(label, str) for label in labels):
+                              raise ValueError("runner label")
+                          record = (runner.get("status"), runner.get("busy"), labels)
+                          if runner["id"] in by_id and by_id[runner["id"]] != record:
+                              raise ValueError("conflicting duplicate runner")
+                          by_id[runner["id"]] = record
+                  idle = {key: labels for key, (status, busy, labels) in by_id.items()
+                          if status == "online" and busy is False}
+              except (subprocess.SubprocessError, ValueError, TypeError, KeyError):
+                  unavailable("runner list unavailable or invalid")
+                  return
+              if (event == "merge_group" and env.get("MERGE_OVERFLOW") == "on"
+                      and any(key < 1 or status not in ("online", "offline") or type(busy) is not bool
+                              for key, (status, busy, labels) in by_id.items())):
+                  unavailable("unqualified merge capacity status")
+                  return
+              # Group 3 is the common pool. These compatibility role names are shared on both hosts.
+              online = sum(status == "online" for status, busy, labels in by_id.values())
+              def candidates(label):
+                  return [key for key, labels in idle.items() if label in labels]
+              census = (f'common pool group3: {online} online, {len(idle)} idle; '
+                        f'{len(candidates("ci1"))} general idle, {len(candidates("ci1-priority"))} priority idle')
+              print(census)
+              print(census, file=summary)
+              if event == "merge_group" and env.get("MERGE_OVERFLOW") == "on":
+                  merge_need = env.get("MERGE_NEED", "3")
+                  run_id = env.get("RUN_ID", "")
+                  if (merge_need.isascii() and merge_need.isdigit() and int(merge_need) > 0
+                          and run_id.isascii() and run_id.isdigit() and int(run_id) > 0):
+                      if len(candidates("ci1-priority")) < int(merge_need):
+                          # The existing Linux profile supplies the same tools and KVM.
+                          # Every required merge job follows this single, run-bound choice.
+                          emit("ci1", f"namespace-profile-linux-x86-64;job.priority=1;github.run-id={run_id}")
+                          print('Merge overflow: **Namespace** (qualified pool census below admission minimum)', file=summary)
+                          return
+                  else:
+                      print('Merge overflow refused: invalid admission minimum or run identity', file=summary)
+              if priority:
+                  emit("ci1", "ci1-priority")
+                  # A dual-labelled runner can take the priority primary; do not also offer it.
+                  available = candidates("ci1-priority")
+                  if available:
+                      idle.pop(available[0])
+                  if event == "merge_group" or env.get("MODE") == "priority":
+                      return
+              elif len(candidates("ci1")) >= int(need):
+                  emit("ci1", "ci1")
+                  idle.pop(candidates("ci1")[0])
+              else:
+                  print('Primary runner: **Namespace** (minimum idle count unmet)', file=summary)
+              for key in ("ci1_secondary", "ci1_mail"):
+                  available = candidates("ci1")
+                  if available:
+                      emit(key, "ci1")
+                      idle.pop(available[0])
+                  else:
+                      print(f'{key}: **Namespace** (no distinct idle general worker)', file=summary)
+
+
+          if __name__ == "__main__":
+              main()
+          CI_PICK_RUNNER
+
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -267,6 +295,7 @@ jobs:
         env:
           CACHE_REASON: Retains Git source objects only; builds nothing and has no signing key.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   upgrade-impact:
     name: upgrade-impact
     runs-on: ubuntu-latest
@@ -298,10 +327,11 @@ jobs:
         env:
           CACHE_REASON: Runs Python/Git classification checks without downloads or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   namespace-capacity:
     name: namespace-capacity
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group'
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('["namespace-profile-linux-x86-64;job.priority={1};github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || 2)) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group') }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('["namespace-profile-linux-x86-64;job.priority={1};github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || 3)) }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -318,6 +348,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner"],"typescript-client":["pick-runner","genie-freshness"],"linux-test-build":["pick-runner"],"linux-tests":["pick-runner","linux-test-build"],"linux-tests-shard-2":["pick-runner","linux-test-build"],"linux-tests-shard-3":["pick-runner","linux-test-build"],"linux-tests-shard-4":["pick-runner","linux-test-build"],"linux-clippy":["pick-runner"],"linux-fleet-compat":["pick-runner"],"mail-redelivery-canaries":["pick-runner","linux-test-build"],"linux-gate":["pick-runner","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries"],"perf-cost":[],"isolation-vm":["pick-runner","linux-test-build"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -343,8 +374,11 @@ jobs:
               return "wait"
 
 
-          def watch(api, repository, run_id, queue_ref, sha, pause=time.sleep):
+          def watch(api, repository, run_id, queue_ref, sha, pause=time.sleep,
+                    dependencies=None, clock=time.monotonic, alert=print):
               stale = 0
+              blocked_since, warned = {}, set()
+              dependencies = dependencies or {}
               while True:
                   status, payload = api(f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100")
                   # Check completion first: deletion after a successful merge must retain the run result.
@@ -354,12 +388,42 @@ jobs:
                       return "Required checks finished; queue watchdog completed normally."
                   # A job lookup failure cannot establish that cancellation is still needed.
                   if status != 200:
+                      blocked_since.clear()
                       stale = 0
                       pause(15)
                       continue
                   ref_status, ref = api(f"repos/{repository}/git/ref/{quote(queue_ref.removeprefix('refs/'), safe='/')}")
                   result = decision(payload.get("jobs", []), ref_status, ref, sha)
                   stale = stale + 1 if result == "superseded" else 0
+                  if ref_status == 200 and ref.get("object", {}).get("sha") == sha:
+                      try:
+                          # Start a monotonic interval only once the generated dependencies finish.
+                          # A five-minute alert observes missing owned capacity; it never cancels a current ref.
+                          by_name = {job['name']: job for job in payload.get('jobs', [])}
+                          eligible = {name for name, job in by_name.items()
+                                      if name in dependencies and job.get('status') == 'queued'
+                                      and not job.get('runner_id') and 'ci1-priority' in (job.get('labels') or [])
+                                      and all(by_name.get(dep, {}).get('status') == 'completed' for dep in dependencies[name])}
+                          now = clock()
+                          blocked_since = {name: since for name, since in blocked_since.items() if name in eligible}
+                          for name in sorted(eligible):
+                              since = blocked_since.setdefault(name, now)
+                              if now - since >= 300 and name not in warned:
+                                  alert(f'::warning::Merge run {run_id}: {name} has no assigned ci1-priority runner '
+                                        f'for at least {int(now - since)}s after its dependencies finished. '
+                                        'Check owned runner availability; current work is preserved.')
+                                  warned.add(name)
+                      except Exception as error:
+                          # Optional diagnostics must not interrupt the current-ref cancellation guard.
+                          # Retain no timing evidence through malformed or unavailable alert metadata.
+                          blocked_since.clear()
+                          problem = f'{type(error).__name__}: {error}'
+                          if problem not in warned:
+                              alert(f'::warning::Runner-wait observation failed ({problem}); '
+                                    'superseded-ref watchdog continues. No runner-wait proof retained.')
+                              warned.add(problem)
+                  else:
+                      blocked_since.clear()
                   if stale >= 2:
                       status, _ = api(f"repos/{repository}/actions/runs/{run_id}/force-cancel", method="POST")
                       if status == 202:
@@ -368,6 +432,22 @@ jobs:
                           return "Workflow already completed before cancellation."
                       print(f"::warning::Queue cancellation returned HTTP {status}; retrying.", flush=True)
                   pause(15)
+
+
+          def queue_dependencies(alert):
+              try:
+                  dependencies = json.loads(os.environ.get('QUEUE_DEPENDENCIES', '{}'))
+                  if not isinstance(dependencies, dict) or any(
+                      not isinstance(name, str) or not isinstance(needs, list)
+                      or any(not isinstance(dep, str) for dep in needs)
+                      for name, needs in dependencies.items()
+                  ):
+                      raise ValueError('dependency metadata must map job names to dependency-name lists')
+                  return dependencies
+              except (TypeError, ValueError) as error:
+                  alert(f'::warning::Runner-wait alerts disabled: invalid dependency metadata ({error}); '
+                        'superseded-ref watchdog continues.')
+                  return {}
 
 
           def main():
@@ -394,7 +474,13 @@ jobs:
                       return 0, {}
 
               print("Watching the current merge-group ref; API lookup failures never cancel work.", flush=True)
-              result = watch(api, repository, run_id, queue_ref, sha)
+              def alert(message):
+                  print(message, flush=True)
+                  with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                      summary.write(message + '\n')
+
+              result = watch(api, repository, run_id, queue_ref, sha,
+                             dependencies=queue_dependencies(alert), alert=alert)
               print(result, flush=True)
               with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
                   summary.write(result + "\n")
@@ -431,7 +517,7 @@ jobs:
     env:
       CI_CACHE_DEV_SHELL: genie
     needs: [pick-runner]
-    if: ${{ !cancelled() }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -480,7 +566,7 @@ jobs:
         run: python3 scripts/ci-fractal-web-licenses-test && python3 scripts/ci-fractal-web-licenses --check-lockfile
       - name: Check runner selection and generated files
         shell: bash
-        run: "nix develop '.#genie' -c bash -c 'python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'"
+        run: "nix develop '.#genie' -c bash -c 'python3 scripts/ci-ready-pr-test && python3 scripts/ci-draft-admission-test && python3 scripts/ci-workflow-concurrency-test && python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/evidence-verify-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'"
       - name: Save Nix outputs
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: bash scripts/ci-nix-cache save
@@ -493,7 +579,7 @@ jobs:
   typescript-client:
     name: typescript-client
     needs: [pick-runner, genie-freshness]
-    if: ${{ !cancelled() && needs.genie-freshness.result == 'success' }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -536,8 +622,8 @@ jobs:
   linux-test-build:
     name: linux-test-build
     needs: [pick-runner]
-    if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (vars.CI_MERGE_CI1 == 'on' && '["ci1-merge"]' || needs.pick-runner.outputs.merge_ci1) || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, (github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2)) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -680,8 +766,8 @@ jobs:
   linux-tests:
     name: linux-tests
     needs: [pick-runner, linux-test-build]
-    if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (vars.CI_MERGE_CI1 == 'on' && '["ci1-merge"]' || needs.pick-runner.outputs.merge_ci1) || (github.event_name == 'merge_group' && needs.pick-runner.outputs.merge_primary) || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, (github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2)) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     defaults:
       run:
@@ -691,7 +777,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
       CI_RUN_ID: ${{ github.run_id }}
-      CI_TEST_PARTITION: "hash:1/2"
+      CI_TEST_PARTITION: ${{ github.event_name == 'merge_group' && 'hash:1/4' || 'hash:1/2' }}
       CI_TEST_THREADS: "8"
       CI_CACHE_DEV_SHELL: default
     steps:
@@ -771,7 +857,7 @@ jobs:
         run: nix develop -c bash scripts/ci-install-built-hooks
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
-      - name: Prove both shards cover every selected test
+      - name: Prove shards form the complete selected inventory
         shell: bash
         run: nix develop -c python3 scripts/ci-test-partitions
       - name: Run nextest
@@ -799,8 +885,8 @@ jobs:
   linux-tests-shard-2:
     name: linux-tests-shard-2
     needs: [pick-runner, linux-test-build]
-    if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (vars.CI_MERGE_CI1 == 'on' && '["ci1-merge"]' || needs.pick-runner.outputs.merge_ci1) || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_secondary) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, (github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2)) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_secondary) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     defaults:
       run:
@@ -810,7 +896,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
       CI_RUN_ID: ${{ github.run_id }}
-      CI_TEST_PARTITION: "hash:2/2"
+      CI_TEST_PARTITION: ${{ github.event_name == 'merge_group' && 'hash:2/4' || 'hash:2/2' }}
       CI_TEST_THREADS: "8"
       CI_CACHE_DEV_SHELL: default
     steps:
@@ -912,11 +998,243 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  linux-tests-shard-3:
+    name: linux-tests-shard-3
+    needs: [pick-runner, linux-test-build]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CI_RUN_ID: ${{ github.run_id }}
+      CI_TEST_PARTITION: "hash:3/4"
+      CI_TEST_THREADS: "8"
+      CI_CACHE_DEV_SHELL: default
+    steps:
+      - name: Require the shared test producer to succeed
+        env:
+          PRODUCER_RESULT: ${{ needs.linux-test-build.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use the runner's own caches
+        run: |
+          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+      - name: Restore the local Nix cache
+        id: nix-cache
+        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/st-ci-cache"
+          key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
+          restore-keys: |
+            nix5-linux-tests-${{ runner.os }}-
+            nix4-linux-tests-${{ runner.os }}-
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test home and XDG state
+        run: |
+          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
+          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Use the cached Nix outputs
+        if: env.CI_LOCAL_CACHES != '1'
+        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Prepare the historical messaging channel
+        if: runner.os == 'Linux'
+        run: |
+          binary=$(timeout 10m bash scripts/messaging-compat-binary)
+          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+      - name: Prepare provider component fixtures
+        run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths --print-build-logs)
+          for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
+            wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
+            printf 'ST2_%s_COMPONENT=%s/share/st2/providers/st2_%s_component.component.wasm\n' "$provider" "$components" "$wasm" >> "$GITHUB_ENV"
+          done
+      - name: Download this run attempt’s successful test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.linux-test-build.outputs.artifact-id }}
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+        run: python3 scripts/ci-test-archive download
+      - name: Verify source, hashes and extract test archives
+        shell: bash
+        run: nix develop -c python3 scripts/ci-test-archive consume
+        env:
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+      - name: Install matching rendered hooks
+        shell: bash
+        run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Summarize tested revision
+        run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
+      - name: Run nextest
+        shell: bash
+        run: nix develop -c bash scripts/ci-linux tests
+      - name: Save Nix outputs to the local Nix cache
+        if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
+        run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
+      - name: Retain stage logs and timings
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-tests-shard-3-logs
+          path: |
+            ${{ runner.temp }}/ci-logs/
+            target/messaging-faults/
+            target/boot-canaries/
+          if-no-files-found: ignore
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  linux-tests-shard-4:
+    name: linux-tests-shard-4
+    needs: [pick-runner, linux-test-build]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
+    runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      CI_RUN_ID: ${{ github.run_id }}
+      CI_TEST_PARTITION: "hash:4/4"
+      CI_TEST_THREADS: "8"
+      CI_CACHE_DEV_SHELL: default
+    steps:
+      - name: Require the shared test producer to succeed
+        env:
+          PRODUCER_RESULT: ${{ needs.linux-test-build.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::shared test producer failed or was skipped"; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use the runner's own caches
+        run: |
+          if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+      - name: Restore the local Nix cache
+        id: nix-cache
+        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: "${{ runner.temp }}/st-ci-cache"
+          key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
+          restore-keys: |
+            nix5-linux-tests-${{ runner.os }}-
+            nix4-linux-tests-${{ runner.os }}-
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Isolate test home and XDG state
+        run: |
+          # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
+          # and actions/cache expands a leading tilde against the HOME of the step that runs it.
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          home="$RUNNER_TEMP/test-home"
+          mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
+          printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+      - name: Use the cached Nix outputs
+        if: env.CI_LOCAL_CACHES != '1'
+        run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Prepare the historical messaging channel
+        if: runner.os == 'Linux'
+        run: |
+          binary=$(timeout 10m bash scripts/messaging-compat-binary)
+          printf 'ST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" >> "$GITHUB_ENV"
+      - name: Prepare provider component fixtures
+        run: |
+          system=$(nix eval --impure --raw --expr builtins.currentSystem)
+          components=$(nix build ".#checks.$system.provider-components" --no-link --print-out-paths --print-build-logs)
+          for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
+            wasm=$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')
+            printf 'ST2_%s_COMPONENT=%s/share/st2/providers/st2_%s_component.component.wasm\n' "$provider" "$components" "$wasm" >> "$GITHUB_ENV"
+          done
+      - name: Download this run attempt’s successful test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.linux-test-build.outputs.artifact-id }}
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+        run: python3 scripts/ci-test-archive download
+      - name: Verify source, hashes and extract test archives
+        shell: bash
+        run: nix develop -c python3 scripts/ci-test-archive consume
+        env:
+          CI_TEST_ARCHIVE_MANIFEST_SHA256: ${{ needs.linux-test-build.outputs.manifest-sha256 }}
+          CI_TEST_ARCHIVE_PRODUCER_ATTEMPT: ${{ needs.linux-test-build.outputs.producer-attempt }}
+      - name: Install matching rendered hooks
+        shell: bash
+        run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Summarize tested revision
+        run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
+      - name: Run nextest
+        shell: bash
+        run: nix develop -c bash scripts/ci-linux tests
+      - name: Save Nix outputs to the local Nix cache
+        if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
+        run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"'
+      - name: Retain stage logs and timings
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-tests-shard-4-logs
+          path: |
+            ${{ runner.temp }}/ci-logs/
+            target/messaging-faults/
+            target/boot-canaries/
+          if-no-files-found: ignore
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   linux-clippy:
     name: linux-clippy
     needs: [pick-runner]
-    if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (vars.CI_MERGE_CI1 == 'on' && '["ci1-merge"]' || needs.pick-runner.outputs.merge_ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, (github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2)) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1050,8 +1368,8 @@ jobs:
   linux-fleet-compat:
     name: linux-fleet-compat
     needs: [pick-runner]
-    if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (vars.CI_MERGE_CI1 == 'on' && '["ci1-merge"]' || needs.pick-runner.outputs.merge_ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, (github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2)) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1183,7 +1501,7 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   mail-redelivery-canaries:
     name: mail-redelivery-canaries
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (vars.CI_MERGE_CI1 == 'on' && '["ci1-merge"]' || needs.pick-runner.outputs.merge_ci1) || (github.event_name == 'merge_group' && needs.pick-runner.outputs.merge_mail) || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_mail) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, (github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2)) }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_mail) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1336,7 +1654,7 @@ jobs:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
     needs: [pick-runner, linux-test-build]
-    if: ${{ !cancelled() }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
   linux-gate:
     name: linux-gate
     needs:
@@ -1345,17 +1663,31 @@ jobs:
       - upgrade-impact
       - linux-tests
       - linux-tests-shard-2
+      - linux-tests-shard-3
+      - linux-tests-shard-4
       - linux-clippy
       - linux-fleet-compat
       - mail-redelivery-canaries
-    if: always()
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every Linux stage to pass
         env:
           RESULTS: "${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}"
+          EVENT: ${{ github.event_name }}
+          MERGE_RESULTS: "${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}"
         run: |
+          set -eu
+          set -- $RESULTS
+          [ "$#" = 7 ] || { echo "incomplete base-stage results"; exit 1; }
+          if [ "$EVENT" = merge_group ]; then
+            set -- $MERGE_RESULTS
+            [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
+            RESULTS="$RESULTS $MERGE_RESULTS"
+          else
+            [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
+          fi
           echo "stage results: $RESULTS"
           for result in $RESULTS; do
             [ "$result" = success ] || exit 1
@@ -1368,10 +1700,10 @@ jobs:
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   perf-cost:
     name: perf-cost
-    if: github.event_name != 'merge_group'
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'merge_group') }}
     runs-on:
       [
-        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}",
+        "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}",
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 120
@@ -1529,8 +1861,8 @@ jobs:
   isolation-vm:
     name: isolation-vm
     needs: [pick-runner, linux-test-build]
-    if: ${{ !cancelled() }}
-    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (vars.CI_MERGE_CI1 == 'on' && '["ci1-merge"]' || needs.pick-runner.outputs.merge_ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["namespace-profile-linux-x86-64;job.priority={1};github.run-id={0}"]', github.run_id, (github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2)) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
+    runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["namespace-profile-linux-x86-64;job.priority={1};github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 60
     defaults:
       run:
@@ -1639,7 +1971,7 @@ jobs:
           printf '| VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
       - name: Run all three systemd-scope tests in the VM
         env:
-          ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/st2.tar.zst"
+          ST_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
           ST_ISOLATION_WORKSPACE: ${{ github.workspace }}
           ST_ISOLATION_TIMINGS: "${{ runner.temp }}/vm-timings.json"
           ST_ISOLATION_BUILD_WORKSPACE: ${{ env.CI_TEST_BUILD_WORKSPACE }}
@@ -1726,6 +2058,9 @@ jobs:
               "package.json*",
               "pnpm-workspace.yaml*",
               "pnpm-lock.yaml",
+              "megarepo.kdl",
+              "megarepo.lock",
+              "flake.lock",
               "pnpm-install-contract.json*",
               ".npmrc",
               "tsconfig*.json*",
@@ -1815,10 +2150,11 @@ jobs:
         env:
           CACHE_REASON: Diffs two fetched commits without blobs and builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   fractal-web-execution:
     name: fractal-web-execution
     needs: [fractal-web-changes, genie-freshness]
-    if: ${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -1862,7 +2198,7 @@ jobs:
   fractal-web:
     name: fractal-web
     needs: [fractal-web-changes, fractal-web-execution]
-    if: always()
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 1
     permissions: {}

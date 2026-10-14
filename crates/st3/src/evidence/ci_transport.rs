@@ -98,7 +98,10 @@ with zipfile.ZipFile(archive) as zipped:
 "#;
 
 /// Numeric selectors only. No caller-provided repository, path, verdict, statement or key.
-pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
+pub fn observe_ci(run: u64, attempt: u64, artifact: u64, predecessors: &[String]) -> Result<Value> {
+    for id in predecessors {
+        oid(id)?;
+    }
     let home = std::env::var_os("HOME").context("protected profile HOME")?;
     let configuration: Configuration = serde_json::from_slice(&std::fs::read(
         PathBuf::from(home).join(".config/st/evidence-ci.json"),
@@ -168,6 +171,10 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
         required_checks: configuration.required_checks,
     };
     binding.validate()?;
+    ensure!(
+        predecessors.len() <= binding.required_checks.len(),
+        "too many predecessor selectors"
+    );
     let repo = &configuration.scratch_repo;
     ensure!(
         git_text(repo, &["rev-parse", "--is-bare-repository"], None)? == "true",
@@ -244,14 +251,63 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
     } else {
         &signer
     };
-    let produced = produce_ci(
+    let mut old_jobs = Vec::new();
+    if !predecessors.is_empty() {
+        let refs = predecessors
+            .iter()
+            .map(|id| format!("{NOTES_PREFIX}{id}"))
+            .collect::<Vec<_>>();
+        fetch_source(
+            repo,
+            &binding.repository,
+            &refs.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?;
+        let mut attempts = BTreeMap::<(u64, u64), Vec<(String, u64)>>::new();
+        for id in predecessors {
+            let old = ci_reattest::prior(repo, &binding.repository, id)?;
+            let Fact::Tests { runner, .. } = old.predicate.fact else {
+                unreachable!()
+            };
+            let (run, attempt, job) = ci_reattest::identity(&binding.repository, &runner)?;
+            attempts
+                .entry((run, attempt))
+                .or_default()
+                .push((id.clone(), job));
+        }
+        // One immutable provider read per distinct old attempt, shared by its selected jobs.
+        for ((run, attempt), selected) in attempts {
+            let old_run = github.json(&format!("actions/runs/{run}/attempts/{attempt}"))?;
+            let mut old_binding = binding.clone();
+            old_binding.run = run;
+            old_binding.attempt = attempt;
+            old_binding.validate_run(&old_run)?;
+            let fetched = github.jobs(run, attempt)?;
+            for (id, job) in selected {
+                let matching = fetched
+                    .iter()
+                    .filter(|value| value["id"].as_u64() == Some(job))
+                    .collect::<Vec<_>>();
+                ensure!(matching.len() == 1, "missing or ambiguous predecessor job");
+                old_jobs.push((id, old_run.clone(), matching[0].clone()));
+            }
+        }
+    }
+    let current = ci_statements(repo, &binding, &observed_run, &receipt, &jobs)?;
+    let links = ci_reattest::prepare(repo, &binding.repository, &current, &jobs, &old_jobs)?;
+    let produced = produce_ci_linked(
         repo,
         &binding,
         &observed_run,
         &receipt,
         &jobs,
         effective_signer,
+        &links,
     )?;
+    let re_attestations = ci_reattest::measurements(repo, &produced)?;
+    let re_attestation_elapsed_ms = re_attestations
+        .iter()
+        .filter_map(|value| value["elapsed_ms"].as_u64())
+        .max();
     // Export data only. The caller imports it with index-pack and verifies/puts each record;
     // the private profile need not write the caller's read-only checkout or expose its key.
     let mut objects = format!("{}\n", receipt.source).into_bytes();
@@ -260,15 +316,26 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
         &["rev-list", "--objects", "--no-object-names", &receipt.tree],
         None,
     )?);
+    let mut exported_records = produced
+        .iter()
+        .map(|observation| observation.record.clone())
+        .collect::<BTreeSet<_>>();
     for observation in &produced {
-        objects.extend(format!("{}\n", observation.record).as_bytes());
+        if let Some(prior) = show(repo, &observation.record)?.predicate.re_attests {
+            exported_records.insert(prior);
+        }
+    }
+    for record in exported_records {
+        let statement = show(repo, &record)?;
+        objects.extend(format!("{}\n", statement.subject[0].name).as_bytes());
+        objects.extend(format!("{record}\n").as_bytes());
         objects.extend(git(
             repo,
             &[
                 "rev-list",
                 "--objects",
                 "--no-object-names",
-                &format!("{}^{{tree}}", observation.record),
+                &format!("{record}^{{tree}}"),
             ],
             None,
         )?);
@@ -291,14 +358,15 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
         "source":receipt.source, "tree":receipt.tree,
         "full_trust_eligible":full_eligible,
         "trust_limitation":(!full_eligible).then_some("PR source is self-reported or retained workflow differs from accepted pin"),
-        "records":produced,
+        "records":produced, "re_attestations":re_attestations,
         "object_pack_base64":base64::engine::general_purpose::STANDARD.encode(object_pack),
         "metrics":{
             "fresh_records":fresh.len(), "full_records":full,
             "full_trust_share":(!fresh.is_empty()).then(|| full as f64 / fresh.len() as f64),
             "signing_latency_ms":signing_latency_ms,
             "original_ci_signing_latency_ms":0,
-            "re_attestation_elapsed_ms":Value::Null
+            "re_attested_records":re_attestations.len(),
+            "re_attestation_elapsed_ms":re_attestation_elapsed_ms
         }
     }))
 }

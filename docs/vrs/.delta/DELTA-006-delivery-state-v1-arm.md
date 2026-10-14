@@ -4,8 +4,8 @@ Status: open
 
 ## Divergence
 
-The canonical delivery ledger owns exactly one schema, `st2.delivery-ledger.v1`,
-and `src/delivery_ledger.rs` is written as though only that format had ever
+The canonical delivery ledger owns exactly one schema, `st.delivery-ledger.v1`,
+and `crates/st-drivers/src/delivery_ledger.rs` is written as though only that format had ever
 shipped. It nevertheless carries one statement that knows otherwise: the
 `ErrorKind::NotFound` arm of `Ledger::open` calls
 `crate::migrations::delivery_state::recover`, which reads the single-binding
@@ -50,7 +50,7 @@ carried-forward attempts from being re-sent. The field makes the unobserved
 phase countable for clause 2 of the Resolution Signal, so it is trigger
 instrumentation, not a permanent concept.
 
-## Deletion-readiness audit (2026-10-07)
+## Deletion prerequisites
 
 **The signal requires two zero counts per admitted host for seven consecutive
 days:** (1) no pre-ledger `delivery-state.json` in the Codex/OpenCode state dirs,
@@ -63,10 +63,10 @@ behavior is pinned for both clauses and read-only repeat measurement in
 `mod.rs:288-334`. `st2 doctor` reports the per-seat advisory only while either
 count is nonzero (`src/main.rs:1140-1162`).
 
-**Deletion is not safe now.** The audit found no fleet observations, no
-seven-day all-admitted-host silence evidence, and no ratified decision that
-retires the pre-ledger release as a supported rollback target; the latter is an
-explicit additional prerequisite in this record below. Code inspection proves
+**Deletion requires fleet observations and a ratified rollback decision.** Both
+signal clauses must be clear on every admitted host for seven consecutive days;
+the pre-ledger release must also be retired as a supported rollback target, as
+required below. Code inspection proves
 the local no-old-record case is a no-op (`mod.rs:73-105`, test at
 `mod.rs:269-285`), but does not establish absence of old records fleet-wide.
 `Ledger::open` still calls `recover` on `NotFound`
@@ -98,7 +98,13 @@ measuring is read-only, so a diagnostic cannot make the record it counts
 disappear. Implementation evidence: `src/main.rs:1140-1162` and
 `crates/st-drivers/src/migrations/delivery_state/mod.rs:107-143`.
 
-The two clauses, and the equivalent commands for a host with no `st2` on PATH:
+The migration also runs inside st through the shared Codex driver. The st daemon
+does not call `resolution_signal` or print this advisory: silence from `st doctor`
+is not evidence for either clause. Read-only measurement for an st seat must
+supply that seat's actual per-harness state directories to `resolution_signal`;
+the legacy st2 directory examples below do not inventory current st driver state.
+
+The two clauses, and the equivalent commands for the legacy st2 state tree:
 
 ```sh
 state="${XDG_STATE_HOME:-$HOME/.local/state}/st2"

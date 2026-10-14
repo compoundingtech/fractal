@@ -9,7 +9,7 @@
 //! inbox head and submits typed input only when that state proves an idle or one exact regular
 //! active turn.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom, Write};
@@ -534,6 +534,31 @@ pub struct CodexControlState {
     observed: CodexObservedState,
     #[serde(default)]
     approval_request_pending: bool,
+    /// The approval requests this thread waits on, oldest first, as this connection saw them.
+    /// Codex shows them one at a time, so the oldest is the prompt. Not persisted: an adopted
+    /// connection never saw them, so the wait it inherits is answered in the terminal.
+    #[serde(skip)]
+    approval_requests: VecDeque<CodexApprovalRequest>,
+}
+
+/// One approval request a thread waits on: its JSON-RPC id and what it asks to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexApprovalRequest {
+    id: Value,
+    kind: &'static str,
+}
+
+/// What an approval request asks to do, in the words a harness observation's reason uses: run a
+/// command, change files, or grant more permissions. `None` for a request that is no approval.
+fn approval_request_kind(method: &str) -> Option<&'static str> {
+    match method {
+        "execCommandApproval" | "item/commandExecution/requestApproval" => {
+            Some("commandExecution")
+        }
+        "applyPatchApproval" | "item/fileChange/requestApproval" => Some("fileChange"),
+        "item/permissions/requestApproval" => Some("permissions"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -735,6 +760,9 @@ struct CodexInboxDelivery {
     /// A projected transition whose write failed, retried on the next pump pass before any
     /// heartbeat may re-stamp the contradicted on-disk state.
     pending_observation: Option<harness_state::Observation>,
+    /// The approval request the last projection waited on. Each request's wait is its own
+    /// transition, so st's answer binds to exactly that request, never an earlier one's.
+    approval_request: Option<Value>,
     /// The numeric axis's producer, beside the categorical one. `None` only where the record has
     /// nowhere safe to stage — observability never blocks a launch.
     context: Option<CodexContextProducer>,
@@ -898,6 +926,7 @@ impl CodexInboxDelivery {
             harness_writer,
             harness_evidence: false,
             pending_observation: None,
+            approval_request: None,
             context,
             timeline,
             model_attempted: BTreeSet::new(),
@@ -966,8 +995,25 @@ impl CodexInboxDelivery {
     /// not count as evidence either. A transition whose write failed is retained as pending and
     /// retried before any heartbeat, so a stale on-disk state is never kept fresh in
     /// contradiction of the latest observation.
+    #[cfg(test)]
     fn observe_harness(&mut self, observed: &CodexObservedState) {
-        match observed.harness_observation() {
+        self.publish_harness(observed.harness_observation());
+    }
+
+    /// Publish the projection of the control state, as [`Self::observe_harness`] does, with the
+    /// approval request it waits on. A different request than the last one starts a transition
+    /// even when it asks the same kind of thing: a second request is a new prompt.
+    fn observe_control(&mut self, state: &CodexControlState) {
+        let request = state.approval_request().cloned();
+        if request.is_some() && request != self.approval_request {
+            self.harness_writer.interrupt();
+        }
+        self.approval_request = request;
+        self.publish_harness(state.harness_observation());
+    }
+
+    fn publish_harness(&mut self, observation: Option<harness_state::Observation>) {
+        match observation {
             Some(mut observation) => {
                 if let Some(accepted) = self.provider_auth_edge.take() {
                     observation.provider_auth = Some(accepted);
@@ -2002,7 +2048,39 @@ impl CodexControlState {
             subscribed: false,
             observed: CodexObservedState::AwaitingStatus,
             approval_request_pending: false,
+            approval_requests: VecDeque::new(),
         }
+    }
+
+    /// The generic observed-harness-state projection of this state. A wait on an approval names
+    /// the request it waits on (`commandExecution`, `fileChange`, `permissions`) when this
+    /// connection saw it, so st can answer exactly that request; one known only from the thread's
+    /// `waitingOnApproval` flag keeps that reason and is answered in the terminal.
+    pub fn harness_observation(&self) -> Option<harness_state::Observation> {
+        let observation = self.observed.harness_observation()?;
+        Some(match (&self.observed, self.approval_requests.front()) {
+            (
+                CodexObservedState::Held {
+                    reason: CodexHoldReason::WaitingOnApproval,
+                    ..
+                },
+                Some(request),
+            ) if self.approval_request_pending => observation.with_reason(request.kind),
+            _ => observation,
+        })
+    }
+
+    /// The id of the approval request the thread waits on, when this connection saw it.
+    fn approval_request(&self) -> Option<&Value> {
+        self.approval_requests
+            .front()
+            .filter(|_| self.approval_request_pending)
+            .map(|request| &request.id)
+    }
+
+    fn clear_approval_requests(&mut self) {
+        self.approval_request_pending = false;
+        self.approval_requests.clear();
     }
 
     pub fn thread_id(&self) -> &str {
@@ -2075,7 +2153,18 @@ impl CodexControlState {
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             return Ok(false);
         };
-        let before = (self.observed.clone(), self.approval_request_pending);
+        let before = (
+            self.observed.clone(),
+            self.approval_request_pending,
+            self.approval_requests.front().cloned(),
+        );
+        let after = |state: &Self| {
+            (
+                state.observed.clone(),
+                state.approval_request_pending,
+                state.approval_requests.front().cloned(),
+            )
+        };
         match method {
             "thread/started" => {
                 let thread_id = required_string(message, "/params/thread/id", method)?;
@@ -2151,6 +2240,21 @@ impl CodexControlState {
                     turn_id,
                 };
                 self.approval_request_pending = true;
+                if let (Some(id), Some(kind)) = (message.get("id"), approval_request_kind(method))
+                    && !self.approval_requests.iter().any(|request| &request.id == id)
+                {
+                    self.approval_requests.push_back(CodexApprovalRequest {
+                        id: id.clone(),
+                        kind,
+                    });
+                }
+            }
+            // Answered anywhere: the TUI, or st. The thread's status says whether it still waits;
+            // the next request, if one waits, is the prompt now.
+            "serverRequest/resolved" => {
+                let request = message.pointer("/params/requestId");
+                self.approval_requests
+                    .retain(|pending| Some(&pending.id) != request);
             }
             "item/started" | "item/completed" => {
                 let thread_id = required_string(message, "/params/threadId", method)?;
@@ -2199,7 +2303,7 @@ impl CodexControlState {
                     "exitedReviewMode" => (CodexHoldReason::Review, true),
                     "contextCompaction" => (CodexHoldReason::Compaction, false),
                     _ if CLASSIFIED_CODEX_THREAD_ITEMS.contains(&item_type) => {
-                        return Ok((self.observed.clone(), self.approval_request_pending) != before);
+                        return Ok(after(self) != before);
                     }
                     _ => (CodexHoldReason::UnknownProtocol, false),
                 };
@@ -2218,12 +2322,12 @@ impl CodexControlState {
             }
             _ => return Ok(false),
         }
-        Ok((self.observed.clone(), self.approval_request_pending) != before)
+        Ok(after(self) != before)
     }
 
     fn observe_thread_status(&mut self, status: &str, blocked: Option<CodexHoldReason>) {
         if blocked != Some(CodexHoldReason::WaitingOnApproval) {
-            self.approval_request_pending = false;
+            self.clear_approval_requests();
         }
         self.observed = match status {
             "idle" => CodexObservedState::Idle,
@@ -2416,7 +2520,7 @@ impl CodexControlState {
                 reason: CodexHoldReason::WaitingOnApproval,
                 turn_id: Some(current),
             } if current == turn_id && self.approval_request_pending => {
-                self.approval_request_pending = false;
+                self.clear_approval_requests();
                 CodexObservedState::Idle
             }
             CodexObservedState::Held {
@@ -2770,7 +2874,8 @@ pub fn run_controlled_paths(
     let codex_argv = if let Some(mode) = crate::access::AccessMode::from_environment()? {
         let workspace = std::env::current_dir().context("reading managed Codex workspace")?;
         let endpoint = std::env::var("ST3_ENDPOINT").ok();
-        managed_codex_argv(mode, endpoint.as_deref(), &workspace, codex_argv)?
+        let permissions = crate::access::Permissions::from_environment()?;
+        managed_codex_argv_asking(mode, crate::access::codex_asks(), endpoint.as_deref(), &workspace, codex_argv, permissions)?
     } else {
         codex_argv
     };
@@ -2847,7 +2952,25 @@ pub fn run_controlled_paths(
 }
 
 /// Defaults apply only at the st3 launch entry point, before fresh/resume policy projection.
-fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
+#[cfg(test)]
+fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, argv: Vec<String>) -> Result<Vec<String>> {
+    managed_codex_argv_with(mode, endpoint, workspace, argv, crate::access::Permissions::default())
+}
+
+#[cfg(test)]
+fn managed_codex_argv_with(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, argv: Vec<String>, permissions: crate::access::Permissions) -> Result<Vec<String>> {
+    managed_codex_argv_asking(mode, crate::access::codex_asks(), endpoint, workspace, argv, permissions)
+}
+
+/// `asks` is an unticked "Let Codex work without asking": Codex keeps its own approval defaults.
+fn managed_codex_argv_asking(
+    mode: crate::access::AccessMode,
+    asks: bool,
+    endpoint: Option<&str>,
+    workspace: &Path,
+    mut argv: Vec<String>,
+    permissions: crate::access::Permissions,
+) -> Result<Vec<String>> {
     let boundary = interactive_root_prefix_end(&argv[1..])?;
     let authored = &argv[1..1 + boundary];
     let mut explicit_permissions = false;
@@ -2864,11 +2987,13 @@ fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, w
         { explicit_permissions = true; }
         index += if matches!(arg, "-c" | "--config" | "--enable" | "--disable" | "--remote-auth-token-env" | "-m" | "--model" | "--local-provider" | "-p" | "--profile" | "-s" | "--sandbox" | "-C" | "--cd" | "--add-dir" | "-a" | "--ask-for-approval") { 2 } else { 1 };
     }
+    // An unticked "Let Codex work without asking" leaves Codex's own approval defaults in place.
+    explicit_permissions |= asks;
     let socket = if mode == crate::access::AccessMode::Auto && !explicit_permissions {
         let endpoint = endpoint.context("managed auto Codex needs ST3_ENDPOINT")?;
         Some(Path::new(endpoint.strip_prefix("unix://").unwrap_or(endpoint)))
     } else { None };
-    let mut defaults = crate::access::codex_defaults(mode, socket, workspace, explicit_permissions)?;
+    let mut defaults = crate::access::codex_defaults(mode, socket, workspace, explicit_permissions, permissions)?;
     if authored_bypasses_hook_trust(authored)? {
         defaults.retain(|arg| arg != "--dangerously-bypass-hook-trust");
     }
@@ -3185,6 +3310,20 @@ fn run_controlled_owned(
     result
 }
 
+/// A preloaded resume that fails drops its completion sender, which reads as "channel is empty and
+/// sending half is closed". The control thread has already named the real cause (Codex rejected the
+/// declared settings, or the saved thread has no persisted rollout); report that one.
+fn preload_failure(events: &Receiver<ControlEvent>, closed: anyhow::Error) -> anyhow::Error {
+    while let Ok(event) = events.try_recv() {
+        if let ControlEvent::Failed(cause) = event {
+            return anyhow::anyhow!(
+                "Codex control could not preload the declared resume policy: {cause}"
+            );
+        }
+    }
+    closed
+}
+
 fn declared_codex_model(args: &[String]) -> Option<String> {
     let mut selected_config = None;
     let mut selected_direct = None;
@@ -3430,7 +3569,7 @@ fn run_connected(
             drop(resume_ready_tx);
             let _ = shutdown.shutdown(Shutdown::Both);
             let _ = event_thread.join();
-            return Err(error);
+            return Err(preload_failure(&events_rx, error));
         }
     }
     // A fresh initialized observer reads before this child can issue thread/start.
@@ -4581,6 +4720,17 @@ fn controlled_tui_args(
     Ok(args)
 }
 
+/// Whether a `-c key=value` entry sets permissions, which a remote TUI rejects while resuming.
+fn is_permission_config(config: &str) -> bool {
+    let key = config.split('=').next().unwrap_or_default().trim();
+    matches!(
+        key,
+        "default_permissions" | "permissions" | "approval_policy" | "approvals_reviewer" | "sandbox_mode"
+    ) || key.starts_with("permissions.")
+        || key.starts_with("sandbox_workspace_write")
+        || key.starts_with("auto_review")
+}
+
 fn resume_compatible_root_args(authored_prefix: &[String]) -> Vec<String> {
     let mut compatible = Vec::with_capacity(authored_prefix.len());
     let mut index = 0;
@@ -4592,6 +4742,26 @@ fn resume_compatible_root_args(authored_prefix: &[String]) -> Vec<String> {
                 | "--dangerously-bypass-approvals-and-sandbox"
                 | "--dangerously-bypass-hook-trust"
         ) {
+            index += 1;
+            continue;
+        }
+        if matches!(argument, "-c" | "--config") {
+            // The remote TUI refuses permission config on a resume as it does permission flags
+            // ("Permission overrides are not supported when resuming a remote task"). The app server
+            // already holds every one of these entries, and `thread/resume` selects the profile.
+            let value = authored_prefix.get(index + 1);
+            if !value.is_some_and(|value| is_permission_config(value)) {
+                compatible.push(authored_prefix[index].clone());
+                compatible.extend(value.cloned());
+            }
+            index += 2;
+            continue;
+        }
+        if argument
+            .strip_prefix("--config=")
+            .or_else(|| argument.strip_prefix("-c").filter(|value| !value.is_empty()))
+            .is_some_and(is_permission_config)
+        {
             index += 1;
             continue;
         }
@@ -5058,12 +5228,14 @@ struct PendingCodexApproval {
 /// is sent at most once. A request for another thread is never remembered or answered.
 ///
 /// Like Claude's prompt hook, the request binds to the observation its wait wrote, named by the
-/// seat's state record, and st answers only that observation (or a restatement of it). A request
-/// whose wait wrote no new transition (a second request while the record still shows the first)
-/// never binds: it is answered in the terminal, never with the earlier request's answer.
+/// seat's state record, and st answers only that observation (or a restatement of it). Requests
+/// wait in the order they came, and only the oldest is the prompt: a later one binds once the
+/// earlier ones are resolved and its own wait is written as a new transition (see
+/// `CodexInboxDelivery::observe_control`). A request never binds to an observation another
+/// request bound to, so it is never answered with an earlier request's answer.
 #[derive(Debug, Default)]
 struct CodexApprovalAnswer {
-    pending: Option<PendingCodexApproval>,
+    pending: VecDeque<PendingCodexApproval>,
     /// The last observation a request bound to; a later request never reuses it.
     last_prompt: Option<(u64, u64)>,
 }
@@ -5089,8 +5261,9 @@ impl CodexApprovalAnswer {
             | "item/permissions/requestApproval" => {
                 if let Some(id) = message.get("id")
                     && thread == Some(thread_id)
+                    && !self.pending.iter().any(|pending| &pending.id == id)
                 {
-                    self.pending = Some(PendingCodexApproval {
+                    self.pending.push_back(PendingCodexApproval {
                         id: id.clone(),
                         method: method.to_owned(),
                         params: message.get("params").cloned().unwrap_or(Value::Null),
@@ -5100,11 +5273,8 @@ impl CodexApprovalAnswer {
                 }
             }
             "serverRequest/resolved" => {
-                if self.pending.as_ref().is_some_and(|pending| {
-                    message.pointer("/params/requestId") == Some(&pending.id)
-                }) {
-                    self.pending = None;
-                }
+                let request = message.pointer("/params/requestId");
+                self.pending.retain(|pending| Some(&pending.id) != request);
             }
             "thread/status/changed" if thread == Some(thread_id) => {
                 let waiting = message
@@ -5112,10 +5282,10 @@ impl CodexApprovalAnswer {
                     .and_then(Value::as_array)
                     .is_some_and(|flags| flags.iter().any(|flag| flag == "waitingOnApproval"));
                 if !waiting {
-                    self.pending = None;
+                    self.pending.clear();
                 }
             }
-            "turn/completed" if thread == Some(thread_id) => self.pending = None,
+            "turn/completed" if thread == Some(thread_id) => self.pending.clear(),
             _ => {}
         }
     }
@@ -5130,7 +5300,7 @@ impl CodexApprovalAnswer {
         read: impl FnOnce(u64, u64) -> Option<crate::session_control::PromptAnswer>,
     ) -> Option<Value> {
         use crate::session_control::PromptAnswer;
-        let pending = self.pending.as_mut()?;
+        let pending = self.pending.front_mut()?;
         if pending
             .polled
             .is_some_and(|polled| now.duration_since(polled) < APPROVAL_ANSWER_POLL)
@@ -5158,11 +5328,11 @@ impl CodexApprovalAnswer {
         match read(ownership, transition)? {
             PromptAnswer::Open => None,
             PromptAnswer::Gone => {
-                self.pending = None;
+                self.pending.pop_front();
                 None
             }
             PromptAnswer::Answered { answer } => {
-                let pending = self.pending.take()?;
+                let pending = self.pending.pop_front()?;
                 let result = approval_decision(&pending.method, &pending.params, &answer)?;
                 Some(json!({ "id": pending.id, "result": result }))
             }
@@ -5432,7 +5602,7 @@ fn pump_control(
                     atomic_json(control_state_path, &bound)
                         .context("persisting Codex control state")?;
                     if let Some(delivery) = delivery.as_mut() {
-                        delivery.observe_harness(&bound.observed);
+                        delivery.observe_control(&bound);
                     }
                     control_state = Some(bound);
                     if let Some(preloaded) = preloaded.take() {
@@ -5460,7 +5630,7 @@ fn pump_control(
                 atomic_json(control_state_path, &bound)
                     .context("persisting Codex fresh control state")?;
                 if let Some(delivery) = delivery.as_mut() {
-                    delivery.observe_harness(&bound.observed);
+                    delivery.observe_control(&bound);
                 }
                 control_state = Some(bound);
                 let _ = events.send(ControlEvent::Bound);
@@ -5567,7 +5737,7 @@ fn pump_control(
                     if !delivery_response {
                         delivery.retry_held_snapshot_after_live_recovery(&state.observed);
                     }
-                    delivery.observe_harness(&state.observed);
+                    delivery.observe_control(state);
                 }
                 let _ = events.send(ControlEvent::Observed);
             } else if turn_error_changed
@@ -5580,7 +5750,7 @@ fn pump_control(
                 // provider refused every attempt, so nothing here changed and nothing was
                 // republished. The record has to learn the cause on this edge or never.
                 if let Some(delivery) = delivery.as_mut() {
-                    delivery.observe_harness(&state.observed);
+                    delivery.observe_control(state);
                 }
             }
             if !state.subscribed
@@ -5695,7 +5865,7 @@ fn recover_transcript_turn_from_frames(
         atomic_json(control_state_path, state)
             .context("persisting transcript-recovered Codex system error")?;
         if let Some(delivery) = delivery.as_mut() {
-            delivery.observe_harness(&state.observed);
+            delivery.observe_control(state);
             delivery.accept_transcript_recovery(state.observed.clone());
         }
         let _ = events.send(ControlEvent::Observed);
@@ -5710,7 +5880,7 @@ fn recover_transcript_turn_from_frames(
         atomic_json(control_state_path, state)
             .context("persisting transcript-recovered Codex turn")?;
         if let Some(delivery) = delivery.as_mut() {
-            delivery.observe_harness(&state.observed);
+            delivery.observe_control(state);
         }
         let _ = events.send(ControlEvent::Observed);
     }

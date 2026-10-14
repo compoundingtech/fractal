@@ -21,8 +21,9 @@ export type Context = { carrier: Carrier; path?: 'direct' | 'relay' };
 
 export const MINUTE_MS = 60_000;
 export const KEEP_MS = 7 * 24 * 60 * MINUTE_MS;
-/** The most intervals one report carries. */
+/** The most intervals one report carries, and the most samples (a member refuses more than 32). */
 export const MAX_INTERVALS_PER_REPORT = 30;
+export const MAX_SAMPLES_PER_REPORT = 32;
 /** The most closed intervals kept on the device while no member accepts them. */
 export const MAX_KEPT_INTERVALS = 1500;
 /** The histogram has this many buckets for each doubling, as the daemon's windows do. */
@@ -67,6 +68,8 @@ export class Observations {
   private minutes = new Map<number, Interval>();
   private closed: Interval[] = [];
   private batch: { report_id: string; intervals: Interval[] } | null = null;
+  /** Called when closed intervals wait to be reported (set by the app, which sends them). */
+  ready: (() => void) | undefined;
   private timers = new Map<number, { target: Target; began: number }>();
   private nextToken = 1;
   // The share of foreground time with a live feed: when each state last changed.
@@ -195,6 +198,8 @@ export class Observations {
       if (!this.batch.intervals.length) this.batch = null;
     }
     if (moved) void this.persist();
+    // Something is waiting to be told: whoever reports hears it now, with no timer of ours.
+    if (this.closed.length || this.batch) this.ready?.();
   }
 
   // ---- Reporting.
@@ -208,7 +213,15 @@ export class Observations {
     this.sweep();
     if (!this.batch) {
       if (!this.closed.length) return null;
-      const intervals = this.closed.splice(0, MAX_INTERVALS_PER_REPORT);
+      // As many closed minutes as fit the member's sample limit, at least one.
+      let samples = 0, take = 0;
+      for (const interval of this.closed) {
+        const count = Object.keys(interval.series).length + Object.keys(interval.shares).length;
+        if (take > 0 && samples + count > MAX_SAMPLES_PER_REPORT) break;
+        samples += count;
+        if (++take >= MAX_INTERVALS_PER_REPORT) break;
+      }
+      const intervals = this.closed.splice(0, take);
       this.batch = { report_id: this.clock.id(), intervals };
       void this.persist();
     }
@@ -244,4 +257,24 @@ export class Observations {
 function valid(interval: unknown): interval is Interval {
   const candidate = interval as Interval | null;
   return !!candidate && typeof candidate.start === 'number' && candidate.start % MINUTE_MS === 0 && !!candidate.series && !!candidate.shares;
+}
+
+/**
+ * A batch as the member takes it (`observations.report`): flat samples, each naming its own minute,
+ * latencies and live shares. A carrier the member does not know (HTTPS) is left out, never relabelled.
+ */
+export function toObservationReport(batch: Batch): { report_id: string; samples: Array<Record<string, unknown>> } {
+  const known = (carrier: string) => carrier === 'fabric' || carrier === 'tailscale' || carrier === 'lan';
+  const samples: Array<Record<string, unknown>> = [];
+  for (const interval of batch.intervals) {
+    for (const sample of interval.samples) {
+      if (!known(sample.carrier)) continue;
+      samples.push({ kind: 'latency', target: sample.target, carrier: sample.carrier, ...(sample.path ? { path: sample.path } : {}), interval_start: interval.interval_start, interval_end: interval.interval_end, count: sample.count, over_target: sample.over_target, max_ms: sample.max_ms, buckets: sample.buckets });
+    }
+    for (const share of interval.shares) {
+      if (!known(share.carrier) || share.foreground_ms < 1) continue;
+      samples.push({ kind: 'live-share', target: 'ios-live-share', carrier: share.carrier, ...(share.path ? { path: share.path } : {}), interval_start: interval.interval_start, interval_end: interval.interval_end, foreground_ms: Math.min(60_000, Math.round(share.foreground_ms)), live_ms: Math.min(Math.round(share.live_ms), Math.min(60_000, Math.round(share.foreground_ms))) });
+    }
+  }
+  return { report_id: batch.report_id, samples };
 }
