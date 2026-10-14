@@ -852,8 +852,13 @@ pub fn sql(statement: &str, duration: Duration) {
 pub struct WriterWait {
     started: Instant,
     holder: Option<Arc<str>>,
-    trace_holder: Option<crate::sqlite::telemetry::Origin>,
-    trace_origin: crate::sqlite::telemetry::Origin,
+    // Keep queued jobs small beside always-on holders; allocate only for opt-in phase traces.
+    trace: Option<Box<WriterTrace>>,
+}
+
+struct WriterTrace {
+    holder: Option<crate::sqlite::telemetry::Origin>,
+    origin: crate::sqlite::telemetry::Origin,
 }
 
 pub fn writer_waiting() -> Option<WriterWait> {
@@ -865,8 +870,7 @@ pub fn writer_waiting() -> Option<WriterWait> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone(),
-        trace_holder: None,
-        trace_origin: crate::sqlite::telemetry::Origin::other(),
+        trace: None,
     })
 }
 
@@ -876,25 +880,23 @@ pub(crate) fn writer_waiting_for(
     trace_origin: crate::sqlite::telemetry::Origin,
 ) -> WriterWait {
     let mut wait = wait.unwrap_or_else(|| WriterWait {
-        started: Instant::now(), holder: None, trace_holder: None,
-        trace_origin: crate::sqlite::telemetry::Origin::other(),
+        started: Instant::now(), holder: None, trace: None,
     });
-    wait.trace_holder = trace_holder;
-    wait.trace_origin = trace_origin;
+    wait.trace = Some(Box::new(WriterTrace { holder: trace_holder, origin: trace_origin }));
     wait
 }
 
 impl WriterWait {
     pub(crate) fn trace_holder(&self) -> Option<crate::sqlite::telemetry::Origin> {
-        self.trace_holder.clone()
+        self.trace.as_ref().and_then(|trace| trace.holder.clone())
     }
 
-    pub(crate) fn trace_origin(&self) -> &crate::sqlite::telemetry::Origin {
-        &self.trace_origin
+    pub(crate) fn trace_origin(&self) -> Option<&crate::sqlite::telemetry::Origin> {
+        self.trace.as_ref().map(|trace| &trace.origin)
     }
 
     pub(crate) fn take_trace_origin(&mut self) -> crate::sqlite::telemetry::Origin {
-        std::mem::replace(&mut self.trace_origin, crate::sqlite::telemetry::Origin::other())
+        self.trace.take().map_or_else(crate::sqlite::telemetry::Origin::other, |trace| trace.origin)
     }
 }
 

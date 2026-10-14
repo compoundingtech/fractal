@@ -835,7 +835,7 @@ fn run_write_batch(
 ) -> Option<WriterJob> {
     let (observers, finalizers, mutation_observer, writer_telemetry) = callbacks;
     let first_origin = match &first {
-        WriterJob::Batched { wait, .. } => wait.as_ref().map(crate::profile::WriterWait::trace_origin),
+        WriterJob::Batched { wait, .. } => wait.as_ref().and_then(crate::profile::WriterWait::trace_origin),
         _ => None,
     };
     let _holder = writer_telemetry.map(|writer| writer.holding(first_origin.cloned()));
