@@ -100,42 +100,42 @@ describe('sidebar machine query', () => {
   it.each([
     ['', '', []],
     ['  compiler  sidebar ', 'compiler sidebar', []],
-    ['machine:build3', '', [['build3']]],
-    ['machine:build3,,build5,', '', [['build3', 'build5']]],
-    ['HOST:BUILD machine:build3', '', [['build'], ['build3']]],
+    ['machine:synthetic-138/1', '', [['synthetic-138/1']]],
+    ['machine:synthetic-138/1,,synthetic-138/2,', '', [['synthetic-138/1', 'synthetic-138/2']]],
+    ['HOST:SYNTHETIC-138 machine:synthetic-138/1', '', [['synthetic-138'], ['synthetic-138/1']]],
     ['machine: host:,, compiler', 'compiler', []],
-    ['compiler machine:build3 sidebar host:BUILD', 'compiler sidebar', [['build3'], ['build']]],
-    ['other:build3 compiler-machine:build3', 'other:build3 compiler-machine:build3', []],
+    ['compiler machine:synthetic-138/1 sidebar host:SYNTHETIC-138', 'compiler sidebar', [['synthetic-138/1'], ['synthetic-138']]],
+    ['other:synthetic-138/1 compiler-machine:synthetic-138/1', 'other:synthetic-138/1 compiler-machine:synthetic-138/1', []],
   ] as const)('parses %j without highlighting facets', (input, query, machines) => {
     expect(parseSidebarQuery(input)).toEqual({ query, machines })
   })
 
   it('shares row host namespace stripping without rewriting query values', () => {
-    expect(matchesSidebarHost('HOST/BUILD3', parseSidebarQuery('machine:build').machines)).toBe(true)
-    expect(matchesSidebarHost('host/build3', parseSidebarQuery('machine:host/build3').machines)).toBe(false)
-    expect(parseSidebarQuery('machine:HOST/BUILD3').machines).toEqual([['host/build3']])
+    expect(matchesSidebarHost('HOST/SYNTHETIC-138/1', parseSidebarQuery('machine:synthetic-138').machines)).toBe(true)
+    expect(matchesSidebarHost('host/synthetic-138/1', parseSidebarQuery('machine:host/synthetic-138/1').machines)).toBe(false)
+    expect(parseSidebarQuery('machine:HOST/SYNTHETIC-138/1').machines).toEqual([['host/synthetic-138/1']])
   })
 
   const machineRows = [
-    row('build3', 'Compiler', 'idle', 'host/build3', 0),
-    row('build5', 'Sidebar', 'idle', 'BUILD5', 0),
+    row('synthetic-138/1', 'Compiler', 'idle', 'host/synthetic-138/1', 0),
+    row('synthetic-138/2', 'Sidebar', 'idle', 'SYNTHETIC-138/2', 0),
     row('other', 'Compiler', 'idle', 'host/laptop24', 0),
   ]
   it.each([
-    ['machine:build3', '', ['build3']],
-    ['machine:build3,build5', '', ['build3', 'build5']],
-    ['HOST:BUILD', '', ['build3', 'build5']],
-    ['machine:build machine:build3', '', ['build3']],
-    ['machine:build3 host:build5', '', []],
-    ['machine:build9', '', []],
-    ['machine:', '', ['build3', 'build5', 'other']],
-    ['machine:,,', '', ['build3', 'build5', 'other']],
-    ['machine:build3,,', '', ['build3']],
-    ['compiler machine:build', '', ['build3']],
-    ['laptop machine:build', '', []],
-    ['machine:build', 'host/build3', ['build3']],
-    ['machine:build3', 'BUILD5', []],
-    ['machine:build', 'build3', []],
+    ['machine:synthetic-138/1', '', ['synthetic-138/1']],
+    ['machine:synthetic-138/1,synthetic-138/2', '', ['synthetic-138/1', 'synthetic-138/2']],
+    ['HOST:SYNTHETIC-138', '', ['synthetic-138/1', 'synthetic-138/2']],
+    ['machine:synthetic-138 machine:synthetic-138/1', '', ['synthetic-138/1']],
+    ['machine:synthetic-138/1 host:synthetic-138/2', '', []],
+    ['machine:synthetic-138/9', '', []],
+    ['machine:', '', ['synthetic-138/1', 'synthetic-138/2', 'other']],
+    ['machine:,,', '', ['synthetic-138/1', 'synthetic-138/2', 'other']],
+    ['machine:synthetic-138/1,,', '', ['synthetic-138/1']],
+    ['compiler machine:synthetic-138', '', ['synthetic-138/1']],
+    ['laptop machine:synthetic-138', '', []],
+    ['machine:synthetic-138', 'host/synthetic-138/1', ['synthetic-138/1']],
+    ['machine:synthetic-138/1', 'SYNTHETIC-138/2', []],
+    ['machine:synthetic-138', 'synthetic-138/1', []],
   ] as const)('matches %j AND the exact menu host %j', (query, host, expected) => {
     expect(machineRows.filter((candidate) =>
       matchesRow({ row: candidate, filters: { ...defaultFilters, query, host }, context: '' }),
@@ -164,6 +164,6 @@ describe('sidebar machine query', () => {
     applyOp(doc, createFolder('empty', 'Empty', null, 'V', [1, 0, 't']))
     const folders = project(doc, []).folders
     expect(filterFolders({ folders, rows, filters: { ...defaultFilters, query: 'machine: host:,, ' }, sort: 'manual' })).toEqual(folders)
-    expect(filterFolders({ folders, rows, filters: { ...defaultFilters, query: 'machine:build9' }, sort: 'manual' })).toEqual([])
+    expect(filterFolders({ folders, rows, filters: { ...defaultFilters, query: 'machine:dev9' }, sort: 'manual' })).toEqual([])
   })
 })

@@ -134,10 +134,10 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
 describe('shipped live sidebar machine query', () => {
   it('applies typed hosts to the real roster and preserves substring text and stripped highlights', async () => {
     const candidates: readonly Agent[] = [
-      { ...agent, id: 'agent/compiler', name: 'Compiler Alpha', host_id: Option.some('host/build3') },
-      { ...agent, id: 'agent/sidebar', name: 'Sidebar Beta', host_id: Option.some('host/BUILD5') },
+      { ...agent, id: 'agent/compiler', name: 'Compiler Alpha', host_id: Option.some('host/synthetic-138/1') },
+      { ...agent, id: 'agent/sidebar', name: 'Sidebar Beta', host_id: Option.some('host/SYNTHETIC-138/2') },
       // Text looks like a matching host but must not satisfy a machine facet.
-      { ...agent, id: 'agent/decoy', name: 'Compiler build3 decoy', host_id: Option.some('host/laptop24') },
+      { ...agent, id: 'agent/decoy', name: 'Compiler synthetic-138/1 decoy', host_id: Option.some('host/laptop24') },
     ]
     registry.set(agents, observed({ value: candidates }))
     await mount(1440)
@@ -152,25 +152,25 @@ describe('shipped live sidebar machine query', () => {
     const names = () => [...roster().querySelectorAll('[data-testid="taste-agent-row"]')].map(row => row.textContent)
     expect(names()).toHaveLength(3)
     for (const [query, expected] of [
-      ['machine:build3', ['Compiler Alpha']],
-      ['machine:build3,build5', ['Compiler Alpha', 'Sidebar Beta']],
-      ['HOST:BUILD', ['Compiler Alpha', 'Sidebar Beta']],
-      ['machine:build host:build3', ['Compiler Alpha']],
-      ['machine:build3 host:build5', []],
-      ['machine:build9', []],
-      ['machine: host:,,', ['Compiler Alpha', 'Sidebar Beta', 'Compiler build3 decoy']],
-      ['Alpha machine:BUILD', ['Compiler Alpha']],
-      ['cmp machine:build', []],
-      ['build3', ['Compiler Alpha', 'Compiler build3 decoy']],
-      ['machine:host/build3', []],
+      ['machine:synthetic-138/1', ['Compiler Alpha']],
+      ['machine:synthetic-138/1,synthetic-138/2', ['Compiler Alpha', 'Sidebar Beta']],
+      ['HOST:SYNTHETIC-138', ['Compiler Alpha', 'Sidebar Beta']],
+      ['machine:synthetic-138 host:synthetic-138/1', ['Compiler Alpha']],
+      ['machine:synthetic-138/1 host:synthetic-138/2', []],
+      ['machine:synthetic-138/9', []],
+      ['machine: host:,,', ['Compiler Alpha', 'Sidebar Beta', 'Compiler synthetic-138/1 decoy']],
+      ['Alpha machine:SYNTHETIC-138', ['Compiler Alpha']],
+      ['cmp machine:synthetic-138', []],
+      ['synthetic-138/1', ['Compiler Alpha', 'Compiler synthetic-138/1 decoy']],
+      ['machine:host/synthetic-138/1', []],
     ] as const) {
       await search(query)
       expect(names()).toHaveLength(expected.length)
       expected.forEach(name => expect(roster().textContent).toContain(name))
     }
-    await search('machine:build3')
+    await search('machine:synthetic-138/1')
     expect(roster().querySelectorAll('mark')).toHaveLength(0)
-    await search('Alpha machine:build3')
+    await search('Alpha machine:synthetic-138/1')
     expect([...roster().querySelectorAll('mark')].map(mark => mark.textContent).join('')).toContain('Alpha')
     expect([...roster().querySelectorAll('mark')].some(mark => mark.textContent?.includes('machine:'))).toBe(false)
   })
