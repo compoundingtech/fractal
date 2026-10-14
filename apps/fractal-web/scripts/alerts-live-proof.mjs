@@ -128,16 +128,17 @@ async function start() {
 }
 
 function down() {
-  spawnSync('systemctl', ['--user', 'stop', unit], { stdio: 'inherit' })
-  if (existsSync(tools)) {
-    const result = st(['uninstall', '--yes', '--erase-local-graph', '--no-service', '--offline'], { check: false })
-    process.stdout.write(result.stdout + result.stderr)
-  }
-  // WEBPROOF_ROOT comes from the environment: remove only a directory this script made.
+  // WEBPROOF_ROOT comes from the environment: act only on a directory this script made,
+  // so a wrong root neither uninstalls nor deletes anything.
   if (!basename(root).startsWith('st-webproof') || !existsSync(join(root, 'fleet-created'))) {
     console.error(`not removing ${root}: it is not named st-webproof* or has no fleet-created marker from this script`)
     process.exitCode = 1
     return
+  }
+  spawnSync('systemctl', ['--user', 'stop', unit], { stdio: 'inherit' })
+  if (existsSync(tools)) {
+    const result = st(['uninstall', '--yes', '--erase-local-graph', '--no-service', '--offline'], { check: false })
+    process.stdout.write(result.stdout + result.stderr)
   }
   rmSync(root, { recursive: true, force: true })
   console.log(`removed ${root}`)
