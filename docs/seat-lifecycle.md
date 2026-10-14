@@ -184,19 +184,20 @@ Local start-observation trimming and replication to another node cannot rearm it
 Bindings from older drivers without this optional field never expire bootstrap;
 they remain strict until an upgraded driver publishes a proven binding.
 Unrelated declaration edits do not reset it. Subsequent restarts ignore the pair
-and continue the latest bound native ID and transcript path within the linked
-inventory. Explicit suspension resumes and rollouts retain strict selectors.
+and continue the latest bound native session by ID within the linked inventory.
+Only strict import bootstrap uses its pinned transcript path. Explicit suspension
+resumes and rollouts retain strict selectors.
 Declaration/binding and refusal/binding precedence use canonical claim order,
 so replication arrival order does not change which native session launches.
 
-Moving the bound transcript outside the linked inventory directory is not
-supported. The driver reports a visible `native-continue-unavailable` warning with
-status `managed-directory-foreign-link` and starts a fresh session. The refusal is
-remembered for that native ID until a canonically newer successful binding supersedes it.
-Without a newer binding, subsequent launches do not retry the refused continuation
-or the original import bootstrap, so relocation does not cause a repeated refusal
-loop. A successful strict repair can bind the same native ID again; its later
-binding restores normal continuation. Supporting relocation requires an
+Ordinary continuation reads the linked managed inventory by native ID. If its
+transcript is missing, the driver reports a visible `native-continue-unavailable`
+warning with status `transcript-missing` and starts a fresh session. The refusal is
+remembered permanently for that native ID, even after a newer binding. Subsequent
+launches do not retry the refused continuation or the original import bootstrap,
+so relocation does not cause a repeated refusal loop. A selector-scoped
+`authored-session-selection` refusal can stop applying after the selector changes
+or a canonically newer binding. Supporting relocation requires an
 owned-inventory relink shared by reporting, ask recovery, suspension and rollout
 consumers.
 

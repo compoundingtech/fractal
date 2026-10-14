@@ -19309,7 +19309,7 @@ async fn run_driver(client: &Client, args: DriverArgs, catalog: Option<&Path>) -
             client, subject, &incarnation, &args.driver, args.seed.as_deref(), &sessions,
             st3::native_resume::requested().is_some(),
         ).await? {
-            argv = st3::native_resume::pi_family_argv("omp", argv, &sessions, &session)
+            argv = st3::native_resume::pi_family_argv("omp", argv, &sessions, &session, None)
                 .map_err(|refusal| anyhow::anyhow!("{}: {}", refusal.code, refusal.reason))?;
         }
         if let (Some(message), Some(id)) = (&args.initial_message, &args.initial_message_id) {
@@ -19486,7 +19486,9 @@ async fn run_st2_native_driver(
                 path.as_deref(),
             );
         }
-        match select(argv.clone(), &session, path.as_deref())? {
+        // A saved continuation path is not the strict import bootstrap selector.
+        // OMP restarts keep selecting their session by ID in the managed inventory.
+        match select(argv.clone(), &session, None)? {
             Ok(argv) => {
                 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
                 selected_session = Some(session);

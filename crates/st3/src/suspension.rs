@@ -481,13 +481,15 @@ pub fn continue_session(
         let typed = field(&claim, "session_id") == Some(session.as_str())
             && field(&claim, "code") == Some(CONTINUE_UNAVAILABLE_CODE);
         let in_scope = legacy || typed;
-        let applies = in_scope && if field(&claim, "status") == Some("authored-session-selection") {
+        let authored = field(&claim, "status") == Some("authored-session-selection");
+        let applies = in_scope && if authored {
             selector_scope.is_some_and(|scope| field(&claim, "selector_scope").is_none_or(|recorded| recorded == scope))
         } else {
             true
         };
-        // A newer native binding supersedes a refusal recorded before it.
-        if applies && store.claim_is_after(&claim.id, &bound.id)? {
+        // Only scoped selector refusals can be superseded by a newer binding.
+        // A permanent refusal still applies to the same session after a rebind.
+        if applies && (!authored || store.claim_is_after(&claim.id, &bound.id)?) {
             refused = true;
             break;
         }
@@ -748,10 +750,15 @@ mod tests {
             assert!(continue_session(&store, "agent/example", "omp", Some("one"), Some("selector")).unwrap().is_none());
             assert_eq!(continue_session(&store, "agent/example", "omp", Some("one"), None).unwrap().unwrap().0, "native");
             assert!(continue_session(&store, "agent/example", "omp", Some("two"), None).unwrap().is_none());
+            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native","account_ref":"one"}), None);
+            assert_eq!(continue_session(&store, "agent/example", "omp", Some("one"), Some("selector")).unwrap().unwrap().0, "native");
             let permanent = typed_continue_unavailable_key("agent/example", "native", "transcript-missing", None);
             continuation_claim(&store, "harness.diagnostic", json!({"code":CONTINUE_UNAVAILABLE_CODE,"status":"transcript-missing","session_id":"native"}), Some(permanent.clone()));
             assert!(store.operation_claim(&permanent).unwrap().is_some());
             assert!(continue_session(&store, "agent/example", "omp", Some("one"), None).unwrap().is_none());
+            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native","account_ref":"one"}), None);
+            assert!(continue_session(&store, "agent/example", "omp", Some("one"), None).unwrap().is_none());
+            assert!(continue_session(&store, "agent/example", "omp", Some("one"), Some("selector")).unwrap().is_none());
         }
     }
 
