@@ -5,6 +5,7 @@ import { surfaceVars as surface, textVars as text, borderVars as border, accentV
 import { Button, IconButton, Tooltip } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
 import { Markdown } from '../composition/Markdown'
+import { InlineMarkdown, toPlainText } from '../composition/InlineMarkdown'
 import { compactTime } from '../sidebar/model'
 import type { AnswerDraft, Answers, OptionView, Preview, QuestionFormProps, QuestionState, QuestionView } from './model'
 
@@ -275,8 +276,8 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
   >
     <div {...stylex.props(styles.header)}>
       <span data-question-glyph="" data-question-attention={attention} {...stylex.props(styles.glyph, attention && styles.glyphAttention)}><Icon name="message" /></span>
-      <span id={titleId} {...stylex.props(styles.title)}>{title}</span>
-      <span data-question-asked="" {...stylex.props(styles.meta)}>{request.agentLabel}{askedAge !== undefined && <> · asked <time dateTime={request.askedAt}>{askedAge}</time></>}</span>
+      <span id={titleId} {...stylex.props(styles.title)}><InlineMarkdown text={title} /></span>
+      <span data-question-asked="" {...stylex.props(styles.meta)}><InlineMarkdown text={request.agentLabel} />{askedAge !== undefined && <> · asked <time dateTime={request.askedAt}>{askedAge}</time></>}</span>
       <div {...stylex.props(styles.headerEnd)}>
         {state._tag === 'pending' && state.expiresAt !== undefined && <Clock at={state.expiresAt} prefix="Expires" />}
         {(state._tag === 'answered' || state._tag === 'answered-elsewhere' || state._tag === 'expired' || state._tag === 'cancelled') && <Clock at={state.at} prefix={state._tag === 'expired' ? 'Expired at' : 'At'} />}
@@ -298,8 +299,8 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
             const answered = isQuestionAnswered(question, draftFor(answers, question.id))
             const header = question.header ?? `Question ${index + 1}`
             // An explicit name: the marker is a box, so content-derived names would read "Storage , answered".
-            return <Tab key={question.id} id={question.id} aria-label={answered ? `${header}, answered` : header} className={({ isSelected, isFocusVisible }) => stylex.props(styles.tab, stacked && styles.tabStacked, isSelected && styles.tabSelected, isFocusVisible && styles.focusRing).className ?? ''}>
-              <span {...stylex.props(styles.tabLabel, stacked && styles.tabLabelStacked)}>{header}</span>
+            return <Tab key={question.id} id={question.id} aria-label={answered ? `${toPlainText(header)}, answered` : toPlainText(header)} className={({ isSelected, isFocusVisible }) => stylex.props(styles.tab, stacked && styles.tabStacked, isSelected && styles.tabSelected, isFocusVisible && styles.focusRing).className ?? ''}>
+              <span {...stylex.props(styles.tabLabel, stacked && styles.tabLabelStacked)}><InlineMarkdown text={header} /></span>
               <span data-question-tab-marker={answered ? 'answered' : 'open'} {...stylex.props(styles.marker, answered && styles.markerAnswered)}>{answered && <Icon name="check" size={12} />}</span>
             </Tab>
           })}
@@ -343,9 +344,9 @@ function Settled({ state, questions }: { state: Exclude<QuestionState, { _tag: '
         const answer = answers?.[question.id]
         const note = filled(answer?.note)
         return <div key={question.id} data-question-summary={question.id} {...stylex.props(styles.summaryRow)}>
-          <dt {...stylex.props(styles.summaryPrompt)}>{question.header !== undefined && <span {...stylex.props(styles.chip)}>{question.header}</span>}{question.prompt}</dt>
-          <dd {...stylex.props(styles.summaryAnswer)}>{answerText(question, answer)}</dd>
-          {note !== undefined && <dd {...stylex.props(styles.summaryNote)}>Note: {note}</dd>}
+          <dt {...stylex.props(styles.summaryPrompt)}>{question.header !== undefined && <span {...stylex.props(styles.chip)}><InlineMarkdown text={question.header} /></span>}<span><InlineMarkdown text={question.prompt} links="anchor" /></span></dt>
+          <dd {...stylex.props(styles.summaryAnswer)}><InlineMarkdown text={answerText(question, answer)} /></dd>
+          {note !== undefined && <dd {...stylex.props(styles.summaryNote)}>Note: <InlineMarkdown text={note} /></dd>}
         </div>
       })}
     </dl>
@@ -427,8 +428,9 @@ function QuestionPanel({ question, draft, showHeader, showKeys, stacked, pinned,
 
   return <div data-question-panel={question.id} {...stylex.props(styles.question)}>
     <div {...stylex.props(styles.promptRow)}>
-      {showHeader && question.header !== undefined && <span {...stylex.props(styles.chip)}>{question.header}</span>}
-      <span ref={promptRef} id={promptId} {...stylex.props(styles.prompt, promptClamped && styles.promptClamped)}>{question.prompt}</span>
+      {showHeader && question.header !== undefined && <span {...stylex.props(styles.chip)}><InlineMarkdown text={question.header} /></span>}
+      {/* Clamp-hidden text never holds focus targets, so links become anchors only once the prompt is fully shown. */}
+      <span ref={promptRef} id={promptId} {...stylex.props(styles.prompt, promptClamped && styles.promptClamped)}><InlineMarkdown text={question.prompt} links={promptClamped ? 'label' : 'anchor'} /></span>
       {pinned && (promptExpanded || promptOverflows) && <Button data-question-prompt-disclosure="" variant="ghost" size="sm" aria-expanded={promptExpanded} aria-controls={promptId} onPress={() => setPromptExpanded(expanded => !expanded)}>{promptExpanded ? 'Show less' : 'Show full question'}</Button>}
     </div>
     {question.subject !== undefined && <div {...stylex.props(styles.subject)}><PreviewBody preview={question.subject} /></div>}
@@ -436,13 +438,13 @@ function QuestionPanel({ question, draft, showHeader, showKeys, stacked, pinned,
       <div {...stylex.props(styles.column)}>
         <div data-question-stop="options" onPointerOver={previewRow} onFocus={previewRow}>{control}</div>
         {otherOpen && <div data-question-stop="other" {...stylex.props(styles.otherField)}>
-          <TextField aria-label={`Other answer: ${question.header ?? question.prompt}`} value={draft.other ?? ''} onChange={onOther} isDisabled={isDisabled} isReadOnly={isReadOnly}>
+          <TextField aria-label={`Other answer: ${toPlainText(question.header ?? question.prompt)}`} value={draft.other ?? ''} onChange={onOther} isDisabled={isDisabled} isReadOnly={isReadOnly}>
             <Input type={inputType} placeholder={question.placeholder ?? 'Type your own answer'} {...stylex.props(styles.input)} />
           </TextField>
         </div>}
       </div>
       {hasPreview && preview !== undefined && <figure data-question-preview={preview.id} aria-labelledby={previewCaptionId} {...stylex.props(styles.preview)}>
-        <figcaption id={previewCaptionId} {...stylex.props(styles.meta)}>Preview · {preview.label}</figcaption>
+        <figcaption id={previewCaptionId} {...stylex.props(styles.meta)}>Preview · <InlineMarkdown text={preview.label} /></figcaption>
         <PreviewBody preview={preview.preview} />
       </figure>}
     </div>
@@ -473,11 +475,11 @@ function OptionContent({ option, index, descriptionId, showKey, isSelected, mult
     <Indicator isSelected={isSelected} multi={multi} />
     <span {...stylex.props(styles.optionText)}>
       <span {...stylex.props(styles.optionLabel)}>
-        {option.label}
+        <span><InlineMarkdown text={option.label} /></span>
         {option.recommended === true && <span data-recommended="" {...stylex.props(styles.badge)}>Recommended</span>}
         {option.tone === 'danger' && <span {...stylex.props(styles.danger)}><Icon name="alert" size={12} label="Destructive" /></span>}
       </span>
-      {option.description !== undefined && <span id={descriptionId} aria-hidden="true" {...stylex.props(styles.description)}>{option.description}</span>}
+      {option.description !== undefined && <span id={descriptionId} aria-hidden="true" {...stylex.props(styles.description)}><InlineMarkdown text={option.description} /></span>}
     </span>
     {showKey && index < 9 && <span data-question-keycap="" aria-hidden="true" {...stylex.props(styles.keycap)}>{index + 1}</span>}
   </div>

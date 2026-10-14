@@ -5,6 +5,7 @@ import { surfaceVars as surface, textVars as ink, borderVars as border, accentVa
 import { Icon } from '../composition/Icons'
 import { ErrorOverlay } from '../composition/ErrorOverlay'
 import { HighlightedSource } from '../composition/Markdown'
+import { InlineMarkdown } from '../composition/InlineMarkdown'
 import type { WorkLogCall, WorkLogTurn } from './work-log'
 import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, workLogOutputLanguage } from './work-log'
 
@@ -63,7 +64,7 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
 function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
   const [rawOpen, setRawOpen] = React.useState(false)
   return <>
-    <p>{call.summary ?? call.title} · {call.status}</p>
+    <p><InlineMarkdown text={call.summary ?? call.title} /> · {call.status}</p>
     {call.status === 'error' && call.detail !== undefined && <p>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.call)}>Show raw input/output</Button>

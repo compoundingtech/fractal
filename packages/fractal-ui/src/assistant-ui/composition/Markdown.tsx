@@ -19,6 +19,8 @@ import markdown from 'refractor/markdown'
 import css from 'refractor/css'
 import remarkGfm from 'remark-gfm'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { InlineCode } from './InlineMarkdown'
+import { phrasingStyles } from './phrasing.stylex'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
 export type InlineReferenceRenderer = (path: string) => React.ReactNode | undefined
@@ -75,7 +77,7 @@ function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
 function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'> & ExtraProps) {
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
   const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
-  const link = <Link href={href} target="_blank" rel="noopener noreferrer" render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
+  const link = <Link href={href} target="_blank" rel="noopener noreferrer" render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(phrasingStyles.link)}>{imageLink ? 'Open link' : children}</Link>
   return <ReferenceContext.Provider value={{ resolveImage, onLoadImage }}>{imageLink ? <span>{children}{' '}{link}</span> : link}</ReferenceContext.Provider>
 }
 
@@ -103,11 +105,12 @@ function InlineText({ children }: { children: React.ReactNode }) {
   })
 }
 
-function InlineCode({ children }: React.ComponentProps<'code'>) {
+/** A code span that names a known resource becomes its chip; every other span is the shared `InlineCode`. */
+function MarkdownCode({ children }: React.ComponentProps<'code'>) {
   const references = React.useContext(ReferenceContext)
   const path = String(children ?? '')
   const rendered = renderReference(path, references)
-  return rendered === undefined ? <code {...stylex.props(styles.inlineCode)}>{children}</code> : rendered
+  return rendered === undefined ? <InlineCode>{children}</InlineCode> : rendered
 }
 
 // Eager, fixed package grammars: authored fences never trigger a module request.
@@ -187,13 +190,13 @@ const MARKDOWN_COMPONENTS: Components = {
   h1: heading('h1'), h2: heading('h2'), h3: heading('h3'), h4: heading('h4'), h5: heading('h5'), h6: heading('h6'),
   p: Paragraph,
   span: ({ children, node }) => <span data-streaming-tail={node?.properties['data-streaming-tail'] || undefined} aria-hidden={node?.properties['aria-hidden'] === true || undefined} {...stylex.props(node?.properties['data-streaming-tail'] === true && styles.streamingTail)}>{children}</span>,
-  strong: ({ children }) => <strong {...stylex.props(styles.strong)}><InlineText>{children}</InlineText></strong>,
-  em: ({ children }) => <em {...stylex.props(styles.emphasis)}><InlineText>{children}</InlineText></em>,
+  strong: ({ children }) => <strong {...stylex.props(phrasingStyles.strong)}><InlineText>{children}</InlineText></strong>,
+  em: ({ children }) => <em {...stylex.props(phrasingStyles.emphasis)}><InlineText>{children}</InlineText></em>,
   ul: ({ children }) => <ul {...stylex.props(styles.list, styles.prose, styles.unorderedList)}>{children}</ul>,
   ol: ({ children, start }) => <ol start={start} {...stylex.props(styles.list, styles.prose, styles.orderedList)}>{children}</ol>,
   li: ({ children }) => <li {...stylex.props(styles.listItem)}><InlineText>{children}</InlineText></li>,
   a: MarkdownLink,
-  code: InlineCode,
+  code: MarkdownCode,
   img: DeferredImage,
   pre: CodeFence,
   blockquote: ({ children }) => <blockquote {...stylex.props(styles.blockquote)}>{children}</blockquote>,
@@ -308,8 +311,6 @@ const styles = stylex.create({
   list: { margin: 0, marginBlockEnd: s.proseGap, paddingInlineStart: s.xxl, listStylePosition: 'outside' },
   unorderedList: { listStyleType: 'disc' }, orderedList: { listStyleType: 'decimal' },
   listItem: { display: 'list-item', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: textColor.fgSoft },
-  strong: { fontWeight: t.weightBold, color: textColor.fg },
-  emphasis: { fontStyle: 'italic' },
   syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
   syntaxKeyword: { color: status.runningFg },
   syntaxString: { color: textColor.fgMuted },
@@ -333,7 +334,5 @@ const styles = stylex.create({
   codeText: { fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, color: textColor.fgSoft },
   paragraph: { margin: 0, marginBlockEnd: s.proseGap, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: textColor.fgSoft, overflowWrap: 'anywhere' },
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
-  inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
-  link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
   resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.hairline } }, hoverCard: { maxWidth: g.tooltipMax, padding: s.lg, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: textColor.fg, fontSize: t.metaSize, lineHeight: t.metaLeading }, resourceTitle: { display: 'flex', alignItems: 'center', gap: s.md, fontFamily: t.fontMono }, added: { color: textColor.fgMuted }, removed: { color: textColor.fgMuted }, preview: { margin: 0, marginTop: s.md, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, color: textColor.fgMuted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
 })

@@ -12,6 +12,7 @@ import { syncLine } from '../st3-views/sync-line'
 import type { SyncStatus } from '../st3-views/sync-status'
 import { ErrorOverlay, ErrorOverlayHost } from './ErrorOverlay'
 import { HighlightedSource, Markdown, MarkdownImagePolicy, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
+import { InlineMarkdown } from './InlineMarkdown'
 import { ThinkingEntry } from './ThinkingEntry'
 import { SendFailure, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
 import { Icon } from './Icons'
@@ -66,7 +67,11 @@ function TranscriptMessage() {
   if (item === undefined || item._tag === 'ToolCall' || item._tag === 'Reasoning') return null
   if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <AgentMessage item={{ ...item, role: 'assistant' }} senderLine={caption} />
   if (item._tag === 'Message') return <AgentMessage item={item} senderLine={caption ?? item.sender?.label ?? item.from} />
-  return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
+  return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><SemanticText text={summary} /></MessagePrimitive.Root>
+}
+/** Notice and event lines keep their line breaks (pre-wrap); each line renders as inline Markdown. */
+function SemanticText({ text }: { readonly text: string }) {
+  return <span {...stylex.props(styles.semanticText)}>{text.split('\n').map((line, index) => <React.Fragment key={index}>{index > 0 && '\n'}<InlineMarkdown text={line} links="anchor" /></React.Fragment>)}</span>
 }
 const messageComponents = { Message: TranscriptMessage }
 export function UserMessage({ item }: { readonly item: TextItem & { readonly role: 'user' } }) {
@@ -106,7 +111,7 @@ export function ToolDetailPreview({ call, onOpen }: { readonly call: WorkLogCall
   const command = readableCommand(call)
   const showOutput = (call.detail ?? '') !== '' || call.rawInput === undefined
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
-    <p>{call.summary ?? call.title} · {call.status}</p>
+    <p><InlineMarkdown text={call.summary ?? call.title} /> · {call.status}</p>
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.previewOpen)}>Show raw input/output</Button>
@@ -133,7 +138,7 @@ const strandedText = (item: ConversationItem): string | undefined => {
 /** Fallback for an item the runtime never adopted: visible in place, never silently dropped. */
 function StrandedItem({ item }: { readonly item: ConversationItem }) {
   const text = strandedText(item)
-  return <div data-testid="transcript-stranded" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{text === undefined || text.trim() === '' ? 'Couldn\u2019t display this entry' : text}</span></div>
+  return <div data-testid="transcript-stranded" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}>{text === undefined || text.trim() === '' ? <span {...stylex.props(styles.semanticText)}>Couldn{'\u2019'}t display this entry</span> : <SemanticText text={text} />}</div>
 }
 /** The content-bearing fields of an item; lifecycle and timing fields are left out. */
 const itemContent = (item: ConversationItem): string => {

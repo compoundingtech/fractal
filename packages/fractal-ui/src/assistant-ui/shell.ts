@@ -1,4 +1,7 @@
 /** Runtime-free workbench presentation. Conversation runtimes load with the thread surface. */
+/** Inline Markdown is shell-safe: no react-markdown, remark or refractor. */
+export { InlineMarkdown, InlineCode, toPlainText } from './composition/InlineMarkdown.tsx'
+export type { InlineMarkdownProps } from './composition/InlineMarkdown.tsx'
 export { AgentRow, StatusGlyph } from './composition/Sidebar.tsx'
 export { ThreadHeader, ResizableSplit, TerminalDrawer } from './composition/Shell.tsx'
 export { SidebarAgentRow, sidebarRowDescription } from './sidebar/SidebarAgentRow.tsx'

@@ -21,6 +21,7 @@
     "typecheck": "tsc --noEmit",
     "test:palettes": "node --test src/legacy-palettes.test.mjs",
     "test:transcript": "node --test --test-force-exit src/assistant-ui/composition/Transcript.unit.test.mjs",
+    "test:inline-markdown": "node --test --test-force-exit src/assistant-ui/composition/InlineMarkdown.unit.test.mjs",
     "check:shell-imports": "node scripts/check-shell-imports.mjs",
     "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs"
   },

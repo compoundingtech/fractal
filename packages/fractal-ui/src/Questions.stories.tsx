@@ -4,7 +4,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { QuestionDock, QuestionDockGroup } from '../../../apps/fractal-web/src/web/questions/QuestionDock.tsx'
 import { questionScenarios, viewedAt, submittedAt } from './assistant-ui/questions/fixtures'
-import type { QuestionRequestView } from './assistant-ui/questions/model'
+import type { QuestionRequestView, QuestionView } from './assistant-ui/questions/model'
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import { Transcript } from './assistant-ui/composition/Transcript'
@@ -14,8 +14,18 @@ import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars, textVars, typeVars } from './assistant-ui/composition-tokens.stylex'
 
 type Phase = 'pending' | 'arrival' | 'readonly' | 'answered'
-interface Args { scheme: Scheme; phase: Phase; multiple: boolean; drawer: boolean; prompt?: string; empty?: boolean }
+interface Args { scheme: Scheme; phase: Phase; multiple: boolean; drawer: boolean; prompt?: string; empty?: boolean; report?: boolean }
 const longPrompt = 'The orchestration plan spans several worktrees and independent agents. Before continuing, choose the verification coverage that should run across the touched packages, explain how the full application suite relates to narrow checks, and account for the existing terminal session and pending release-note validation. '.repeat(4)
+/** The ask from the Notion report (b206ff): its prompt showed `NOPASSWD: darwin-rebuild` with literal backticks. The annotation arrow in the report covered two glyphs of the host list. */
+const reportQuestion: QuestionView = {
+  id: 'q237', header: 'q237 Mac root', kind: 'single', allowOther: true, allowNote: true,
+  prompt: "q237: github-app-auth found that `NOPASSWD: darwin-rebuild` makes every agent and dotfiles CI job root-equivalent on mbp2021, mbp2025, mini2020 and ulrike-mba2022. No CI workflow uses darwin-rebuild. mbp2021 deploys over root SSH and doesn't need the rule. mbp2025's deploy relies on it (fleet decision 0016). #5843's runner-scaler fix is only defense in depth while the rule exists. How do you want the agent/root boundary on Macs? [[axe:huvphd:556c0ccfcb31c1d6b92b71bf]]",
+  options: [
+    { id: 'remove', label: 'Remove where unused', recommended: true, description: 'Drop `NOPASSWD: darwin-rebuild` on hosts that do not deploy with it' },
+    { id: 'scope', label: 'Scope the rule', description: 'Allow only the **deploy** user to run it' },
+    { id: 'keep', label: 'Keep it everywhere' },
+  ],
+}
 const headerStatusSince = viewedAt - 120_000
 const requestFor = (phase: Phase): QuestionRequestView => ({
   ...questionScenarios.multi,
@@ -23,10 +33,11 @@ const requestFor = (phase: Phase): QuestionRequestView => ({
   ...(phase === 'answered' ? { state: { _tag: 'answered', by: 'You', at: submittedAt, answers: { checks: { selected: ['typecheck'], note: 'Run the narrow checks first.' } } } } : {}),
 })
 /** Real dock, transcript, runtime and composer. Settlement is explicitly story-only, not a live transport. */
-function QuestionsStory({ scheme, phase, multiple, drawer, prompt, empty }: Args) {
+function QuestionsStory({ scheme, phase, multiple, drawer, prompt, empty, report }: Args) {
   const [request, setRequest] = React.useState(() => {
     const request = requestFor(phase)
     if (empty === true) return { ...request, id: 'ask-empty', title: 'Empty ask', questions: [] }
+    if (report === true) return { ...request, id: 'ask-q237', questions: [reportQuestion] }
     return prompt !== undefined ? { ...request, questions: request.questions.map(question => ({ ...question, prompt })) } : request
   })
   const [arrived, setArrived] = React.useState(phase !== 'arrival')
@@ -121,6 +132,30 @@ export const ShortPrompt: Story = { play: async ({ canvasElement }) => {
   const prompt = canvas.getByText('Which checks should run before merge?')
   await expect(prompt.scrollHeight).toBeLessThanOrEqual(prompt.clientHeight)
   await expect(canvas.queryByRole('button', { name: 'Show full question' })).toBeNull()
+} }
+/** The reported prompt renders its backtick span as inline code, clamped and expanded, and no accessible name or description carries the markers. */
+export const BacktickPrompt: Story = { args: { report: true }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const group = canvas.getByRole('radiogroup', { name: /^q237: github-app-auth found that NOPASSWD: darwin-rebuild makes every agent/ })
+  const prompt = canvasElement.ownerDocument.getElementById(group.getAttribute('aria-labelledby')!)!
+  const assertCode = async () => {
+    const code = within(prompt).getByText('NOPASSWD: darwin-rebuild', { selector: 'code' })
+    await expect(code).toBeVisible()
+    await expect(prompt.textContent).not.toContain('`')
+    await expect(prompt.textContent).toContain('[[axe:huvphd:556c0ccfcb31c1d6b92b71bf]]')
+  }
+  await expect(prompt.scrollHeight).toBeGreaterThan(prompt.clientHeight)
+  await assertCode()
+  await userEvent.click(canvas.getByRole('button', { name: 'Show full question' }))
+  await expect(canvas.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true')
+  await expect(prompt.scrollHeight).toBeLessThanOrEqual(prompt.clientHeight)
+  await assertCode()
+  await expect(group.getAttribute('aria-label') ?? '').not.toContain('`')
+  const remove = canvas.getByRole('radio', { name: /^Remove where unused/ })
+  await expect(remove).toHaveAccessibleDescription(/Drop NOPASSWD: darwin-rebuild on hosts/)
+  await expect(within(remove.closest('label')!).getByText('NOPASSWD: darwin-rebuild', { selector: 'code' })).toBeVisible()
+  await expect(within(canvas.getByRole('radio', { name: /^Scope the rule/ }).closest('label')!).getByText('deploy', { selector: 'strong' })).toBeVisible()
+  await expect(canvas.getByTestId('question-dock').textContent).not.toMatch(/`|\*\*/)
 } }
 /** The clamp is re-measured on resize: narrowing the pane makes the same prompt overflow, widening it again removes the disclosure. */
 export const PromptResize: Story = { args: { prompt: 'Which verification checks should run across the touched packages before merge?' }, play: async ({ canvasElement }) => {

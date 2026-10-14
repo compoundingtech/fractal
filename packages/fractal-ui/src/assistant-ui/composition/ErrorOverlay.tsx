@@ -11,6 +11,7 @@ import { createPortal } from 'react-dom'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
 import { surfaceVars as surface, textVars as ink, borderVars as border, statusVars as tone, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, elevationVars as elevation } from '../composition-tokens.stylex'
 import { Icon } from './Icons'
+import { InlineMarkdown } from './InlineMarkdown'
 
 export interface ErrorOverlayNotice {
   readonly id: string
@@ -65,7 +66,7 @@ export function ErrorOverlay({ id, title, detail, rawDetail, command, onRetry, o
   if (host !== null && !host.lane && host.layer === null) return null
   const banner = <div role="alert" data-error-overlay data-error-overlay-id={id} onKeyDown={event => { if (host === null && event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); setDismissedId(id) } }} {...stylex.props(styles.banner, host?.lane === true && styles.bannerLane)}>
     <Icon name="alert" size={14} />
-    <div {...stylex.props(styles.text)}><strong {...stylex.props(styles.title)}>{title}</strong>{detail !== undefined && <span {...stylex.props(styles.detail, rawDetail !== undefined && styles.reason)}>{detail}</span>}
+    <div {...stylex.props(styles.text)}><strong {...stylex.props(styles.title)}>{title}</strong>{detail !== undefined && <span {...stylex.props(styles.detail, rawDetail !== undefined && styles.reason)}><InlineMarkdown text={detail} /></span>}
       {rawDetail !== undefined && <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}><Button slot="trigger" {...stylex.props(styles.rawTrigger)}>Show raw input/output</Button><DisclosurePanel>{rawOpen && <>{command !== undefined && <pre data-testid="error-overlay-command" {...stylex.props(styles.rawOutput, styles.command)}><code>{command}</code></pre>}<pre {...stylex.props(styles.rawOutput)}>{rawDetail}</pre></>}</DisclosurePanel></Disclosure>}
     </div>
     {onRetry !== undefined && <Button onPress={onRetry} {...stylex.props(styles.action)}>Retry</Button>}

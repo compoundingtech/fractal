@@ -9,6 +9,7 @@ import { EmbraceDiffPreview, EmbraceMarkdownPreview } from './EmbraceToolPreview
 import { embraceToolKind as toolKind, embraceToolNeedsAttention, type EmbraceToolKind as ToolKind } from './embrace-tool-attention'
 export { embraceToolNeedsAttention } from './embrace-tool-attention'
 import { toolDiffs, toolFields, toolHumanSummary, toolOutput, toolString } from './embrace-tool-preview'
+import { InlineMarkdown, toPlainText } from './composition/InlineMarkdown'
 
 export type ToolVariant = 'rows' | 'grouped' | 'cards'
 export type EmbraceToolCallItem = Extract<ConversationItem, { _tag: 'ToolCall' }>
@@ -117,14 +118,17 @@ const ToolPresentation = ({ name, input, output, mediaType, status, variant, cal
   const kind = toolKind(name)
   const target = toolString(input, ['path', 'file_path', 'pattern', 'query', 'question', 'url', 'description'])
     || (kind === 'run' ? toolString(input, ['command', 'cmd']).trim().split(/\s+/).slice(0, 2).join(' ') : '')
-  const label = `${verbs[kind][status === 'running' ? 1 : 0]} ${target || name}`
+  const verb = verbs[kind][status === 'running' ? 1 : 0]
+  const label = `${verb} ${target || name}`
+  // Questions and descriptions are agent prose; paths, patterns, queries and commands stay verbatim.
+  const prose = target !== '' && target === toolString(input, ['question', 'description'])
   const promoted = status === 'error' || status === 'interrupted' || kind === 'edit' || kind === 'write' || kind === 'question'
     || /^(?:diff --git |--- [^\n]+\n\+\+\+ )/m.test(toolOutput(output))
   const header = <>
     <span aria-hidden="true" {...stylex.props(styles.indicator, status === 'error' && styles.error, status === 'interrupted' && styles.warning)}>
       {status === 'running' ? '◌' : status === 'success' ? '✓' : status === 'error' ? '!' : '■'}
     </span>
-    <span {...stylex.props(styles.label)} title={label}>{label}</span>
+    <span {...stylex.props(styles.label)} title={prose ? `${verb} ${toPlainText(target)}` : label}>{prose ? <>{verb} <InlineMarkdown text={target} /></> : label}</span>
     {!callSeen ? <span {...stylex.props(styles.caption)}>Start not loaded</span> : null}
     <span {...stylex.props(styles.status, status === 'error' && styles.error, status === 'interrupted' && styles.warning)}>{status}</span>
   </>
@@ -159,11 +163,11 @@ const ToolDetails = ({ name, input, output, mediaType, status, variant }: {
   const question = toolString(input, ['question', 'prompt', 'message'])
   const options = toolFields(input).options
   return <div {...stylex.props(styles.details)}>
-    <p {...stylex.props(styles.caption)}>{toolHumanSummary(input, name)} · {status}</p>
+    <p {...stylex.props(styles.caption)}><InlineMarkdown text={toolHumanSummary(input, name)} /> · {status}</p>
     {kind === 'question' ? <section aria-label="Agent question">
-      <p {...stylex.props(styles.question)}>{question || 'Agent needs your answer'}</p>
+      <p {...stylex.props(styles.question)}><InlineMarkdown text={question || 'Agent needs your answer'} links="anchor" /></p>
       {Array.isArray(options) ? <ul {...stylex.props(styles.options)}>{options.map((option, index) => <li key={index}>
-        {typeof option === 'string' ? option : toolString(option, ['label', 'title', 'value'])}
+        <InlineMarkdown text={typeof option === 'string' ? option : toolString(option, ['label', 'title', 'value'])} />
       </li>)}</ul> : null}
       {status === 'running' && output === undefined ? <p {...stylex.props(styles.caption)}>Awaiting answer</p> : null}
     </section> : null}

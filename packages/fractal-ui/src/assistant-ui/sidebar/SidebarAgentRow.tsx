@@ -2,6 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Icon } from '../composition/Icons'
+import { InlineMarkdown, toPlainText } from '../composition/InlineMarkdown'
 import { Button, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Popover, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { matchPositions, type SidebarActions, type SidebarAgentRow as Row } from './model'
@@ -46,7 +47,7 @@ export const sidebarRowTitle = (row: Row): string => row.title
 /** Reported metadata stays accessible; fields the source never reported are omitted, never described as unknown. */
 export function sidebarRowDescription(row: Row): string {
   const parts: string[] = [row.title]
-  if (row.description !== undefined) parts.push(row.description)
+  if (row.description !== undefined) parts.push(toPlainText(row.description))
   parts.push(`Host: ${row.host}. Status: ${row.statusLabel}; ${row.freshness} observation`)
   if (row.usage._tag === 'Known') parts.push(usageText(row.usage))
   if (row.duration._tag === 'Known') parts.push(`${row.duration.scope === '24h-activity-span' ? '24h activity span' : 'Lifetime duration'}: ${row.duration.ms} milliseconds`)
@@ -71,7 +72,7 @@ export function AgentRowDetails({ row, ...clock }: { readonly row: Row } & Sideb
   return <dl {...stylex.props(styles.details)}>
     <dt {...stylex.props(styles.detailLabel)}>Name</dt><dd {...stylex.props(styles.detailValue)}>{sidebarRowTitle(row)}</dd>
     <dt {...stylex.props(styles.detailLabel)}>ID</dt><dd {...stylex.props(styles.detailValue)}>{row.ref}</dd>
-    {row.description !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Description</dt><dd {...stylex.props(styles.detailValue)}>{row.description}</dd></>}
+    {row.description !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Description</dt><dd {...stylex.props(styles.detailValue)}><InlineMarkdown text={row.description} /></dd></>}
     <dt {...stylex.props(styles.detailLabel)}>Status</dt><dd {...stylex.props(styles.detailValue)}>{row.statusLabel}; {row.freshness} observation</dd>
     {row.statusSince !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Elapsed in status</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.statusSince} {...clock} />; since {new Date(row.statusSince).toISOString()}</dd></>}
     {row.lastActivityAt !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Last activity</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastActivityAt} {...clock} kind="activity" />; {new Date(row.lastActivityAt).toISOString()}</dd></>}
@@ -103,7 +104,7 @@ export function AgentHoverCard({ row, ...clock }: { readonly row: Row } & Sideba
     <div {...stylex.props(styles.cardSummary)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" freshness={row.freshness} iconOnly /><span>{row.statusLabel}</span><span>·</span><Icon name="gear" size={12} /><span>{row.host}</span></div>
     <p data-status-description="" {...stylex.props(styles.cardStatus)}>{statusDescription({ statusLabel: row.statusLabel, statusSince: row.statusSince, freshness: row.freshness })}</p>
     {row.needsMe === true && <p data-needs-me="" {...stylex.props(styles.cardNeeds)}><span {...stylex.props(styles.needsYou)}><Icon name="alert" size={12} /></span>Needs your attention</p>}
-    {row.description !== undefined && <p {...stylex.props(styles.cardWork)}><Icon name="message" size={12} />{row.description}</p>}
+    {row.description !== undefined && <p {...stylex.props(styles.cardWork)}><Icon name="message" size={12} /><span><InlineMarkdown text={row.description} /></span></p>}
     <dl {...stylex.props(styles.details)}>
       {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="dot" size={12} />Spend</dt><dd {...stylex.props(styles.detailValue)}>{spendCount.format(row.usage.usd)} · {tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : 'Lifetime · includes subagents'}</div></dd></>}
       {row.duration._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="clock" size={12} />Duration</dt><dd {...stylex.props(styles.detailValue)}><SidebarDuration duration={row.duration} /></dd></>}
@@ -152,7 +153,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
     <span data-row-column="title" {...stylex.props(styles.title, variant === 'SR-2' && item.children.length > 0 && styles.hasChildren)} title={metadata}>{rowGlyph === 'SG-2' && <span {...stylex.props(styles.statusWord)}>{item.statusLabel}</span>}<span data-row-column="title-text" {...stylex.props(styles.name)}><Highlight value={title} query={query} /></span></span>
     {variant !== 'SR-1' && <SidebarRowSignals>
       {rowLayout === 'SR2-C' && <span data-row-field="status-label" data-row-retention="7" title={item.statusLabel}>{item.statusLabel}</span>}
-      {extraSignals.includes('X-work') && item.description !== undefined && <span data-row-field="current-work" data-row-signal="X-work" data-row-retention="2" title={item.description}>{item.description}</span>}
+      {extraSignals.includes('X-work') && item.description !== undefined && <span data-row-field="current-work" data-row-signal="X-work" data-row-retention="2" title={toPlainText(item.description)}><InlineMarkdown text={item.description} /></span>}
       <span data-row-field="host" data-row-retention="3" title={`Host: ${host}`} aria-label={`Host ${host}`} aria-description={metadata}>{host}</span>
       {rowLayout === 'SR2-A' && <span data-row-retention="5">{spendFields}</span>}
       {rowLayout !== 'SR2-B' && <span data-row-retention="4">{durationField}</span>}
@@ -160,7 +161,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
       {extraSignals.includes('X-model') && (item.model ?? item.harness) !== undefined && <span data-row-signal="X-model" data-row-retention="1" title={`Harness: ${item.harness ?? 'unknown'}; model: ${item.model ?? 'unknown'}`}>{item.model ?? item.harness}</span>}
       {extraSignals.includes('X-pr') && (item.pullRequest ?? item.branch ?? item.worktree) !== undefined && <span data-row-signal="X-pr" data-row-retention="0" title={`Worktree: ${item.worktree ?? 'unknown'}; pull request: ${item.pullRequest === undefined ? 'unknown' : `#${item.pullRequest.number}: ${item.pullRequest.title}`}`}>{item.pullRequest === undefined ? item.branch ?? item.worktree : `#${item.pullRequest.number}`}</span>}
     </SidebarRowSignals>}
-    <span {...stylex.props(styles.metadata, variant !== 'SR-3' && styles.hidden)}>{[item.description, item.harness, item.model, item.branch, item.worktree, item.pullRequest === undefined ? undefined : `PR #${item.pullRequest.number}`].filter((part): part is string => part !== undefined).join(' / ')}</span>
+    <span {...stylex.props(styles.metadata, variant !== 'SR-3' && styles.hidden)}>{[item.description === undefined ? undefined : toPlainText(item.description), item.harness, item.model, item.branch, item.worktree, item.pullRequest === undefined ? undefined : `PR #${item.pullRequest.number}`].filter((part): part is string => part !== undefined).join(' / ')}</span>
   </>
   const rowStyle = stylex.props(styles.row)
   return <div ref={hoverLifetime} data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') { clearTimeout(hoverTimer.current); setHoverOpen(false) }; if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() } }}>
