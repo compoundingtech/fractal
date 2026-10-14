@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { Feed, shouldProbe } from './feed.ts';
+import { test } from 'node:test';
+import { Feed, OPEN_WAIT_MS } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
 import { fakeClient } from './fakeFeed.mjs';
 
@@ -20,6 +21,40 @@ function watch() {
   };
 }
 const subscribed = socket => socket.sent.filter(command => command.kind === 'subscribe').map(command => command.id);
+
+{
+  // A pending source keeps its delivered rows and says they are stale. Ready changes
+  // recover on the held subscription, canceling the pending resubscription timer.
+  const { client, sockets } = fakeClient();
+  const { seen, handlers } = watch();
+  const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [100], 40);
+  await settle();
+  const socket = sockets[0];
+  socket.frame({ kind: 'snapshot', id: 'agents', collection: 'agents', snapshot: snapshot(1), items: [agent('agent/amber'), agent('agent/blue')], order: ['agent/amber', 'agent/blue'], has_more: false });
+  const before = socket.sent.length;
+  const pending = { kind: 'resync', id: 'agents', collection: 'agents', code: 'internal', message: 'collection source is unavailable; held rows are stale until readiness returns', retryable: true };
+  socket.frame(pending);
+  socket.frame(pending);
+  assert.deepEqual(seen.windows.agents.ids, ['agent/amber', 'agent/blue'], 'resync preserves the last delivered rows');
+  assert.equal(seen.errors.length, 0, 'a moment of unavailability is not reported yet');
+  await settle(60);
+  assert.equal(seen.errors.length, 1, 'one issue per unavailable interval, once it lasted');
+  assert.match(seen.errors[0], /agents: .*held rows are stale/);
+  socket.frame({ kind: 'changes', id: 'agents', collection: 'agents', snapshot: snapshot(2), upserts: [agent('agent/coral')], removes: ['agent/amber'], order: ['agent/coral', 'agent/blue'], has_more: false });
+  assert.deepEqual(seen.windows.agents.ids, ['agent/coral', 'agent/blue']);
+  await settle(170);
+  assert.equal(socket.sent.length, before, 'Ready changes cancel resubscription');
+  socket.frame(pending);
+  await settle(60);
+  assert.equal(seen.errors.length, 2, 'a later unavailable interval is reported again');
+  // A blip a write causes (unavailable, then changes at once) is never reported.
+  socket.frame({ kind: 'changes', id: 'agents', collection: 'agents', snapshot: snapshot(3), upserts: [agent('agent/coral')], removes: [], order: ['agent/coral', 'agent/blue'], has_more: false });
+  socket.frame(pending);
+  socket.frame({ kind: 'changes', id: 'agents', collection: 'agents', snapshot: snapshot(4), upserts: [agent('agent/coral')], removes: [], order: ['agent/coral', 'agent/blue'], has_more: false });
+  await settle(60);
+  assert.equal(seen.errors.length, 2, 'a blip that recovered at once says nothing');
+  feed.close();
+}
 
 {
   // Snapshot then changes produce ordered lists; a removal leaves the window.
@@ -201,12 +236,13 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   const { handlers } = watch();
   const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [5]);
   await settle();
-  const issues = [];
-  feed.followConversation('agent/example/worker', { onEntries: () => {}, onIssue: issue => issues.push(issue) });
+  const issues = [], stops = [];
+  feed.followConversation('agent/example/worker', { onEntries: () => {}, onIssue: (issue, stopped) => { issues.push(issue); stops.push(stopped); } });
   const before = sockets[0].sent.length;
   const reason = 'the retained transcript starts after its first entries; st cannot show it from the start';
   sockets[0].frame({ kind: 'error', id: 'conversation', collection: 'conversation', code: 'timeline-history-incomplete', message: reason });
   assert.equal(issues.at(-1), reason, 'st\'s own words, without "trying again"');
+  assert.equal(stops.at(-1), true, 'the screen offers a retry instead of loading forever');
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(sockets[0].sent.length, before, 'not asked for again');
   feed.close();
@@ -238,7 +274,131 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
 }
 
 
-// st is asked nothing while the stream speaks; only a quiet stream is probed (Nathan, 2026-10-06).
-assert.equal(shouldProbe(1_000, 5_000), false);
-assert.equal(shouldProbe(1_000, 10_999), false);
-assert.equal(shouldProbe(1_000, 11_000), true);
+
+{
+  // The missions window is followed only when asked: not subscribed at the start, subscribed when a
+  // missions screen shows, and left (its rows dropped) when none does.
+  const { client, sockets } = fakeClient();
+  const { seen, handlers } = watch();
+  const stopped = [];
+  const feed = new Feed(client, { ...handlers, onWindowStopped: name => stopped.push(name) }, new ForegroundGate('active'), () => 'action/test', [100], 1000, false);
+  await settle();
+  const socket = sockets[0];
+  assert.ok(!subscribed(socket).includes('missions'), 'not followed at the start');
+  assert.ok(subscribed(socket).includes('agents') && subscribed(socket).includes('attention'));
+  feed.setMissions(true);
+  assert.ok(subscribed(socket).includes('missions'), 'followed once a missions screen shows');
+  feed.setMissions(false);
+  assert.ok(socket.sent.some(command => command.kind === 'unsubscribe' && command.id === 'missions'), 'left when none shows');
+  assert.deepEqual(stopped, ['missions']);
+  feed.setMissions(false);
+  assert.deepEqual(stopped, ['missions'], 'leaving twice says nothing more');
+  // Frames already on their way when it was left change nothing: no rows, no retry, no error.
+  const sent = socket.sent.length;
+  socket.frame({ kind: 'snapshot', id: 'missions', collection: 'missions', snapshot: snapshot(9), items: [mission('mission/late')], order: ['mission/late'], has_more: false });
+  socket.frame({ kind: 'changes', id: 'missions', collection: 'missions', snapshot: snapshot(10), upserts: [mission('mission/later')], removes: [], order: ['mission/later'], has_more: false });
+  socket.frame({ kind: 'resync', id: 'missions', collection: 'missions', code: 'internal', message: 'collection source is unavailable', retryable: true });
+  socket.frame({ kind: 'error', id: 'missions', code: 'internal', message: 'the window failed', retryable: true });
+  await settle(1100);
+  assert.equal(seen.windows.missions, undefined, 'a late missions frame brings no rows back');
+  assert.equal(seen.errors.length, 0, 'and no error');
+  assert.equal(socket.sent.length, sent, 'and is not subscribed again');
+  feed.close();
+}
+
+{
+  // Screens ask and give back; the window stays for a grace period after the last one leaves.
+  const { client, sockets } = fakeClient();
+  const { handlers } = watch();
+  const stopped = [];
+  const feed = new Feed(client, { ...handlers, onWindowStopped: name => stopped.push(name) }, new ForegroundGate('active'), () => 'action/test', [100], 1000, false, 40);
+  await settle();
+  const socket = sockets[0];
+  const first = feed.watchMissions();
+  const second = feed.watchMissions();
+  assert.equal(subscribed(socket).filter(id => id === 'missions').length, 1, 'subscribed once for two screens');
+  first();
+  first();
+  await settle(80);
+  assert.deepEqual(stopped, [], 'one screen still shows missions');
+  second();
+  await settle(10);
+  assert.deepEqual(stopped, [], 'kept through the grace period');
+  const again = feed.watchMissions();
+  await settle(80);
+  assert.deepEqual(stopped, [], 'asked again within the grace: still followed');
+  again();
+  await settle(80);
+  assert.deepEqual(stopped, ['missions'], 'left once the grace ended');
+  feed.close();
+}
+
+{
+  // A conversation frame carries the header when st sends one (`conversation-blocks.v1`);
+  // without it there is none, and nothing assumes the field.
+  const { client, sockets } = fakeClient();
+  const { handlers } = watch();
+  const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [5]);
+  await settle();
+  const frames = [];
+  feed.followConversation('agent/example/worker', { onEntries: frame => frames.push(frame), onIssue: () => {} });
+  const header = { model: { value: 'synthetic/model', source: 'transcript', as_of: '2026-10-06T12:00:00Z' }, working: { value: true, source: 'register', as_of: '2026-10-06T12:00:00Z' } };
+  sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: true, items: [{ id: 'entry/1' }], has_more: false, header });
+  sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: false, items: [] });
+  sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: true, items: [], header: { model: { value: 'x', source: 'register', as_of: '2026-10-06T12:00:00Z' } } });
+  assert.deepEqual(frames.map(frame => frame.header), [header, undefined, { model: { value: 'x', source: 'register', as_of: '2026-10-06T12:00:00Z' } }]);
+  feed.close();
+}
+
+{
+  // Sidebar follows an explicit owner, applies stream changes and resubscribes on reconnect.
+  const { client, sockets } = fakeClient();
+  const { handlers } = watch();
+  const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [5]);
+  const seen = [], issues = [];
+  const follow = feed.followArrangements('person/avery', { onArrangements: rows => seen.push(rows), onIssue: issue => issues.push(issue) });
+  await settle();
+  assert.deepEqual(sockets[0].sent.at(-1), { kind: 'subscribe', id: 'arrangements', collection: 'arrangements', person: 'person/avery', limit: 100 });
+  const arrangement = { kind: 'arrangement', id: 'arrangement/person/avery/demo', owner: 'person/avery', revision: 'claim/1', deleted: false, body: { version: 1, name: { value: 'Sidebar', revision: 'claim/1' }, folders: {}, placements: {} } };
+  sockets[0].frame({ kind: 'snapshot', id: 'arrangements', collection: 'arrangements', snapshot: snapshot(1), items: [arrangement], order: [arrangement.id], has_more: false });
+  assert.equal(seen[0][0].body.name.value, 'Sidebar');
+  sockets[0].frame({ kind: 'changes', id: 'arrangements', collection: 'arrangements', snapshot: snapshot(2), upserts: [{ ...arrangement, body: { ...arrangement.body, name: { value: 'Renamed', revision: 'claim/2' } } }], removes: [], order: [arrangement.id], has_more: false });
+  assert.equal(seen.at(-1)[0].body.name.value, 'Renamed');
+  sockets[0].frame({ kind: 'resync', id: 'arrangements', retryable: true });
+  assert.equal(sockets[0].sent.filter(command => command.id === 'arrangements').length, 1, 'daemon retries temporary resync itself');
+  sockets[0].drop(new Error('test drop'));
+  await settle(40);
+  assert.equal(sockets[1].sent.at(-1).person, 'person/avery');
+  sockets[1].frame({ kind: 'snapshot', id: 'arrangements', collection: 'arrangements', snapshot: snapshot(3), items: [], order: [], has_more: false });
+  assert.deepEqual(seen.at(-1), []);
+  sockets[1].frame({ kind: 'error', id: 'arrangements', code: 'forbidden', message: 'scope missing' });
+  assert.ok(issues.at(-1).includes('scope missing'));
+  follow.close();
+  assert.deepEqual(sockets[1].sent.at(-1), { kind: 'unsubscribe', id: 'arrangements' });
+  feed.close();
+}
+
+// ---- A socket that never opens is a failed try, not a wait without end: the feed says reconnecting and tries again.
+test('a collections socket that never opens is given up on and tried again', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1_800_000_000_000 });
+  let opens = 0;
+  const late = [];
+  const client = { collectionStream: () => { opens++; return new Promise(resolve => late.push(resolve)); } };
+  const states = [];
+  const feed = new Feed(client, { onWindow() {}, onConnection: (state, issue) => states.push([state, issue]) }, new ForegroundGate('active'), () => 'action/test', [1000]);
+  await Promise.resolve();
+  assert.equal(opens, 1);
+  assert.deepEqual(states.at(-1), ['connecting', undefined]);
+  t.mock.timers.tick(OPEN_WAIT_MS);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(states.at(-1), ['reconnecting', 'st did not answer'], 'a hung open ends in a retry cycle');
+  t.mock.timers.tick(1000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(opens, 2, 'and it tries again by itself');
+  // The first socket opening after it was given up on is closed, not adopted.
+  let closed = false;
+  late[0]({ close() { closed = true; }, subscribe() {}, unsubscribe() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closed, true);
+  feed.close();
+});

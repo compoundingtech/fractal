@@ -350,10 +350,10 @@ fn removal_write_barrier(stage: &str) {
 
 /// A signed refusal from a member that names this node's own key as ended.
 #[derive(Debug)]
-struct RemovedFromFleet {
-    code: String,
+pub(super) struct RemovedFromFleet {
+    pub(super) code: String,
     /// The refusal's message, which names who removed this node and why when the member knows.
-    message: String,
+    pub(super) message: String,
 }
 
 impl std::fmt::Display for RemovedFromFleet {
@@ -415,6 +415,7 @@ pub async fn run<B: Backend>(
     wake: watch::Sender<u64>,
     routes: Router<PeerState<B>>,
 ) -> Result<()> {
+    let mut settings_tasks = tokio::task::JoinSet::new();
     let fleet_id = config.fleet_id.as_str();
     let secret_file = config.secret_file.as_path();
     let member_key = match &config.fleet {
@@ -529,6 +530,7 @@ pub async fn run<B: Backend>(
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
+                super::telemetry::record_error(&name, super::telemetry::ErrorReason::Down);
                 let _ = backend
                     .record_failure(&name, "down", "no recent inbound exchange")
                     .await;
@@ -585,33 +587,51 @@ pub async fn run<B: Backend>(
                 .fabric_protocol
                 .clone()
                 .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
-            tokio::spawn(keep_fabric_exposed(
+            settings_tasks.spawn(keep_fabric_exposed(
                 fabric,
                 protocol,
                 address,
                 endpoints.clone(),
                 fleet.connectivity_changed.subscribe(),
+                config.state_dir.clone(),
+                file.clone(),
             ));
         }
-        tokio::spawn(keep_endpoints_published(
+        settings_tasks.spawn(keep_endpoints_published(
             backend,
             file.mode.as_str(),
             endpoints.clone(),
+            config.state_dir.clone(),
+            file.clone(),
         ));
     }
-    // A dial-out member accepts no connections.
-    let Some(listener) = listener else {
-        std::future::pending::<()>().await;
-        return Ok(());
+    let serving = async move {
+        // A dial-out member accepts no connections, but still supervises publication.
+        let Some(listener) = listener else {
+            return std::future::pending::<Result<()>>().await;
+        };
+        use axum::serve::ListenerExt as _;
+        let listener = listener.tap_io(|tcp| {
+            if let Err(error) = tcp.set_nodelay(true) {
+                eprintln!("st: could not disable Nagle on peer socket: {error}");
+            }
+        });
+        axum::serve(listener, app).await?;
+        Ok(())
     };
-    use axum::serve::ListenerExt as _;
-    let listener = listener.tap_io(|tcp| {
-        if let Err(error) = tcp.set_nodelay(true) {
-            eprintln!("st: could not disable Nagle on peer socket: {error}");
-        }
-    });
-    axum::serve(listener, app).await?;
-    Ok(())
+    tokio::select! {
+        result = serving => result,
+        result = settings_task_failure(&mut settings_tasks) => result,
+    }
+}
+
+/// A deliberate settings retirement leaves outbound sync running until the operator's
+/// restart. A local settings failure must fail the worker visibly, not strand two tasks.
+async fn settings_task_failure(tasks: &mut tokio::task::JoinSet<Result<()>>) -> Result<()> {
+    while let Some(result) = tasks.join_next().await {
+        result.context("fleet settings task failed")??;
+    }
+    std::future::pending::<Result<()>>().await
 }
 
 /// The endpoints this member announces, as its transports come up.
@@ -734,13 +754,22 @@ async fn keep_fabric_exposed(
     address: SocketAddr,
     endpoints: Endpoints,
     mut connectivity: watch::Receiver<u64>,
-) {
+    state_dir: PathBuf,
+    settings: FleetFile,
+) -> Result<()> {
     loop {
+        let Some(lock) = lock_current_settings(&state_dir, &settings)
+            .await
+            .context("cannot verify fleet settings before Fabric exposure")?
+        else {
+            return Ok(());
+        };
         if fabric.expose(&protocol, &address.to_string()).await.is_ok()
             && let Ok(node) = fabric.id().await
         {
             endpoints.update(|set| set.fabric = Some((node, protocol.clone())));
         }
+        drop(lock);
         tokio::select! {
             _ = connectivity.changed() => {},
             _ = tokio::time::sleep(worker_interval(Duration::from_secs(60))) => {},
@@ -862,14 +891,39 @@ async fn keep_endpoints_published<B: Backend>(
     backend: B,
     mode: &'static str,
     endpoints: Endpoints,
-) {
+    state_dir: PathBuf,
+    settings: FleetFile,
+) -> Result<()> {
     loop {
+        let Some(lock) = lock_current_settings(&state_dir, &settings)
+            .await
+            .context("cannot verify fleet settings before endpoint publication")?
+        else {
+            return Ok(());
+        };
         let _ = backend.publish_endpoints(mode, &endpoints.list()).await;
+        drop(lock);
         tokio::select! {
             _ = endpoints.changed.notified() => {}
             _ = tokio::time::sleep(worker_interval(Duration::from_secs(60))) => {}
         }
     }
+}
+
+/// Serialize exposure and publication with CLI settings changes. In particular, an old
+/// worker must not restore an endpoint or exposure after `transports remove --no-service`.
+/// The operator restarts that worker to apply its new configuration, as with mode changes.
+async fn lock_current_settings(
+    state_dir: &Path,
+    settings: &FleetFile,
+) -> Result<Option<std::fs::File>> {
+    let state_dir = state_dir.to_path_buf();
+    let settings = settings.clone();
+    tokio::task::spawn_blocking(move || {
+        let lock = FleetFile::lock_settings(&state_dir)?;
+        Ok((FleetFile::load(&state_dir)?.as_ref() == Some(&settings)).then_some(lock))
+    })
+    .await?
 }
 
 /// Who this node dials, and the loopback URLs that reach each, most preferred first: every
@@ -1084,7 +1138,7 @@ async fn dial_peer<B: Backend>(
                     .cloned();
                 if let Some(offered) = offered
                     && let Ok(current) = backend
-                        .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+                        .guard_summary(auth.fleet_id())
                         .await
                 {
                     // The other side already knows this inventory and is draining both
@@ -1162,12 +1216,18 @@ async fn dial_peer<B: Backend>(
                                     selected,
                                     tokio::time::Instant::now() + fabric_refusal_delay(),
                                 ));
+                                super::telemetry::record_error(
+                                    &name, super::telemetry::ErrorReason::Refused,
+                                );
                                 let _ = backend
                                     .record_failure(&name, "refused", &error.to_string())
                                     .await;
                                 route = route.wrapping_add(1);
                                 continue;
                             }
+                            super::telemetry::record_error(
+                                &name, super::telemetry::ErrorReason::Down,
+                            );
                             let _ = backend
                                 .record_failure(&name, "down", &error.to_string())
                                 .await;
@@ -2133,97 +2193,106 @@ pub async fn exchange<B: Backend>(
     auth: &FleetAuth,
     fleet: &FleetContext,
 ) -> Result<(bool, bool)> {
+    let mut telemetry = super::telemetry::Round::new(&peer.name);
+    let result = exchange_inner(http, backend, node, peer, auth, fleet, &mut telemetry).await;
+    telemetry.finish(&result);
+    result
+}
+
+async fn exchange_inner<B: Backend>(
+    http: &reqwest::Client,
+    backend: &B,
+    node: &str,
+    peer: &PeerConfig,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+    telemetry: &mut super::telemetry::Round,
+) -> Result<(bool, bool)> {
     let mut heal_now = false;
-    // One compact round, then at most one full-inventory round if the compact prefix
-    // cannot make progress. Payloadless checkpoint identities can differ indefinitely.
-    for full_inventory in [false, true] {
-        let first = backend
-            .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+    // One compact round. Each side lists the ranges that differ a few at a time, from a different
+    // range on each answer, so successive rounds compare every range without either side ever
+    // sending its whole inventory (a million identities, 228 MB, on a busy fleet). Ranges that
+    // differ only by payloadless checkpoint identities never settle this way; checkpoint-lineage
+    // reconciliation, not more envelope requests, settles those.
+    let first = backend
+        .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+        .await?
+        .exchange;
+    let own_checkpoint = first.inventory.checkpoint.clone();
+    let query = ReplicationExchange {
+        envelopes: Vec::new(),
+        ..first
+    };
+    let started = std::time::Instant::now();
+    let (remote, peer_inflates) =
+        post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+    let round_trip = started.elapsed();
+    let different = remote.inventory.digest != query.inventory.digest;
+    let received = backend
+        .receive(&peer.name, auth.fleet_id(), &remote, Some(round_trip))
+        .await?;
+    telemetry.pull(received.receipt.received);
+    // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
+    // or keeps being sent, envelopes that are never stored must not keep the worker busy.
+    let pulled = received.receipt.received != 0;
+    heal_now |= received.receipt.heal;
+    if received.changed {
+        backend.changed().await;
+    }
+    let mut pushed = false;
+    let mut pulled_follow_up = false;
+    // A follow-up also carries the signatures the peer asked for, even when both sides hold
+    // the same envelopes.
+    if different || !remote.signature_requests.is_empty() {
+        let push = backend
+            .export(
+                auth.fleet_id(),
+                &remote.inventory,
+                false,
+                &remote.signature_requests,
+            )
             .await?
             .exchange;
-        let own_checkpoint = first.inventory.checkpoint.clone();
-        let mut query = ReplicationExchange {
-            envelopes: Vec::new(),
-            ..first
-        };
-        if full_inventory {
-            // Keep the digest: an empty listing is not proof of an empty inventory.
-            // Existing peers answer a request without buckets with their complete inventory.
-            query.inventory.buckets.clear();
-        }
         let started = std::time::Instant::now();
-        let (remote, peer_inflates) =
-            post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+        // A peer that says it takes compressed requests gets a large push compressed.
+        let (response, _) =
+            post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
         let round_trip = started.elapsed();
-        let different = remote.inventory.digest != query.inventory.digest;
+        // The peer stores a push before it answers, so its inventory moved if the push landed.
+        pushed =
+            !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
+        telemetry.push(push.envelopes.len(), pushed);
         let received = backend
-            .receive(&peer.name, auth.fleet_id(), &remote, Some(round_trip))
+            .receive(&peer.name, auth.fleet_id(), &response, Some(round_trip))
             .await?;
-        // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
-        // or keeps being sent, envelopes that are never stored must not keep the worker busy.
-        let pulled = received.receipt.received != 0;
+        telemetry.pull(received.receipt.received);
+        pulled_follow_up = received.receipt.received != 0;
         heal_now |= received.receipt.heal;
         if received.changed {
             backend.changed().await;
         }
-        let mut pushed = false;
-        let mut pulled_follow_up = false;
-        // A follow-up also carries the signatures the peer asked for, even when both sides hold
-        // the same envelopes.
-        if different || !remote.signature_requests.is_empty() {
-            let push = backend
-                .export(
-                    auth.fleet_id(),
-                    &remote.inventory,
-                    false,
-                    &remote.signature_requests,
-                )
-                .await?
-                .exchange;
-            let started = std::time::Instant::now();
-            // A peer that says it takes compressed requests gets a large push compressed.
-            let (response, _) =
-                post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
-            let round_trip = started.elapsed();
-            // The peer stores a push before it answers, so its inventory moved if the push landed.
-            pushed =
-                !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
-            let received = backend
-                .receive(&peer.name, auth.fleet_id(), &response, Some(round_trip))
-                .await?;
-            pulled_follow_up = received.receipt.received != 0;
-            heal_now |= received.receipt.heal;
-            if received.changed {
-                backend.changed().await;
-            }
-        }
-        let adopted = match &remote.inventory.checkpoint {
-            Some(advertised) => {
-                adopt_advertised_checkpoint(
-                    http,
-                    backend,
-                    node,
-                    peer,
-                    auth,
-                    fleet,
-                    own_checkpoint.as_ref(),
-                    advertised,
-                )
-                .await
-            }
-            None => false,
-        };
-        if adopted {
-            backend.changed().await;
-        }
-        let progressed = pulled || pulled_follow_up || pushed || adopted;
-        if progressed || !different || remote.inventory.buckets.is_empty() {
-            return Ok((progressed, heal_now));
-        }
     }
-    // A full comparison can still differ only by tombstones. Let the worker rest;
-    // checkpoint-lineage reconciliation, not more envelope requests, must settle those.
-    Ok((false, heal_now))
+    let adopted = match &remote.inventory.checkpoint {
+        Some(advertised) => {
+            adopt_advertised_checkpoint(
+                http,
+                backend,
+                node,
+                peer,
+                auth,
+                fleet,
+                own_checkpoint.as_ref(),
+                advertised,
+            )
+            .await
+        }
+        None => false,
+    };
+    if adopted {
+        backend.changed().await;
+    }
+    let progressed = pulled || pulled_follow_up || pushed || adopted;
+    Ok((progressed, heal_now))
 }
 
 /// When an adoption last failed, by this node and the checkpoint's drop digest, so a manifest
@@ -2320,6 +2389,19 @@ pub async fn heal<B: Backend>(
     auth: &FleetAuth,
     fleet: &FleetContext,
 ) {
+    let mut telemetry = super::telemetry::Heal::new(&peer.name);
+    heal_inner(backend, node, peer, auth, fleet, &mut telemetry).await;
+    telemetry.finish();
+}
+
+async fn heal_inner<B: Backend>(
+    backend: &B,
+    node: &str,
+    peer: &PeerConfig,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+    telemetry: &mut super::telemetry::Heal,
+) {
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(HEAL_TIMEOUT)
@@ -2327,6 +2409,7 @@ pub async fn heal<B: Backend>(
         .expect("the heal HTTP client configuration is valid");
     let mut query = ReplicationHealQuery::Ranges;
     for _ in 0..HEAL_QUESTION_LIMIT {
+        telemetry.question();
         let request = ReplicationHealRequest {
             fleet_id: auth.fleet_id().to_owned(),
             query,
@@ -2337,21 +2420,31 @@ pub async fn heal<B: Backend>(
         .await
         {
             Ok((answer, _)) => answer,
-            Err(error) => ReplicationHealAnswer::Failed {
-                message: format!("{} could not answer: {error:#}", peer.name),
-            },
+            Err(error) => {
+                telemetry.error(&error);
+                ReplicationHealAnswer::Failed {
+                    message: format!("{} could not answer: {error:#}", peer.name),
+                }
+            }
         };
         match backend.heal_next(&peer.name, answer).await {
             Ok(ReplicationHealStep::Ask { query: next }) => query = next,
-            Ok(ReplicationHealStep::Done { .. }) | Err(_) => break,
+            Ok(ReplicationHealStep::Done { report }) => {
+                telemetry.complete(&report);
+                break;
+            }
+            Err(error) => {
+                telemetry.error(&error);
+                break;
+            }
         }
     }
     backend.changed().await;
 }
 
 #[derive(Debug)]
-struct PeerOverloaded {
-    retry_after: Duration,
+pub(super) struct PeerOverloaded {
+    pub(super) retry_after: Duration,
 }
 
 impl std::fmt::Display for PeerOverloaded {

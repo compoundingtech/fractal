@@ -10,6 +10,9 @@ use super::view::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+/// What Home says when nothing needs the person; setup's first-run test waits for it.
+pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
+
 /// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
 /// only have invented data to show (Nathan, 2026-09-28).
 pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
@@ -67,8 +70,10 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
         AgentState::NeedsLogin => ("⚿", theme::PERSON),
         AgentState::Fault => ("✕", theme::FAULT),
         AgentState::Working => (spinner, theme::WORKING),
+        AgentState::Compacting => ("◐", theme::SAPPHIRE),
         AgentState::Idle => ("●", theme::IDLE),
         AgentState::Starting => ("◌", theme::WAITING),
+        AgentState::Down => ("⊘", theme::FAULT),
         AgentState::Stopped => ("○", theme::QUIET),
         AgentState::Unknown => ("?", theme::QUIET),
     }
@@ -80,8 +85,10 @@ pub fn agent_word(state: AgentState) -> &'static str {
         AgentState::NeedsLogin => "needs login",
         AgentState::Fault => "broken",
         AgentState::Working => "working",
+        AgentState::Compacting => "compacting",
         AgentState::Idle => "idle",
         AgentState::Starting => "starting",
+        AgentState::Down => "down",
         AgentState::Stopped => "stopped",
         AgentState::Unknown => "not managed",
     }
@@ -124,7 +131,9 @@ pub fn attention_style(kind: &AttentionKind) -> (&'static str, Color) {
         | AttentionKind::Feedback { .. }
         | AttentionKind::Launch { .. }
         | AttentionKind::Revision { .. }
-        | AttentionKind::Request { .. } => ("◆", theme::PERSON),
+        | AttentionKind::Request { .. }
+        | AttentionKind::Prompt { .. } => ("◆", theme::PERSON),
+        AttentionKind::Login { .. } => ("⚿", theme::PERSON),
         AttentionKind::Fault { .. } => ("✕", theme::FAULT),
         AttentionKind::Message { .. } => ("✉", theme::SAPPHIRE),
         AttentionKind::Update { .. } => ("✦", theme::GREEN),
@@ -194,7 +203,7 @@ pub fn home_list(
                 .count();
             items.push(Item::Header {
                 title: if is_closed {
-                    "closed elsewhere: x clears each".into()
+                    "Recently closed: x clears each".into()
                 } else {
                     item.tier.title().into()
                 },
@@ -242,8 +251,8 @@ pub fn home_list(
         ids,
         state: state_of(
             &world.attention,
-            "Checking what needs you…",
-            "Nothing needs you.",
+            "Checking for alerts…",
+            "No alerts.",
         ),
         legend: legend(&[
             ("◆", theme::PERSON, "decide"),
@@ -427,37 +436,69 @@ fn structured_request(
         .recommendation
         .as_ref()
         .map(|wanted| wanted.answer.as_str());
+    if !request.answers.is_empty() {
+        card.section("choose one", None, inner);
+    }
     for (index, answer) in request.answers.iter().enumerate() {
         let chosen = drafts.answering == Some(index);
+        // A radio row: the dot says it is a choice, the filled one is the choice, and the chosen
+        // row is lifted off the card so it cannot be missed.
+        let fill = |style: Style| {
+            if chosen {
+                style.bg(theme::SURFACE0)
+            } else {
+                style
+            }
+        };
         let mut head = vec![
             text::run(
-                if chosen { " ▸ " } else { "   " },
-                theme::strong(theme::ACCENT),
+                if chosen { " ◉ " } else { " ○ " },
+                fill(theme::strong(if chosen {
+                    theme::ACCENT
+                } else {
+                    theme::OVERLAY1
+                })),
             ),
             text::run(
                 answer.label.clone(),
-                if chosen {
+                fill(if chosen {
                     theme::strong(theme::ACCENT)
                 } else {
                     theme::strong(theme::TEXT)
-                },
+                }),
             ),
         ];
         if recommended == Some(answer.id.as_str()) {
-            head.push(text::run("  recommended", theme::fg(theme::GREEN)));
+            head.push(text::run("  recommended", fill(theme::fg(theme::GREEN))));
         }
         if answer.outcome.as_deref() == Some("request_changes") {
-            head.push(text::run("  needs your words", theme::fg(theme::YELLOW)));
+            head.push(text::run(
+                "  needs your words",
+                fill(theme::fg(theme::YELLOW)),
+            ));
         }
-        head.push(text::run(format!("  {}", answer.consequence), theme::dim()));
+        head.push(text::run(
+            format!("  {}", answer.consequence),
+            fill(theme::dim()),
+        ));
         let from_line = card.lines.len();
-        card.lines(text::wrap(
+        let mut wrapped = text::wrap(
             &head,
             inner,
             &[],
-            &[text::run("   ", theme::dim())],
+            &[text::run("    ", fill(theme::dim()))],
             None,
-        ));
+        );
+        if chosen {
+            for line in &mut wrapped {
+                let used: usize = line.spans.iter().map(|span| span.width()).sum();
+                line.spans.push(Span::styled(
+                    " ".repeat(inner.saturating_sub(used)),
+                    Style::default().bg(theme::SURFACE0),
+                ));
+            }
+        }
+        card.lines(wrapped);
         card.targets.push(crate::ui::doc::Target {
             line: from_line,
             column: 0,
@@ -470,6 +511,7 @@ fn structured_request(
         let hint = drafts.needs_words.as_ref().map(|label| {
             format!("what should change? Enter sends it with “{label}” · Esc cancels")
         });
+        card.section("in your own words", None, inner);
         text_box(
             card,
             &format!("answer {from}"),
@@ -509,20 +551,13 @@ fn structured_request(
             buttons.push(("c", "Answer in words", Hit::Key('c'), theme::ACCENT));
         }
         card.buttons(&buttons);
-        // x cannot close a question that needs one of its answers; say so and what does.
-        let declining = request
-            .answers
-            .iter()
-            .find(|answer| answer.outcome.as_deref() == Some("decline"))
-            .map(|answer| format!("“{}” declines it", answer.label))
-            .unwrap_or_else(|| "pick the answer that says no".to_owned());
-        card.wrap(
-            &text::inline(
-                &format!("x cannot dismiss this: it needs one of its answers ({declining})."),
-                theme::dim(),
-            ),
-            inner,
-        );
+        // A person can always set a request aside, whatever its answers: the asker is told it
+        // was dismissed (Nathan, 2026-10-11). It asks first.
+        card.blank();
+        let label = format!("Dismiss this: tell {from} you set it aside without answering");
+        if !confirm_row(card, drafts, &label) {
+            card.buttons(&[("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1)]);
+        }
     }
     if !request.why_person.is_empty() {
         card.blank();
@@ -665,10 +700,10 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     let Some(item) = id.and_then(|id| world.attention.items().iter().find(|item| item.id == id))
     else {
         match &world.attention {
-            Load::Loading => doc.line(Line::from(span("Checking what needs you…", theme::dim()))),
+            Load::Loading => doc.line(Line::from(span("Checking for alerts…", theme::dim()))),
             Load::Failed(error) => doc.wrap(
                 &[run(
-                    format!("Could not read what needs you: {error}"),
+                    format!("Could not read your alerts: {error}"),
                     theme::fg(theme::RED),
                 )],
                 width,
@@ -677,7 +712,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 doc.blank();
                 doc.line(Line::from(vec![
                     span("✓ ", theme::strong(theme::GREEN)),
-                    span("Nothing needs you right now.", theme::bold()),
+                    span(HOME_IDLE_TEXT, theme::bold()),
                 ]));
                 doc.blank();
                 doc.wrap(
@@ -1167,6 +1202,55 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 inner,
             );
         }
+        AttentionKind::Prompt {
+            seat,
+            text: prompt,
+            answers,
+            ..
+        } => {
+            card.line(Line::from(vec![
+                span("waits  ", theme::dim()),
+                span(seat.clone(), theme::strong(theme::PERSON)),
+            ]));
+            card.blank();
+            card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
+            card.blank();
+            if answers.is_empty() {
+                card.wrap(
+                    &text::inline(
+                        "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered.",
+                        theme::dim(),
+                    ),
+                    inner,
+                );
+            } else {
+                card.wrap(
+                    &text::inline(
+                        "The call it would make is the pending one in the seat's conversation: open the conversation to read it in full, then allow or deny it there. This clears when the prompt is gone, however it was answered.",
+                        theme::dim(),
+                    ),
+                    inner,
+                );
+            }
+        }
+        AttentionKind::Login { text: login, seats } => {
+            card.lines(text::markdown(&spaced(login), inner, theme::text()));
+            if seats.len() > 1 {
+                card.blank();
+                card.section("seats that share this sign-in", Some(seats.len()), inner);
+                for seat in seats {
+                    link(&mut card, "         ", seat, seat);
+                }
+            }
+            card.blank();
+            card.wrap(
+                &text::inline(
+                    "One sign-in in the seat's terminal (Ctrl+]) fixes every seat; this clears when the next authenticated turn succeeds.",
+                    theme::dim(),
+                ),
+                inner,
+            );
+        }
         AttentionKind::Update {
             from,
             body,
@@ -1402,8 +1486,8 @@ fn agent_group(agent: &Agent) -> &'static str {
     match agent.state {
         AgentState::NeedsYou => "waiting on you",
         AgentState::NeedsLogin => "needs login",
-        AgentState::Fault => "broken",
-        AgentState::Working => "working",
+        AgentState::Fault | AgentState::Down => "broken",
+        AgentState::Working | AgentState::Compacting => "working",
         AgentState::Idle | AgentState::Starting => "idle",
         AgentState::Stopped | AgentState::Unknown => "stopped",
     }
@@ -1441,6 +1525,9 @@ fn subagent_lines(agent: &Agent, indent: &str, width: usize) -> Vec<Line<'static
 pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_partial.iter().any(|name| name == "sessions") {
+        items.push(Item::Note(Line::from(span(" More native sessions exist beyond this inventory window.", theme::dim()))));
+    }
     let agents = agent_order(world);
     let mut current = "";
     for agent in &agents {
@@ -1619,14 +1706,46 @@ pub fn mission_order(world: &World, system: bool) -> Vec<&Mission> {
         .iter()
         .filter(|mission| system || !hidden_by_default(mission))
         .collect::<Vec<_>>();
-    missions.sort_by_key(|mission| (mission.word, mission.title.to_lowercase()));
+    missions.sort_by_key(|mission| (display_rank(mission.word), mission.title.to_lowercase()));
     missions
+}
+
+/// The order the list reads in: what is running first, then what waits on the person, then what
+/// is stuck, then what is paused, then what is finished (Nathan, 2026-10-11: the list was hard to
+/// navigate, with running work between stuck work and the paused).
+fn display_rank(word: Word) -> u8 {
+    match word {
+        Word::Working => 0,
+        Word::Queued => 1,
+        Word::Decision => 2,
+        Word::Stalled => 3,
+        Word::Unstaffed => 4,
+        Word::Unclaimed => 5,
+        Word::Watching => 6,
+        Word::Held => 7,
+        Word::Idle => 8,
+        Word::Failed => 9,
+        Word::Cancelled => 10,
+        Word::Done => 11,
+        Word::NotStarted => 12,
+    }
 }
 
 /// Missions a person rarely looks for: st's own, ones nobody has started, and failures from before
 /// today, which age out of the list (Nathan, 2026-10-02). `x` shows them.
 fn hidden_by_default(mission: &Mission) -> bool {
-    mission.system || mission.word == Word::NotStarted || failed_before_today(mission)
+    mission.system
+        || mission.word == Word::NotStarted
+        || failed_before_today(mission)
+        || finished_before_today(mission)
+}
+
+/// A mission that finished or was stopped before today: done is not news the next day.
+fn finished_before_today(mission: &Mission) -> bool {
+    matches!(mission.word, Word::Done | Word::Cancelled)
+        && chrono::DateTime::parse_from_rfc3339(&mission.updated_at).is_ok_and(|at| {
+            at.with_timezone(&chrono::Local).date_naive() < chrono::Local::now().date_naive()
+        })
 }
 
 /// A failed mission whose last change was before today, on this machine's clock. A failure with
@@ -1726,6 +1845,10 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
             (
                 count(|mission| !mission.system && failed_before_today(mission)),
                 "failed before today",
+            ),
+            (
+                count(|mission| !mission.system && finished_before_today(mission)),
+                "finished before today",
             ),
         ]
         .into_iter()
@@ -1918,6 +2041,21 @@ pub fn mission_detail(
                 &[run("      ", theme::dim())],
                 None,
             ));
+        }
+        // A step whose holder sat idle with nothing set to wake it says when st nudged it.
+        if step.state == StepState::Working
+            && let Some(nudged) = mission
+                .step_metadata
+                .get(&step.id)
+                .and_then(|metadata| metadata.nudged.as_deref())
+        {
+            steps.line(Line::from(vec![
+                span("      ", theme::dim()),
+                span(
+                    format!("nudged {nudged} ago: idle holding it, nothing set to wake it"),
+                    theme::soft(),
+                ),
+            ]));
         }
         if open {
             let pad = "      ";
@@ -2164,6 +2302,12 @@ fn screens_word(state: AgentState) -> &'static str {
 pub fn fleet_list(world: &World) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_supported == Some(false) {
+        items.push(Item::Note(Line::from(span(" This member’s inventories are read, not followed.", theme::dim()))));
+    }
+    if world.inventory_partial.iter().any(|name| ["clients", "machines", "devices", "sessions"].contains(&name.as_str())) {
+        items.push(Item::Note(Line::from(span(" This view is partial; more inventory rows exist beyond its window.", theme::dim()))));
+    }
     for machine in world.machines.items() {
         let (glyph, color) = reach_style(machine.reach);
         let agents = world
@@ -2844,28 +2988,49 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     }
     doc.blank();
     doc.section("next", Some(details.queued as usize), width);
+    // Each queued step opens its mission when clicked.
+    let open_mission = |doc: &mut Doc, lines: Vec<Line<'static>>, mission: Option<&String>| {
+        if let Some(mission) = mission.filter(|mission| !mission.is_empty()) {
+            for offset in 0..lines.len() {
+                doc.targets.push(super::doc::Target {
+                    line: doc.lines.len() + offset,
+                    column: 2,
+                    width: width.saturating_sub(2) as u16,
+                    hit: Hit::Open(mission.clone()),
+                });
+            }
+        }
+        doc.lines(lines);
+    };
     match &details.next {
-        Some(next) => doc.lines(text::wrap(
-            &[run(next.clone(), theme::text())],
-            width,
-            &[run("› ", theme::fg(theme::ACCENT))],
-            &[run("  ", theme::dim())],
-            None,
-        )),
+        Some(next) => open_mission(
+            &mut doc,
+            text::wrap(
+                &[run(next.clone(), theme::text())],
+                width,
+                &[run("› ", theme::fg(theme::ACCENT))],
+                &[run("  ", theme::dim())],
+                None,
+            ),
+            details.next_mission.as_ref(),
+        ),
         None => doc.line(Line::from(span("Nothing queued.", theme::dim()))),
     }
-    for item in details
-        .queue
-        .iter()
-        .filter(|item| Some(*item) != details.next.as_ref())
-    {
-        doc.lines(text::wrap(
-            &[run(item.clone(), theme::soft())],
-            width,
-            &[run("· ", theme::dim())],
-            &[run("  ", theme::dim())],
-            None,
-        ));
+    for (index, item) in details.queue.iter().enumerate() {
+        if Some(item) == details.next.as_ref() {
+            continue;
+        }
+        open_mission(
+            &mut doc,
+            text::wrap(
+                &[run(item.clone(), theme::soft())],
+                width,
+                &[run("· ", theme::dim())],
+                &[run("  ", theme::dim())],
+                None,
+            ),
+            details.queue_missions.get(index),
+        );
     }
     if !agent.subagents.is_empty() {
         doc.blank();
@@ -2901,6 +3066,11 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     };
     field(&mut doc, "harness", Some(agent.harness.name()));
     field(&mut doc, "model", details.model.as_deref());
+    // Beside the model, only when the seat is configured with one: an unset effort is the
+    // harness's own default, which is not worth a row of "unknown".
+    if let Some(effort) = details.effort.as_deref() {
+        field(&mut doc, "effort", Some(effort));
+    }
     field(&mut doc, "state", details.harness_state.as_deref());
     field(&mut doc, "runtime", details.runtime.as_deref());
     field(&mut doc, "host", Some(&agent.host));
@@ -3237,6 +3407,51 @@ pub fn devices_card(world: &World, width: usize) -> Doc {
 #[cfg(test)]
 mod tree_tests {
     use super::*;
+
+    #[test]
+    fn a_working_step_says_when_its_idle_holder_was_nudged() {
+        let mut world = crate::ui::demo::world();
+        let Load::Ready(missions) = &mut world.missions else {
+            panic!("the demo world has missions");
+        };
+        let mission = missions
+            .iter_mut()
+            .find(|mission| mission.steps.iter().any(|step| step.state == StepState::Working))
+            .unwrap();
+        let step = mission
+            .steps
+            .iter()
+            .find(|step| step.state == StepState::Working)
+            .unwrap()
+            .id
+            .clone();
+        let id = mission.id.clone();
+        let shown = |world: &World| {
+            mission_detail(world, Some(&id), 120, "", None, &Default::default())
+                .lines
+                .iter()
+                .map(text::plain)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(!shown(&world).contains("nudged"));
+        let Load::Ready(missions) = &mut world.missions else {
+            unreachable!()
+        };
+        missions
+            .iter_mut()
+            .find(|mission| mission.id == id)
+            .unwrap()
+            .step_metadata
+            .entry(step)
+            .or_default()
+            .nudged = Some("40m".into());
+        let detail = shown(&world);
+        assert!(
+            detail.contains("nudged 40m ago: idle holding it, nothing set to wake it"),
+            "{detail}"
+        );
+    }
 
     #[test]
     fn a_request_holding_a_json_report_shows_what_happened_and_folds_the_rest() {
