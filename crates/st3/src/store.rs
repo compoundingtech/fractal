@@ -1662,7 +1662,7 @@ fn subject_status_at(
             current_harness_at(connection, subject, at_index)?,
             Vec::new(),
             ClaimsSummary::default(),
-            desired_conflicts_at(connection, subject, desired.as_ref().map(|row| row.id.as_str()), at_index)?,
+            desired_conflicts_at(connection, subject, desired.as_ref().map(|row| row.claim_id.as_str()), at_index)?,
         ),
         ClaimsReduction::AgentCard => {
             let latest = if desired.is_some() {
