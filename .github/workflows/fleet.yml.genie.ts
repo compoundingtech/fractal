@@ -154,7 +154,9 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
   'timeout-minutes': 5,
   'continue-on-error': true,
   permissions: { contents: 'read' },
-  outputs: { skip: '${{ steps.gate.outputs.skip }}', record: '${{ steps.gate.outputs.record }}' },
+  // The decision the check jobs act on comes from the marker step below, not from the gate step: skip=true can
+  // exist only if the marker already ran, so the observer, which keys on the marker, can never miss a skip.
+  outputs: { skip: '${{ steps.taken.outputs.skip }}', record: '${{ steps.taken.outputs.record }}' },
   steps: [
     { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
     {
@@ -182,7 +184,14 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
     })),
     // Fixed name: a decision to skip was taken. The observer must not record a check whose gate ran
     // this step as a fresh finished run, or one real run would keep refreshing its own skips.
-    { name: 'evidence skip taken', if: "steps.gate.outputs.skip == 'true'", run: 'echo evidence skip taken' },
+    {
+      name: 'evidence skip taken',
+      id: 'taken',
+      if: "steps.gate.outputs.skip == 'true'",
+      env: { RECORD: '${{ steps.gate.outputs.record }}' },
+      // The outputs are the LAST thing this step writes: if anything before them fails, there is no skip.
+      run: `echo evidence skip taken && printf 'skip=true\\nrecord=%s\\n' "$RECORD" >> "$GITHUB_OUTPUT"`,
+    },
   ],
 }]))
 

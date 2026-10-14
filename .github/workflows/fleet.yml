@@ -304,8 +304,8 @@ jobs:
     permissions:
       contents: read
     outputs:
-      skip: ${{ steps.gate.outputs.skip }}
-      record: ${{ steps.gate.outputs.record }}
+      skip: ${{ steps.taken.outputs.skip }}
+      record: ${{ steps.taken.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -339,8 +339,11 @@ jobs:
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
       - name: evidence skip taken
+        id: taken
         if: steps.gate.outputs.skip == 'true'
-        run: echo evidence skip taken
+        env:
+          RECORD: ${{ steps.gate.outputs.record }}
+        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -356,8 +359,8 @@ jobs:
     permissions:
       contents: read
     outputs:
-      skip: ${{ steps.gate.outputs.skip }}
-      record: ${{ steps.gate.outputs.record }}
+      skip: ${{ steps.taken.outputs.skip }}
+      record: ${{ steps.taken.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -391,8 +394,11 @@ jobs:
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
       - name: evidence skip taken
+        id: taken
         if: steps.gate.outputs.skip == 'true'
-        run: echo evidence skip taken
+        env:
+          RECORD: ${{ steps.gate.outputs.record }}
+        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -408,8 +414,8 @@ jobs:
     permissions:
       contents: read
     outputs:
-      skip: ${{ steps.gate.outputs.skip }}
-      record: ${{ steps.gate.outputs.record }}
+      skip: ${{ steps.taken.outputs.skip }}
+      record: ${{ steps.taken.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -443,8 +449,11 @@ jobs:
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
       - name: evidence skip taken
+        id: taken
         if: steps.gate.outputs.skip == 'true'
-        run: echo evidence skip taken
+        env:
+          RECORD: ${{ steps.gate.outputs.record }}
+        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -460,8 +469,8 @@ jobs:
     permissions:
       contents: read
     outputs:
-      skip: ${{ steps.gate.outputs.skip }}
-      record: ${{ steps.gate.outputs.record }}
+      skip: ${{ steps.taken.outputs.skip }}
+      record: ${{ steps.taken.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -495,8 +504,11 @@ jobs:
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
       - name: evidence skip taken
+        id: taken
         if: steps.gate.outputs.skip == 'true'
-        run: echo evidence skip taken
+        env:
+          RECORD: ${{ steps.gate.outputs.record }}
+        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -512,8 +524,8 @@ jobs:
     permissions:
       contents: read
     outputs:
-      skip: ${{ steps.gate.outputs.skip }}
-      record: ${{ steps.gate.outputs.record }}
+      skip: ${{ steps.taken.outputs.skip }}
+      record: ${{ steps.taken.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -547,8 +559,11 @@ jobs:
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
       - name: evidence skip taken
+        id: taken
         if: steps.gate.outputs.skip == 'true'
-        run: echo evidence skip taken
+        env:
+          RECORD: ${{ steps.gate.outputs.record }}
+        run: echo evidence skip taken && printf 'skip=true\nrecord=%s\n' "$RECORD" >> "$GITHUB_OUTPUT"
       - name: Report job cache coverage
         if: always()
         shell: bash
