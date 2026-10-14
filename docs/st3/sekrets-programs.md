@@ -114,9 +114,13 @@ be required per check; a wrapper note cannot satisfy an observed-only policy.
 Keep CI and developer signer roles distinct rather than inventing a schema tier.
 
 Fork PRs never sign or enroll. Enrollment on the current CI pools is permitted;
-a merge-group-only runner unit is not required in this phase. Installation must
-verify the actual fork-exclusion routing/guard, not infer it from a unit name.
-The gateway's Program identity alone has no GitHub event/repository provenance.
+a merge-group-only runner unit is not required in this phase. First installation records the repository's
+`all_external_contributors` fork-workflow approval setting and the working rule:
+no maintainer, curator or administrative automation approves a fork Actions run
+unless the workflow diff has been reviewed and the run is routed away from the
+signing pools. This is an interim approval/routing rule, not technical proof that
+all fork-owned jobs are excluded. The gateway's Program identity alone has no
+GitHub event/repository provenance.
 
 Known defects in this phase:
 
@@ -124,6 +128,12 @@ Known defects in this phase:
   that a hostile job executed the stated check. Same-repository PR code can
   request a passing or failing note for a tree it holds. The phase policy accepts
   this gap for matching wrapper-kind skips; it must remain visible and tracked.
+- Fork admission enforcement: an unrestricted runner group and PR-owned workflow
+  definitions can bypass a picker or label convention if a fork workflow is
+  approved. The interim rule above is the first-install acceptance condition;
+  an actual runner-group restriction to qualified trusted workflow definitions,
+  preserving internal PR and merge-group coverage, is the required fix. Do not
+  treat withheld GitHub secrets or approval settings alone as a kernel boundary.
 - Bridge key exposure: until the existing wrapper consumer moves behind the
   protected profile, its environment-secret or local key-file bridge may be
   reachable by code under test. This source does not remove that bridge. The
