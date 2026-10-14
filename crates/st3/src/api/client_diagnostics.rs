@@ -208,6 +208,34 @@ mod tests {
         (status,serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
     #[test]
+    fn diagnostics_receipts_install_additively_at_version_nineteen_and_survive_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        drop(crate::store::Store::open(&path, "diagnostic-test").unwrap());
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), 19);
+            connection.execute_batch(
+                "DROP TABLE client_diagnostic_receipts;
+                 INSERT INTO meta(key, value) VALUES ('diagnostic-migration-marker', 'preserved');",
+            ).unwrap();
+        }
+        drop(crate::store::Store::open(&path, "diagnostic-test").unwrap());
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            assert_eq!(connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(), 19);
+            assert_eq!(connection.query_row("SELECT value FROM meta WHERE key='diagnostic-migration-marker'", [], |row| row.get::<_, String>(0)).unwrap(), "preserved");
+            assert_eq!(connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('client_diagnostic_receipts_time_index', 'client_diagnostic_receipts_device_time_index')",
+                [], |row| row.get::<_, u32>(0),
+            ).unwrap(), 2);
+            connection.execute("INSERT INTO client_diagnostic_receipts(device, event_id, accepted_at_unix_ms) VALUES ('client/test', 'receipt', 1)", []).unwrap();
+        }
+        drop(crate::store::Store::open(&path, "diagnostic-test").unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(connection.query_row("SELECT event_id FROM client_diagnostic_receipts WHERE device='client/test'", [], |row| row.get::<_, String>(0)).unwrap(), "receipt");
+    }
+    #[test]
     fn diagnostics_runtime_metadata_matches_expo_native_version() {
         for (runtime, expected) in [
             ("0.1.0(1)", "0.1.0(1)"),

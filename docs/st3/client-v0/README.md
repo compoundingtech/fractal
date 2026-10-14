@@ -40,6 +40,13 @@ command/frame definitions, and subscription bound; see [collections](collections
 device credential. New default limited and full-control pairings include the scope;
 existing grants are unchanged and must be re-paired to acquire it. The Unix route
 also requires a paired bearer; it is not an arbitrary observation/OTLP write API.
+
+Route support and the active pairing's permission are advertised by
+`GET /v1/client/capabilities`: `write.client-diagnostics` version 1 is `granted`
+or `ungranted`. Upload starts only when it is granted; older daemons that omit
+the capability are not probed with POST. A separate unauthenticated health
+feature is unnecessary for this paired-only route.
+
 `ClientDiagnosticsBatch` version 1 carries 1–32 events within 128 KiB, including
 launch/sequence IDs, build/runtime/update metadata, occurrence/capture times,
 severity and one allowlisted payload. Stacks contain at most 32 categorized numeric
@@ -56,6 +63,13 @@ observation trimming. Admission allows 256 new events per device per minute; ret
 do not consume that allowance. These observations never replicate desired state.
 Their Local retention is declared in `crates/st3-schema/retention.toml`, alongside
 the other node-local observations; schema registration reads that shared policy.
+
+The receipt table and its indexes are installed idempotently on every store open,
+including an existing storage-version-19 database. This is backward-compatible
+local storage: older binaries ignore the table, existing rows/columns and
+checkpoint/operation rules are unchanged. No migration version or local storage
+compatibility digest bump is required; the published diagnostics vocabulary and
+client contract digests do change. Reopening preserves diagnostic receipts.
 
 Admission refusal returns HTTP 429 with public error code `rate-limited`.
 Phones honour `Retry-After` when supplied, otherwise use bounded backoff. Terminal
@@ -106,6 +120,7 @@ advertisement from every active member. Pending unsigned local membership change
 also block publication until the replication writer seals them. Fence legacy
 peers before enabling notes: advertisements do not discover unknown legacy peers.
 Launch delivery, change notifications, and UI authoring are outside this read-path slice.
+
 
 ### Phone observations
 
@@ -1880,12 +1895,12 @@ projection time of its cut.
 
 Before the missions list's first publication, and while its refresher fails three folds in a
 row or after it stops, missions windows fold on read and follow commits as before, until a fold
-publishes again. When projections are replaced without a claim (a replay, trim or heal), they
+publishes again. When projections are replaced without a claim (a replay or trim), they
 keep the newest rows, under their own cut, until the list's fold from nothing publishes.
 
 The work list is never folded on read while its refresher runs. Until it has a current
 publication (at startup, after its refresher withdrew it on three failed folds in a row, and
-after a replay, trim or heal until its fold from nothing publishes), a work window receives one
+after a replay or trim until its fold from nothing publishes), a work window receives one
 retryable `resync`, then waits for the list's next publication; neither commits, the reread
 interval nor a repeat of that answer sends it anything more. A paired session's clock still
 rechecks its grant meanwhile, and an expired or revoked grant ends the window. If the work
@@ -1895,7 +1910,7 @@ list's refresher stops for good, a work window receives one `error` frame and en
 `GET /v1/client/work` (the current list, not `history=true`) answers the same way. A first
 page is a slice of the newest publication, under that publication's snapshot. A continuation
 is a slice of the same publication, even after a newer one, a withdrawal or the refresher's end
-(new first pages then refuse), until its cursor expires or a replay, trim or heal replaced the
+(new first pages then refuse), until its cursor expires or a replay or trim replaced the
 projections behind it (`page-cursor-expired`). Asking for the same first page again reuses its
 cursor and its original expiry: a cursor close to expiring can still expire before its next page
 is read, and the client restarts from a first page. The daemon keeps at most 32 cached first pages,
@@ -1912,7 +1927,7 @@ comes, it answers HTTP 503, retryable, with `details.reason: "work-list-not-fres
 asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across every
 attempt. A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
 model, gets that retryable 503 until the work list's first fold after the daemon starts, and again
-after each replay, trim or heal and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
+after each replay or trim and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
 
 A daemon started with `ST3_PUBLISHED_LISTS=off` folds each window and page on read instead.
 

@@ -106,17 +106,11 @@ function defaultTerminalSocket(url: string, protocols: string[], headers: Record
 export class ClientError extends Error {
     public readonly response: ErrorEnvelope;
     public readonly status: number;
-    public readonly retryAfterMs?: number;
 
-    constructor(response: ErrorEnvelope, status: number, retryAfter?: string | null) {
+    constructor(response: ErrorEnvelope, status: number) {
         super(response.message);
         this.response = response;
         this.status = status;
-        if (retryAfter) {
-            const seconds = /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) : undefined;
-            const delay = seconds === undefined ? Date.parse(retryAfter) - Date.now() : seconds * 1000;
-            if (Number.isFinite(delay)) this.retryAfterMs = Math.max(0, delay);
-        }
         this.name = 'ClientError';
     }
 }
@@ -224,7 +218,7 @@ export class St3Client {
             throw new Error('Unexpected st client API response');
         }
         if (!response.ok || 'error_version' in payload) {
-            throw new ClientError(payload as ErrorEnvelope, response.status, response.headers.get('Retry-After'));
+            throw new ClientError(payload as ErrorEnvelope, response.status);
         }
         if ((path !== '/v1/client/observations' && !('snapshot' in payload)) || !('value' in payload)) {
             throw new Error('Incomplete st client API response');
