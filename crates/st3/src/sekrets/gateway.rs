@@ -21,6 +21,7 @@ use super::policy::{Policy, Verdict};
 use super::protocol::{self, CallerView, Reply, Request, RunRequest};
 use super::sandbox::{self, BoundDirectory, Sandbox};
 use super::store::{GatewayStore, Grant, Profile, now_unix_ms, person_name};
+use crate::tiles::registry::{Registry, Tile};
 
 pub const DEFAULT_CONFIG: &str = "/etc/st-sekrets/gateway.toml";
 /// How long the gateway keeps its own log: each daemon has recorded its entries long before.
@@ -57,6 +58,10 @@ pub struct GatewayConfig {
     /// Dedicated Unix UID to a root-controlled, run-only system service.
     #[serde(default)]
     pub programs: BTreeMap<String, ProgramConfig>,
+    /// Root's tile registry. A tile's Unix user is one agent, which the kernel identifies
+    /// without any daemon's word: its process runs in the tile's root-owned cgroup.
+    #[serde(default = "default_tile_registry")]
+    pub tile_registry: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -116,6 +121,9 @@ fn default_path() -> Vec<PathBuf> {
 }
 fn default_github_api() -> String {
     "https://api.github.com".into()
+}
+fn default_tile_registry() -> PathBuf {
+    crate::tiles::registry::DEFAULT_REGISTRY.into()
 }
 fn default_checkout_roots() -> Vec<PathBuf> {
     vec!["/home".into()]
@@ -223,6 +231,8 @@ pub struct Gateway {
     http: OnceLock<Arc<super::authorized::Http>>,
     /// Each profile's API token, read from the profile, until a 401 says it changed.
     tokens: Mutex<BTreeMap<String, String>>,
+    /// Reads root's tile registry for each connection, so a change applies to the next one.
+    tiles: Box<dyn Fn() -> Result<Option<Registry>> + Send + Sync>,
 }
 
 /// Start the gateway and serve until the process ends.
@@ -344,6 +354,8 @@ struct Caller {
     pid_start: Option<u64>,
     person: String,
     view: CallerView,
+    /// The tile this caller's Unix user is, when it is one.
+    tile: Option<String>,
 }
 
 impl Caller {
@@ -404,6 +416,11 @@ impl Gateway {
         config.validate()?;
         let git = sandbox::resolve_tool("git", &config.path, tool_owner).ok();
         let store = GatewayStore::open(&config.store)?;
+        let registry = config.tile_registry.clone();
+        let tiles = Box::new(move || match fs::symlink_metadata(&registry) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            _ => Registry::load(&registry).map(Some),
+        });
         Ok(Self {
             config,
             tool_owner,
@@ -414,7 +431,17 @@ impl Gateway {
             logged: Condvar::new(),
             http: OnceLock::new(),
             tokens: Mutex::new(BTreeMap::new()),
+            tiles,
         })
+    }
+
+    /// Read the tile registry with `load` instead of from root's file. Tests stand in for it.
+    pub fn with_tiles(
+        mut self,
+        load: impl Fn() -> Result<Option<Registry>> + Send + Sync + 'static,
+    ) -> Self {
+        self.tiles = Box::new(load);
+        self
     }
 
     /// Serve each connection on its own thread until the listener fails.
@@ -480,22 +507,53 @@ impl Gateway {
         if Some(uid) == self.own_uid {
             bail!("the sekrets user cannot call its own gateway");
         }
-        let Some(person) = self
-            .config
-            .programs
-            .get(&uid.to_string())
+        let program = self.config.programs.get(&uid.to_string());
+        let person = program
             .map(|program| program.person.as_str())
-            .or_else(|| self.config.person_for(uid))
-        else {
-            bail!("Unix user {uid} is not a person this gateway serves");
+            .or_else(|| self.config.person_for(uid));
+        // A person's or program's call never depends on the registry; a tile's call needs it.
+        let registry = match (self.tiles)() {
+            Ok(registry) => registry,
+            Err(_) if person.is_some() => None,
+            Err(error) => return Err(error.context("read root's tile registry")),
         };
+        let tile = registry
+            .as_ref()
+            .and_then(|registry| registry.tile_for_uid(uid))
+            .map(|(name, tile)| (name.to_owned(), tile.clone()));
+        let tile_name = tile.as_ref().map(|(name, _)| name.clone());
+        let (person, tile_view) = match (person, tile) {
+            (Some(_), Some((name, _))) => bail!(
+                "Unix user {uid} is both a person in the gateway's configuration and tile {name} \
+                 in root's registry; a tile is never a person"
+            ),
+            (Some(person), None) => (person.to_owned(), None),
+            (None, Some((name, tile))) => {
+                let view = self.classify_tile(
+                    registry.as_ref().expect("a tile came from the registry"),
+                    uid,
+                    pid,
+                    &name,
+                    &tile,
+                );
+                (tile.person, Some(view))
+            }
+            (None, None) => bail!("Unix user {uid} is not a person or tile this gateway serves"),
+        };
+        let person = person.as_str();
         let nonce = nonce();
+        let classify = |attestation: Option<&protocol::Attestation>| match &tile_view {
+            // The kernel and root's registry name a tile; no daemon's word changes that.
+            Some(view) => view.clone(),
+            None => self.classify(uid, pid, person, attestation, &nonce),
+        };
         let mut caller = Caller {
             uid,
             pid,
             pid_start: self.kernel.start(pid),
             person: person.to_owned(),
-            view: self.classify(uid, pid, person, None, &nonce),
+            view: classify(None),
+            tile: tile_name,
         };
         while let Some((request, fds)) = protocol::recv::<Request>(stream)? {
             // A program may not keep an earlier classification after leaving its unit,
@@ -514,7 +572,7 @@ impl Gateway {
             let reply = match request {
                 Request::Hello { attestation } => {
                     if !self.config.programs.contains_key(&uid.to_string()) {
-                        caller.view = self.classify(uid, pid, person, attestation.as_ref(), &nonce);
+                        caller.view = classify(attestation.as_ref());
                     }
                     Reply::Hello {
                         caller: caller.view.clone(),
@@ -612,6 +670,34 @@ impl Gateway {
                     Err(reason) => unidentified(format!("attestation refused: {reason}")),
                 }
             }
+        }
+    }
+
+    /// A process of a tile's Unix user is the tile's agent when it runs in the tile's slice,
+    /// which only root can place it in. Anywhere else it is no one.
+    fn classify_tile(
+        &self,
+        registry: &Registry,
+        uid: u32,
+        pid: i32,
+        name: &str,
+        tile: &Tile,
+    ) -> CallerView {
+        let unidentified = |reason: String| CallerView::Unidentified {
+            person: tile.person.clone(),
+            reason,
+        };
+        let Some(cgroup) = self.kernel.cgroup(pid) else {
+            return unidentified(format!("cannot read the cgroup of process {pid}"));
+        };
+        match registry.identify(uid, &cgroup) {
+            Some((found, _)) if found == name => CallerView::Agent {
+                agent: tile.agent.clone(),
+                person: tile.person.clone(),
+            },
+            _ => unidentified(format!(
+                "process {pid} is tile {name}'s Unix user but runs in {cgroup}, outside the tile"
+            )),
         }
     }
 
@@ -976,7 +1062,16 @@ impl Gateway {
                 }
             }
         }
-        if program.is_some_and(|program| program.checkout.is_none()) {
+        if let Some(tile) = caller.tile.as_deref() {
+            // A tile's directories live in its own mount namespace; the sandbox binds a checkout
+            // by the path the gateway's namespace gives a descriptor, which does not name them.
+            // Until that is qualified (tiles design step 4), a tile's checkout is never bound.
+            note = Some(format!(
+                "running in the profile's home, without your directory: tile {tile}'s directories \
+                 are not served yet"
+            ));
+            fds.clear();
+        } else if program.is_some_and(|program| program.checkout.is_none()) {
             // Signing has no meaningful HOME fallback: it must see the authorized checkout.
             self.servable(&fds[0])?;
         } else if program.is_none()
@@ -2096,6 +2191,7 @@ command = ["evidence-sign"]
             pid_start: Some(123),
             person: "person/ada".into(),
             view: gateway.classify(1001, 7, "person/ada", None, "nonce"),
+            tile: None,
         };
         let allow = Policy::build(&[], &["evidence-sign".into()], &[]).unwrap();
         gateway
@@ -2168,6 +2264,7 @@ command = ["evidence-sign"]
             view: CallerView::Person {
                 person: "person/ada".into(),
             },
+            tile: None,
         };
         assert!(
             gateway
