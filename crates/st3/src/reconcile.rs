@@ -17590,6 +17590,7 @@ mod tests {
     mod ready_idle_wake;
     mod ref_watch_tests;
     mod revision_seat_tests;
+    mod agentless_cutover_tests;
     mod rollout_tests;
     mod run_report_tests;
     mod start_spacing_loop;
