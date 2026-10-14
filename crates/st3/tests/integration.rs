@@ -23,6 +23,7 @@ mod client_only;
 mod client_v0_cli;
 mod client_v0_contract;
 mod cli_inventory_process;
+mod cli_output;
 
 // Invoked only by cli_inventory_process's bounded-capture test. Keeping this
 // outside that module preserves its five selected fixture names.
@@ -93,6 +94,7 @@ mod reconcile_pass_perf;
 mod recorder_report;
 mod revision_seats;
 mod seat_queue_perf;
+mod setup;
 mod startup_readiness;
 mod stui_slo_history;
 mod subagent_publisher;

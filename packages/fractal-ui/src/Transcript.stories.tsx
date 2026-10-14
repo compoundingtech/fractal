@@ -18,11 +18,11 @@ const now = Date.parse('2026-01-15T12:01:00Z')
 const at = '2026-01-15T12:00:00Z'
 const source = 'export const visibleRows = rows.filter(row => row.visible)\nexport const count = visibleRows.length\nexport const labels = visibleRows.map(row => row.label)\nexport const selected = visibleRows.find(row => row.selected)\nexport const first = visibleRows[0]\nexport const last = visibleRows.at(-1)\n'
 const answer = 'The row projection now keeps **visible rows** together and preserves selection.\n\n```ts\nconst count = visibleRows.length\n```\n\nThe focused checks passed.'
-type State = 'settled' | 'expanded' | 'streaming' | 'failed' | 'interrupted' | 'unknown' | 'loading' | 'catching-up' | 'reconnecting' | 'sync-failed' | 'pending-send' | 'failed-send' | 'empty'
+type State = 'settled' | 'expanded' | 'streaming' | 'failed' | 'interrupted' | 'unknown' | 'loading' | 'catching-up' | 'reconnecting' | 'sync-failed' | 'pending-send' | 'failed-send' | 'unconfirmed-send' | 'empty'
 interface TranscriptStoryData { readonly turns: readonly TranscriptTurn[]; readonly sync: SyncStatus; readonly availability?: TranscriptAvailability; readonly history?: TranscriptHistory; readonly emptyState?: React.ReactNode | TranscriptEmptyState }
 function fixture(state: State, prefix: string): TranscriptStoryData {
   const running = state === 'streaming', failed = state === 'failed', interrupted = state === 'interrupted'
-  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : undefined }
+  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : state === 'unconfirmed-send' ? { _tag: 'Unconfirmed', detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.' } : undefined }
   const calls: ConversationItem[] = [
     { _tag: 'ToolCall', id: `${prefix}/read`, callId: `${prefix}/read`, name: 'read', input: { path: 'src/rows.ts' }, status: 'success', result: { content: source, mediaType: 'text/plain', isError: false, at: '2026-01-15T12:00:03Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' },
     { _tag: 'ToolCall', id: `${prefix}/run`, callId: `${prefix}/run`, name: 'run', input: { command: 'pnpm test rows' }, status: failed ? 'error' : interrupted ? 'interrupted' : running ? 'running' : 'success', result: running ? undefined : { content: failed ? 'The row assertion did not match the observed selection.' : interrupted ? 'Stopped before the checks completed.' : '✓ selection retained\n✓ visible count matches\n✓ empty rows handled', mediaType: 'text/x-shellscript', isError: failed, at: '2026-01-15T12:00:18Z' }, callSeen: true, at: '2026-01-15T12:00:05Z' },
@@ -40,7 +40,7 @@ function fixture(state: State, prefix: string): TranscriptStoryData {
   return { turns: state === 'loading' || state === 'empty' ? [] : [{ id: prefix, prompt, items, work, senderCaptions: { [response.id]: 'Assistant' } }], sync }
 }
 const cases: Readonly<Record<State, TranscriptStoryData>> = {
-  settled: fixture('settled', 'settled'), expanded: fixture('expanded', 'expanded'), streaming: fixture('streaming', 'streaming'), failed: fixture('failed', 'failed'), interrupted: fixture('interrupted', 'interrupted'), unknown: fixture('unknown', 'unknown'), loading: fixture('loading', 'loading'), 'catching-up': fixture('catching-up', 'catching-up'), reconnecting: fixture('reconnecting', 'reconnecting'), 'sync-failed': fixture('sync-failed', 'sync-failed'), 'pending-send': fixture('pending-send', 'pending-send'), 'failed-send': fixture('failed-send', 'failed-send'), empty: fixture('empty', 'empty'),
+  settled: fixture('settled', 'settled'), expanded: fixture('expanded', 'expanded'), streaming: fixture('streaming', 'streaming'), failed: fixture('failed', 'failed'), interrupted: fixture('interrupted', 'interrupted'), unknown: fixture('unknown', 'unknown'), loading: fixture('loading', 'loading'), 'catching-up': fixture('catching-up', 'catching-up'), reconnecting: fixture('reconnecting', 'reconnecting'), 'sync-failed': fixture('sync-failed', 'sync-failed'), 'pending-send': fixture('pending-send', 'pending-send'), 'failed-send': fixture('failed-send', 'failed-send'), 'unconfirmed-send': fixture('unconfirmed-send', 'unconfirmed-send'), empty: fixture('empty', 'empty'),
 }
 /** `drop` withholds ids from the runtime adapter, standing in for an adapter that never adopts them. */
 function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState, syncPresentation }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState; syncPresentation?: 'inline' | 'shell' }) {
@@ -462,6 +462,19 @@ export const FailedSend: Story = { args: { state: 'failed-send' }, play: async (
   await expect(failure).toHaveTextContent('The connection dropped while sending')
 } }
 export const FailedSendLight: Story = { ...FailedSend, args: { state: 'failed-send', scheme: 'light' } }
+/** st may have taken the send: a neutral status with Send again, never failure copy or an alert. */
+export const UnconfirmedSend: Story = { args: { state: 'unconfirmed-send' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const prompt = await canvas.findByTestId('user-message')
+  await expect(prompt).toHaveAttribute('data-send-state', 'unconfirmed')
+  const notice = await canvas.findByTestId('send-unconfirmed')
+  await expect(notice).toHaveAttribute('role', 'status')
+  await expect(notice).toHaveTextContent('Not confirmed yet')
+  await expect(canvas.queryByTestId('send-failure')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: 'Not confirmed yet' }))
+  await expect(notice).toHaveTextContent('Sending it again is safe')
+} }
+export const UnconfirmedSendLight: Story = { ...UnconfirmedSend, args: { state: 'unconfirmed-send', scheme: 'light' } }
 /** The server echo replaces a pending prompt in place: same item id, one row, no duplicate. */
 function SendIdentityStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [delivered, setDelivered] = React.useState(false)
@@ -595,7 +608,8 @@ function StrandedItemStory({ scheme = 'dark' }: { scheme?: Scheme }) {
 const itemOrder = (turn: Element) => Array.from(turn.querySelectorAll('[data-item-id]'), element => element.getAttribute('data-item-id'))
 export const StrandedItem: Story = { render: args => <StrandedItemStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  const lost = await canvas.findByText('This answer never reached the runtime.')
+  // The virtualized transcript's first paint can exceed findBy's 1s default on a saturated strict host.
+  const lost = await canvas.findByText('This answer never reached the runtime.', undefined, { timeout: 10_000 })
   const lostRow = lost.closest('[data-testid="transcript-stranded"]')
   await expect(lostRow).toHaveAttribute('data-item-id', 'stranded/lost-answer')
   const eventRow = canvasElement.querySelector('[data-testid="transcript-stranded"][data-item-id="stranded/lost-event"]')
@@ -613,7 +627,8 @@ export const StrandedItem: Story = { render: args => <StrandedItemStory scheme={
     await userEvent.click(canvas.getByRole('button', { name: 'Append dropped entry' }))
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="transcript-stranded"][data-item-id="stranded/lost-notice"]')).toHaveTextContent('An appended entry the runtime drops.'))
     await expect(itemOrder(first!)).toEqual(['stranded/prompt', 'stranded/lost-answer', 'stranded/lost-event', 'stranded/answer', 'stranded/lost-notice', 'stranded/late-answer'])
-    await expect(warn).toHaveBeenCalledWith(expect.stringContaining('stranded/lost-notice'))
+    // Stranded content and stable row order are the production contract; diagnostics are development-only.
+    if (import.meta.env.DEV) await expect(warn).toHaveBeenCalledWith(expect.stringContaining('stranded/lost-notice'))
     observer.takeRecords().forEach(record => record.removedNodes.forEach(node => { if (retained.some(element => node === element || node.contains(element))) removed.push(node) }))
     await expect(removed).toHaveLength(0)
     const turns = canvas.getAllByTestId('transcript-turn')

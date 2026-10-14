@@ -71,6 +71,29 @@ fn can_stall(run: &MissionRunView) -> bool {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Linked child runs do the parent's work. Follow their indexed parent-step links and
+    /// register every run and step read, including nested work, so progress moves the stall
+    /// deadline on the next incremental evaluation rather than waiting for a scan.
+    fn run_report_activity(&self, run: &MissionRunView) -> Result<u128> {
+        let mut activity = run_activity(run);
+        let mut pending = run
+            .steps
+            .iter()
+            .map(|step| step.subject.clone())
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(step) = pending.pop() {
+            for child in self.store.mission_run_children_for_step(&step)? {
+                if !visited.insert(child.subject.clone()) {
+                    continue;
+                }
+                activity = activity.max(run_activity(&child));
+                pending.extend(child.steps.into_iter().map(|step| step.subject));
+            }
+        }
+        Ok(activity)
+    }
+
     /// Who a run reports to: its latest `st missions report-to`, else what it was created with.
     pub(super) fn run_report(&self, run: &str) -> Result<Option<RunReport>> {
         let claim = match self
@@ -117,7 +140,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !report.stalls || !can_stall(run) {
             return Ok(None);
         }
-        let since = run_activity(run);
+        let since = self.run_report_activity(run)?;
         let stalls_at = since.saturating_add(u128::from(report.stalled_after_ms));
         if now < stalls_at {
             return Ok(Some(stalls_at));
