@@ -19,6 +19,8 @@ export type AgentRowView = {
   name: string;
   harness: string;
   state: AgentState;
+  /** The state st reports, from an st too old to serve a presentation. */
+  reported?: string;
   unmanaged: boolean;
   /** How long since st last saw it change, e.g. `8h`. */
   activity: string;
@@ -67,6 +69,15 @@ export function agentState(agent: Pick<Agent, 'presentation'>): AgentState {
   const state = agent.presentation?.state.replace('_', '-');
   return (AGENT_STATES as readonly string[]).includes(state ?? '') ? state as AgentState : 'unknown';
 }
+
+/** The word for an agent from an st too old to serve its presentation: the state st reports,
+ *  marked so. Undefined when st serves a presentation. */
+export function agentReported(agent: Pick<Agent, 'presentation' | 'state'>): string | undefined {
+  return agent.presentation ? undefined : `${agent.state} · older st`;
+}
+
+/** What the Agents list says when a row came from an older st. */
+export const OLDER_ST_NOTE = "This host's st is older: agent states show as st reports them.";
 
 export const SPINNER = '⠿';
 export function agentGlyph(state: AgentState, spinner = SPINNER): { glyph: string; color: string } {
@@ -156,6 +167,7 @@ export function agentRows(agents: Agent[], sessions: SessionView[], gatewayHost:
     name: agentName(agent),
     harness: harnessName(agent.driver),
     state: agentState(agent),
+    reported: agentReported(agent),
     unmanaged: false,
     activity: ago(agent.updated_at, now),
     path: agent.id.replace(/^agent\//, ''),
