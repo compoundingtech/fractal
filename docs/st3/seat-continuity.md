@@ -24,9 +24,13 @@ st agents handoff show
 ```
 
 `write` replaces the handoff from standard input or a file. `show` prints the latest, for this seat
-or any named seat. Only a seat writes its own: the daemon refuses a `doc/agents/…` write from a
-seat bound to another identity, because the next session reads the document as its own seat's
-words. A person can write any document.
+or any named seat.
+
+Under `doc/agents/` a seat may bind exactly one name, its own `doc/agents/IDENTITY/handoff`. The
+daemon refuses every other `doc/agents/…` name from a seat bound to an agent identity
+(`document-not-yours`), including the seat's own other names, because the next session reads the
+document as its own seat's words. The restriction applies to ancestry-bound seats only: a person's
+or an unbound caller's writes, and every name outside `doc/agents/`, are unchanged.
 
 A handoff carries what the graph does not: what the seat was in the middle of, the pull requests
 and branches it owns, what it waits on, the next steps, and anything it started that still runs. A

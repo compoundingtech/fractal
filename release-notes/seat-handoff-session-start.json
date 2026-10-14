@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "A seat bound to an agent identity can no longer bind a document under doc/agents/ for another identity (document-not-yours). Writes outside doc/agents/ and writes by people are unchanged."
+    "detail": "A seat bound to an agent identity can bind a document under doc/agents/ only at its own doc/agents/IDENTITY/handoff; any other doc/agents/ name is refused (document-not-yours), including that seat's own other names. The restriction applies to ancestry-bound seats only: writes outside doc/agents/, by people and by unbound callers are unchanged."
   },
   "compatibility": {
     "status": "changed",

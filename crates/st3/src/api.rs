@@ -20096,6 +20096,12 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             write(Some("agent/garden/ash"), "doc/agents/garden/ash/handoff", "own").await;
         assert_eq!(status, StatusCode::OK, "{written}");
 
+        // Not even its own other names are open to it under doc/agents/.
+        let (status, refused) =
+            write(Some("agent/garden/ash"), "doc/agents/garden/ash/other", "own-other").await;
+        assert_ne!(status, StatusCode::OK, "{refused}");
+        assert_eq!(refused["code"], "document-not-yours");
+
         let (status, refused) =
             write(Some("agent/garden/birch"), "doc/agents/garden/ash/handoff", "other").await;
         assert_ne!(status, StatusCode::OK, "{refused}");

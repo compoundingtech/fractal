@@ -3527,16 +3527,29 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// running long after it started already has its context. An incarnation is looked at once, so
     /// a pass over a settled fleet reads and writes nothing for it.
     fn deliver_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
+        if self
+            .session_starts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(subject)
+            .map(String::as_str)
+            == Some(incarnation)
         {
-            let mut seen = self
-                .session_starts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if seen.get(subject).map(String::as_str) == Some(incarnation) {
-                return Ok(());
-            }
-            seen.insert(subject.to_owned(), incarnation.to_owned());
+            return Ok(());
         }
+        // Only a final outcome marks the incarnation handled: an error (a busy database, say)
+        // leaves it for the next pass.
+        self.decide_session_start(subject, incarnation)?;
+        self.session_starts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(subject.to_owned(), incarnation.to_owned());
+        Ok(())
+    }
+
+    /// Decide whether to tell `incarnation` where its seat was, and tell it. Every `Ok` is final:
+    /// the message was sent, was sent before, or should not be sent.
+    fn decide_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
         let mut started = None;
         let mut replaced = false;
         for claim in self.store.claims_for(subject, Some("runtime.observed"))? {
@@ -36975,7 +36988,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             "node".into(),
             Arc::new(Notify::new()),
         );
-        let ready = |incarnation: &str| {
+        let observe = |incarnation: &str| {
             store
                 .append_claim(&ClaimInput {
                     subject: desired.subject.clone(),
@@ -36990,6 +37003,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             store
                 .append_claim(&harness_claim(&desired.subject, "ready", incarnation))
                 .unwrap();
+        };
+        let ready = |incarnation: &str| {
+            observe(incarnation);
             let observation = RuntimeObservation {
                 runtime_id: member.runtime_id.clone(),
                 terminal: true,
@@ -37032,6 +37048,42 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         );
         assert!(!crate::silent::is_held(message));
         assert!(crate::silent::always_wakes(&message.from, &message.tags));
+
+        // A pass that fails after the message was due leaves the incarnation for the next pass,
+        // instead of marking it handled and never telling it.
+        observe("worker-three");
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_session_start BEFORE INSERT ON claims
+                 WHEN NEW.kind='message.sent'
+                 BEGIN SELECT RAISE(ABORT, 'injected session-start failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            reconciler
+                .deliver_session_start(&desired.subject, "worker-three")
+                .is_err()
+        );
+        assert_eq!(inbox().len(), 1, "nothing was sent for worker-three");
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_session_start")
+            .unwrap();
+        reconciler
+            .deliver_session_start(&desired.subject, "worker-three")
+            .unwrap();
+        assert_eq!(inbox().len(), 2, "the next pass sent it");
+        assert!(
+            inbox()
+                .iter()
+                .any(|message| message.tags
+                    == vec![format!("{}worker-three", crate::handoff::SESSION_START_TAG_PREFIX)])
+        );
 
         // A seat that has written nothing and holds no work is sent nothing at all.
         let quiet = Arc::new(Store::open_memory("node").unwrap());
