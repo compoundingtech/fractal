@@ -169,3 +169,8 @@ test('grouped rows expose readable wrapping button labels and shared buttons exp
   assert.equal(prop(button, 'accessibilityState').expression.getText(), '{ disabled }');
   assert.equal(prop(button, 'disabled').expression.getText(), 'disabled');
 });
+
+test('the native app permits the device light and dark appearance', () => {
+  const config = JSON.parse(readFileSync(new URL('./app.json', import.meta.url), 'utf8'));
+  assert.equal(config.expo.userInterfaceStyle, 'automatic');
+});

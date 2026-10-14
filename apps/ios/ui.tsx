@@ -6,8 +6,8 @@ import { fonts, systemColors, theme } from './theme';
 import type { Run } from './markdown';
 import { markdown } from './markdown';
 
-// The pieces every screen draws with, so the app reads like stui: one monospace face, the
-// Mocha palette, dense rows, dim section rules with counts, and glyphs for state.
+// Shared renderers retain the legacy stui presentation by default. SystemScreen scopes
+// system text, semantic appearance and grouped rows to the migrated native surfaces.
 
 export const SIZE = 14;
 export const LINE = 20;

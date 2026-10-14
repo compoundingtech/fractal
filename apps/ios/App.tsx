@@ -130,6 +130,7 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       if (parsed.kind === 'scroll') { requestScroll(parsed.y); return; }
       if (!navigationRef.isReady()) { setTimeout(() => handle(link), 300); return; }
       if (parsed.kind === 'tab') navigationRef.navigate(parsed.tab, { screen: ROOTS[parsed.tab] } as never);
+      else if (parsed.kind === 'attention') navigationRef.navigate('Now', { screen: 'Attention', params: { id: parsed.id }, initial: false });
       else if (parsed.kind === 'mission') navigationRef.navigate('Resources', { screen: 'Mission', params: { id: parsed.id }, initial: false });
       else if (parsed.kind === 'agent') navigationRef.navigate('Resources', { screen: 'Conversation', params: { target: parsed.id }, initial: false });
       else if (parsed.kind === 'terminal') navigationRef.navigate('Resources', { screen: 'Terminal', params: { terminalId: parsed.id }, initial: false });
