@@ -1,7 +1,10 @@
 //! Completed response-envelope timings. Action buckets are subsets of route totals.
+//!
+//! Each path also keeps rolling 1-minute, 5-minute and 1-hour windows, and each target in
+//! `slo/targets.toml` keeps the same windows over all its paths.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::Method;
 use serde_json::{Value, json};
@@ -113,6 +116,23 @@ impl AgentsRead {
     }
 }
 
+/// Whether the request asked the agents list to be fresh: it waits for one roster refresh by
+/// design. A person still waits on it, so it has its own target rather than none.
+pub(super) fn is_fresh_agents_read(method: &Method, route: &str, query: Option<&str>) -> bool {
+    AgentsRead::classify(method, route, query) == Some(AgentsRead::Fresh)
+}
+
+/// What a request waits for beyond its own work, which decides the target it counts toward.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Wait {
+    /// Nothing: it counts toward the target of its own path.
+    No,
+    /// A change it asked to wait for, so its time is mostly that wait: it counts toward no target.
+    LongPoll,
+    /// A fresh agents list: it counts toward the target of its `(fresh)` path.
+    Fresh,
+}
+
 #[derive(Default)]
 struct Sample {
     count: u64,
@@ -152,6 +172,67 @@ impl Sample {
     }
 }
 
+/// Where an agents roster read's time goes: the refresher's fold, from a previous publication
+/// or from the log when none was kept, and its wait for roster admission; and a fresh read's
+/// wait for a publication at its cut and the page it then builds.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum RosterStage {
+    Refresh,
+    RefreshCold,
+    RefreshAdmission,
+    FreshWait,
+    FreshPage,
+}
+
+impl RosterStage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Refresh => "refresh",
+            Self::RefreshCold => "refresh-cold",
+            Self::RefreshAdmission => "refresh-admission",
+            Self::FreshWait => "fresh-wait",
+            Self::FreshPage => "fresh-page",
+        }
+    }
+
+    fn population(self) -> &'static str {
+        match self {
+            Self::Refresh | Self::RefreshCold | Self::RefreshAdmission => "refresher-folds",
+            Self::FreshWait | Self::FreshPage => "fresh-reads",
+        }
+    }
+}
+
+/// Where a current-work read's time goes when the work list is published: a fresh read's wait
+/// for a publication at its cut, a page served from a publication, and a page whose actor's
+/// order in that publication its read built. Descriptive only: no target of its own.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum WorkStage {
+    FreshWait,
+    Page,
+    ActorBuild,
+}
+
+impl WorkStage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::FreshWait => "fresh-wait",
+            Self::Page => "page",
+            Self::ActorBuild => "actor-build",
+        }
+    }
+
+    fn population(self) -> &'static str {
+        match self {
+            Self::FreshWait => "fresh-reads",
+            Self::Page | Self::ActorBuild => "first-pages",
+        }
+    }
+}
+
+/// The client current-work route, which work stages are reported beside.
+const CLIENT_WORK: &str = "/v1/client/work";
+
 #[derive(Default)]
 pub(super) struct Meter {
     routes: BTreeMap<String, Sample>,
@@ -159,6 +240,45 @@ pub(super) struct Meter {
     // complete denominator even if the route table has already filled.
     work_actions: BTreeMap<WorkAction, Sample>,
     agents_reads: BTreeMap<AgentsRead, Sample>,
+    roster_stages: BTreeMap<RosterStage, Sample>,
+    work_stages: BTreeMap<WorkStage, Sample>,
+    /// Windows by path: `GET /route`, `stream COLLECTION`, or a long poll's route.
+    paths: BTreeMap<String, smallclaims::windows::Series>,
+    /// Windows by target position in `slo/targets.toml`: served here, then from another machine.
+    targets: Vec<[smallclaims::windows::Series; 2]>,
+    cpu: smallclaims::windows::Cpu,
+    client_intervals: BTreeMap<(String, String, Option<String>), smallclaims::windows::IntervalSeries>,
+}
+
+/// How a completed sample is counted in the windows. Build it with [`Timed::resolve`] before
+/// taking the meter's lock: the key and the target lookup allocate and scan.
+pub(super) struct Timed {
+    key: String,
+    target: Option<usize>,
+    remote: bool,
+}
+
+impl Timed {
+    /// `path` is `GET /v1/client/now`, or `stream agents` for a socket subscription's first
+    /// snapshot. `remote` says it read from another machine that owns it, through this daemon.
+    /// What it `wait`ed for sets its key: a long poll is kept under `(long poll)` and counts
+    /// toward no target, and a fresh agents list under `(fresh)` and its own target.
+    pub(super) fn resolve(path: &str, remote: bool, wait: Wait) -> Self {
+        let key = match wait {
+            Wait::No => path.to_owned(),
+            Wait::LongPoll => format!("{path} (long poll)"),
+            Wait::Fresh => format!("{path} (fresh)"),
+        };
+        let target = match wait {
+            Wait::LongPoll => None,
+            Wait::No | Wait::Fresh => crate::slo::targets().index_of(&key),
+        };
+        Self {
+            key,
+            target,
+            remote,
+        }
+    }
 }
 
 impl Meter {
@@ -184,6 +304,148 @@ impl Meter {
         }
     }
 
+    /// Count one roster stage's duration.
+    pub(super) fn record_roster_stage(&mut self, stage: RosterStage, elapsed: Duration) {
+        self.roster_stages.entry(stage).or_default().record(elapsed);
+    }
+
+    /// Count one published current-work stage's duration.
+    pub(super) fn record_work_stage(&mut self, stage: WorkStage, elapsed: Duration) {
+        self.work_stages.entry(stage).or_default().record(elapsed);
+    }
+
+    /// Count one sample in its path's windows and its target's.
+    pub(super) fn time(&mut self, now: Instant, timed: Timed, elapsed: Duration) {
+        self.cpu.note(now);
+        let targets = crate::slo::targets();
+        let Timed {
+            key,
+            target,
+            remote,
+        } = timed;
+        let over = target.is_some_and(|target| elapsed > targets.latency[target].target(remote));
+        if let Some(series) = self.paths.get_mut(key.as_str()) {
+            series.record(now, elapsed, over);
+        } else if self.paths.len() < ROUTES {
+            self.paths
+                .entry(key)
+                .or_default()
+                .record(now, elapsed, over);
+        }
+        if let Some(target) = target {
+            if self.targets.is_empty() {
+                self.targets
+                    .resize_with(targets.latency.len(), Default::default);
+            }
+            self.targets[target][usize::from(remote)].record(now, elapsed, over);
+        }
+    }
+
+    /// Every target's windows, then every path's that has a sample in its last hour.
+    pub(super) fn windows(&mut self, now: Instant) -> Value {
+        let rows = self.target_rows(now);
+        json!({"targets": rows, "paths": self.path_rows(now)})
+    }
+
+    /// Only the targets' windows: what the collector gets, without every path's snapshot.
+    pub(super) fn targets_only(&mut self, now: Instant) -> Value {
+        json!({"targets": self.target_rows(now)})
+    }
+
+    fn target_rows(&mut self, now: Instant) -> Vec<Value> {
+        let targets = crate::slo::targets();
+        let empty = smallclaims::windows::Series::default();
+        let mut rows = targets
+            .latency
+            .iter()
+            .enumerate()
+            .filter(|(_, latency)| !latency.paths.iter().any(|p| p.starts_with("client/ios/")))
+            .map(|(index, latency)| {
+                let windows = |remote: bool| {
+                    self.targets
+                        .get(index)
+                        .map_or(&empty, |pair| &pair[usize::from(remote)])
+                        .snapshot(now)
+                };
+                let mut row = json!({
+                    "name": latency.name,
+                    "about": latency.about,
+                    "p99_ms": latency.p99_ms,
+                    "windows": windows(false),
+                });
+                if let Some(remote) = latency.remote_p99_ms {
+                    row["remote_p99_ms"] = json!(remote);
+                    row["remote_windows"] = windows(true);
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        rows.extend(crate::slo::store_report(self.cpu.snapshot(now)));
+        let wall = crate::api::client_now_ms() as u64;
+        for latency in targets.latency.iter().filter(|t| t.paths.iter().any(|p| p.starts_with("client/ios/"))) {
+            let windows = self.client_windows(wall, &latency.name, false);
+            rows.push(json!({"name":latency.name,"about":latency.about,"p99_ms":latency.p99_ms,
+                "population":"client-observed-latencies", "windows":windows}));
+        }
+        for share in &targets.share {
+            rows.push(json!({"name":share.name,"about":share.about,"min_percent":share.min_percent,
+                "population":"client-observed-foreground-ms","windows":self.client_windows(wall,&share.name,true)}));
+        }
+        rows
+    }
+
+    fn path_rows(&self, now: Instant) -> Vec<Value> {
+        let targets = crate::slo::targets();
+        let mut paths = self
+            .paths
+            .iter()
+            .filter(|(_, series)| !series.is_empty(now))
+            .map(|(path, series)| {
+                json!({
+                    "path": path,
+                    "target": targets.for_path(path).map(|target| target.name.as_str()),
+                    "windows": series.snapshot(now),
+                })
+            })
+            .collect::<Vec<_>>();
+        let wall = crate::api::client_now_ms() as u64;
+        for ((target,carrier,path),series) in &self.client_intervals {
+            let share = target == "ios-live-share";
+            paths.push(json!({"path":format!("client/ios/{}", target.strip_prefix("ios-").unwrap_or(target)),
+                "target":target,"carrier":carrier,"carrier_path":path,
+                "population":if share {"client-observed-foreground-ms"} else {"client-observed-latencies"},
+                "windows":series.snapshot(wall,share)}));
+        }
+        paths
+    }
+
+    pub(super) fn can_report(&self, now_ms: u64, samples: &[super::client_observations::Validated]) -> bool {
+        samples.iter().filter(|s| Self::live_minute(now_ms, &s.minute)).all(|s| self.client_intervals.get(&s.key).is_none_or(|series| series.can_record(&s.minute)))
+    }
+
+    pub(super) fn report(&mut self, now_ms: u64, samples: &[super::client_observations::Validated]) {
+        for s in samples {
+            if Self::live_minute(now_ms, &s.minute) {
+                self.client_intervals.entry(s.key.clone()).or_default().record(now_ms,&s.minute);
+            }
+        }
+    }
+
+    fn live_minute(now_ms: u64, minute: &smallclaims::windows::MinuteSummary) -> bool {
+        minute.start_ms >= now_ms.saturating_sub(3_600_000) && minute.start_ms.saturating_add(60_000) <= now_ms
+    }
+
+    fn client_windows(&self, now_ms: u64, target: &str, share: bool) -> Value {
+        let mut total = smallclaims::windows::IntervalSeries::default();
+        // At most 9 carrier/path combinations per target and 60 minutes per series.
+        for ((name,_,_),series) in &self.client_intervals {
+            if name == target {
+                total.absorb(series);
+            }
+        }
+        total.snapshot(now_ms,share)
+    }
+
     pub(super) fn snapshot(&self) -> Vec<Value> {
         self.routes
             .iter()
@@ -198,6 +460,20 @@ impl Meter {
                 let mut row = sample.snapshot(AGENTS, "agents-read");
                 row["method"] = json!("GET");
                 row["read"] = json!(read.name());
+                row
+            }))
+            .chain(self.roster_stages.iter().map(|(stage, sample)| {
+                let mut row = sample.snapshot(AGENTS, "agents-roster");
+                row["stage"] = json!(stage.name());
+                row["duration_scope"] = json!("roster-stage");
+                row["population"] = json!(stage.population());
+                row
+            }))
+            .chain(self.work_stages.iter().map(|(stage, sample)| {
+                let mut row = sample.snapshot(CLIENT_WORK, "work-list");
+                row["stage"] = json!(stage.name());
+                row["duration_scope"] = json!("work-stage");
+                row["population"] = json!(stage.population());
                 row
             }))
             .collect()
@@ -310,6 +586,137 @@ mod tests {
     }
 
     #[test]
+    fn paths_count_toward_their_target_with_the_remote_target_for_remote_reads() {
+        let mut meter = Meter::default();
+        let now = Instant::now();
+        let time = |meter: &mut Meter, path, remote, long_poll: bool, ms| {
+            let wait = if long_poll { Wait::LongPoll } else { Wait::No };
+            meter.time(
+                now,
+                Timed::resolve(path, remote, wait),
+                Duration::from_millis(ms),
+            );
+        };
+        time(&mut meter, "GET /v1/client/now", false, false, 50);
+        time(&mut meter, "GET /v1/client/now", false, false, 150);
+        time(&mut meter, "stream agents", true, false, 250);
+        time(&mut meter, "stream conversation", true, false, 350);
+        time(&mut meter, "GET /v1/client/conversations/{id}/changes", false, true, 30_000);
+        time(&mut meter, "GET /v1/health", false, false, 1);
+        let report = meter.windows(now);
+        let target = |name: &str| {
+            report["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        let read = target("person-read");
+        assert_eq!(read["windows"]["1m"]["count"], 2);
+        assert_eq!(read["windows"]["1m"]["over_target"], 1);
+        assert_eq!(read["remote_windows"]["5m"]["count"], 2);
+        assert_eq!(read["remote_windows"]["5m"]["over_target"], 1);
+        assert_eq!(target("write-ack")["windows"]["1h"]["count"], 0);
+        for name in ["sql-statement", "transaction", "cpu", "database"] {
+            target(name);
+        }
+        let paths = report["paths"].as_array().unwrap();
+        let path = |name: &str| paths.iter().find(|row| row["path"] == name).unwrap();
+        assert_eq!(path("GET /v1/client/now")["target"], "person-read");
+        assert_eq!(path("GET /v1/health")["target"], Value::Null);
+        let poll = path("GET /v1/client/conversations/{id}/changes (long poll)");
+        assert_eq!(poll["target"], Value::Null);
+        assert_eq!(poll["windows"]["1m"]["over_target"], 0);
+        assert_eq!(paths.len(), 5);
+    }
+
+    #[test]
+    fn a_fresh_agents_read_has_its_own_target_and_counts_toward_no_other() {
+        assert!(is_fresh_agents_read(&Method::GET, AGENTS, Some("limit=5&fresh=true")));
+        assert!(!is_fresh_agents_read(&Method::GET, AGENTS, Some("fresh=false")));
+        assert!(!is_fresh_agents_read(&Method::GET, AGENTS, None));
+        assert!(!is_fresh_agents_read(&Method::GET, AGENTS, Some("fresh=true&cursor=page")));
+        assert!(!is_fresh_agents_read(&Method::POST, AGENTS, Some("fresh=true")));
+        assert!(!is_fresh_agents_read(&Method::GET, "/v1/client/work", Some("fresh=true")));
+        let targets = crate::slo::targets();
+        let named = |timed: &Timed| timed.target.map(|index| targets.latency[index].name.as_str());
+        let first = Timed::resolve("GET /v1/client/agents", false, Wait::No);
+        assert_eq!(named(&first), Some("person-read"));
+        let fresh = Timed::resolve("GET /v1/client/agents", false, Wait::Fresh);
+        assert_eq!(fresh.key, "GET /v1/client/agents (fresh)");
+        assert_eq!(named(&fresh), Some("person-read-fresh"));
+        let poll = Timed::resolve("GET /v1/client/agents", false, Wait::LongPoll);
+        assert_eq!(poll.key, "GET /v1/client/agents (long poll)");
+        assert_eq!(named(&poll), None);
+        // A fresh read over its own 300 ms is over that target, not the 100 ms of a first page.
+        let mut meter = Meter::default();
+        let now = Instant::now();
+        meter.time(now, Timed::resolve("GET /v1/client/agents", false, Wait::Fresh), Duration::from_millis(200));
+        meter.time(now, Timed::resolve("GET /v1/client/agents", false, Wait::Fresh), Duration::from_millis(400));
+        meter.time(now, Timed::resolve("GET /v1/client/agents", false, Wait::No), Duration::from_millis(150));
+        let report = meter.windows(now);
+        let row = |name: &str| {
+            report["targets"].as_array().unwrap().iter().find(|row| row["name"] == name).unwrap().clone()
+        };
+        assert_eq!(row("person-read-fresh")["windows"]["1m"]["count"], 2);
+        assert_eq!(row("person-read-fresh")["windows"]["1m"]["over_target"], 1);
+        assert_eq!(row("person-read")["windows"]["1m"]["count"], 1);
+        assert_eq!(row("person-read")["windows"]["1m"]["over_target"], 1);
+    }
+
+    #[test]
+    fn roster_stages_report_their_own_samples_beside_the_route() {
+        let mut meter = Meter::default();
+        for (stage, ms) in [
+            (RosterStage::Refresh, 40), (RosterStage::Refresh, 60), (RosterStage::RefreshCold, 1700),
+            (RosterStage::RefreshAdmission, 2),
+            (RosterStage::FreshWait, 90), (RosterStage::FreshPage, 4),
+        ] {
+            meter.record_roster_stage(stage, Duration::from_millis(ms));
+        }
+        let stage = |name: &str| meter.snapshot().into_iter()
+            .find(|row| row["scope"] == "agents-roster" && row["stage"] == name).unwrap();
+        assert_eq!(stage("refresh")["count"], 2);
+        assert_eq!(stage("refresh")["max_ms"], 60);
+        assert_eq!(stage("refresh")["population"], "refresher-folds");
+        assert_eq!(stage("refresh-cold")["count"], 1);
+        assert_eq!(stage("refresh-cold")["population"], "refresher-folds");
+        assert_eq!(stage("refresh-admission")["p99_ms"], 2);
+        assert_eq!(stage("fresh-wait")["p99_ms"], 90);
+        assert_eq!(stage("fresh-wait")["population"], "fresh-reads");
+        assert_eq!(stage("fresh-page")["duration_scope"], "roster-stage");
+        assert_eq!(stage("fresh-page")["route"], AGENTS);
+        // Stages are not requests: no route row appears for them.
+        assert!(meter.snapshot().iter().all(|row| row["scope"] != "route"));
+    }
+
+    #[test]
+    fn work_stages_report_their_own_samples_and_leave_the_roster_keys_alone() {
+        let mut meter = Meter::default();
+        meter.record_roster_stage(RosterStage::FreshWait, Duration::from_millis(90));
+        for (stage, ms) in [
+            (WorkStage::FreshWait, 700), (WorkStage::Page, 2), (WorkStage::Page, 3), (WorkStage::ActorBuild, 9),
+        ] {
+            meter.record_work_stage(stage, Duration::from_millis(ms));
+        }
+        let rows = meter.snapshot();
+        let stage = |name: &str| rows.iter()
+            .find(|row| row["scope"] == "work-list" && row["stage"] == name).unwrap();
+        assert_eq!(stage("fresh-wait")["p99_ms"], 700);
+        assert_eq!(stage("fresh-wait")["population"], "fresh-reads");
+        assert_eq!(stage("page")["count"], 2);
+        assert_eq!(stage("actor-build")["population"], "first-pages");
+        assert_eq!(stage("page")["route"], CLIENT_WORK);
+        assert_eq!(stage("page")["duration_scope"], "work-stage");
+        // The roster's rows keep their keys, and stages are not requests.
+        let roster = rows.iter().find(|row| row["scope"] == "agents-roster").unwrap();
+        assert_eq!((roster["stage"].clone(), roster["route"].clone()), (json!("fresh-wait"), json!(AGENTS)));
+        assert!(rows.iter().all(|row| row["scope"] != "route"));
+    }
+
+    #[test]
     fn agents_reads_split_the_designed_fresh_wait_from_the_route_total() {
         let mut meter = Meter::default();
         for (query, duration) in [
@@ -369,4 +776,23 @@ mod tests {
         assert_eq!(renew["max_ms"], 600);
         assert_eq!(meter.snapshot().len(), ROUTES + 1);
     }
+    #[test]
+    fn client_intervals_batch_disjoint_minutes_and_old_reports_are_history_only() {
+        use super::super::client_observations::Validated;
+        let key: (String,String,Option<String>)=("ios-connect".into(),"lan".into(),None);
+        let sample=|start,count|Validated {key:key.clone(), minute:smallclaims::windows::MinuteSummary {
+            start_ms:start,count,over:0,max_ms:100,buckets:vec![(smallclaims::windows::histogram_upper_ms(100),count)]
+        }};
+        let mut meter=Meter::default();
+        meter.report(60_000,&[sample(0,1_000_000_000)]);
+        let now=3_660_000;
+        assert!(meter.can_report(now,&[sample(0,1)]),"expired slot capacity cannot reject history-only reports");
+        meter.report(now,&[sample(0,1)]);
+        assert_eq!(meter.client_windows(now,"ios-connect",false)["1h"]["count"],0);
+        let batch=[sample(3_540_000,100),sample(3_600_000,200)];
+        assert!(meter.can_report(now,&batch));meter.report(now,&batch);
+        assert_eq!(meter.client_windows(now,"ios-connect",false)["5m"]["count"],300);
+        assert_eq!(meter.client_windows(now,"ios-connect",false)["1m"]["count"],200);
+    }
+
 }

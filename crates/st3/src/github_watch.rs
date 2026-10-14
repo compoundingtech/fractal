@@ -5,7 +5,8 @@
 //! comments and reviews, its state, and how the checks its base requires stand, and the write
 //! that records an observation decides each watch's wakes from the item's prior facts: one for
 //! each new comment or review, one for each move of the required checks into pass or fail on the
-//! current head, and a final one when the thread closes or merges, which ends that watch. No
+//! current head, changes to a PR's head, draft state or queue membership, and a final one when
+//! the thread closes or merges, which ends that watch. No
 //! thread has a poller of its own.
 
 use std::collections::HashMap;
@@ -264,6 +265,8 @@ pub enum WatchEvent {
     Comment(Value),
     /// The checks the base requires moved into `pass` or `fail` on the current head.
     Checks(Value),
+    /// A PR changed head, draft state, or merge-queue membership while still open.
+    PullRequestChanged(Vec<String>),
     /// The thread closed or merged.
     Ended { merged: bool },
 }
@@ -279,6 +282,7 @@ impl WatchEvent {
                 format!("{kind}:{id}")
             }
             Self::Checks(_) => format!("checks:{observation}"),
+            Self::PullRequestChanged(_) => format!("pull-request:{observation}"),
             Self::Ended { .. } => "ended".into(),
         }
     }
@@ -287,7 +291,8 @@ impl WatchEvent {
 /// The events one observation of a watched item holds, oldest first: the comments and reviews
 /// `seen` names that `prior` did not, made no earlier than five minutes before the watch
 /// began; a move of the required checks into pass or fail, or a new head first seen there; and
-/// the thread closing. With no prior facts the item is new to the observer, so it holds no
+/// changes to an open PR's head, draft state or queue membership; and the thread closing.
+/// With no prior facts the item is new to the observer, so it holds no
 /// check move and no close.
 pub fn watch_events(
     watch: &WatchSpec,
@@ -351,20 +356,76 @@ pub fn watch_events(
             .and_then(Value::as_str)
             .map(str::to_owned)
     };
+    let open = |facts: &Value| facts.get("state").and_then(Value::as_str) == Some("open");
+    if open(prior) && open(facts) {
+        let mut changes = Vec::new();
+        if let (Some(before), Some(after)) = (head(prior), head(facts))
+            && before != after
+        {
+            changes.push(format!("head changed from {before} to {after}"));
+        }
+        if let (Some(before), Some(after)) = (
+            prior.get("draft").and_then(Value::as_bool),
+            facts.get("draft").and_then(Value::as_bool),
+        ) && before != after
+        {
+            changes.push(
+                if after {
+                    "became draft"
+                } else {
+                    "became ready for review"
+                }
+                .into(),
+            );
+        }
+        // These are normalized item facts: a null removes the field, while an omitted
+        // sighting retains the prior value. Absence therefore means outside the queue.
+        // Queue positions and build-state changes are routine; membership needs action.
+        if in_merge_queue(prior) != in_merge_queue(facts) {
+            changes.push(
+                if in_merge_queue(facts) {
+                    "entered the merge queue"
+                } else {
+                    "left the merge queue"
+                }
+                .into(),
+            );
+        }
+        if !changes.is_empty() {
+            events.push(WatchEvent::PullRequestChanged(changes));
+        }
+    }
     if let Some(now) = state(facts).filter(|state| state == "pass" || state == "fail")
-        && (head(prior) != head(facts) || state(prior).as_deref() != Some(now.as_str()))
+        && (head(prior) != head(facts)
+            || state(prior).as_deref() != Some(now.as_str())
+            || (prior.pointer("/required_checks/execution").is_some()
+                && prior.pointer("/required_checks/execution")
+                    != facts.pointer("/required_checks/execution")))
     {
         events.push(WatchEvent::Checks(
             facts.get("required_checks").cloned().unwrap_or(Value::Null),
         ));
     }
-    let open = |facts: &Value| facts.get("state").and_then(Value::as_str) == Some("open");
     if open(prior) && facts.get("state").is_some() && !open(facts) {
         events.push(WatchEvent::Ended {
             merged: facts.get("merged").and_then(Value::as_bool) == Some(true),
         });
     }
     events
+}
+
+/// Whether an observed pull request is in its base's merge queue.
+pub fn in_merge_queue(facts: &Value) -> bool {
+    facts
+        .get("merge_queue")
+        .is_some_and(|queue| !queue.is_null())
+}
+
+/// Whether an observed pull request is open, unmerged and outside the merge queue.
+pub fn open_outside_merge_queue(facts: &Value) -> bool {
+    facts.get("state").and_then(Value::as_str) == Some("open")
+        && facts.get("merged").and_then(Value::as_bool) != Some(true)
+        && !in_merge_queue(facts)
 }
 
 /// One wake: its message subject, the key it was decided by, title, content and tags.
@@ -492,6 +553,10 @@ pub fn wake(
                 format!("{which} {verb} on {thread}{title} at {short_head}: {named}\n{url}/checks"),
             )
         }
+        WatchEvent::PullRequestChanged(changes) => (
+            format!("Pull request changed on {thread}"),
+            format!("{thread}{title}: {}.\n{url}", changes.join("; ")),
+        ),
         WatchEvent::Ended { merged } => {
             let how = if *merged {
                 "merged".to_owned()
@@ -962,9 +1027,161 @@ mod tests {
         assert!(moved(&at("a", "fail"), &at("a", "pending")).is_empty());
         assert_eq!(moved(&at("a", "pending"), &at("a", "pass")).len(), 1);
         // A new head already green is news; the old head's green is not carried over.
-        assert_eq!(moved(&at("a", "pass"), &at("b", "pass")).len(), 1);
-        assert!(moved(&at("a", "pass"), &at("b", "pending")).is_empty());
+        assert_eq!(moved(&at("a", "pass"), &at("b", "pass")).len(), 2);
+        assert!(matches!(
+            moved(&at("a", "pass"), &at("b", "pending")).as_slice(),
+            [WatchEvent::PullRequestChanged(_)]
+        ));
         assert!(moved(&at("a", "pending"), &at("a", "none")).is_empty());
+    }
+
+    #[test]
+    fn required_checks_notify_a_new_ready_execution_even_when_pending_was_not_observed() {
+        let facts = |execution: u64, state: &str| {
+            json!({"state":"open", "head_sha":"same",
+            "draft":false, "required_checks":{"state":state, "source":"rules", "checks":["build"],
+                "failed":[], "execution":{"workflows":[[15368,77,execution,execution,1]]}}})
+        };
+        // Rollout adds execution facts without reannouncing every existing terminal PR.
+        for state in ["pass", "fail"] {
+            let current = facts(10, state);
+            let mut legacy = current.clone();
+            legacy["required_checks"]
+                .as_object_mut()
+                .unwrap()
+                .remove("execution");
+            assert!(watch_events(&watch(), Some(&legacy), &json!({}), &current).is_empty());
+            let mut new_head = current.clone();
+            new_head["head_sha"] = json!("new");
+            assert!(
+                watch_events(&watch(), Some(&legacy), &json!({}), &new_head)
+                    .iter()
+                    .any(|event| matches!(event, WatchEvent::Checks(_)))
+            );
+        }
+        let previous = facts(10, "pass");
+        let pending = facts(20, "pending");
+        assert!(watch_events(&watch(), Some(&previous), &json!({}), &pending).is_empty());
+        let completed = facts(20, "pass");
+        let events = watch_events(&watch(), Some(&previous), &json!({}), &completed);
+        assert_eq!(
+            events,
+            [WatchEvent::Checks(completed["required_checks"].clone())]
+        );
+        assert!(watch_events(&watch(), Some(&completed), &json!({}), &completed).is_empty());
+        assert_eq!(
+            watch_events(&watch(), Some(&pending), &json!({}), &completed).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pull_request_changes_wake_without_waiting_for_checks_and_ignore_queue_churn() {
+        let before = json!({"state":"open", "head_sha":"aaa", "draft":false,
+            "required_checks":{"state":"pending"}, "merge_queue":null});
+        let mut after = before.clone();
+        after["head_sha"] = json!("bbb");
+        after["draft"] = json!(true);
+        after["merge_queue"] = json!({"state":"queued", "position":3});
+        let events = watch_events(&watch(), Some(&before), &json!({}), &after);
+        assert_eq!(
+            events,
+            vec![WatchEvent::PullRequestChanged(vec![
+                "head changed from aaa to bbb".into(),
+                "became draft".into(),
+                "entered the merge queue".into(),
+            ])]
+        );
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let subject = thread.watch("agent/example/planner");
+        let notification = wake(
+            &subject,
+            &watch(),
+            &thread,
+            &after,
+            &events[0],
+            "observation-1",
+            None,
+        )
+        .unwrap();
+        assert!(
+            notification
+                .content
+                .contains("head changed from aaa to bbb")
+        );
+        assert!(notification.content.contains("entered the merge queue"));
+        assert_eq!(
+            notification.delivery_key,
+            wake(
+                &subject,
+                &watch(),
+                &thread,
+                &after,
+                &events[0],
+                "observation-1",
+                None
+            )
+            .unwrap()
+            .delivery_key
+        );
+        assert_ne!(
+            notification.delivery_key,
+            wake(
+                &subject,
+                &watch(),
+                &thread,
+                &after,
+                &events[0],
+                "observation-2",
+                None
+            )
+            .unwrap()
+            .delivery_key
+        );
+        let mut moved = after.clone();
+        moved["merge_queue"] = json!({"state":"awaiting_checks", "position":2});
+        assert!(watch_events(&watch(), Some(&after), &json!({}), &moved).is_empty());
+        moved["draft"] = json!(false);
+        moved["merge_queue"] = Value::Null;
+        assert_eq!(
+            watch_events(&watch(), Some(&after), &json!({}), &moved),
+            vec![WatchEvent::PullRequestChanged(vec![
+                "became ready for review".into(),
+                "left the merge queue".into()
+            ])]
+        );
+        moved["state"] = json!("closed");
+        moved["merged"] = json!(true);
+        assert_eq!(
+            watch_events(&watch(), Some(&after), &json!({}), &moved),
+            vec![WatchEvent::Ended { merged: true }]
+        );
+        assert!(watch_events(&watch(), None, &json!({}), &after).is_empty());
+        assert!(
+            watch_events(
+                &watch(),
+                Some(&before),
+                &json!({}),
+                &json!({"state":"open"})
+            )
+            .is_empty()
+        );
+        let mut normalized = before.clone();
+        normalized.as_object_mut().unwrap().remove("merge_queue");
+        let mut queued = normalized.clone();
+        queued["merge_queue"] = json!({"state":"queued", "position":1});
+        assert_eq!(
+            watch_events(&watch(), Some(&normalized), &json!({}), &queued),
+            vec![WatchEvent::PullRequestChanged(vec![
+                "entered the merge queue".into()
+            ])]
+        );
+        assert_eq!(
+            watch_events(&watch(), Some(&queued), &json!({}), &normalized),
+            vec![WatchEvent::PullRequestChanged(vec![
+                "left the merge queue".into()
+            ])]
+        );
     }
 
     #[test]
@@ -1024,6 +1241,9 @@ mod tests {
             in_reply_to: None,
             tags: comment.tags.clone(),
             attachments: Vec::new(),
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
         };
         assert_eq!(
@@ -1105,6 +1325,9 @@ mod tests {
                 format!("{COMMENT_TAG}{thread}:comment:5:12"),
             ],
             attachments: Vec::new(),
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
         };
         let post = PostInFlight::begin("agent/example.planner", &thread);

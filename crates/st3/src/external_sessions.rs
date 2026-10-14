@@ -820,10 +820,9 @@ pub(crate) fn find_managed_omp_transcript(
     const CANDIDATES: usize = 64;
     let mut files = Vec::new();
     for entry in entries.filter_map(std::result::Result::ok) {
-        if entry.file_type().is_ok_and(|kind| kind.is_file())
-            && entry.path().extension().is_some_and(|ext| ext == "jsonl")
-        {
-            files.push(entry.path());
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
+            files.push(path);
             if files.len() >= CANDIDATES * 4 {
                 files.sort_unstable_by(|left, right| right.file_name().cmp(&left.file_name()));
                 files.truncate(CANDIDATES);
@@ -952,6 +951,7 @@ pub(crate) fn normalized_record(
                 *sequence,
                 timestamp,
                 *line_index,
+                false,
                 &mut items,
             );
         }
@@ -1181,7 +1181,22 @@ const MAX_FOLDED_TRANSCRIPTS: usize = 16;
 const MAX_FOLDED_SOURCE_BYTES: usize = 96 * 1024 * 1024;
 type SharedLineFold = Arc<Mutex<LineTimelineFold>>;
 type LineFoldCache = VecDeque<(PathBuf, ExternalDriver, SharedLineFold, usize)>;
+#[cfg(not(test))]
 static LINE_FOLDS: LazyLock<Mutex<LineFoldCache>> = LazyLock::new(Mutex::default);
+
+/// The fold cache serving `transcript`: the process-wide one, or under test the cache of the
+/// test's own scope, so parallel tests never evict or contend for each other's folds.
+#[cfg(not(test))]
+fn line_folds(_transcript: &Path) -> &'static Mutex<LineFoldCache> {
+    &LINE_FOLDS
+}
+
+#[cfg(test)]
+fn line_folds(transcript: &Path) -> Arc<Mutex<LineFoldCache>> {
+    static SCOPES: timeline_test_support::Scopes<Mutex<LineFoldCache>> =
+        LazyLock::new(Mutex::default);
+    timeline_test_support::scoped(&SCOPES, transcript, Mutex::default)
+}
 
 /// Process-random epoch for timeline generations. A restart draws a fresh epoch, so page
 /// cursors bound to a generation never carry into another process, matching the cursor MAC
@@ -1208,7 +1223,31 @@ pub(crate) mod timeline_test_support {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Condvar, LazyLock, Mutex};
+    use std::sync::{Arc, Condvar, LazyLock, Mutex};
+
+    /// Per-scope instances of a process-wide budget or cache.
+    pub(crate) type Scopes<T> = LazyLock<Mutex<HashMap<PathBuf, Arc<T>>>>;
+
+    /// A test's isolation scope: the temporary directory its transcripts live in. Paths
+    /// outside the temporary directory share one scope.
+    fn scope(path: &Path) -> PathBuf {
+        let temp = std::env::temp_dir();
+        path.strip_prefix(&temp)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .map_or_else(PathBuf::new, |first| temp.join(first))
+    }
+
+    /// The instance of a process-wide budget or cache for `path`'s scope, so each test owns
+    /// its own and parallel tests cannot affect each other through global state.
+    pub(crate) fn scoped<T>(scopes: &Scopes<T>, path: &Path, create: impl FnOnce() -> T) -> Arc<T> {
+        let mut scopes = scopes.lock().unwrap_or_else(|error| error.into_inner());
+        Arc::clone(
+            scopes
+                .entry(scope(path))
+                .or_insert_with(|| Arc::new(create())),
+        )
+    }
 
     static FOLD_WAITERS: AtomicUsize = AtomicUsize::new(0);
     static REFRESH_GATES: LazyLock<Mutex<HashMap<PathBuf, RefreshGate>>> =
@@ -1298,51 +1337,52 @@ pub(crate) mod timeline_test_support {
     }
 }
 
-fn line_fold(session: &ExternalSession) -> SharedLineFold {
-    let mut folds = match LINE_FOLDS.lock() {
+/// Run `use_folds` on the fold cache serving `transcript`. A poisoned cache starts empty.
+fn with_line_folds<R>(transcript: &Path, use_folds: impl FnOnce(&mut LineFoldCache) -> R) -> R {
+    let cache = line_folds(transcript);
+    let mut folds = match cache.lock() {
         Ok(folds) => folds,
         Err(error) => {
             let mut folds = error.into_inner();
             folds.clear();
-            LINE_FOLDS.clear_poison();
+            cache.clear_poison();
             folds
         }
     };
-    let found = folds
-        .iter()
-        .position(|(path, driver, _, _)| path == &session.transcript && *driver == session.driver);
-    let entry = found
-        .and_then(|index| folds.remove(index))
-        .unwrap_or_else(|| {
-            (
-                session.transcript.clone(),
-                session.driver,
-                SharedLineFold::default(),
-                0,
-            )
-        });
-    let fold = Arc::clone(&entry.2);
-    folds.push_back(entry);
-    trim_line_folds(&mut folds, MAX_FOLDED_SOURCE_BYTES);
-    fold
+    use_folds(&mut folds)
 }
 
-fn account_line_fold(fold: &SharedLineFold, bytes: usize) {
-    let mut folds = match LINE_FOLDS.lock() {
-        Ok(folds) => folds,
-        Err(error) => {
-            let mut folds = error.into_inner();
-            folds.clear();
-            LINE_FOLDS.clear_poison();
-            folds
-        }
-    };
-    if let Some(index) = folds.iter().position(|entry| Arc::ptr_eq(&entry.2, fold)) {
-        let mut entry = folds.remove(index).expect("located fold");
-        entry.3 = bytes;
+fn line_fold(session: &ExternalSession) -> SharedLineFold {
+    with_line_folds(&session.transcript, |folds| {
+        let found = folds.iter().position(|(path, driver, _, _)| {
+            path == &session.transcript && *driver == session.driver
+        });
+        let entry = found
+            .and_then(|index| folds.remove(index))
+            .unwrap_or_else(|| {
+                (
+                    session.transcript.clone(),
+                    session.driver,
+                    SharedLineFold::default(),
+                    0,
+                )
+            });
+        let fold = Arc::clone(&entry.2);
         folds.push_back(entry);
-    }
-    trim_line_folds(&mut folds, MAX_FOLDED_SOURCE_BYTES);
+        trim_line_folds(folds, MAX_FOLDED_SOURCE_BYTES);
+        fold
+    })
+}
+
+fn account_line_fold(session: &ExternalSession, fold: &SharedLineFold, bytes: usize) {
+    with_line_folds(&session.transcript, |folds| {
+        if let Some(index) = folds.iter().position(|entry| Arc::ptr_eq(&entry.2, fold)) {
+            let mut entry = folds.remove(index).expect("located fold");
+            entry.3 = bytes;
+            folds.push_back(entry);
+        }
+        trim_line_folds(folds, MAX_FOLDED_SOURCE_BYTES);
+    });
 }
 
 fn trim_line_folds(folds: &mut LineFoldCache, budget: usize) {
@@ -1414,7 +1454,7 @@ impl LineTimelineHeld<'_> {
             Some(state) => {
                 let result = state.read(session);
                 let fold = self.fold.expect("held fold state has its fold");
-                account_line_fold(fold, state.retained_source_bytes);
+                account_line_fold(session, fold, state.retained_source_bytes);
                 result
             }
             None => normalized_opencode_timeline(session),
@@ -1432,7 +1472,7 @@ impl LineTimelineHeld<'_> {
             Some(state) => {
                 let result = state.slice(session, order, before, limit);
                 let fold = self.fold.expect("held fold state has its fold");
-                account_line_fold(fold, state.retained_source_bytes);
+                account_line_fold(session, fold, state.retained_source_bytes);
                 result
             }
             None => opencode_timeline_slice(session, order, before, limit),
@@ -1509,6 +1549,7 @@ impl FoldedLine {
             sequence,
             timestamp,
             line_number,
+            true,
             &mut self.items,
         );
         let locator = NativeLocator::Jsonl {
@@ -1705,8 +1746,9 @@ impl LineTimelineFold {
         let window_start = len.saturating_sub(MAX_TIMELINE_BYTES);
         let identity = file_identity(&metadata);
         if !self.resumable(&identity, len, window_start, &mut file) {
-            // Any non-append change (replacement, shrink, edit, or a cold fold) draws a new
-            // generation, so outstanding page cursors stop applying their old boundary.
+            // Any non-append change (replacement, shrink, edit, or a cold fold, including one
+            // the fold cache evicted) draws a new generation, so outstanding page cursors are
+            // refused as expired instead of applying their old boundary to a re-read fold.
             *self = Self {
                 identity: Some(identity),
                 consumed: window_start,
@@ -1986,7 +2028,7 @@ fn normalize_native_line(
 /// object only opens after `:`, `,`, `[`, or at the start, so an object opening after anything
 /// else is where the torn record ends. The first such position whose remainder parses as one
 /// whole object is the recovered record. The search is bounded.
-fn recover_trailing_record(line: &str) -> Option<Value> {
+fn recover_trailing_record(line: &str, preview: bool) -> Option<Value> {
     let bytes = line.as_bytes();
     let mut attempts = 0;
     for (index, _) in line.match_indices('{') {
@@ -2004,28 +2046,123 @@ fn recover_trailing_record(line: &str) -> Option<Value> {
         if attempts > 16 {
             return None;
         }
-        if let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(&line[index..]) {
+        if let Ok(value @ Value::Object(_)) = parse_native_record(&bytes[index..], preview) {
             return Some(value);
         }
     }
     None
 }
 
+/// Native records above this size paint with bounded normalized strings. The fold still reads
+/// and retains the source bytes; a continuation normalizes their complete strings on demand.
+const PREVIEW_RECORD_BYTES: usize = 256 * 1024;
+/// The longest head a preview keeps of a string. With its marker it stays within the client
+/// display window (8 KiB), so the marker reports the size of the complete native string.
+const PREVIEW_STRING_BYTES: usize = 8 * 1024 - 128;
+
+/// Parse one native record. A preview of an oversized record retains all keys and elements,
+/// but bounds each normalized string. This avoids full long-string copies in typed bodies and
+/// source-record payloads; it does not bound total record memory or avoid scanning source bytes.
+fn parse_native_record(bytes: &[u8], preview: bool) -> serde_json::Result<Value> {
+    if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+        serde_json::from_slice::<PreviewValue>(bytes).map(|PreviewValue(value)| value)
+    } else {
+        serde_json::from_slice(bytes)
+    }
+}
+
+fn preview_text(text: &str) -> String {
+    if text.len() <= PREVIEW_STRING_BYTES {
+        return text.to_owned();
+    }
+    let mut end = PREVIEW_STRING_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[st truncated this native timeline value: size limit; {} bytes]",
+        &text[..end],
+        text.len()
+    )
+}
+
+struct PreviewValue(Value);
+
+impl<'de> Deserialize<'de> for PreviewValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(PreviewVisitor).map(Self)
+    }
+}
+
+struct PreviewVisitor;
+
+impl<'de> serde::de::Visitor<'de> for PreviewVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(preview_text(value)))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(PreviewValue(value)) = seq.next_element()? {
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut values = serde_json::Map::new();
+        while let Some((key, PreviewValue(value))) = map.next_entry::<String, PreviewValue>()? {
+            values.insert(key, value);
+        }
+        Ok(Value::Object(values))
+    }
+}
+
 /// Unparseable records preserve exact bytes, including newline, controls and invalid UTF-8.
+/// A `preview` of an oversized record bounds every retained string (see `parse_native_record`)
+/// and marks its entries with `_preview_of_bytes`; the owner serves the rest on request.
 fn normalize_native_bytes(
     driver: ExternalDriver,
     bytes: &[u8],
     sequence: u64,
     timestamp: &str,
     line_index: usize,
+    preview: bool,
     items: &mut Vec<Value>,
 ) {
-    match serde_json::from_slice::<Value>(bytes) {
+    let first = items.len();
+    match parse_native_record(bytes, preview) {
         Ok(value) => normalize_native_line(driver, &value, sequence, timestamp, items),
         Err(error) => {
             let recovered = std::str::from_utf8(bytes)
                 .ok()
-                .and_then(recover_trailing_record);
+                .and_then(|line| recover_trailing_record(line, preview));
             let mut item = timeline_item(
                 sequence,
                 timestamp,
@@ -2037,14 +2174,24 @@ fn normalize_native_bytes(
                     "retryable":false, "details":{"line_in_window":line_index.saturating_add(1),"parse_error":error.to_string()}
                 }),
             );
+            let kept = if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+                &bytes[..PREVIEW_STRING_BYTES]
+            } else {
+                bytes
+            };
             item["body"]["blocks"]
                 .as_array_mut()
                 .unwrap()
-                .insert(0, raw_bytes_block(sequence, driver.as_str(), bytes));
+                .insert(0, raw_bytes_block(sequence, driver.as_str(), kept));
             items.push(item);
             if let Some(value) = recovered {
                 normalize_native_line(driver, &value, sequence.saturating_add(1), timestamp, items);
             }
+        }
+    }
+    if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+        for item in &mut items[first..] {
+            item["_preview_of_bytes"] = json!(bytes.len());
         }
     }
 }
@@ -3535,6 +3682,17 @@ fn push_unrecognized(
         json!({"raw": value}),
         &label,
     );
+    if matches!(driver, "omp" | "pi")
+        && let Some((kind, view, visibility)) = crate::native_views::omp_record_view(value)
+        && let Some(item) = items.last_mut()
+    {
+        let block = &mut item["body"]["blocks"][0];
+        block["kind"] = json!(kind);
+        block["view"] = view;
+        if let Some(visibility) = visibility {
+            block["visibility"] = json!(visibility);
+        }
+    }
 }
 
 /// Native bodies stay owner-local. HTTP negotiation adds size bounds and owner fetch refs;
@@ -3894,6 +4052,128 @@ fn push_claude_content(
     }
 }
 
+/// OMP persists a failed assistant turn with `stopReason: "error"`, an `errorMessage`, and —
+/// once an automatic retry settles — a `retryRecovery` marker recording how the attempt was
+/// recovered or superseded. Project the presentation exactly as the harness resolves it:
+/// superseded attempts are hidden, recovered ones render a compact note that still discloses
+/// the original error, silent and user-interrupt aborts render nothing, and terminal failures
+/// render in full. `label` is the resolved display text; `message` keeps the original error.
+fn omp_assistant_error_view(message: &Value) -> Option<Value> {
+    const SILENT_ABORT_MARKER: &str = "__omp.silent_abort__";
+    const USER_INTERRUPT_LABEL: &str = "Interrupted by user";
+    const GENERIC_ABORT_SENTINEL: &str = "Request was aborted";
+    let retry = message
+        .get("retryRecovery")
+        .filter(|retry| retry.is_object());
+    let stop_reason = message.get("stopReason").and_then(Value::as_str);
+    let error_message = message.get("errorMessage").and_then(Value::as_str);
+    let error_id = message.get("errorId").and_then(Value::as_i64);
+    let flagged = |bit: i64| error_id.is_some_and(|id| id & bit != 0);
+    let silent_abort = error_message == Some(SILENT_ABORT_MARKER) || flagged(0x0200_0000);
+    let user_interrupt = error_message == Some(USER_INTERRUPT_LABEL) || flagged(0x0400_0000);
+    let retry_note = || {
+        retry
+            .and_then(|retry| retry.get("note"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    };
+    let (status, presentation, is_error, label) = match retry
+        .and_then(|retry| retry.get("status"))
+        .and_then(Value::as_str)
+    {
+        Some("recovered") => ("recovered", "compact-recovered", false, retry_note()),
+        Some("superseded") => ("superseded", "none", false, ""),
+        _ => match stop_reason {
+            Some("error") => ("failed", "full", true, error_message.unwrap_or("Error")),
+            Some("aborted") => {
+                if silent_abort || user_interrupt {
+                    return None;
+                }
+                let custom = error_message.is_some_and(|text| {
+                    !text.is_empty()
+                        && text != GENERIC_ABORT_SENTINEL
+                        && text != SILENT_ABORT_MARKER
+                });
+                (
+                    "failed",
+                    "full",
+                    true,
+                    if custom {
+                        error_message.unwrap_or_default()
+                    } else {
+                        "Operation aborted"
+                    },
+                )
+            }
+            _ => {
+                let text = error_message?;
+                if text.is_empty() || silent_abort || user_interrupt {
+                    return None;
+                }
+                ("failed", "full", true, text)
+            }
+        },
+    };
+    let mut view = json!({
+        "type": "assistant_error",
+        "status": status,
+        "presentation": presentation,
+        "is_error": is_error,
+        "label": label,
+        "message": error_message.unwrap_or(""),
+    });
+    if let Some(stop_reason) = stop_reason {
+        view["stop_reason"] = json!(stop_reason);
+    }
+    if let Some(error_id) = error_id {
+        view["error_id"] = json!(error_id);
+    }
+    for field in ["api", "provider", "model"] {
+        if let Some(value) = message.get(field).and_then(Value::as_str) {
+            view[field] = json!(value);
+        }
+    }
+    if let Some(retry) = retry {
+        let mut projected = json!({});
+        for field in ["kind", "status", "recovery", "note"] {
+            if let Some(value) = retry.get(field).and_then(Value::as_str) {
+                projected[field] = json!(value);
+            }
+        }
+        if let Some(attempt) = retry.get("attempt").and_then(Value::as_u64) {
+            projected["attempt"] = json!(attempt);
+        }
+        if let Some(recovered_at) = retry.get("recoveredAt").and_then(Value::as_str) {
+            projected["recovered_at"] = json!(recovered_at);
+        }
+        if let Some(superseded) = retry.get("supersededBy").filter(|value| value.is_object()) {
+            let mut by = json!({});
+            if let Some(at) = superseded.get("timestamp").and_then(Value::as_i64) {
+                by["timestamp"] = json!(at);
+            }
+            for (target, field) in [
+                ("response_id", "responseId"),
+                ("provider", "provider"),
+                ("model", "model"),
+            ] {
+                if let Some(value) = superseded.get(field).and_then(Value::as_str) {
+                    by[target] = json!(value);
+                }
+            }
+            if by.as_object().is_some_and(|by| !by.is_empty()) {
+                projected["superseded_by"] = by;
+            }
+        }
+        if projected
+            .as_object()
+            .is_some_and(|projected| !projected.is_empty())
+        {
+            view["retry"] = projected;
+        }
+    }
+    Some(view)
+}
+
 fn normalize_omp(
     driver: ExternalDriver,
     value: &Value,
@@ -3908,6 +4188,8 @@ fn normalize_omp(
     let timestamp = native_timestamp(value.get("timestamp"))
         .or_else(|| native_timestamp(value.pointer("/message/timestamp")))
         .unwrap_or_else(|| fallback_timestamp.to_owned());
+    let record_view = crate::native_views::omp_record_view(value);
+    let first_item = items.len();
     match value.get("type").and_then(Value::as_str) {
         Some("message") => {}
         Some(kind @ ("compaction" | "branch_summary")) => {
@@ -3932,6 +4214,17 @@ fn normalize_omp(
                     value,
                 );
             }
+            if let Some((kind, view, visibility)) = record_view
+                && let Some(item) = items.last_mut()
+            {
+                let block = &mut item["body"]["blocks"][0];
+                block["kind"] = json!(kind);
+                block["payload"] = json!({"raw":value});
+                block["view"] = view;
+                if let Some(visibility) = visibility {
+                    block["visibility"] = json!(visibility);
+                }
+            }
             return;
         }
         Some("custom_message") => {
@@ -3945,6 +4238,93 @@ fn normalize_omp(
                     &timestamp,
                     "system",
                 );
+                if let Some((kind, view, visibility)) = record_view {
+                    for item in &mut items[first_item..] {
+                        if let Some(blocks) = item["body"]["blocks"].as_array_mut() {
+                            for block in blocks {
+                                block["kind"] = json!(kind);
+                                block["payload"] = json!({"raw":value});
+                                block["view"] = view.clone();
+                                if let Some(visibility) = visibility {
+                                    block["visibility"] = json!(visibility);
+                                }
+                            }
+                        }
+                    }
+                    if items.len() == first_item {
+                        push_unrecognized(
+                            items,
+                            sequence,
+                            &timestamp,
+                            label,
+                            "entry",
+                            Some("custom_message"),
+                            value,
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        Some("custom") => {
+            if let Some((kind, view, visibility)) = record_view
+                && view["type"] == "tool_start"
+            {
+                let tool = view["tool"].as_str().unwrap_or("tool");
+                push_native_block(
+                    items,
+                    sequence,
+                    &timestamp,
+                    "system",
+                    (kind, "custom"),
+                    json!({"raw": value}),
+                    &format!("[{label} tool start {tool}]"),
+                );
+                let block = &mut items.last_mut().unwrap()["body"]["blocks"][0];
+                block["view"] = view;
+                if let Some(visibility) = visibility {
+                    block["visibility"] = json!(visibility);
+                }
+            } else {
+                push_unrecognized(
+                    items,
+                    sequence,
+                    &timestamp,
+                    label,
+                    "entry",
+                    Some("custom"),
+                    value,
+                );
+            }
+            return;
+        }
+        Some(record_type @ ("reset_boundary" | "credential_pin" | "title")) => {
+            let text = match record_type {
+                "reset_boundary" => format!("[{label} session reset]"),
+                "credential_pin" => format!(
+                    "[{label} credential pin {}]",
+                    value["provider"].as_str().unwrap_or_default()
+                ),
+                _ => format!(
+                    "[{label} title] {}",
+                    value["title"].as_str().unwrap_or_default()
+                ),
+            };
+            if let Some((kind, view, visibility)) = record_view {
+                push_native_block(
+                    items,
+                    sequence,
+                    &timestamp,
+                    "system",
+                    (kind, record_type),
+                    json!({"raw": value}),
+                    &text,
+                );
+                let block = &mut items.last_mut().unwrap()["body"]["blocks"][0];
+                block["view"] = view;
+                if let Some(visibility) = visibility {
+                    block["visibility"] = json!(visibility);
+                }
             }
             return;
         }
@@ -3961,6 +4341,7 @@ fn normalize_omp(
             "user"
                 | "assistant"
                 | "system"
+                | "developer"
                 | "tool"
                 | "toolResult"
                 | "tool_result"
@@ -4000,6 +4381,21 @@ fn normalize_omp(
                     .unwrap_or(false),
             );
             preserve_omp_result_timing(items, message);
+            if let Some(item) = items.last_mut() {
+                item["body"]["blocks"][0]["view"] = crate::native_views::tool_output_view(
+                    message
+                        .get("toolName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool"),
+                    message["toolCallId"].as_str().unwrap_or_default(),
+                    message
+                        .get("isError")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    message.get("details"),
+                );
+                item["body"]["blocks"][0]["payload"] = json!({"body_ref":true,"raw":value});
+            }
             return;
         }
         // A shell command the person ran with `!`: shown as the harness recorded it, without
@@ -4032,6 +4428,7 @@ fn normalize_omp(
         }
         _ => {}
     }
+    let first_content = items.len();
     push_omp_content(
         driver,
         items,
@@ -4040,6 +4437,50 @@ fn normalize_omp(
         &timestamp,
         role,
     );
+    if native_role == Some("assistant")
+        && let Some(view) = omp_assistant_error_view(message)
+    {
+        // The error presentation is its own block after the turn's content, so every
+        // existing native block identity stays stable.
+        let error_sequence = items
+            .last()
+            .and_then(|item| item["sequence"].as_u64())
+            .map_or(sequence + 1, |last| last + 1);
+        let label = view["label"].as_str().unwrap_or_default().to_owned();
+        let fallback = match view["presentation"].as_str() {
+            Some("full") => format!("[error] {label}"),
+            Some("compact-recovered") => format!("[retry recovered] {label}"),
+            _ => String::new(),
+        };
+        push_content(items, error_sequence, &timestamp, "assistant", &fallback);
+        let block = &mut items.last_mut().expect("error item just pushed")["body"]["blocks"][0];
+        block["kind"] = json!("error");
+        block["source_type"] = json!(format!("{}/assistant_error", driver.as_str()));
+        block["payload"] = json!({"body_ref": true});
+        block["view"] = view;
+    }
+    // Message-level metadata has one owner: the last emitted block, including a
+    // tool call or an error. Newest-first header windows retain that block even
+    // when they split a message, without counting each part as another response.
+    if let Some(metadata) = crate::native_views::assistant_metadata(message)
+        && let Some(block) = items[first_content..]
+            .iter_mut()
+            .rev()
+            .filter_map(|item| item["body"]["blocks"].as_array_mut())
+            .find_map(|blocks| blocks.last_mut())
+    {
+        if let Some(existing) = block.get_mut("metadata").and_then(Value::as_object_mut) {
+            if let Some(additions) = metadata.as_object() {
+                existing.extend(
+                    additions
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone())),
+                );
+            }
+        } else {
+            block["metadata"] = metadata;
+        }
+    }
 }
 
 fn push_omp_content(
@@ -4067,28 +4508,55 @@ fn push_omp_content(
                             part["text"].as_str().unwrap_or_default(),
                         );
                     }
-                    Some("toolCall" | "tool_call") => push_tool_call(
-                        items,
-                        item_sequence,
-                        &timestamp,
-                        part.get("id")
-                            .or_else(|| part.get("toolCallId"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("native-call"),
-                        part.get("name").and_then(Value::as_str).unwrap_or("tool"),
-                        part.get("arguments").cloned().unwrap_or_else(|| json!({})),
-                    ),
+                    Some("toolCall" | "tool_call") => {
+                        let tool = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        push_tool_call(
+                            items,
+                            item_sequence,
+                            &timestamp,
+                            part.get("id")
+                                .or_else(|| part.get("toolCallId"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("native-call"),
+                            tool,
+                            part.get("arguments").cloned().unwrap_or_else(|| json!({})),
+                        );
+                        if let Some(item) = items.last_mut() {
+                            item["body"]["blocks"][0]["view"] = crate::native_views::tool_call_view(
+                                tool,
+                                &item["body"]["arguments"],
+                            );
+                        }
+                    }
                     Some("toolResult" | "tool_result") => {
+                        let call_id = part
+                            .get("toolCallId")
+                            .or_else(|| part.get("call_id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("native-call");
                         push_tool_result(
                             items,
                             item_sequence,
                             &timestamp,
-                            part.get("toolCallId")
-                                .or_else(|| part.get("call_id"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("native-call"),
+                            call_id,
                             part.get("content").cloned().unwrap_or(Value::Null),
                         );
+                        if let Some(item) = items.last_mut() {
+                            item["body"]["blocks"][0]["view"] =
+                                crate::native_views::tool_output_view(
+                                    part.get("toolName")
+                                        .or_else(|| part.get("name"))
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("tool"),
+                                    call_id,
+                                    part.get("isError")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false),
+                                    part.get("details"),
+                                );
+                            item["body"]["blocks"][0]["payload"] =
+                                json!({"body_ref":true,"raw":part});
+                        }
                         preserve_omp_result_timing(items, part);
                     }
                     Some(kind) if REASONING_BLOCKS.contains(&kind) => {
@@ -4362,6 +4830,214 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_omp_message_usage_once(content: Value) {
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
+            let mut items = Vec::new();
+            for (sequence, usd) in [(0, 0.25), (1000, 0.5)] {
+                let record = json!({
+                    "type": "message",
+                    "message": {
+                        "role": "assistant", "content": content, "model": "test-model",
+                        "usage": {"input": 12, "output": 5, "totalTokens": 17, "cost": {"total": usd}},
+                        "contextSnapshot": {"promptTokens": 23},
+                    },
+                });
+                let first = items.len();
+                normalize_omp(driver, &record, sequence, "2026-10-06T00:00:00Z", &mut items);
+                let blocks: Vec<_> = items[first..]
+                    .iter()
+                    .filter_map(|item| item["body"]["blocks"].as_array())
+                    .flatten()
+                    .collect();
+                let owner = blocks.last().unwrap();
+                assert_eq!(owner["metadata"]["usage"]["cost_usd"], usd);
+                assert_eq!(owner["metadata"]["usage"]["total"], 17);
+                assert_eq!(blocks.iter().filter(|block| block["metadata"]["usage"].is_object()).count(), 1);
+            }
+            let header = crate::conversation_header::derive(&items, false);
+            assert_eq!(header["cost"]["value"]["usd"], 0.75);
+            assert_eq!(header["model"]["value"], "test-model");
+            assert_eq!(header["context"]["value"]["tokens"], 23);
+        }
+    }
+
+    #[test]
+    fn omp_thinking_and_text_count_message_usage_once() {
+        assert_omp_message_usage_once(json!([
+            {"type": "thinking", "thinking": "Consider the request"},
+            {"type": "text", "text": "Answer"},
+        ]));
+    }
+
+    #[test]
+    fn omp_tool_call_only_counts_message_usage_once() {
+        assert_omp_message_usage_once(json!([
+            {"type": "toolCall", "id": "first", "name": "read", "arguments": {"path": "a"}},
+            {"type": "toolCall", "id": "second", "name": "read", "arguments": {"path": "b"}},
+        ]));
+    }
+
+    #[test]
+    fn omp_split_newest_header_window_keeps_latest_message_metadata() {
+        let mut content: Vec<_> = (0..201)
+            .map(|index| json!({"type": "text", "text": format!("part {index}")}))
+            .collect();
+        content.push(json!({
+            "type": "toolCall", "id": "last-call", "name": "read", "arguments": {"path": "a"},
+        }));
+        assert_omp_message_usage_once(json!(content));
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
+            let mut items = Vec::new();
+            for (sequence, message, timestamp) in [
+                (0, json!({
+                    "role": "assistant", "content": "previous answer", "model": "old-model",
+                    "usage": {"cost": {"total": 0.25}},
+                    "contextSnapshot": {"promptTokens": 11},
+                }), "2026-10-06T00:00:00Z"),
+                (1000, json!({
+                    "role": "assistant", "content": content, "model": "latest-model",
+                    "usage": {"input": 12, "output": 5, "totalTokens": 17, "cost": {"total": 0.5}},
+                    "contextSnapshot": {"promptTokens": 23}, "ttft": 10, "duration": 30,
+                }), "2026-10-06T00:00:01Z"),
+            ] {
+                normalize_omp(driver, &json!({"type": "message", "message": message}),
+                    sequence, timestamp, &mut items);
+            }
+            let owner = &items.last().unwrap()["body"]["blocks"][0];
+            assert_eq!(owner["kind"], "tool_call");
+            assert_eq!(owner["metadata"]["usage"]["total"], 17);
+            assert_eq!(owner["metadata"]["ttft_ms"], 10);
+            assert_eq!(owner["metadata"]["duration_ms"], 30);
+            // Match the native header's newest-first 200-item window: the latest
+            // message spans 202 entries, so its first projected blocks are absent.
+            items.reverse();
+            let head = &items[..200];
+            assert_eq!(head.len(), 200);
+            assert!(head.iter().all(|item| item["sequence"].as_u64().unwrap() > 1001));
+            let header = crate::conversation_header::derive(head, true);
+            assert_eq!(header["cost"]["value"], json!({"usd": 0.5, "window": true}));
+            assert_eq!(header["model"]["value"], "latest-model");
+            assert_eq!(
+                header["context"]["value"],
+                json!({"tokens": 23, "window": null})
+            );
+            for field in ["cost", "model", "context"] {
+                assert_eq!(header[field]["as_of"], "2026-10-06T00:00:01Z");
+            }
+        }
+    }
+
+    #[test]
+    fn omp_parity_fixture_projects_all_views_without_losing_native_payloads() {
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
+            let mut items = Vec::new();
+            for (index, line) in include_str!("../fixtures/native-records/omp-parity.jsonl")
+                .lines()
+                .enumerate()
+            {
+                let record: Value = serde_json::from_str(line).unwrap();
+                let first = items.len();
+                normalize_omp(
+                    driver,
+                    &record,
+                    index as u64 * 100,
+                    "2026-10-06T00:00:00Z",
+                    &mut items,
+                );
+                if let Some((_, view, _)) = crate::native_views::omp_record_view(&record) {
+                    let block = &items[first]["body"]["blocks"][0];
+                    assert_eq!(block["payload"]["raw"], record);
+                    assert_eq!(block["view"], view);
+                }
+                if record.pointer("/message/role").and_then(Value::as_str) == Some("toolResult") {
+                    assert_eq!(
+                        items.last().unwrap()["body"]["content"],
+                        record["message"]["content"]
+                    );
+                    assert_eq!(
+                        items.last().unwrap()["body"]["blocks"][0]["payload"]["raw"],
+                        record
+                    );
+                }
+                if let Some(parts) = record.pointer("/message/content").and_then(Value::as_array) {
+                    for part in parts.iter().filter(|part| part["type"] == "toolCall") {
+                        let call = items[first..]
+                            .iter()
+                            .find(|item| item["type"] == "tool_call")
+                            .unwrap();
+                        assert_eq!(call["body"]["arguments"], part["arguments"]);
+                    }
+                }
+            }
+            let pairs: std::collections::BTreeSet<_> = items
+                .iter()
+                .flat_map(|item| item["body"]["blocks"].as_array().into_iter().flatten())
+                .filter_map(|block| {
+                    Some((block["kind"].as_str()?, block["view"]["type"].as_str()?))
+                })
+                .collect();
+            for expected in [
+                ("tool_call", "bash"),
+                ("tool_call", "edit"),
+                ("tool_call", "write"),
+                ("tool_call", "read"),
+                ("tool_call", "search"),
+                ("tool_call", "todo"),
+                ("tool_call", "ask"),
+                ("tool_call", "task"),
+                ("tool_call", "hub"),
+                ("tool_call", "eval"),
+                ("tool_call", "generic"),
+                ("tool_output", "bash"),
+                ("tool_output", "edit"),
+                ("tool_output", "search"),
+                ("tool_output", "todo"),
+                ("tool_output", "ask"),
+                ("tool_output", "task"),
+                ("tool_output", "hub"),
+                ("tool_output", "generic"),
+                ("irc", "irc"),
+                ("job", "job"),
+                ("status", "skill"),
+                ("status", "compaction"),
+                ("status", "model_change"),
+                ("status", "thinking_level"),
+                ("status", "title"),
+                ("status", "session_exit"),
+                ("status", "tool_start"),
+                ("error", "assistant_error"),
+            ] {
+                assert!(
+                    pairs.contains(&expected),
+                    "missing {expected:?} for {driver:?}"
+                );
+            }
+            let blocks: Vec<_> = items
+                .iter()
+                .flat_map(|item| item["body"]["blocks"].as_array().into_iter().flatten())
+                .collect();
+            assert!(
+                blocks
+                    .iter()
+                    .any(|block| block["view"]["type"] == "tool_start"
+                        && block["visibility"] == "internal")
+            );
+            assert!(blocks.iter().any(|block| block["metadata"]["context_tokens"] == 23
+                && block["metadata"]["usage"]["cost_usd"] == 0.01));
+            for kind in ["text", "reasoning"] {
+                assert!(blocks.iter().any(|block| block["kind"] == kind));
+            }
+            assert!(items.iter().any(|item| item["body"]["text"]
+                == "Synthetic extension fallback"
+                && item["body"]["blocks"][0]["kind"] == "text"));
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| item["body"]["text"] == "Synthetic hidden extension")
+            );
+        }
+    }
 
     #[test]
     fn metadata_cache_refreshes_after_a_transcript_changes() {
@@ -5033,6 +5709,258 @@ mod tests {
             json!({"existing": true, "wallTimeMs": 0, "timeoutSeconds": 0.125, "future": "unchanged"})
         );
         assert_eq!(items[0]["body"]["blocks"], source_before);
+    }
+
+    #[test]
+    fn omp_failed_assistant_record_appends_typed_error_block() {
+        let record = json!({
+            "type": "message",
+            "id": "err-one",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "synthetic planning note"}],
+                "api": "openai-codex-responses",
+                "provider": "openai-codex",
+                "model": "gpt-5.6-sol",
+                "stopReason": "error",
+                "errorId": 135168,
+                "errorMessage": "synthetic socket closed",
+                "retryRecovery": {
+                    "kind": "auto-retry",
+                    "status": "recovered",
+                    "attempt": 1,
+                    "recoveredAt": "2026-01-01T00:00:20Z",
+                    "recovery": "plain",
+                    "note": "error; retried",
+                    "supersededBy": {
+                        "timestamp": 1789031579362i64,
+                        "responseId": "resp_synthetic",
+                        "provider": "openai-codex",
+                        "model": "gpt-5.6-sol"
+                    }
+                }
+            }
+        });
+        for (driver, source_type) in [
+            (ExternalDriver::Omp, "omp/assistant_error"),
+            (ExternalDriver::Pi, "pi/assistant_error"),
+        ] {
+            let mut items = Vec::new();
+            normalize_omp(driver, &record, 16, "", &mut items);
+            assert_eq!(items.len(), 3);
+            // Prior content and its native block identity are untouched.
+            assert_eq!(items[1]["type"], "content");
+            assert_eq!(items[1]["body"]["blocks"][0]["id"], "native-17/0");
+            let error = items.last().unwrap();
+            assert_eq!(error["type"], "content");
+            assert_eq!(error["role"], "assistant");
+            assert_eq!(error["sequence"], 18);
+            let block = &error["body"]["blocks"][0];
+            assert_eq!(block["id"], "native-18/0");
+            assert_eq!(block["kind"], "error");
+            assert_eq!(block["source_type"], source_type);
+            assert_eq!(block["payload"], json!({"body_ref": true}));
+            assert_eq!(block["view"]["type"], "assistant_error");
+            assert_eq!(block["view"]["status"], "recovered");
+            assert_eq!(block["view"]["presentation"], "compact-recovered");
+            assert_eq!(block["view"]["is_error"], false);
+            assert_eq!(block["view"]["label"], "error; retried");
+            assert_eq!(block["view"]["message"], "synthetic socket closed");
+            assert_eq!(block["view"]["stop_reason"], "error");
+            assert_eq!(block["view"]["error_id"], 135168);
+            assert_eq!(block["view"]["api"], "openai-codex-responses");
+            assert_eq!(block["view"]["provider"], "openai-codex");
+            assert_eq!(block["view"]["model"], "gpt-5.6-sol");
+            assert_eq!(block["view"]["retry"]["kind"], "auto-retry");
+            assert_eq!(block["view"]["retry"]["status"], "recovered");
+            assert_eq!(block["view"]["retry"]["attempt"], 1);
+            assert_eq!(block["view"]["retry"]["recovery"], "plain");
+            assert_eq!(block["view"]["retry"]["note"], "error; retried");
+            assert_eq!(
+                block["view"]["retry"]["recovered_at"],
+                "2026-01-01T00:00:20Z"
+            );
+            assert_eq!(
+                block["view"]["retry"]["superseded_by"],
+                json!({
+                    "timestamp": 1789031579362i64,
+                    "response_id": "resp_synthetic",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.6-sol"
+                })
+            );
+            assert!(
+                block["view"]["retry"]["superseded_by"]
+                    .get("responseId")
+                    .is_none()
+            );
+            assert_eq!(error["body"]["text"], "[retry recovered] error; retried");
+        }
+    }
+
+    #[test]
+    fn omp_terminal_assistant_error_renders_in_full() {
+        let mut record = json!({
+            "type": "message",
+            "id": "err-two",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": "synthetic boom"
+            }
+        });
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+        let block = &items.last().unwrap()["body"]["blocks"][0];
+        assert_eq!(block["view"]["status"], "failed");
+        assert_eq!(block["view"]["presentation"], "full");
+        assert_eq!(block["view"]["is_error"], true);
+        assert_eq!(block["view"]["label"], "synthetic boom");
+        assert_eq!(block["view"]["message"], "synthetic boom");
+        assert!(block["view"]["retry"].is_null());
+        assert!(block["view"]["provider"].is_null());
+        assert_eq!(
+            items.last().unwrap()["body"]["text"],
+            "[error] synthetic boom"
+        );
+
+        record["message"]
+            .as_object_mut()
+            .unwrap()
+            .remove("errorMessage");
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+        assert_eq!(
+            items.last().unwrap()["body"]["blocks"][0]["view"]["label"],
+            "Error"
+        );
+    }
+
+    #[test]
+    fn omp_superseded_retry_error_is_typed_but_not_an_error() {
+        let record = json!({
+            "type": "message",
+            "id": "err-three",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": "synthetic rate limited",
+                "retryRecovery": {
+                    "kind": "auto-retry",
+                    "status": "superseded",
+                    "attempt": 2,
+                    "recovery": "model",
+                    "note": "switched model; retried"
+                }
+            }
+        });
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+        let block = &items.last().unwrap()["body"]["blocks"][0];
+        assert_eq!(block["kind"], "error");
+        assert_eq!(block["view"]["status"], "superseded");
+        assert_eq!(block["view"]["presentation"], "none");
+        assert_eq!(block["view"]["is_error"], false);
+        assert_eq!(block["view"]["label"], "");
+        assert_eq!(block["view"]["message"], "synthetic rate limited");
+        assert_eq!(block["view"]["retry"]["status"], "superseded");
+        assert_eq!(block["view"]["retry"]["attempt"], 2);
+        assert!(block["view"]["retry"]["superseded_by"].is_null());
+        assert_eq!(items.last().unwrap()["body"]["text"], "");
+    }
+
+    #[test]
+    fn omp_aborted_assistant_errors_match_native_presentation_rules() {
+        let cases = [
+            (
+                json!({"stopReason":"aborted","errorMessage":"__omp.silent_abort__"}),
+                None,
+            ),
+            (
+                json!({"stopReason":"aborted","errorMessage":"Interrupted by user"}),
+                None,
+            ),
+            (
+                json!({"stopReason":"aborted","errorId": 0x0400_0000i64, "errorMessage":"synthetic"}),
+                None,
+            ),
+            (
+                json!({"stopReason":"aborted","errorId": 0x0200_0000i64}),
+                None,
+            ),
+            (json!({"stopReason":"aborted"}), Some("Operation aborted")),
+            (
+                json!({"stopReason":"aborted","errorMessage":"Request was aborted"}),
+                Some("Operation aborted"),
+            ),
+            (
+                json!({"stopReason":"aborted","errorMessage":"synthetic context limit"}),
+                Some("synthetic context limit"),
+            ),
+            (
+                json!({"errorMessage":"synthetic late failure"}),
+                Some("synthetic late failure"),
+            ),
+            (json!({"stopReason":"stop"}), None),
+            (json!({}), None),
+        ];
+        for (fields, expected) in cases {
+            let record = json!({
+                "type": "message",
+                "id": "abort-one",
+                "message": {"role": "assistant", "content": []}
+            });
+            let mut record = record;
+            let message = record["message"].as_object_mut().unwrap();
+            for (key, value) in fields.as_object().unwrap() {
+                message.insert(key.clone(), value.clone());
+            }
+            let mut items = Vec::new();
+            normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+            match expected {
+                None => assert_eq!(items.len(), 1, "no error block for {fields}"),
+                Some(label) => {
+                    let block = &items.last().unwrap()["body"]["blocks"][0];
+                    assert_eq!(block["view"]["status"], "failed", "for {fields}");
+                    assert_eq!(block["view"]["presentation"], "full", "for {fields}");
+                    assert_eq!(block["view"]["is_error"], true, "for {fields}");
+                    assert_eq!(block["view"]["label"], label, "for {fields}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn omp_assistant_error_block_keeps_source_record_and_native_identity() {
+        let record = json!({
+            "type": "message",
+            "id": "err-four",
+            "message": {
+                "role": "assistant",
+                "content": "synthetic partial answer",
+                "stopReason": "error",
+                "errorMessage": "synthetic socket closed"
+            }
+        });
+        let mut items = Vec::new();
+        normalize_native_line(ExternalDriver::Omp, &record, 16, "", &mut items);
+        // Source record stays on the first item; the error block is separate.
+        assert_eq!(items[0]["body"]["blocks"][0]["kind"], "source_record");
+        assert_eq!(items[0]["body"]["blocks"][0]["payload"]["raw"], record);
+        assert_eq!(items[0]["body"]["blocks"][0]["visibility"], "internal");
+        assert_eq!(items[1]["body"]["blocks"][0]["id"], "native-17/0");
+        assert_eq!(items[1]["body"]["blocks"][0]["kind"], "text");
+        let error = items.last().unwrap();
+        assert_eq!(error["sequence"], 18);
+        assert_eq!(error["body"]["blocks"][0]["kind"], "error");
+        assert_eq!(
+            error["body"]["blocks"][0]["source_type"],
+            "omp/assistant_error"
+        );
+        assert_eq!(error["body"]["text"], "[error] synthetic socket closed");
     }
 
     #[test]
@@ -5724,6 +6652,42 @@ mod tests {
             .unwrap();
         assert_eq!(result["body"]["status"], "error");
         assert_unique_ids(&items);
+    }
+
+    #[test]
+    fn omp_developer_reminders_are_system_text_without_unknown_blocks() {
+        let text = "<system-reminder>\nSynthetic incomplete todo reminder.\n</system-reminder>";
+        let mut record = json!({
+            "type": "message",
+            "message": {
+                "role": "developer",
+                "attribution": {"source": "harness"},
+                "timestamp": "2026-10-06T12:00:00Z",
+                "content": [{"type": "text", "text": text}]
+            }
+        });
+        let mut items = Vec::new();
+        normalize_omp(ExternalDriver::Omp, &record, 16, &timestamp(0), &mut items);
+        assert!(items.iter().all(|item| item["role"] == "system"));
+        let blocks: Vec<_> = items
+            .iter()
+            .flat_map(|item| item["body"]["blocks"].as_array().into_iter().flatten())
+            .collect();
+        assert!(blocks.iter().all(|block| block["kind"] != "unknown"));
+        assert!(blocks.iter().any(|block| block["kind"] == "text"));
+        assert!(items.iter().any(|item| item["body"]["text"] == text));
+
+        // Native attribution is handled exactly as it is for other OMP system messages.
+        record["message"]["role"] = json!("system");
+        let mut system_items = Vec::new();
+        normalize_omp(
+            ExternalDriver::Omp,
+            &record,
+            16,
+            &timestamp(0),
+            &mut system_items,
+        );
+        assert_eq!(items, system_items);
     }
 
     #[test]
@@ -6615,6 +7579,7 @@ mod tests {
                 sequence,
                 &last_timestamp,
                 line_index,
+                true,
                 &mut items,
             );
             let source = serde_json::to_value(NativeLocator::Jsonl {
@@ -6759,6 +7724,45 @@ mod tests {
         let edited = timeline_slice(&session, order, None, 10).unwrap();
         assert_ne!(edited.generation, replaced.generation);
         assert_eq!(texts(&edited.items), ["edited"]);
+    }
+
+    #[test]
+    fn an_evicted_fold_reopens_under_a_new_generation_with_the_same_items() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("evicted.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}{}",
+                codex_record("one", "one"),
+                codex_record("two", "two")
+            ),
+        )
+        .unwrap();
+        let session = transcript_session(ExternalDriver::Codex, &path);
+        let order = TimelineOrder::Sequence;
+        let first = timeline_slice(&session, order, None, 10).unwrap();
+        for index in 0..MAX_FOLDED_TRANSCRIPTS {
+            let other = root.path().join(format!("other-{index}.jsonl"));
+            fs::write(&other, codex_record("other", "other")).unwrap();
+            timeline_slice(
+                &transcript_session(ExternalDriver::Codex, &other),
+                order,
+                None,
+                10,
+            )
+            .unwrap();
+        }
+        assert!(with_line_folds(&path, |folds| {
+            !folds.iter().any(|entry| entry.0 == path)
+        }));
+        // The re-read fold must not reuse the evicted generation: a cursor minted against
+        // it would otherwise page a rebuilt fold as if it were the old one.
+        let reopened = timeline_slice(&session, order, None, 10).unwrap();
+        assert_ne!(reopened.generation, first.generation);
+        assert_eq!(reopened.items, first.items);
+        // Slices are newest-first by sequence, even when native timestamps tie.
+        assert_eq!(texts(&reopened.items), ["two", "one"]);
     }
 
     #[test]

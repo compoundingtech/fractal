@@ -286,8 +286,8 @@ async fn sql_message_cursor_refreshes_presence_but_keeps_first_delivery_age() {
     ).unwrap().timestamp_millis();
     let mut expected_item = expected[1].clone();
     expected_item["delivery"] = message_delivery_value(
-        recipient, "sent", u128::try_from(sent_at).unwrap(), now,
-    );
+        &state.store, recipient, "sent", u128::try_from(sent_at).unwrap(), now,
+    ).unwrap();
     assert!(!second.items[0]["delivery"]["recipient_delivery"].is_null());
     assert_eq!(second.items[0], expected_item);
 }
@@ -560,7 +560,7 @@ fn read_message_benchmark_page(
         (metadata["sent_at"].as_str().unwrap().parse::<u128>().unwrap(), message.subject.clone())
     });
     let items = rows.into_iter().map(|(message, metadata, current)| {
-        client_message_resource(message, &metadata, current, 1_800_000_100_000).unwrap()
+        client_message_resource(store, message, &metadata, current, 1_800_000_100_000).unwrap()
     }).collect::<Vec<_>>();
     // Measure the same page-only resource construction and JSON serialization on both paths.
     std::hint::black_box(serde_json::to_vec(&items).unwrap());

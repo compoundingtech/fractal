@@ -536,12 +536,12 @@ pub(crate) fn render_attention_list(
 ) -> String {
     let mut output = String::new();
     let title = person.map_or_else(
-        || "HUMAN ATTENTION".to_owned(),
-        |person| format!("HUMAN ATTENTION FOR {person}"),
+        || "ALERTS".to_owned(),
+        |person| format!("ALERTS FOR {person}"),
     );
     let _ = writeln!(output, "{}", style.heading(title));
     if items.is_empty() {
-        let _ = writeln!(output, "{}", style.muted("No human attention is waiting."));
+        let _ = writeln!(output, "{}", style.muted("No alert is waiting."));
         return output;
     }
     let _ = writeln!(output, "{} waiting · oldest first", items.len());
@@ -578,7 +578,7 @@ pub(crate) fn render_attention_list(
         let _ = writeln!(output, "    subject: {}", item.subject);
         let _ = writeln!(
             output,
-            "    inspect: st attention show {} --as {}",
+            "    inspect: st alerts show {} --as {}",
             item.subject, item.person
         );
         for action in &item.actions {
@@ -600,12 +600,21 @@ pub(crate) fn render_attention_show(
     now_unix_ms: u128,
 ) -> String {
     let mut output = String::new();
-    let _ = writeln!(output, "{}  {}", style.heading("ATTENTION"), item.title);
+    let heading = if item.is_update() { "UPDATE" } else { "ALERT" };
+    let _ = writeln!(output, "{}  {}", style.heading(heading), item.title);
     let _ = writeln!(output, "SUBJECT   {}", item.subject);
     let _ = writeln!(output, "KIND      {}", item.kind);
     let _ = writeln!(output, "PERSON    {}", item.person);
     if let Some(requester) = &item.requester_id {
         let _ = writeln!(output, "FROM      {requester}");
+    }
+    // The agent whose conversation it belongs to, when that is not who asked.
+    if let Some(conversation) = item
+        .conversation
+        .as_ref()
+        .filter(|conversation| item.requester_id.as_ref() != Some(*conversation))
+    {
+        let _ = writeln!(output, "AGENT     {conversation}");
     }
     let _ = writeln!(
         output,
@@ -819,6 +828,9 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
     if let Some(incarnation) = &step.claim_incarnation {
         let _ = writeln!(output, "  Incarnation  {incarnation}");
     }
+    if let Some(incarnation) = &step.submitted_incarnation {
+        let _ = writeln!(output, "  Submitted incarnation  {incarnation}");
+    }
     if let Some(expires) = step.claim_expires_at_unix_ms {
         let _ = writeln!(
             output,
@@ -830,11 +842,26 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
         let active = step
             .execution_started_at_unix_ms
             .map(|started| format!(" · active {}", relative_time(started, now_unix_ms)))
+            .or_else(|| {
+                step.execution_paused_until_unix_ms.map(|until| {
+                    format!(" · clock stopped for a wait until {}", relative_time(until, now_unix_ms))
+                })
+            })
             .unwrap_or_default();
         let _ = writeln!(
             output,
             "  Execution    {}ms / {timeout_ms}ms{active}",
             step.execution_elapsed_ms
+        );
+    }
+    if step.execution_waited_ms > 0 || step.execution_paused_until_unix_ms.is_some() {
+        let budget = u128::from(st3::store::MAX_STEP_WAIT_MS);
+        let _ = writeln!(
+            output,
+            "  Wait budget  {} used of {} · {} left",
+            st3::store::format_wait_span(step.execution_waited_ms),
+            st3::store::format_wait_span(budget),
+            st3::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
         );
     }
     if let Some(wake) = &step.wake {
@@ -1321,6 +1348,10 @@ fn render_work_list_item(output: &mut String, step: &StepRunView, style: OutputS
             step.execution_elapsed_ms,
             step.execution_started_at_unix_ms
                 .map(|started| format!(" · active since {started}"))
+                .or_else(|| {
+                    step.execution_paused_until_unix_ms
+                        .map(|until| format!(" · clock stopped for a wait until {until}"))
+                })
                 .unwrap_or_default()
         );
     }
@@ -1453,9 +1484,12 @@ mod tests {
             worker_reported: false,
             claimant: None,
             claim_incarnation: None,
+            submitted_incarnation: None,
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,
@@ -1468,6 +1502,7 @@ mod tests {
             blocked_reason: None,
             blockers: Vec::new(),
             not_before_unix_ms: None,
+            nudged_at_unix_ms: None,
             created_at_unix_ms: 1_000,
             updated_at_unix_ms: 2_000,
             person_answers: Vec::new(),
@@ -1625,7 +1660,7 @@ mod tests {
             requester_id: None,
             launch_id: None,
             variant_id: None,
-            message_id: None, conversation: None,
+            message_id: None, answers: Vec::new(), conversation: None,
             title: "Fabric needs review".into(),
             detail: "The queue did not recover.".into(),
             mission: Some("mission/fabric".into()),
@@ -1652,7 +1687,7 @@ mod tests {
             OutputStyle::plain(),
             180_000,
         );
-        assert!(rendered.contains("HUMAN ATTENTION FOR person/alex"));
+        assert!(rendered.contains("ALERTS FOR person/alex"));
         assert!(rendered.contains("1 waiting · oldest first"));
         assert!(rendered.contains("[fault] Fabric needs review"));
         assert!(rendered.contains("requested 2m ago"));
@@ -1660,11 +1695,11 @@ mod tests {
         assert!(rendered.contains("--reason 'It is fixed'"));
         assert!(!rendered.contains("The queue did not recover."));
         assert!(
-            rendered.contains("inspect: st attention show attention/fabric --as person/alex")
+            rendered.contains("inspect: st alerts show attention/fabric --as person/alex")
         );
 
         let shown = render_attention_show(&item, OutputStyle::plain(), 180_000);
-        assert!(shown.contains("ATTENTION  Fabric needs review"));
+        assert!(shown.contains("ALERT  Fabric needs review"));
         assert!(shown.contains("The queue did not recover."));
         assert!(shown.contains("TARGETS\n  doc/fabric/report@abc"));
     }
@@ -1674,7 +1709,7 @@ mod tests {
         let rendered = render_attention_list(None, &[], OutputStyle::plain(), 180_000);
         assert_eq!(
             rendered,
-            "HUMAN ATTENTION\nNo human attention is waiting.\n"
+            "ALERTS\nNo alert is waiting.\n"
         );
     }
 

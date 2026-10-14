@@ -11,6 +11,7 @@ use rusqlite::{Connection, Transaction};
 use serde_json::{Value, json};
 
 use super::checkpoint::{DropPlan, SealedSet};
+use super::checkpoint_staging::{CheckpointClaimFacts, StagedPlanner};
 use super::{ReplicatedClaimAdmission, Store, append_claim_record_tx};
 use crate::claim::{ClaimInput, ClaimRecord, ReplicaBatch};
 use crate::error::Error;
@@ -62,6 +63,12 @@ pub trait Runtime: Send + Sync {
 
     /// Create the runtime's tables and its indexes on the claim log, once the graph's exist.
     fn create_schema(&self, connection: &Connection) -> Result<()>;
+
+    /// Install a runtime for a store that had no user objects when opening began.
+    /// Runtimes may batch fresh DDL here; existing and incomplete stores use create_schema.
+    fn create_schema_for_fresh_store(&self, connection: &Connection) -> Result<()> {
+        self.create_schema(connection)
+    }
 
     /// Bring the runtime's projections up to date as the store opens: a store in shared memory
     /// is new, and a store on disk may need a replay after an upgrade.
@@ -175,6 +182,19 @@ pub trait Runtime: Send + Sync {
     /// Decide what a checkpoint drops from `sealed`: a pure function of the sealed claims.
     fn plan_checkpoint_drops(&self, sealed: &SealedSet) -> DropPlan;
 
+    /// What the staged planner reads of one sealed claim's body, computed while the capture
+    /// holds the body. A runtime with no checkpoint rules reads nothing.
+    fn checkpoint_claim_facts(&self, _claim: &ClaimRecord) -> CheckpointClaimFacts {
+        CheckpointClaimFacts::default()
+    }
+
+    /// Decide what a checkpoint drops from a staged set, by marking its staged claims: the same
+    /// decision `plan_checkpoint_drops` makes from the set in memory. Marking nothing drops
+    /// nothing.
+    fn plan_staged_checkpoint_drops(&self, _planner: &StagedPlanner<'_>) -> Result<()> {
+        Ok(())
+    }
+
     /// Empty every projection, and every local table that refers to claims, on a copy of the
     /// store that a checkpoint proof is about to cut down to its sealed set.
     fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()>;
@@ -189,6 +209,13 @@ pub trait Runtime: Send + Sync {
         subject: &str,
         cut: u128,
     ) -> Result<Value>;
+
+    /// Answers that belong to no one subject, such as a fold across every seat, that a checkpoint
+    /// must leave unchanged. The proof computes them on its copy, which they may write to, before
+    /// and after the drop, and compares them with the subjects' answers.
+    fn checkpoint_global_answers(&self, _transaction: &Transaction<'_>) -> Result<Option<Value>> {
+        Ok(None)
+    }
 
     /// Return the same proof answers, with optional bounded per-item source identities captured
     /// during that read. Sources are diagnostic only and never enter the proof/digest contract.

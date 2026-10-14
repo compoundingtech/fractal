@@ -182,7 +182,7 @@ fn page(store: &Store, case: Case, cut: u64, after: Option<&(u128, String)>) -> 
         (metadata["sent_at"].as_str().unwrap().parse().unwrap(), message.subject.clone()));
     let subjects = rows.iter().map(|(message, _, _)| message.subject.clone()).collect();
     let items = rows.into_iter().map(|(message, metadata, current)| {
-        client_message_resource(message, &metadata, current, BASE_TIME + 100_000).unwrap()
+        client_message_resource(store, message, &metadata, current, BASE_TIME + 100_000).unwrap()
     }).collect::<Vec<_>>();
     black_box(serde_json::to_vec(&items).unwrap());
     Page { items, subjects, key, more }
