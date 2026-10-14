@@ -157,6 +157,7 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     let question = held(state, &id)?;
     live_input_session(state, &question.agent, &question.runtime_incarnation)?;
     let digest = action_request_digest(request)?;
+    let actor_key = st3_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
     // Receipts live only on retained resolutions. Reusing this actor's key for a different
     // question is a conflict too; expiry removes the receipt together with its question.
     let resolved = state.store.status_for_claim_kind_at(st3_schema::harness_questions::RESOLVED, None, false)
@@ -164,12 +165,14 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     for subject in resolved.subjects {
         if subject.subject == id { continue; }
         if let Some(other) = state.store.harness_question(&subject.subject, unix_ms()).map_err(ApiError::internal)?
-            && other.settled_by(&session.actor, &request.idempotency_key).is_some() {
+            && other.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
+                .is_some_and(|receipt| receipt.actor_key == actor_key) {
             return Err(ApiError { status: StatusCode::CONFLICT, code:"idempotency-conflict".into(),
                 message:"the idempotency key already settled a different question".into(), details:Box::default() });
         }
     }
-    if let Some(receipt) = question.settled_by(&session.actor, &request.idempotency_key) {
+    if let Some(receipt) = question.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
+        .filter(|receipt| receipt.actor_key == actor_key) {
         if receipt.request_digest != digest {
             return Err(ApiError { status: StatusCode::CONFLICT, code: "idempotency-conflict".into(),
                 message: "the idempotency key was already used for a different action".into(), details: Box::default() });
@@ -194,7 +197,7 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
         let answers = sink.settle(&question, &answers)?;
         Ok::<_, HarnessQuestionAdapterError>((question, answers))
     }).await.map_err(ApiError::internal)?.map_err(unavailable)?;
-    let receipt = Receipt { actor_key: st3_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key),
+    let receipt = Receipt { actor_key,
         request_digest: digest, action_id: request.id.clone() };
     let (resolved, written) = state.store.resolve_harness_question(&id, Status::Answered, &question.revision, &answers, Some(&receipt)).map_err(ApiError::bad)?;
     if written { signal_changed(state); }
