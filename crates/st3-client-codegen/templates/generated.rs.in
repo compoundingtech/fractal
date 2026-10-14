@@ -2984,7 +2984,7 @@ pub struct PairingComplete {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum PairedSession {
-    Person(PersonPairedSession),
+    Person(Box<PersonPairedSession>),
     Assistant(Box<AssistantPairedSession>),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
