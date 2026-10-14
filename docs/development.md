@@ -99,7 +99,8 @@ python3 scripts/ci-fractal-web-licenses --check-lockfile
 nix develop .#web -c python3 scripts/ci-fractal-web-licenses --check
 ```
 
-`genie-freshness` runs the lock-only guard and the companion
+`genie-freshness` (`scripts/ci-genie-freshness`, also built as `nix build .#checks.<system>.genie-freshness`
+in the Nix sandbox) runs the lock-only guard and the companion
 `python3 scripts/ci-fractal-web-licenses-test`. The fractal-web execution lane runs the
 full guard immediately after its frozen install. The generator/full guard restore the
 inventory's read-only permissions (Git does not preserve them).
@@ -163,6 +164,44 @@ permission prompts still require access to the harness terminal.
 
 See the [conversation crate](../crates/st3-conversation-ui/README.md) for model-only and
 Ratatui builds, and [build your own client](clients/build-your-own.md) for the client contract.
+
+## Fractal web changelog
+
+Author a short user-facing entry in `apps/fractal-web/.changelog/YYYY-MM-DD-slug.ts`
+and register it in that directory's `mod.ts`. Export `{ title, summary, kind?, publicPrUrl? }`
+as the default value. Summaries contain one to three complete sentences; kinds are
+`feature`, `improvement`, or `fix`. The immutable filename supplies the entry ID and date.
+Only link to a confirmed public GitHub pull request. Do not put private names, hosts,
+paths, seats, or links in public entries.
+
+The existing extension build hook compiles the strict versioned manifest before bundling,
+using the exact shared build identity. Public builds read only the public registry; private
+overlay builds combine the inventories and badge private entries. The compiler checks the
+registry/file inventory and deterministic newest-first ordering. A public build rejects private
+entries and private source imports; the UI is not the privacy boundary. The emitted
+`changelog.v1.json` describes precisely the entries included in that build.
+
+The Changes disclosure lazily loads prose and acknowledges included IDs on opening. The
+device-local cursor is scoped by origin, product, and deployment channel; `live`, `main`,
+and `stable` do not share cursors. Seen IDs survive rollbacks and skipped builds. No version
+string or timestamp comparison decides whether a change is new. First visits show “Recent
+changes”; subsequent visits show “New since you last looked” followed by “Recent”.
+The Changes trigger mounts next to the build version in the existing status bar.
+Its React Aria popover anchors to the visible bar with an 8px gap and restores focus
+on dismissal. It uses the shared light/dark theme, glass surface, and change-kind pills.
+The contract and compiler do not depend on a status-bar package or disclosure slot.
+The button names unread changes directly for assistive technology; its dot is decorative.
+Popover dimensions and spacing use composition tokens. Story fixtures are synthetic, and
+already-open story disclosures seed the acknowledged cursor while retaining the opening baseline.
+
+The `fractal-changelog` PR check requires a newly added entry for product UI source changes
+under `apps/fractal-web` or `packages/fractal-ui`. The `no-changelog` label explicitly opts
+out. Run its dependency-free policy tests with
+`node --test apps/fractal-web/scripts/ci/changelog-policy.unit.test.mjs`.
+Like the other PR jobs, this check allocates no runner for drafts and starts when
+the PR becomes ready for review. Label additions and removals refresh the opt-out check.
+This narrative inventory is separate from operational `release-notes/`; keep the public
+wording consistent when both describe the same change.
 
 ## Repository layout
 

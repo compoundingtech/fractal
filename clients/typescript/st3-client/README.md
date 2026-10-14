@@ -38,7 +38,7 @@ pnpm --filter @smalltalk/st3-client test
 pnpm --filter @smalltalk/st3-client typecheck
 ```
 
-The root manifest pins pnpm 12.7.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.0.0-rc.118 in its development dependencies. `pnpm --filter @smalltalk/st3-client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
+The root manifest pins pnpm 12.7.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.0.0 stable in its development dependencies. `pnpm --filter @smalltalk/st3-client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
 
 To verify generated files against the Rust generator, also run `cargo run -p st3-client-codegen -- --check`. The sibling [`st3-views`](../st3-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2.
 
@@ -85,7 +85,7 @@ Browser `WebSocket` cannot set headers. A browser socket factory must move the c
 
 ## Rich Effect schemas
 
-Import `@smalltalk/st3-client/schema` (or `Schema.generated.ts` directly) for Effect 4 `Schema.Struct` codecs and their `typeof X.Type` decoded types. Rich consumers must provide the pinned `effect@4.0.0-rc.118` peer dependency. The raw client entry point does not import Effect, so existing fetch/Expo consumers need no dependency or API migration.
+Import `@smalltalk/st3-client/schema` (or `Schema.generated.ts` directly) for Effect 4 `Schema.Struct` codecs and their `typeof X.Type` decoded types. Rich consumers must provide the pinned `effect@4.0.0` stable peer dependency. The raw client entry point does not import Effect, so existing fetch/Expo consumers need no dependency or API migration.
 
 ```ts
 import * as St3Schema from '@smalltalk/st3-client/schema'
