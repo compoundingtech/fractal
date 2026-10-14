@@ -651,16 +651,12 @@ fn backfill_incomplete(connection: &Connection) -> Result<bool> {
     )?)
 }
 
-/// One restart-safe transaction. `None` means a populated reopen did no work.
+/// One restart-safe transaction. `None` means no chunk ran; startup may persist its resume state.
 /// Progress, headers, reminder winners and pending removal always commit together.
 fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(usize, bool, FoldBudget)>> {
     #[cfg(test)]
     let started = std::time::Instant::now();
     let transaction = connection.transaction()?;
-    // A reopened replica can have admitted declarations whose projection has
-    // not committed. Preserve the resume marker and let projection proceed;
-    // the source-driven worker resumes this same bounded driver afterwards.
-    if projection_blocks_selectors(&transaction, None)? { return Ok(None); }
     let saved: Option<String> = transaction.prepare_cached("SELECT value FROM meta WHERE key=?1")?
         .query_row([BACKFILL_MARKER], |row| row.get(0)).optional()?;
     let mut progress = if reset {
@@ -681,6 +677,13 @@ fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(us
             return Ok(None);
         }
     };
+    // A reopened replica may be blocked before its first selector upgrade.
+    // Commit begin_backfill's durable marker before yielding to projection so
+    // the source-driven worker can resume this same bounded driver afterwards.
+    if projection_blocks_selectors(&transaction, None)? {
+        transaction.commit()?;
+        return Ok(None);
+    }
     let mut processed = 0;
     let mut complete = false;
     let mut budget = FoldBudget::default();
@@ -1939,8 +1942,7 @@ mod tests {
             "full message parity at {cut}, including projection deletion's non-resurrection rule");
         snapshot
     }
-    #[tokio::test]
-    async fn reopened_unprojected_declarations_resume_incomplete_backfill_on_projection_wake() {
+    async fn assert_unprojected_reopen_resumes_on_projection(progress_saved: bool) {
         const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
         let source = Store::open_memory("source").unwrap();
         declare_message(&source);
@@ -1951,7 +1953,13 @@ mod tests {
         super::super::tests::receive_and_project(&target, "source", &exchange);
         {
             let mut connection = target.connection.write();
-            assert!(!backfill_chunk(&mut connection, true).unwrap().unwrap().1);
+            if progress_saved {
+                assert!(!backfill_chunk(&mut connection, true).unwrap().unwrap().1);
+            } else {
+                connection.execute(
+                    "DELETE FROM meta WHERE key IN (?1,?2)", params![MARKER, BACKFILL_MARKER],
+                ).unwrap();
+            }
         }
         let kdl = "version 2\nagent \"keyed\" { workspace \"/tmp\"; command \"true\" }\nmessage \"keyed\" { from \"requester\"; to \"keyed\"; content \"projected after reopen\" }\n";
         let intent = crate::graph::parse_test_intent(kdl, "source").unwrap();
@@ -1992,6 +2000,16 @@ mod tests {
         drop(reopened);
         tokio::time::timeout(std::time::Duration::from_secs(3), worker).await.unwrap().unwrap();
         assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn reopened_unprojected_declarations_resume_incomplete_backfill_on_projection_wake() {
+        assert_unprojected_reopen_resumes_on_projection(true).await;
+    }
+
+    #[tokio::test]
+    async fn initial_unprojected_backfill_persists_resume_marker_before_deferring() {
+        assert_unprojected_reopen_resumes_on_projection(false).await;
     }
 
 

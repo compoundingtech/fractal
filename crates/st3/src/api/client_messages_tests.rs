@@ -327,29 +327,24 @@ async fn sql_message_page_counts_attachment_and_envelope_at_exact_boundary() {
     ).await.unwrap();
     let base = wrapped_message_page(&state, returned, page, request_id).await.len();
     let padding = CLIENT_MAX_RESPONSE_BYTES - base;
-    // Same subject: preserve fixed-width timestamps/revisions and field shapes.
-    append_fixture_claim(
-        &state.store, "message/byte-00000", "message.sent", "person/alex",
-        BTreeMap::from([
-            ("from".into(), json!("person/alex")), ("to".into(), json!("agent/byte-recipient")),
-            ("content".into(), json!("body")), ("status".into(), json!("sent")),
-            ("attachments".into(), json!([{
-                "sha256": "ab".repeat(32), "media_type": "image/png",
-                "name": "x".repeat(padding), "size": 42, "origin": "host/byte-fixture"
-            }])),
-        ]),
-    );
-    let snapshot = new_client_snapshot(&state);
-    let (Extension(returned), Json(page)) = client_messages_sql_page_with_envelope(
-        &state, snapshot, &query, now, request_id, None,
-    ).await.unwrap();
-    let bytes = wrapped_message_page(&state, returned, page, request_id).await;
-    assert_eq!(bytes.len(), CLIENT_MAX_RESPONSE_BYTES);
-    append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(padding + 1)));
-    let error = client_messages_sql_page_with_envelope(
-        &state, new_client_snapshot(&state), &query, now, request_id, None,
-    ).await.expect_err("one encoded byte over the ceiling must be refused");
-    assert_eq!(error.code, "response-too-large");
+    // Each variant has one native send: message.sent is Once per subject.
+    // The subject, envelope and metadata retain the same fixed-width shapes.
+    for extra in [0, 1] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::state(root.path());
+        append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(padding + extra)));
+        let result = client_messages_sql_page_with_envelope(
+            &state, new_client_snapshot(&state), &query, now, request_id, None,
+        ).await;
+        if extra == 0 {
+            let (Extension(returned), Json(page)) = result.unwrap();
+            let bytes = wrapped_message_page(&state, returned, page, request_id).await;
+            assert_eq!(bytes.len(), CLIENT_MAX_RESPONSE_BYTES);
+        } else {
+            let error = result.expect_err("one encoded byte over the ceiling must be refused");
+            assert_eq!(error.code, "response-too-large");
+        }
+    }
 }
 
 #[tokio::test]
