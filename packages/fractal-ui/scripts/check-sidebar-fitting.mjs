@@ -19,7 +19,7 @@ class Style {
   setProperty(name, value) { this.values.set(name, value) }
   removeProperty(name) { this.values.delete(name) }
 }
-function fixture(reversed, withCollision = false) {
+function fixture(reversed, withCollision = false, protectChevron = false) {
   const scope = { style: new Style(), querySelectorAll: () => rows }
   const track = () => Number.parseFloat(scope.style.getPropertyValue('--sidebar-metric-track')) || 140
   const field = (kind, width) => ({
@@ -45,15 +45,20 @@ function fixture(reversed, withCollision = false) {
   const durationScope = field('scope', 25), oversizeTokens = field('tokens', 108)
   const subagentCount = field('subs', 16)
   const candidate = makeRow(21, withCollision ? [durationScope, subagentCount] : [durationScope], withCollision ? 218 : 202), outlier = makeRow(32, [oversizeTokens])
-  // A persistent 16px chevron gives this irreducible row less title room; it has no optional field to drop.
-  const irreducible = makeRow(32, [], 186)
+  // An already-below-floor chevron must not veto restoration elsewhere. A qualifying chevron must.
+  const irreducible = makeRow(32, [], protectChevron ? 187 : 180)
   const rows = reversed ? [irreducible, candidate, outlier] : [outlier, candidate, irreducible]
+  const chevronBeforeRestore = (protectChevron ? 187 : 180) - 32
   fit(new Set([scope]))
-  assert.equal(durationScope.style.display, '', 'row 91 scope must be restored once the cohort track shrinks')
+  const expectedTrack = protectChevron ? 32 : 46
+  assert.equal(durationScope.style.display, protectChevron ? 'none' : '', 'restore scope only if every previously qualifying title retains its floor')
   assert.equal(oversizeTokens.style.display, 'none', '140px tokens cannot fit the title floor')
-  assert.equal(scope.style.getPropertyValue('--sidebar-metric-track'), '46px')
-  assert.equal(candidate.dataset.rowTimeNatural, '46')
+  assert.equal(scope.style.getPropertyValue('--sidebar-metric-track'), `${expectedTrack}px`)
+  assert.equal(candidate.dataset.rowTimeNatural, protectChevron ? '21' : '46')
   assert.ok(202 - track() >= 256 * 0.6)
+  if (chevronBeforeRestore >= 256 * 0.6) {
+    assert.ok(irreducible.querySelector('[data-row-column="title-text"]').clientWidth >= 256 * 0.6, 'restoration must never move a qualifying chevron title below the floor (old logic: 155px -> 141px)')
+  }
   if (withCollision) assert.equal(subagentCount.style.display, '', 'a count that fits the final expanded track must be retained')
   const before = rows.map(row => row.dataset.rowTimeNatural)
   fit(new Set([scope]))
@@ -62,6 +67,7 @@ function fixture(reversed, withCollision = false) {
 }
 assert.deepEqual(fixture(false), fixture(true), 'row mount order must not change retention')
 assert.deepEqual(fixture(false, true), fixture(true, true), 'collision must be evaluated at the final expanded track')
+assert.deepEqual(fixture(false, false, true), fixture(true, false, true), 'qualifying chevrons must constrain restoration in either row order')
 // A rejected widest candidate cannot support another candidate's collision clearance. These two trials must both roll back.
 for (const reversed of [false, true]) {
   const makeTrial = (width, overlap) => {
@@ -82,4 +88,4 @@ for (const reversed of [false, true]) {
   assert.equal(b.drops[0].style.display, 'none', '60px cannot clear the 40px overlap')
   assert.equal(scope.style.getPropertyValue('--sidebar-metric-track'), '32px', 'only accepted widths may set the final track')
 }
-console.log(JSON.stringify({ pass: true, fixture: 'roster row 91 with oversized peer and irreducible chevron', permutations: 6, fixedPoint: true, finalTrackCollision: true, rejectedWidestCollision: true }))
+console.log(JSON.stringify({ pass: true, fixture: 'roster row 91 with oversized peer and chevrons above/below the floor', permutations: 8, fixedPoint: true, finalTrackCollision: true, rejectedWidestCollision: true, titleFloorInvariant: true, protectedChevronTitle: 155 }))
