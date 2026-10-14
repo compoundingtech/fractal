@@ -766,18 +766,6 @@ WHERE (kind='harness.observed' AND (
     OR (kind='harness.diagnostic'
         AND json_extract(body, '$.fields.code')='provider-auth-expired');
 
--- Retained stops read their diagnostic family, not every harness diagnostic of a seat.
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_diagnostic_index
- ON claims(subject,length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC)
- WHERE kind='harness.diagnostic'
-   AND json_extract(body,'$.fields.code') IN ('stop-deferred','stop-deferral-cleared');
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_failure_index
- ON claims(subject,length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC)
- WHERE kind='operational.failure' AND json_extract(body,'$.fields.condition')='stop-deferred';
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_recovery_index
- ON claims(subject,json_extract(body,'$.fields.failure'))
- WHERE kind='operational.recovered';
-
 CREATE TABLE IF NOT EXISTS desired (
     subject TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
