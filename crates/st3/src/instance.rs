@@ -15,7 +15,7 @@
 //!   bin/     the st3, st and pty the installer puts there
 //!   claude/  the instance's Claude account     (CLAUDE_CONFIG_DIR)
 //!   codex/   the instance's Codex account      (CODEX_HOME)
-//!   agents/  default workspaces for new agents
+//!   work/    the default work root: workspaces of new agents, in work/agents/NAME
 //!   app/     where a macOS app bundle for the instance goes
 //! ```
 //!
@@ -128,8 +128,9 @@ impl Instance {
         self.root.join("codex")
     }
 
-    pub fn agents_dir(&self) -> PathBuf {
-        self.root.join("agents")
+    /// The instance's default work root: where its agents work, beside the rest of the instance.
+    pub fn work_dir(&self) -> PathBuf {
+        self.root.join("work")
     }
 
     /// Where a macOS app bundle for this instance is installed, never the shared application folder.
@@ -339,7 +340,7 @@ mod tests {
             one.bin_dir(),
             one.claude_config_dir(),
             one.codex_home(),
-            one.agents_dir(),
+            one.work_dir(),
             one.app_dir(),
         ] {
             assert!(path.starts_with(one.root()), "{}", path.display());

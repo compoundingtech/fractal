@@ -656,7 +656,6 @@ pub fn observe_claude_stop_transcript(
         {
             if let Some(id) = value.get("uuid").and_then(Value::as_str) {
                 turn_id = id.to_owned();
-                usage.clear();
             }
         }
         if value["type"] != "assistant"
@@ -674,7 +673,13 @@ pub fn observe_claude_stop_transcript(
         else {
             continue;
         };
-        let turn = if turn_id.is_empty() {
+        // A channel message can arrive while an earlier response is still streaming.
+        // Keep that response's first turn binding while replacing its final usage.
+        let turn = if let Some((_, body)) = usage.get(message_id)
+            && let Some(turn) = body.get("turn_id").and_then(Value::as_str)
+        {
+            turn
+        } else if turn_id.is_empty() {
             value
                 .get("parentUuid")
                 .and_then(Value::as_str)
@@ -1757,6 +1762,55 @@ mod tests {
         assert!(
             observe_claude_stop_transcript(&mut writer, &payload, &default).is_err(),
             "a transcript outside the session's own config directory is still refused"
+        );
+    }
+
+    #[test]
+    fn claude_stop_preserves_all_turns_and_stream_bindings_in_one_batch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let config = temporary.path().join("claude-config");
+        let projects = config.join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let transcript = projects.join("native-current.jsonl");
+        let lines = [
+            json!({"type":"user","uuid":"turn-a","sessionId":"native-current"}),
+            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-a","model":"claude-example","usage":{"input_tokens":7,"output_tokens":2,"cache_creation_input_tokens":11,"cache_read_input_tokens":13}}}),
+            json!({"type":"user","uuid":"turn-b","sessionId":"native-current"}),
+            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-a","model":"claude-example","usage":{"input_tokens":7,"output_tokens":5,"cache_creation_input_tokens":11,"cache_read_input_tokens":13}}}),
+            json!({"type":"user","uuid":"tool-result-b","sessionId":"native-current","message":{"content":[{"type":"tool_result","tool_use_id":"tool-b","content":"done"}]}}),
+            json!({"type":"assistant","sessionId":"native-current","message":{"id":"response-b","model":"claude-example","usage":{"input_tokens":3,"output_tokens":4,"cache_read_input_tokens":17}}}),
+            json!({"type":"user","uuid":"turn-c","sessionId":"native-current"}),
+        ];
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                lines
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        )
+        .unwrap();
+        let agent = temporary.path().join("agent");
+        let mut writer = Writer::new(&agent, "claude", "inc-current");
+        let payload = json!({"session_id":"native-current","transcript_path":transcript});
+        observe_claude_stop_transcript(&mut writer, &payload, &config).unwrap();
+        observe_claude_stop_transcript(&mut writer, &payload, &config).unwrap();
+        let usage = usage_bodies(&agent);
+        assert_eq!(usage.len(), 2);
+        assert_eq!(usage[0]["turn_id"], "turn-a");
+        assert_eq!(usage[0]["output_tokens"], 5);
+        assert_eq!(usage[0]["cache_write_tokens"], 11);
+        assert_eq!(usage[0]["cached_tokens"], 13);
+        assert_eq!(usage[1]["turn_id"], "turn-b");
+        assert_eq!(
+            usage
+                .iter()
+                .map(|body| body["total_tokens"].as_u64().unwrap())
+                .sum::<u64>(),
+            60
         );
     }
 

@@ -950,7 +950,7 @@ fn status_names_what_differs_between_verifications() {
         .unwrap();
     plan.retained_digest = "another".into();
     birch
-        .publish_verification(&checkpoint, &terms, &plan, &proof)
+        .publish_verification(&checkpoint, &terms, &smallclaims::store::checkpoint_staging::StagedPlan::of(&plan), &proof)
         .unwrap();
     sync(&[&alder, &birch]);
 

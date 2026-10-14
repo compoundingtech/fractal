@@ -288,6 +288,52 @@ async fn the_first_summary_window_of_any_selection_is_served_at_once() {
     state.store.stop_attention_list_refresher();
 }
 
+/// The shared counts read the complete agents roster. As the daemon starts it may not be
+/// published yet; a window then waits for that publication, not for the refresher's pause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_summary_waiting_for_the_roster_is_served_once_it_publishes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "summary-roster");
+    custom(&state, "custom/garden/review/v1/ada", "person/ada");
+    // A roster refresher that has published nothing yet: no summary can be counted.
+    let _roster = state.store.start_agent_roster_refresher().unwrap();
+    crate::api::start_attention_list(&state);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while state.store.newest_attention_list().1.is_none() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for attention");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let ada = ClientSession::local(Some("person/ada")).unwrap();
+    assert_eq!(summary_window(&state, &ada).await.unwrap_err().code, "summary-not-ready");
+    // Well inside the refresher's pause of at least a second after its first refresh.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(state.store.summary_shared().is_none());
+    assert!(state.store.summary_shared_starting(), "nothing was counted yet");
+    let store = state.store.clone();
+    tokio::task::spawn_blocking(move || crate::api::refresh_agent_roster(&store, false))
+        .await
+        .unwrap()
+        .unwrap();
+    let published = std::time::Instant::now();
+    let items = loop {
+        if let Ok((snapshot, items, _)) = summary_window(&state, &ada).await {
+            assert!(snapshot.published_at.is_some());
+            break items;
+        }
+        assert!(
+            published.elapsed() < Duration::from_millis(500),
+            "the summary waited past the roster's publication"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(!state.store.summary_shared_starting());
+    let computed = computed_summary(&state, &ada);
+    for field in ["person_id", "needs_you", "working_agents", "active_missions", "machines", "revision"] {
+        assert_eq!(items[0][field], computed[field], "{field}");
+    }
+    state.store.stop_attention_list_refresher();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn odd_and_surplus_summary_selections_never_stop_the_others() {
     let root = tempfile::tempdir().unwrap();

@@ -17,6 +17,7 @@ pub mod conversation;
 pub mod demo;
 mod direct;
 pub mod doc;
+pub mod checklist;
 mod edit;
 mod glass;
 mod hover;
@@ -26,6 +27,7 @@ mod hyperlinks;
 mod terminal_tab;
 pub use glass::set_glasses_version;
 pub use lastrun::log_panics as lastrun_log_panics;
+pub use lastrun::note_exit as lastrun_note_exit;
 mod glass_store;
 mod lastrun;
 pub(crate) mod open_timing;
@@ -1156,6 +1158,28 @@ impl Ui {
 
     pub(crate) fn conversation_failed(&mut self, target: &str, error: &str) {
         self.stalled.insert(target.to_owned(), error.to_owned());
+    }
+
+    /// What is on screen, as kinds and counts only, for a slow-turn note: which pane has focus,
+    /// whether Home or the palette floats over it, and how much st has sent.
+    pub(crate) fn slow_context(&self) -> String {
+        let pane = self
+            .focused_pane()
+            .map(|pane| pane.key())
+            .map(|key| key.split(':').next().unwrap_or("").to_owned())
+            .unwrap_or_else(|| "none".to_owned());
+        let area = self.frame.borrow().area;
+        format!(
+            "pane {pane}, {}x{}, home {}, palette {}, terminal {}, agents {}, missions {}, attention {}",
+            area.width,
+            area.height,
+            self.home_open(),
+            self.palette_open(),
+            self.native_terminal().is_some(),
+            self.world.agents.items().len(),
+            self.world.missions.items().len(),
+            self.world.attention.items().len(),
+        )
     }
 
     /// The agent whose message box has the keyboard: the selected agent while the Agents tab

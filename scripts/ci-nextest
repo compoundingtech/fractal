@@ -10,7 +10,7 @@ esac
 
 partition=()
 if [[ -n "${CI_TEST_PARTITION:-}" ]]; then
-  [[ "$CI_TEST_PARTITION" =~ ^hash:[12]/2$ ]] || { echo 'invalid CI_TEST_PARTITION' >&2; exit 2; }
+  [[ "$CI_TEST_PARTITION" =~ ^hash:([12]/2|[1234]/4)$ ]] || { echo 'invalid CI_TEST_PARTITION' >&2; exit 2; }
   if [[ " $* " != *" --no-run "* ]]; then partition=(--partition "$CI_TEST_PARTITION"); fi
 fi
 

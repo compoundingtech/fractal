@@ -1511,7 +1511,25 @@ impl Backend for MainBackend {
                     fleet_id: fleet_id.to_owned(),
                     inventory: inventory.clone(),
                     summary_only,
+                    authority_guard: false,
                     signature_requests: signature_requests.to_vec(),
+                },
+            )
+            .await
+    }
+
+    async fn guard_summary(&self, fleet_id: &str) -> Result<ReplicationExportResponse> {
+        // This marker goes only to our local daemon, never into a signed peer exchange.
+        // Old daemons ignore it and return the same complete summary.
+        self.client
+            .post(
+                "/v1/internal/replication/export",
+                &ReplicationExportRequest {
+                    fleet_id: fleet_id.to_owned(),
+                    inventory: ReplicationInventory::default(),
+                    summary_only: true,
+                    authority_guard: true,
+                    signature_requests: Vec::new(),
                 },
             )
             .await

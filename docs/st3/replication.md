@@ -79,8 +79,8 @@ production digest registry in the same change. A new shared claim-derived view m
 its answer at the same explicit time and recipients. Local pagination metadata may order by
 local arrival; shared winner selection must remain independent of that order.
 
-The [canonical projections audit](canonical-projections-audit.md) records the original gaps and
-local exceptions. Modern status reports a graph digest over the complete projection registry,
+The [data-authority reference](data-authority.md) classifies shared projections and local
+exceptions. Status reports a graph digest over the complete projection registry,
 plus one digest for every table. The original six-table hash remains a compatibility field on
 the peer protocol; it cannot prove that every shared outcome agrees.
 
@@ -100,8 +100,7 @@ compare all shared rows and digests through creation, review, draining, cancella
 
 Documents record a sortable encoding of the complete binding claim key at admission.
 `document_canonical_latest(name,binding_key DESC)` serves latest selection and history order;
-readers never sort a name's entire claim history for each returned version. Schema 15 backfills
-the keys once, choosing the earliest canonical binding for each repeated name/hash. The key is
+readers never sort a name's entire claim history for each returned version. The earliest canonical binding is retained for each repeated name/hash. The key is
 a shared derived column and is digested with the document row. The fleet-size regression builds
 260,000 claims and 10,000 document versions, then requires latest listings, history pages,
 lookup and cursor reads to finish within two seconds and verifies the indexed latest query plan.
@@ -119,6 +118,11 @@ unknown claim alone does not degrade its envelope or mark a projection unhealthy
 as a fault. At daemon startup, admission retries those original records using the upgraded
 registry, then the canonical projector rebuilds their shared rows. An earlier claim learned
 on upgrade must sort by its original canonical key, never its new local arrival index.
+That admission seals and signs this node's new local batches first, so local membership claims
+decide it, but it builds no replication snapshot and skips the once-per-process search for
+batches skipped behind the sealing frontier. Both read every envelope or batch, about 15 s on a
+two-million-envelope store, and the daemon listens only after admission. The first export or
+replication activation after the daemon serves runs them on a read connection.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
@@ -149,7 +153,7 @@ means unknown, and validators must never accept unknown as a matching incarnatio
 `model::work_submission_matches` compares the claim's subject, attempt, actor, nonempty
 incarnation and evidence references together.
 
-This changes the claim registry digest. An older member rejects the field at schema admission
+An older member without this registry field rejects it at schema admission
 with `unknown-claim-field`, retains the original signed submission as a waiting unknown record,
 and continues projecting known claims. Its work projection cannot establish that submission's
 completion or incarnation until upgrade. Upgrade completion validators' members before relying
@@ -161,13 +165,19 @@ and graph/table convergence after upgrading the older registry.
 
 ## Projection digest coverage and cost
 
-`store/projection_digest.rs::TABLES` lists the shared tables: operations, blobs, documents,
-desired, message_index, mission_revisions, mission_definitions, mission_runs,
-mission_run_deadlines, mission_run_after, run_generations, step_runs, revision_proposals,
-planning_sessions, planning_candidates and planning_previews. Every column joins the digest
-by default. Only document/message/mission-revision arrival indexes and the effective step lease
-expiry/change timestamps are excluded. Those step timestamps include member-local renewals;
-the original durable lease facts remain covered through their authenticated claim identity.
+`store/projection_digest.rs::TABLES` lists 24 shared tables:
+
+`operations`, `blobs`, `documents`, `desired`, `arrangements`, `arrangement_registers`,
+`message_index`, `resource_observations`, `glass_heads`, `person_directive_notes`,
+`custom_registrations`, `custom_sources`, `custom_dependencies`, `mission_revisions`,
+`mission_definitions`, `mission_runs`, `mission_run_deadlines`, `mission_run_after`,
+`run_generations`, `step_runs`, `revision_proposals`, `planning_sessions`,
+`planning_candidates`, `planning_previews`.
+
+Every column joins the digest by default. Only document, message and mission-revision
+arrival indexes, `arrangements.changed_index`, and the effective step lease expiry/change
+timestamps are excluded. Those step timestamps include member-local renewals; the original
+durable lease facts remain covered through their authenticated claim identity.
 `planning_previews.store_index` is an originating preview input and is covered.
 
 The `claim_sources` digest covers admitted claim identities and immutable acceptance times,
@@ -221,10 +231,9 @@ peer. `st replication diff PEER` and `st doctor` also name them. Table differenc
 only when inventories and claim registries agree, no claims wait for a newer build, projection
 is current and local committed batches are sealed. Old peers omit `projection_digests`;
 exchanges and heals then compare their unchanged six-table compatibility hash. Old peers cannot
-verify full projection coverage. Modern peers compare complete maps. SQLite schema 14 adds the
-transactional digest machinery and rebuilds shared projections once, correcting older stored
-creation/change dates from claim facts. New writer connections must register the projection
-functions, including isolated checkpoint proof connections.
+verify full projection coverage. Modern peers compare complete maps. The transactional digest machinery derives creation/change dates from claim facts.
+New writer connections must register the projection functions, including isolated
+checkpoint proof connections.
 
 The indexed `resource_observations` projection participates in the complete shared table digest
 and canonical replay audit. The projection version identifying its layout is included in the
@@ -232,13 +241,13 @@ runtime schema compatibility identity alongside the claim vocabulary digest. Mix
 without this projection continue exchanging admitted claim authority, but do not compare their
 incompatible projection maps as if they represented the same graph. After upgrade, the table is
 backfilled from retained admitted `resource.observed` claims and projection comparisons resume.
-This changes no claim or resource vocabulary and requires no new replication payload fields.
+This projection is independent of the claim/resource vocabulary and replication payload fields.
 
 
 ## Add any machine
 
 Install st on the new machine and configure the person who operates it, as described in the
-[README](../getting-started.md#3-start-the-daemon). On an existing listening member, invite the new name:
+[README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
 
 ```sh
 st fleet invite beacon
@@ -442,9 +451,8 @@ Local store operations run on blocking threads so their disk waits cannot block 
 
 New callers poll the identical signed body after authenticated overload, for at most 60 HTTP
 attempts or five minutes per logical request, whichever comes first. Exhausting this budget
-enters visible backoff for an alive peer. The compact/full-inventory algorithm still has at
-most four logical signed exchange phases; overload polls are additional HTTP attempts inside
-each phase. Checkpoint manifest paging and local daemon operations keep their separate limits.
+enters visible backoff for an alive peer. The compact algorithm has at most two logical signed
+exchange phases; overload polls are additional HTTP attempts inside each phase. Checkpoint manifest paging and local daemon operations keep their separate limits.
 Ordinary successful exchange payloads, inventory proofs and the peer API version are unchanged.
 Older callers understand the existing signed non-success response envelope and safely retry
 with their existing failure policy; overload polling and the shorter alive-peer retry policy
@@ -477,29 +485,27 @@ The inventory is compact. It carries one digest per writer range of 256 sequence
 
 Each inventory says how many envelopes its sender takes in one exchange, 4,096 for this build. A peer sends at most that many, and at most 512 to a peer whose inventory does not say, as older builds do not.
 
-If a compact exchange finds different inventories but stores no new envelopes and adopts no
-checkpoint, its earliest differing ranges may contain only payloadless checkpoint tombstones.
-The worker runs at most one additional two-phase full-inventory round: it clears the summary's
-range digests, retaining the inventory digest, then sends the reverse difference proved by the
-peer's complete identity list. A bare digest never proves an empty inventory. There are at most
-four logical signed exchange phases in total (four HTTP requests without overload). Existing checkpoint-manifest paging can make additional
-signed requests under its separate limits. Payload page limits, the 64 MiB exchange body cap,
-envelope admission and checkpoint certificate verification remain unchanged. The exceptional
-full comparison costs O(inventory), rather than the compact listing's bounded identity prefix.
-
-This negotiation already exists in older builds, including `8298c70`; an upgraded worker
-initiating an exchange can transfer live payloads both ways with those peers, without new wire
-fields. An older initiator still uses its old compact-prefix algorithm, so recovery requires an
-upgraded member that can dial the peer. A pair of unupgraded members retains the starvation bug.
-The fallback reports no progress once only tombstone differences remain, allowing the worker to
-rest rather than loop. Importing older or losing checkpoint lineages remains separate
-([#1433](https://github.com/compoundingtech/smalltalk/issues/1433),
+Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
+A compact answer therefore lists the differing ranges that hold a live envelope first and the
+payloadless ones after, and each answer starts each group at a different range, so successive
+exchanges list every differing range within the 512-identity listing. Live differences settle in
+one two-phase exchange however many tombstone ranges differ, and no exchange carries a whole
+inventory. Builds before this one ran an extra full-inventory round whenever a compact round made
+no progress; on a fleet whose stores hold a million envelopes, each such round sent about 228 MB
+each way, and tombstone-only differences made it run on nearly every exchange. This build never
+asks for a full inventory. It still answers an older peer's request without range digests with
+its complete identity list, so members may upgrade in any order, and those answers stop once
+every member runs this build. A pair of members with only tombstone differences reports no
+progress, so the worker rests rather than loops. Importing older or losing checkpoint lineages
+remains separate ([#1433](https://github.com/compoundingtech/smalltalk/issues/1433),
 [#1052](https://github.com/compoundingtech/smalltalk/issues/1052)); live-envelope convergence
 does not assert equal tombstone inventories.
 
 `sync::worker::tests::checkpoint_tombstones_do_not_starve_later_live_ranges` proves later notes
-transfer in both directions behind differing tombstone ranges, and that a new write still
-transfers after a quiet tombstone-only comparison. The joined-daemon regression
+transfer in both directions behind differing tombstone ranges in one compact round, that no
+request lists a whole inventory, and that a new write still transfers after a quiet
+tombstone-only comparison. `store::compact_listing_puts_live_ranges_first_and_reaches_every_payloadless_range_in_turn`
+proves the listing order. The joined-daemon regression
 `fleet::rejoin_exchanges_live_claims_beyond_differing_checkpoint_tombstones` exercises the same
 path through real isolated daemons and workers.
 

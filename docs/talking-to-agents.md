@@ -1,6 +1,6 @@
 # Talking to agents
 
-Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker from [getting started](getting-started.md), restarting it if you stopped it.
+Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat), starting it again if you stopped it.
 
 ## From the terminal UI or phone
 
@@ -83,7 +83,9 @@ that closes the prompt releases it on that same positive evidence; an ended sess
 leaves its mail for its successor. Stale or indeterminate observations never count
 as native closure, including after a fresh heartbeat restores the same episode.
 
-Attach an existing PNG, JPEG, GIF, or WebP image (up to four, at most 10 MiB each):
+Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
+the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,
+and says when it changed a file. HEIC, AVIF, TIFF and PDF are refused with a way to convert them.
 
 ```sh
 printf 'Path to an image to share with the worker: '
