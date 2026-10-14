@@ -2584,6 +2584,7 @@ const ACTIONS: &[&str] = &[
     "work.publish-mission",
     "agent.create",
     "agent.stop",
+    "agent.retire",
     "agent.start",
     "agent.suspend",
     "agent.resume",
@@ -2638,6 +2639,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "work.retry",
     "agent.create",
     "agent.stop",
+    "agent.retire",
     "agent.start",
     "agent.suspend",
     "agent.resume",
@@ -9828,7 +9830,12 @@ pub(super) struct ActionRequest {
 fn action_scope(action: &str) -> Option<&'static str> {
     if matches!(
         action,
-        "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume"
+        "agent.create"
+            | "agent.stop"
+            | "agent.retire"
+            | "agent.start"
+            | "agent.suspend"
+            | "agent.resume"
     ) {
         return Some("control.runtimes");
     }
@@ -11235,6 +11242,31 @@ async fn dispatch_action(
             )])
         }
         "terminal.detach" => Ok(vec![detach_terminal_attachment(state, session, request)?]),
+        "agent.retire" => {
+            require_creation_actor(session)?;
+            let parameters = serde_json::from_value::<st3_client::AgentRetireParameters>(p.clone())
+                .map_err(|error| validation(error.to_string()))?;
+            let agent = client_detail_id("agent", &parameters.agent);
+            let token = request
+                .fence
+                .runtime_desired_revision
+                .as_deref()
+                .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
+            state
+                .store
+                .retire_agent(
+                    &agent,
+                    authority_actor,
+                    &parameters.reason,
+                    token,
+                    request.fence.runtime_incarnation.as_deref(),
+                    &request.idempotency_key,
+                    &state.configured_peers,
+                )
+                .map_err(ApiError::bad)?;
+            signal_changed(state);
+            Ok(vec![agent])
+        }
         action @ ("agent.stop" | "agent.start") => {
             require_creation_actor(session)?;
             let agent = client_detail_id("agent", &parameter_string(p, "agent")?);
