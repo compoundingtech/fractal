@@ -818,7 +818,7 @@ class WorkflowStructure(unittest.TestCase):
                 self.assertEqual(names[-1], 'Report job cache coverage')
         # The gate jobs publish exactly the decision and the record the consumers read.
         for check in self.WIRED + self.NOT_YET_WIRED:
-            self.assertIn('      skip: ${{ steps.gate.outputs.skip }}\n      record: ${{ steps.gate.outputs.record }}\n',
+            self.assertIn('      skip: ${{ steps.taken.outputs.skip }}\n      record: ${{ steps.taken.outputs.record }}\n',
                           self.job_text(f'evidence-gate-{check}'))
 
     def test_the_other_required_checks_are_not_wired_to_skip_yet(self):
@@ -826,6 +826,49 @@ class WorkflowStructure(unittest.TestCase):
             with self.subTest(check):
                 self.assertNotIn(f'needs.evidence-gate-{check}', self.job_text(check))
                 self.assertNotIn(f"evidence-gate-{check}", self.job_text(check).split('    steps:\n', 1)[0])
+
+    def test_the_skip_output_can_only_come_from_the_marker_step(self):
+        """The decision the check jobs act on must not exist unless `evidence skip taken` already ran."""
+        for check in self.WIRED + self.NOT_YET_WIRED:
+            with self.subTest(check):
+                job = self.job_text(f'evidence-gate-{check}')
+                outputs = re.search(r'^    outputs:\n((?:      .*\n)+)', job, re.M).group(1)
+                self.assertNotIn('steps.gate.outputs.skip', outputs)  # never straight from the decision step
+                self.assertIn('skip: ${{ steps.taken.outputs.skip }}', outputs)
+                steps = {}
+                body = job.split('    steps:\n', 1)[1]
+                for chunk in re.split(r'^      - ', body, flags=re.M)[1:]:
+                    name = re.match(r'name: (.*)', chunk)
+                    if name:
+                        steps[name.group(1)] = chunk
+                marker = steps['evidence skip taken']
+                self.assertIn('id: taken', marker)
+                self.assertIn("if: steps.gate.outputs.skip == 'true'", marker)
+                run = re.search(r'^        run: (.*)$', marker, re.M).group(1)
+                # The outputs are the last thing the marker writes, after the echo that names it.
+                self.assertTrue(run.startswith('echo evidence skip taken && '), run)
+                self.assertTrue(run.endswith('>> "$GITHUB_OUTPUT"'), run)
+                # No other step may write a job-visible skip=true.
+                others = [chunk for name, chunk in steps.items() if name != 'evidence skip taken' and 'id: gate' not in chunk]
+                for chunk in others:
+                    self.assertNotIn('skip=true', chunk)
+
+    def test_the_marker_steps_own_shell_writes_exactly_the_outputs_the_checks_read(self):
+        job = self.job_text('evidence-gate-genie-freshness')
+        marker = job.split('      - name: evidence skip taken\n', 1)[1].split('\n      - name: ', 1)[0]
+        run = re.search(r'^        run: (.*)$', marker, re.M).group(1)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'out'
+            output.write_text('')
+            done = subprocess.run(['bash', '-e', '-c', run], env={**os.environ, 'RECORD': 'a' * 40, 'GITHUB_OUTPUT': str(output)},
+                                  capture_output=True)
+            self.assertEqual(done.returncode, 0, done.stderr.decode())
+            self.assertEqual(output.read_text(), 'skip=true\nrecord=' + 'a' * 40 + '\n')
+            self.assertIn('evidence skip taken', done.stdout.decode())
+            # If the outputs cannot be written the step fails, so there is no skip and no marker success.
+            failing = subprocess.run(['bash', '-e', '-c', run], env={**os.environ, 'RECORD': 'a' * 40,
+                                                                   'GITHUB_OUTPUT': '/nonexistent/dir/out'}, capture_output=True)
+            self.assertNotEqual(failing.returncode, 0)
 
     def test_the_gate_jobs_can_write_nothing_and_start_nothing(self):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
@@ -837,7 +880,7 @@ class WorkflowStructure(unittest.TestCase):
             self.assertNotIn('needs:', body.split('steps:')[0], name)
             self.assertIn('git show \\"$BASE_SHA:scripts/ci-evidence-gate\\"', body, name)  # the gate comes from the base
             self.assertNotIn('python3 scripts/ci-evidence-gate', body, name)  # never the tree under test
-            self.assertIn("- name: evidence skip taken\n        if: steps.gate.outputs.skip == 'true'", body, name)
+            self.assertIn("- name: evidence skip taken\n        id: taken\n        if: steps.gate.outputs.skip == 'true'", body, name)
 
 
 if __name__ == '__main__':
