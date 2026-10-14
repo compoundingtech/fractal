@@ -1,7 +1,7 @@
 //! Tiny current summary on the existing protocol. Native reads are authorized in
 //! one snapshot; the contract stays the same when the shared IVM source takes over.
 use super::*;
-use crate::store::summary_list::{SummaryInputs, SummaryShared};
+use crate::store::summary_list::{SummaryInputs, SummaryMachines, SummaryShared};
 use st3_ui_model::missions::Display;
 
 pub(super) fn working(agent: &Value) -> bool {
@@ -30,12 +30,14 @@ pub(super) fn native(
     let attention = state.store.attention_snapshot(person.as_deref(), now)?;
     // What needs the person is what waits on their answer: an update asks nothing.
     let alerts = attention.iter().filter(|item| item.is_alert()).count();
-    let shared = shared(state, session, request, snapshot, now, windows, commits)?;
+    let shared = shared(state, session, request, snapshot, now, windows, commits, None)?;
     Ok(vec![row(person.as_deref(), alerts, &shared)?])
 }
 
 /// What every selection's summary shares at `snapshot`: each mission and whether it is active,
-/// the working agents and the machine counts. No count here depends on the selected person.
+/// the working agents and the machine counts, of `machines` when they were read at `snapshot`.
+/// No count here depends on the selected person.
+#[allow(clippy::too_many_arguments)]
 fn shared(
     state: &AppState,
     session: &ClientSession,
@@ -44,6 +46,7 @@ fn shared(
     now: u128,
     windows: Option<&collection_windows::Windows>,
     commits: Option<u64>,
+    machines: Option<Arc<Vec<Value>>>,
 ) -> anyhow::Result<SummaryShared> {
     let store = &state.store;
     let compute = || {
@@ -126,7 +129,10 @@ fn shared(
     };
     overlay_agent_resources(store, &mut agents, &client_timestamp(now))?;
     let working_agents = agents.iter().filter(|agent| working(agent)).count();
-    let machines = machine_summary_resources(state, snapshot, session)?;
+    let machines = match machines {
+        Some(machines) => machines,
+        None => Arc::new(machine_summary_resources(state, snapshot, session)?),
+    };
     let machines = machine_counts(&machines, &agents, &client_host_id(&state.node), now);
     Ok(SummaryShared {
         cut: snapshot.store_index,
@@ -281,7 +287,8 @@ pub(in crate::api) fn refresh_published(
             "kind":"subscribe", "id":"summary", "collection":"summary", "limit":1,
         }))?;
         let snapshot = client_snapshot_at(state, index);
-        Ok(Some((shared(state, &session, &request, &snapshot, now, None, None)?, inputs)))
+        let machines = published_machines(state, generation, &session, &snapshot, inputs.period)?;
+        Ok(Some((shared(state, &session, &request, &snapshot, now, None, None, Some(machines))?, inputs)))
     });
     let shared = match computed {
         Ok(None) => before.map(|(shared, _)| shared),
@@ -330,6 +337,35 @@ pub(in crate::api) fn refresh_published(
         store.publish_collection_view("summary");
     }
     Ok(changed)
+}
+
+/// The machines the shared counts count at `snapshot`: the ones read before while they still
+/// hold (`Store::summary_machines_hold`), else read again. They are read again each clock
+/// `period` too, since a peer's replication successes change them with no claim, as do a new
+/// conflicting operation and the fleet's membership, compared each time.
+pub(in crate::api) fn published_machines(
+    state: &AppState,
+    generation: u64,
+    session: &ClientSession,
+    snapshot: &ClientSnapshot,
+    period: u128,
+) -> anyhow::Result<Arc<Vec<Value>>> {
+    let store = &state.store;
+    let index = snapshot.store_index;
+    let conflicts = store.conflicting_operations()?;
+    let fleet = store.fleet_view_for_client()?;
+    let held = store.summary_machines().filter(|held| {
+        held.period == period && held.conflicts == conflicts && held.fleet == fleet
+    });
+    let machines = match held {
+        Some(held) if store.summary_machines_hold(held.cut, index)? => held.machines,
+        _ => Arc::new(machine_summary_resources(state, snapshot, session)?),
+    };
+    store.keep_summary_machines(
+        generation,
+        SummaryMachines { cut: index, period, conflicts, fleet, machines: machines.clone() },
+    );
+    Ok(machines)
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@
 //! attention rows, the same rows its attention window shows. A window names the person it
 //! selects. A selection the refresher cannot serve (more selections than it keeps, or one whose
 //! shared counts cannot be computed) is not published, and its windows read for themselves.
+//! The machines the shared counts count are the costliest part to read and few claims change
+//! them, so they are read again only when one may have (`summary_machines_hold`).
 //! Volatile cache state, cleared by `forget_views`.
 
 use super::*;
@@ -14,6 +16,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 /// At most this many selections are published; a busy fleet has a handful of people. Windows of
 /// any further selection read for themselves.
 const SELECTIONS: usize = 64;
+
+/// More claims than this since the machines were read reads them again rather than every claim.
+const MACHINES_DELTA_LIMIT: usize = 10_000;
 
 /// One selection's published row.
 #[derive(Clone)]
@@ -46,6 +51,17 @@ pub(crate) struct SummaryInputs {
     pub(crate) period: u128,
 }
 
+/// The machines the shared counts were counted from and what they were read under: the graph
+/// cut, the clock period, the count of conflicting operations and the fleet's membership.
+#[derive(Clone)]
+pub(crate) struct SummaryMachines {
+    pub(crate) cut: u64,
+    pub(crate) period: u128,
+    pub(crate) conflicts: u64,
+    pub(crate) fleet: smallclaims::fleet::FleetView,
+    pub(crate) machines: Arc<Vec<Value>>,
+}
+
 #[derive(Default)]
 struct Selection {
     /// When a window last read it, in Unix ms.
@@ -59,6 +75,7 @@ struct Selection {
 struct Lists {
     selections: HashMap<Option<String>, Selection>,
     shared: Option<(Arc<SummaryShared>, SummaryInputs)>,
+    machines: Option<SummaryMachines>,
 }
 
 #[derive(Default)]
@@ -76,6 +93,7 @@ impl SummaryList {
         let mut lists = self.lists.lock().unwrap_or_else(PoisonError::into_inner);
         self.forgotten.fetch_add(1, AtomicOrdering::AcqRel);
         lists.shared = None;
+        lists.machines = None;
         for selection in lists.selections.values_mut() {
             selection.row = None;
         }
@@ -236,5 +254,84 @@ impl Store {
         selection.failed = false;
         selection.row = Some(row);
         changed
+    }
+
+    /// The machines the shared counts were last counted from, if any.
+    pub(crate) fn summary_machines(&self) -> Option<SummaryMachines> {
+        self.smalltalk
+            .summary_list
+            .lists
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .machines
+            .clone()
+    }
+
+    /// Keep the machines read, or found to still hold, at `machines.cut`. A read that began
+    /// before views were forgotten (`generation` is stale), or one older than the newest, keeps
+    /// nothing.
+    pub(crate) fn keep_summary_machines(&self, generation: u64, machines: SummaryMachines) {
+        let list = &self.smalltalk.summary_list;
+        let mut lists = list.lists.lock().unwrap_or_else(PoisonError::into_inner);
+        if list.forgotten.load(AtomicOrdering::Acquire) != generation
+            || lists.machines.as_ref().is_some_and(|newest| newest.cut > machines.cut)
+        {
+            return;
+        }
+        lists.machines = Some(machines);
+    }
+
+    /// How many operations conflict. A conflict changes the status of the subjects its claims
+    /// are about without a claim of their own.
+    pub(crate) fn conflicting_operations(&self) -> Result<u64> {
+        Ok(self
+            .readers
+            .get()
+            .prepare_cached("SELECT COUNT(*) FROM operations WHERE state='conflict'")?
+            .query_row([], |row| row.get(0))?)
+    }
+
+    /// Whether the machines read at `after` still hold at `through`, read in the snapshot at
+    /// `through`: no claim admitted between them can change one. A machine is a configured,
+    /// fleet or current runtime's host with that host's own status. A runtime is a subject with
+    /// a runtime observation; whether it is current, and where it runs, come from its claims
+    /// other than its harness reports, from a harness report with a live status
+    /// (`CURRENT_VIEW_CLAIM`), and from the claims about the run and generation that own it. So
+    /// only claims about hosts, runtimes, runs and generations change machines; the rest, most
+    /// of a busy host's claims (harness reports, messages, lease renewals, documents), cannot.
+    /// Conflicting operations, fleet membership and replication successes change machines
+    /// without a claim: the caller compares those.
+    pub(crate) fn summary_machines_hold(&self, after: u64, through: u64) -> Result<bool> {
+        if through < after {
+            return Ok(false);
+        }
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(&format!(
+            "SELECT subject, kind, {CURRENT_VIEW_CLAIM},
+                    EXISTS(SELECT 1 FROM claims AS runtime INDEXED BY claims_runtime_subject_index
+                           WHERE runtime.kind='runtime.observed' AND runtime.subject=claims.subject
+                             AND runtime.store_index<=?2)
+             FROM claims WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3"
+        ))?;
+        let claims = statement
+            .query_map(params![after, through, MACHINES_DELTA_LIMIT as u64 + 1], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<bool>>(2)?.unwrap_or(false),
+                    row.get::<_, bool>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if claims.len() > MACHINES_DELTA_LIMIT {
+            return Ok(false);
+        }
+        Ok(!claims.iter().any(|(subject, kind, live, runtime)| {
+            subject.starts_with("host/")
+                || subject.starts_with("mission-run/")
+                || subject.starts_with("run-generation/")
+                || kind == "runtime.observed"
+                || (*runtime || runtime_subject(subject)) && (!kind.starts_with("harness.") || *live)
+        }))
     }
 }

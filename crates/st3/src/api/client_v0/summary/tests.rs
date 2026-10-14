@@ -641,3 +641,97 @@ fn summary_gate_does_not_reintroduce_an_out_of_grace_native_mission() {
         })
         .unwrap();
 }
+
+/// The machines the published summary counts are read again only when a claim can change them,
+/// and what it keeps is always what a fresh read shows at the same cut.
+#[test]
+fn published_machines_are_reused_until_a_claim_can_change_them() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let session = ClientSession::local(None).unwrap();
+    let claim = |subject: &str, kind: &str, actor: Option<&str>, fields: Value| {
+        state
+            .store
+            .append_claim(&crate::model::ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: actor.map(Into::into),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    };
+    let read = |period: u128| {
+        let (generation, _) = state.store.summary_selections(u64::MAX, false);
+        state
+            .store
+            .read_snapshot(|index| {
+                let snapshot = client_snapshot_at(&state, index);
+                let machines = published_machines(&state, generation, &session, &snapshot, period)?;
+                assert_eq!(*machines, machine_summary_resources(&state, &snapshot, &session)?);
+                Ok(machines)
+            })
+            .unwrap()
+    };
+    let runtime_ids = |machines: &[Value]| {
+        machines
+            .iter()
+            .flat_map(|machine| machine["runtime_ids"].as_array().unwrap().clone())
+            .collect::<Vec<_>>()
+    };
+    claim(
+        "agent/alder",
+        "runtime.observed",
+        None,
+        json!({"status":"running","runtime_id":"alder","incarnation_id":"one"}),
+    );
+    let first = read(0);
+    assert_eq!(runtime_ids(&first), [json!("runtime/alder")]);
+
+    // A runtime's harness reports, its usage and the messages it is sent change no machine.
+    claim(
+        "agent/alder",
+        "harness.observed",
+        Some("agent/alder"),
+        json!({"state":"working","incarnation_id":"one","driver":"claude"}),
+    );
+    claim(
+        "agent/alder",
+        "harness.usage",
+        Some("agent/alder"),
+        json!({"driver":"codex","incarnation_id":"one","semantics":"response","total_tokens":7}),
+    );
+    claim(
+        "message/seed-note",
+        "message.sent",
+        Some("person/robin"),
+        json!({"from":"person/robin","to":"agent/alder","content":"A note","status":"sent"}),
+    );
+    assert!(Arc::ptr_eq(&first, &read(0)));
+
+    // A new runtime, a host's status and the clock are read again.
+    claim(
+        "agent/birch",
+        "runtime.observed",
+        None,
+        json!({"status":"running","runtime_id":"birch","incarnation_id":"one"}),
+    );
+    let second = read(0);
+    assert!(!Arc::ptr_eq(&first, &second));
+    assert_eq!(runtime_ids(&second), [json!("runtime/alder"), json!("runtime/birch")]);
+    claim("host/cedar", "transport.observed", None, json!({"status":"up"}));
+    let third = read(0);
+    assert!(!Arc::ptr_eq(&second, &third));
+    assert!(!Arc::ptr_eq(&third, &read(1)));
+
+    // A runtime that stops is no longer current: its own claim is read again.
+    claim(
+        "agent/birch",
+        "runtime.observed",
+        None,
+        json!({"status":"stopped","runtime_id":"birch","incarnation_id":"one"}),
+    );
+    assert_eq!(runtime_ids(&read(1)), [json!("runtime/alder")]);
+}
