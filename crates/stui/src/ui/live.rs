@@ -45,6 +45,9 @@ struct Pending {
     effect: Effect,
     /// The exact request last sent; a retry repeats it so st can answer with the first result.
     sent: Arc<Mutex<Option<Sent>>>,
+
+    /// The conversation drew it, noted once for the quality counters.
+    echoed: bool,
     /// When it was last sent (or sent again): one st has not answered for a while is said to be
     /// unconfirmed, so it can be sent again or cleared rather than wait forever.
     since: Instant,
@@ -780,11 +783,16 @@ pub fn run(context: Context) -> Result<()> {
                         });
                     // A message sent from here is done once st shows it in the conversation.
                     pending.retain(|pending| {
-                        pending.message_id.as_ref().is_none_or(|id| {
-                            !timelines.values().flat_map(|timeline| &timeline.items).any(|entry| {
-                                matches!(&entry.body, TimelineBody::Message(message) if &message.message_id == id)
-                            })
-                        })
+                        let Some(id) = pending.message_id.as_ref() else {
+                            return true;
+                        };
+                        let shown = timelines.values().flat_map(|timeline| &timeline.items).any(|entry| {
+                            matches!(&entry.body, TimelineBody::Message(message) if &message.message_id == id)
+                        });
+                        if shown {
+                            super::slo::METRICS.observe("send_visible_ms", pending.since.elapsed());
+                        }
+                        !shown
                     });
                     changed = true;
                 }
@@ -933,6 +941,7 @@ pub fn run(context: Context) -> Result<()> {
                     if let Some(entry) = pending.iter_mut().find(|entry| entry.token == token) {
                         match outcome {
                             Ok(id) => {
+                                super::slo::METRICS.observe("send_ack_ms", entry.since.elapsed());
                                 entry.message_id = id;
                                 entry.failed = None;
                                 entry.unconfirmed = false;
@@ -981,14 +990,20 @@ pub fn run(context: Context) -> Result<()> {
                     // st took it. The copy here gives way once the conversation shows it, which
                     // may already have happened; with no id to look for, at once.
                     pending.retain(|entry| {
-                        entry.token != token
-                            || entry.failed.is_some()
-                            || entry.message_id.as_ref().is_some_and(|id| {
-                                !timelines
-                                    .values()
-                                    .flat_map(|timeline| &timeline.items)
-                                    .any(|item| matches!(&item.body, TimelineBody::Message(message) if &message.message_id == id))
-                            })
+                        if entry.token != token || entry.failed.is_some() {
+                            return true;
+                        }
+                        // Already in the conversation when st answered: visible as sent now.
+                        let waiting = entry.message_id.as_ref().is_some_and(|id| {
+                            !timelines
+                                .values()
+                                .flat_map(|timeline| &timeline.items)
+                                .any(|item| matches!(&item.body, TimelineBody::Message(message) if &message.message_id == id))
+                        });
+                        if !waiting {
+                            super::slo::METRICS.observe("send_visible_ms", entry.since.elapsed());
+                        }
+                        waiting
                     });
                 }
                 Fetched::Preview(id, preview) => {
@@ -1649,6 +1664,7 @@ pub fn run(context: Context) -> Result<()> {
                         unconfirmed: false,
                         effect: effect.clone(),
                         sent: sent.clone(),
+                        echoed: false,
                         since: Instant::now(),
                     });
                     changed = true;
@@ -1752,6 +1768,11 @@ pub fn run(context: Context) -> Result<()> {
                 links = ui.link_cells(frame.buffer_mut());
             }
         })?;
+        // A message just sent is on screen from this draw on: the time from pressing send to it.
+        for entry in pending.iter_mut().filter(|entry| !entry.echoed) {
+            entry.echoed = true;
+            super::slo::METRICS.observe("send_echo_ms", entry.since.elapsed());
+        }
         // A slow draw, or a whole turn that took long before it waited for input, is written
         // down with what was on screen, so that "it was slow" can be explained afterwards.
         let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
@@ -4069,6 +4090,7 @@ mod tests {
                 images: Vec::new(),
             },
             sent: Arc::new(Mutex::new(None)),
+            echoed: false,
             since,
         };
         let mut fresh = [pending(Instant::now())];
