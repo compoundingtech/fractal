@@ -56,6 +56,25 @@
             "{check}"
           ],
           "runner_prefix": "github:{repository}/"
+        },
+        "wrapper": {
+          "command": [
+            "bash",
+            "scripts/ci-typescript-client"
+          ],
+          "required_inputs": [
+            "flake_lock_sha256",
+            "toolchain_sha256",
+            "wrapper_sha256",
+            "system",
+            "attempt",
+            "job",
+            "steps",
+            "step_outcomes"
+          ],
+          "bind_inputs": {
+            "flake_lock_sha256": "flake.lock"
+          }
         }
       }
     },
@@ -72,6 +91,27 @@
             "{check}"
           ],
           "runner_prefix": "github:{repository}/"
+        },
+        "wrapper": {
+          "command": [
+            "isolation-vm",
+            "nixos-test-driver",
+            "transport-isolation-vm",
+            "sekrets-vm"
+          ],
+          "required_inputs": [
+            "flake_lock_sha256",
+            "toolchain_sha256",
+            "wrapper_sha256",
+            "system",
+            "attempt",
+            "job",
+            "steps",
+            "step_outcomes"
+          ],
+          "bind_inputs": {
+            "flake_lock_sha256": "flake.lock"
+          }
         }
       }
     },
@@ -88,6 +128,25 @@
             "{check}"
           ],
           "runner_prefix": "github:{repository}/"
+        },
+        "wrapper": {
+          "command": [
+            "bash",
+            "scripts/ci-genie-freshness"
+          ],
+          "required_inputs": [
+            "flake_lock_sha256",
+            "toolchain_sha256",
+            "wrapper_sha256",
+            "system",
+            "attempt",
+            "job",
+            "steps",
+            "step_outcomes"
+          ],
+          "bind_inputs": {
+            "flake_lock_sha256": "flake.lock"
+          }
         }
       }
     },

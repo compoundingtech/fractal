@@ -497,19 +497,19 @@ by default (no age limit; a signature is meant to grow to cover more over time);
 a future time is always refused. The file is validated strictly: an unknown key is an error, so
 a typo cannot silently weaken a rule, and a check with no entry never skips. The tree, the check
 name, the command, the exit code and the output hash are part of every record and are always
-checked. `observed` (the central observer's record of a finished job) is listed for every required check. A
-`wrapper` rule (a note the in-job producer signs as `fleet/ci`) is listed only where a producer defines
-its exact note: `linux-gate`, whose command is `["linux-gate", "aggregate", <the aggregate's needed jobs,
-sorted>]`, and `mail-redelivery-canaries`, whose stage command is `["bash", "scripts/ci-linux",
-"mail-redelivery-canaries"]`; both require `flake_lock_sha256`, `toolchain_sha256`, `wrapper_sha256`,
-`system` and `attempt` (the stage rule also `stage` and `job`) and bind `flake_lock_sha256` to
-`flake.lock` in the verified tree. A check with no `wrapper` rule (`typescript-client`, `isolation-vm`,
-`genie-freshness`) can only be satisfied by an `observed` note, so a wrapper note filed under it is
-`unsupported_kind`; adding a rule is a reviewed change to this file. Neither rule names a weaker signer
-level, so only `fleet/ci` counts. The producers refuse to sign for a stage that did not run or whose
-aggregate member was skipped, so a skipped run does not refresh its own note. If a producer's note
-changes (for example a job is added to the aggregate), the policy must change with it; until it does,
-the notes simply stop matching and the check runs.
+checked. `observed` (the central observer's record of a finished job) and `wrapper` (a note the in-job producer signs
+as `fleet/ci`) are listed for **every** required check, each with the exact command that producer records:
+- `linux-gate`: `["linux-gate", "aggregate", <the aggregate's needed jobs, sorted>]`;
+- `mail-redelivery-canaries`: the stage command `["bash", "scripts/ci-linux", "mail-redelivery-canaries"]`;
+- `genie-freshness`: `["bash", "scripts/ci-genie-freshness"]`; `typescript-client`: `["bash", "scripts/ci-typescript-client"]`;
+  `isolation-vm`: `["isolation-vm", "nixos-test-driver", "transport-isolation-vm", "sekrets-vm"]`.
+Every wrapper rule requires `flake_lock_sha256`, `toolchain_sha256`, `wrapper_sha256`, `system` and `attempt`
+and binds `flake_lock_sha256` to `flake.lock` in the verified tree; the stage rule also requires `stage` and
+`job`, and the step-outcome rules `job`, `steps` and `step_outcomes`. No rule names a weaker signer level, so only
+`fleet/ci` counts. A producer signs a step-outcome note only when every listed step actually ran, and refuses
+when a gate in its run said skip, so a skipped run writes no note for itself. If a producer's note changes (a job
+added to the aggregate, a step renamed), the policy must change with it; until it does, the notes simply stop
+matching and the check runs.
 Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
