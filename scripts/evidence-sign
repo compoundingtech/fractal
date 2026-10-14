@@ -16,6 +16,8 @@ record states that this machine's wrapper reported it. That is the cooperative v
 
 Configuration, outside any checkout: $HOME/.config/st/evidence-sign.json
   {"signer": "fleet/dev", "ssh_key": "/abs/key", "scratch_repo": "/abs/bare.git"}
+git and ssh-keygen are looked up only in the signer's own path (the fixed system directories, or the
+configuration's `path`), never through the caller's PATH, and run with that PATH.
 There is no command-line argument, no --config and no environment variable that changes the key,
 the configuration path or the clock (EVIDENCE_SIGN_NOW counts only when the configuration itself
 says test_clock: true).
@@ -29,6 +31,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -44,16 +47,33 @@ INPUT_KEYS = {'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system
 EXTRA_INPUT = re.compile(r'^[a-z][a-z0-9_]{0,39}$')
 
 
+# The signer finds git and ssh-keygen only in these directories (or the operator's `path` in its
+# configuration), never through the caller's PATH, and runs them with that PATH.
+TRUSTED_PATH = ['/run/current-system/sw/bin', '/nix/var/nix/profiles/default/bin', '/usr/local/bin', '/usr/bin', '/bin']
+TOOLS = {}
+
+
 class Refused(Exception):
     pass
+
+
+def trusted_tools(path):
+    for name in ('git', 'ssh-keygen'):
+        found = shutil.which(name, path=path)
+        if not found:
+            raise Refused(f'{name} is not in the signer\'s own path ({path})')
+        TOOLS[name] = found
+    TOOLS['PATH'] = path
 
 
 def git(repo, *args, stdin=None, env=None):
     # No GIT_* variable of the caller reaches git, and the caller's repository cannot name programs
     # for it to run (fsmonitor, hooks, pager, external diff).
     clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
-    done = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat',
-                           '-C', str(repo), *args], input=stdin, capture_output=True, timeout=300,
+    clean['PATH'] = TOOLS['PATH']
+    done = subprocess.run([TOOLS['git'], '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat',
+                           '-c', f'gpg.ssh.program={TOOLS["ssh-keygen"]}', '-C', str(repo), *args], input=stdin,
+                          capture_output=True, timeout=300,
                           env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C', **(env or {})))
     if done.returncode != 0:
         raise Refused(f'git {args[0]} failed: {done.stderr.decode(errors="replace").strip()[-500:]}')
@@ -92,8 +112,9 @@ def validate(request):
 
 def main():
     config = json.loads((Path.home() / '.config/st/evidence-sign.json').read_text())
-    if not {'signer', 'ssh_key', 'scratch_repo'} <= set(config) or set(config) - {'signer', 'ssh_key', 'scratch_repo', 'test_clock'}:
-        raise Refused('configuration must have signer, ssh_key, scratch_repo (and for tests only test_clock)')
+    if not {'signer', 'ssh_key', 'scratch_repo'} <= set(config) or set(config) - {'signer', 'ssh_key', 'scratch_repo', 'test_clock', 'path'}:
+        raise Refused('configuration must have signer, ssh_key, scratch_repo (optionally path; for tests only test_clock)')
+    trusted_tools(config.get('path') or ':'.join(TRUSTED_PATH))
     signer, key, scratch = config['signer'], Path(config['ssh_key']), Path(config['scratch_repo'])
     if not (re.fullmatch(r'\S+', signer) and key.is_absolute() and scratch.is_absolute()):
         raise Refused('invalid signer configuration')
@@ -110,7 +131,7 @@ def main():
         raise Refused('flake_lock_sha256 does not match flake.lock in the commit')
 
     if not scratch.exists():
-        subprocess.run(['git', 'init', '--quiet', '--bare', str(scratch)], check=True)
+        subprocess.run([TOOLS['git'], 'init', '--quiet', '--bare', str(scratch)], check=True, env={'PATH': TOOLS['PATH'], 'LC_ALL': 'C'})
     git(scratch, 'fetch', '--quiet', '--no-tags', str(checkout), commit)
 
     body = {
