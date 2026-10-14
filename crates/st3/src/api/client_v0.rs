@@ -12188,7 +12188,7 @@ mod tests {
         state.store.set_member_key(Some(key.clone())).unwrap();
         state.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
         let append = |subject: &str, kind: &str, fields: Value| {
-            state.store.append_claim(&crate::store::ClaimInput {
+            state.store.append_claim(&crate::model::ClaimInput {
                 subject: subject.into(), kind: kind.into(), actor: None,
                 fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
                 expected_subject: None, idempotency_key: None,
