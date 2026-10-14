@@ -62,6 +62,11 @@ def main():
     except (subprocess.SubprocessError, ValueError, TypeError, KeyError):
         unavailable("runner list unavailable or invalid")
         return
+    if (event == "merge_group" and env.get("MERGE_OVERFLOW") == "on"
+            and any(key < 1 or status not in ("online", "offline") or type(busy) is not bool
+                    for key, (status, busy, labels) in by_id.items())):
+        unavailable("unqualified merge capacity status")
+        return
     # Group 3 is the common pool. These compatibility role names are shared on both hosts.
     online = sum(status == "online" for status, busy, labels in by_id.values())
     def candidates(label):
@@ -70,6 +75,19 @@ def main():
               f'{len(candidates("ci1"))} general idle, {len(candidates("ci1-priority"))} priority idle')
     print(census)
     print(census, file=summary)
+    if event == "merge_group" and env.get("MERGE_OVERFLOW") == "on":
+        merge_need = env.get("MERGE_NEED", "3")
+        run_id = env.get("RUN_ID", "")
+        if (merge_need.isascii() and merge_need.isdigit() and int(merge_need) > 0
+                and run_id.isascii() and run_id.isdigit() and int(run_id) > 0):
+            if len(candidates("ci1-priority")) < int(merge_need):
+                # The existing Linux profile supplies the same tools and KVM.
+                # Every required merge job follows this single, run-bound choice.
+                emit("ci1", f"namespace-profile-linux-x86-64;job.priority=1;github.run-id={run_id}")
+                print('Merge overflow: **Namespace** (qualified pool census below admission minimum)', file=summary)
+                return
+        else:
+            print('Merge overflow refused: invalid admission minimum or run identity', file=summary)
     if priority:
         emit("ci1", "ci1-priority")
         # A dual-labelled runner can take the priority primary; do not also offer it.

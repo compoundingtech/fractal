@@ -27,6 +27,7 @@ import {
   supportingLinuxRunsOn,
   supportingStageRunsOn,
   secondaryStageRunsOn,
+  extraMergeTestRunsOn,
   workspacePreparationSteps,
   testArchiveConsumerSetup,
 } from './workspace-ci.ts'
@@ -304,7 +305,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         ...buildSnapshotSave,
       ],
     },
-    // Two test partitions and the two supporting stages retain independent CPU capacity.
+    // Four merge partitions (two for other events) reuse the one producer archive.
     // `linux-gate` below is the single required check that collects them.
     'linux-tests': {
       ...linuxStageJob({
@@ -314,9 +315,9 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         runsOn: primaryTestRunsOn,
         // CI_RUN_ID keeps the messaging-fault evidence under target/messaging-faults and a failed
         // boot canary's evidence under target/boot-canaries.
-        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:1/2', CI_TEST_THREADS: '8' },
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: "${{ github.event_name == 'merge_group' && 'hash:1/4' || 'hash:1/2' }}", CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
-        before: [nixDevelopStep({ name: 'Prove both shards cover every selected test', command: ['python3', 'scripts/ci-test-partitions'] })],
+        before: [nixDevelopStep({ name: 'Prove shards form the complete selected inventory', command: ['python3', 'scripts/ci-test-partitions'] })],
       }),
       needs: [pickRunnerJobId, 'linux-test-build'],
       if: "${{ !cancelled() }}",
@@ -327,11 +328,31 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         stage: 'tests',
         runsOn: secondaryStageRunsOn,
         setup: testArchiveConsumerSetup,
-        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:2/2', CI_TEST_THREADS: '8' },
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: "${{ github.event_name == 'merge_group' && 'hash:2/4' || 'hash:2/2' }}", CI_TEST_THREADS: '8' },
         extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
       }),
       needs: [pickRunnerJobId, 'linux-test-build'],
       if: "${{ !cancelled() }}",
+    },
+    'linux-tests-shard-3': {
+      ...linuxStageJob({
+        name: 'linux-tests-shard-3', stage: 'tests', setup: testArchiveConsumerSetup,
+        runsOn: extraMergeTestRunsOn,
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:3/4', CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
+    },
+    'linux-tests-shard-4': {
+      ...linuxStageJob({
+        name: 'linux-tests-shard-4', stage: 'tests', setup: testArchiveConsumerSetup,
+        runsOn: extraMergeTestRunsOn,
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:4/4', CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
     },
     'linux-clippy': linuxStageJob({
       name: 'linux-clippy',
@@ -364,7 +385,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     },
     'linux-gate': {
       name: 'linux-gate',
-      needs: [pickRunnerJobId, 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries'],
+      needs: [pickRunnerJobId, 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
       // Aggregation needs no build caches and must not queue behind the work it summarizes.
@@ -374,8 +395,18 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         {
           name: 'Require every Linux stage to pass',
           // The stages only: pick-runner is skipped whenever ci1 is off.
-          env: { RESULTS: '${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}' },
-          run: `echo "stage results: $RESULTS"
+          env: { RESULTS: '${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}', EVENT: '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
+          run: `set -eu
+set -- $RESULTS
+[ "$#" = 7 ] || { echo "incomplete base-stage results"; exit 1; }
+if [ "$EVENT" = merge_group ]; then
+  set -- $MERGE_RESULTS
+  [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
+  RESULTS="$RESULTS $MERGE_RESULTS"
+else
+  [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
+fi
+echo "stage results: $RESULTS"
 for result in $RESULTS; do
   [ "$result" = success ] || exit 1
 done`,

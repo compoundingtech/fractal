@@ -52,7 +52,7 @@ This section is written for a person's own agent to read and act on at their req
 | Mode | Codex | Claude |
 | --- | --- | --- |
 | bypass, including a missing key | `--dangerously-bypass-approvals-and-sandbox` and `--dangerously-bypass-hook-trust` | `--dangerously-skip-permissions` |
-| auto | Named `st-managed` profile extending `:workspace`, the seat's workspace root, networking enabled (also through `sandbox_workspace_write.network_access`), and the daemon socket explicitly allowed; live web search; `on-request` approval with `auto_review`; `--dangerously-bypass-hook-trust` | `--permission-mode auto` |
+| auto | Named `st-managed` profile extending `:workspace`, the seat's workspace root, networking enabled (also through `sandbox_workspace_write.network_access`), and the daemon socket explicitly allowed; live web search; `on-request` approval with `auto_review`; `--dangerously-bypass-hook-trust` | `--permission-mode auto` with the Read rules below |
 
 These are driver defaults for st-launched seats. They do not modify the provider's
 account settings or change a manually launched provider. Authored permission options
@@ -96,6 +96,11 @@ omits the profile's `-c` entries (and an authored `-c` entry for the same keys):
 Before this, a plain-declaration Codex seat that restarted on an auto install had its TUI exit and the
 driver started a new thread instead of resuming (the old rollout stayed on disk, unreferenced).
 
+A saved thread that has not yet taken a turn has no rollout on disk, and Codex cannot resume it. Under
+declared permissions the launch fails closed (the driver does not guess that the thread is empty and
+replace it) and says so: `saved Codex resume binding has no persisted rollout for thread ...`. Give the
+seat one turn on its previous declaration, which saves the thread, then restart it on the new one.
+
 The live eval `evals/st3/codex-minimal-access` and `scripts/st3-codex-minimal-eval/resume-check` (a
 restart between two turns, checking the thread id, the daemon socket, the network and the refused
 write) are paid and run by hand; no CI gate proves the real launch path. The argv tests and the
@@ -125,6 +130,18 @@ workspace's project hooks already have. A workspace that holds untrusted content
 branch checked out for review, must not be a seat workspace; the same goes for any workspace that holds someone else's branch or fork. Each approval is logged by the driver
 (`st: approved project MCP server NAME in DIR (definition sha256 HASH)`), so a changed definition is
 visible after the fact.
+
+A Claude seat in auto mode also gets Read rules in its settings, merged with any authored settings. Auto
+mode's classifier treats a read in another repository as scope escalation and asks a person, which stalls
+an unattended seat on "Read outside the working directories" (a release builder reading a sibling worktree
+overnight). The default allows reads under `~/src`, `/var/tmp` (and `/private/var/tmp`, where macOS resolves it, since the rule does not rely on Claude resolving the symlink) and `/nix/store`, plus, for a workspace under a directory literally named `github.com` that is outside `~/src` (a Mac's `~/Developer/github.com/org/repo`), that `github.com` tree, strictly inside the home directory. Any other workspace layout adds nothing. It denies reads of credential and login paths
+(`~/.ssh`, `~/.config/gh`, `~/.config/fabric`, `~/.config/sekrets`, `~/.sekrets`, `~/.claude-accounts`,
+`~/.claude/.credentials.json`, `~/.claude.json`, `~/.codex/auth.json`, `~/.codex/config.toml`, `~/.npmrc`,
+st's keys and accounts directories and `~/.config/st3`), and deny wins over allow. Every other read, and
+every write and command, stays with the classifier and still asks. This is a default for auto-mode Claude
+seats applied at launch, so a running seat takes it at its next start. A seat that declares its own
+permission options (`--permission-mode`, `--dangerously-skip-permissions`) keeps them and gets nothing
+added; an authored `--settings` merges with it, and its deny rules are kept.
 
 Codex update checks remain disabled with `check_for_update_on_startup=false`.
 Managed Claude runs with `DISABLE_AUTOUPDATER=1`; pi and omp already disable their

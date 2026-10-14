@@ -3192,6 +3192,20 @@ fn run_controlled_owned(
     result
 }
 
+/// A preloaded resume that fails drops its completion sender, which reads as "channel is empty and
+/// sending half is closed". The control thread has already named the real cause (Codex rejected the
+/// declared settings, or the saved thread has no persisted rollout); report that one.
+fn preload_failure(events: &Receiver<ControlEvent>, closed: anyhow::Error) -> anyhow::Error {
+    while let Ok(event) = events.try_recv() {
+        if let ControlEvent::Failed(cause) = event {
+            return anyhow::anyhow!(
+                "Codex control could not preload the declared resume policy: {cause}"
+            );
+        }
+    }
+    closed
+}
+
 fn declared_codex_model(args: &[String]) -> Option<String> {
     let mut selected_config = None;
     let mut selected_direct = None;
@@ -3437,7 +3451,7 @@ fn run_connected(
             drop(resume_ready_tx);
             let _ = shutdown.shutdown(Shutdown::Both);
             let _ = event_thread.join();
-            return Err(error);
+            return Err(preload_failure(&events_rx, error));
         }
     }
     // A fresh initialized observer reads before this child can issue thread/start.

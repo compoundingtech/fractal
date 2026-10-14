@@ -31,7 +31,7 @@ and step baselines, dependency, backoff, and assignment checks; ordinary predica
 not become scheduler faults. It reports late evaluation when the evaluator reaches the run,
 including after a stalled writer returns.
 Until the evaluator reaches that boundary, even a run delayed for twelve minutes can still
-appear as `waiting` without a scheduler blocker. This change adds no independent writer watchdog.
+appear as `waiting` without a scheduler blocker. There is no independent writer watchdog.
 
 The fault is recorded once while open, including across daemon restarts. Elapsed time alone does
 not replace it. The ready state is written before the diagnosis. Diagnostic and recovery errors
@@ -67,7 +67,7 @@ page the operator for each run. Ordinary reconciliation faults retain their exis
 - `concurrent-runs` enables concurrent active runs. An optional `max` property bounds them.
 - A mission can declare exact text and resource inputs.
 - A mission can declare one absolute run `timeout`.
-- `terminal "NAME" { ... }` is the canonical interactive runtime declaration. The legacy spelling `pty "NAME" { ... }` is temporarily accepted with a preview warning and will be removed before the friend-ready v0.
+- `terminal "NAME" { ... }` is the canonical interactive runtime declaration. The spelling `pty "NAME" { ... }` is also accepted with a preview warning.
 - An eval entry mission must declare a timeout no greater than 20 minutes.
 - A first-class `loop` runs one bounded child mission for each round.
 - A loop always declares `max-rounds`. It can also declare one total `timeout`.
@@ -260,9 +260,9 @@ st missions retire mission/MISSION_ID --as person/operator
 
 Retirement publishes the current definition again with `state="retired"`, naming who retired it.
 The mission leaves `st missions ls`, `st missions tree` and every client, and cannot start. Its
-revisions and runs stay in its history (`st missions ls --all`, `st missions show`). A person, or an
-agent with `publish` authority for the mission, can retire it once no run of it is active. Publishing
-a ready revision brings it back.
+revisions and runs stay in its history (`st missions ls --all`, `st missions show`).
+In free mode, a person or agent acting as itself can retire it once no run of it is
+active. Publishing a ready revision brings it back.
 
 ## Run ownership and concurrency
 
@@ -848,7 +848,7 @@ document it needs.
 A broken gate does not fail its step. The step keeps waiting, and st raises one attention item for
 the actor that published the run's mission revision. It names the gate, the step, the host, why the
 gate is broken, and the end of the check's output. A person who published the mission sees it in
-`st attention ls`; an agent receives it as a fault message. When st did not record the revision's
+`st alerts ls`; an agent receives it as a fault message. When st did not record the revision's
 publisher, the run's requester receives it. Correct the gate and revise the run with
 `st work revise RUN FILE`. A revision that changes only a step's gates keeps the work its worker
 already submitted, and the revised gates check that work in the new generation. The item closes
@@ -883,8 +883,9 @@ before the work exists, most gates should say not yet. `--workspace` names the w
 check. `--no-gate-check` publishes without it, for a gate whose check cannot run before its run,
 such as one that waits on a lock the run takes.
 
-`--dry-run` (alias `--preview`) prints the publication preview and stops before any gate check or
-apply. Use `missions check` separately when gate commands should run during validation.
+`--dry-run` (alias `--preview`) prints the publication preview without applying it.
+Add `--check` to execute gates during that preview, using `--workspace` and `--input`
+for their environment. `missions check` also runs gate commands separately.
 
 Each check records its result on the gate's `gate.result` subject. The result's `verdict` is
 `pass`, `fail` for not yet, or `error` for broken, so every fleet build can read it; its
@@ -941,10 +942,7 @@ actor cannot hide an answer from the gate while the list no longer offers the re
 
 A loop's human gates (`until`, a person's candidate choice, `on-exhausted`) are asked of its
 `loop-run/GENERATION/PATH` subject, and are current while the step running the loop is on the
-attempt they were asked for. They are listed, approved and rejected like step gates. A for-each
-loop stored before that mode was removed asks an item's metric gate of
-`loop-run/GENERATION/PATH/item/ID` with the item's round as its attempt; that review is current
-until the loop records the item's round.
+attempt they were asked for. They are listed, approved and rejected like step gates.
 
 The review list and each reviewer's attention agree: a review is offered exactly while its card
 is shown. Both need the gate's run, and every run above it, to be open and on the generation of
@@ -954,7 +952,7 @@ does not hold, an answer could change nothing, so the review is not listed and a
 refused with the reason, such as which parent step failed. It is offered again once that step
 is retried.
 
-`st attention ls --as person/NAME` shows the selected person's pending KDL human gates together
+`st alerts ls --as person/NAME` shows the selected person's pending KDL human gates together
 with their other current decisions and faults.
 
 The human view shows the mission, owner step, question, review targets, age, and exact decision commands. `--json` returns the same current review records as structured data.
@@ -963,15 +961,15 @@ The list excludes resolved requests, old generations, changed definitions, old a
 
 ### Human attention inbox
 
-`st attention ls --as person/NAME` reads current source state: ready person steps, human
-gates, valid launch previews, outstanding proposal reviews, unread person messages/reminders,
+`st alerts ls --as person/NAME` reads current source state: ready person steps, human
+gates, valid launch previews, outstanding proposal reviews, requested person updates,
 and failures whose current source needs a person. Priority precedes waiting age. Each card's
 identity includes its source, recipient and waiting episode. A cancelled or retired owner,
 removed source, replacement generation or changed attempt removes the card before cleanup.
 Failed sources can retain their own repair fault. Held subscription requests do not appear.
 
 ```sh
-st attention ls --as person/operator
+st alerts ls --as person/operator
 st work ask --for person/operator --title "Choose a release date" \
   --reason "The release needs a date" --step step-run/release/prepare \
   --as agent/release/operator --idempotency-key release-date
@@ -1029,7 +1027,7 @@ returns `update-not-asked`.
 
 The update is a person step in a run of its own, so no step waits on it and the poster keeps
 working. It stays on the person's home until they read it, even after the poster stops; the
-poster can withdraw it with `cancel-ask`. Opening it with `st attention show` as the person (not
+poster can withdraw it with `cancel-ask`. Opening it with `st alerts show` as the person (not
 from an agent seat) reads it, as does `st work done STEP --as PERSON --answer read`. Reading
 records `{type: "update", outcome: "read"}` and tells nobody. The client attention card carries
 the update under `update`, not `request`, so a client that predates updates shows a plain card
@@ -1078,6 +1076,11 @@ To make one run wait without changing its mission, start it with `after`. See [S
 A run tells nobody about itself unless its mission or its start names an agent:
 
 ```kdl
+version 2
+agent "ops/builder" {
+  workspace "/work/ops"
+  harness "claude" {}
+}
 mission "release" state="ready" report-to="agent/ops/watcher" stalled-after="45m" {
   goal "Publish the release."
   step "build" { assigned-to "agent/ops/builder" }
@@ -1267,7 +1270,7 @@ A step has one attempt by default. st does not repeat a failure automatically: a
 usually an agent's judgment or a false gate, and a repeated attempt repeats its side effects. Declare
 `retry` on a step whose failure is known to be transient.
 
-A person, or an agent with `revise` authority for the mission, can retry one failed step:
+In free mode, a person or agent acting as itself can retry one failed step:
 
 ```sh
 st work retry STEP_RUN --as person/operator --reason "the deploy check host is back"
@@ -1284,8 +1287,7 @@ than the failure, when a mission gate or the mission timeout failed it, when it 
 run, or when its mission deadline has passed. Revise the run instead to restart several failed steps.
 
 A finished root run can show another outcome than the one st recorded, for example when its work
-shipped after a gate failed. A person, the agent that requested the run, or an agent with `revise`
-authority for its mission sets it with a reason:
+shipped after a gate failed. In free mode, a person or agent acting as itself sets it with a reason:
 
 ```sh
 st missions outcome RUN completed --reason "the change merged after the gate was fixed" --as person/operator
@@ -1560,8 +1562,12 @@ Queued steps do not consume wake attempts or arm retry timers while the agent is
 acknowledged by a new working turn, by a native read or close, by a delivery into a turn that is
 still working, or by claiming the step. Pi and OMP steer a wake into the running turn, so a
 turn that started before the wake still acknowledges it. An unacknowledged delivery is retried
-after 15 seconds, at most three times. Exhaustion writes a `work-wake-exhausted` harness
-diagnostic naming the step, incarnation, and attempt count.
+after 15 seconds, for at most three automatic attempts. After those attempts,
+exhaustion waits for the five-minute grace measured from the first attempt before
+writing a `work-wake-exhausted` diagnostic naming the step, incarnation and count.
+A supported wake that was consumed but leaves the assignee idle with the work
+unclaimed has its own five-minute grace from the last attempt. Delivery proof
+does not create a worker lease.
 
 ## Seat queues
 
@@ -1590,8 +1596,7 @@ st agents queue move agent/example/example/worker mission-run/docs/2026-09-26 \
 `st agents queue AGENT` shows the step the seat holds now, its next work, and then each queued
 run in order with its state: `claimed`, `ready`, or `waiting`. `st missions queued AGENT` is the
 same show command reached from the `missions` group. A move places one run at the top, at the
-bottom, or directly before or after another queued run. It needs explicit person authority, like
-other client mutations.
+bottom, or directly before or after another queued run. In free mode a person or agent may move it, acting as itself.
 
 Each move writes one `agent.queue.moved` claim on the agent subject with the run, the placement,
 the optional anchor run, the optional reason, the actor, and the graph time. Replicas rebuild the
@@ -1622,10 +1627,11 @@ The runtime can also send one fault message for a new diagnostic epoch. st does 
 
 `under` is repeatable agent metadata.
 
+The example belongs inside a mission that also declares `lead`:
+
 ```kdl
 agent "researcher" {
   under "lead" reason="the lead combines the research"
-  under "design-group"
   workspace "/work/research"
   command "research"
 }
@@ -1633,11 +1639,12 @@ agent "researcher" {
 
 A bare target inside a mission uses the same mission run. A full external agent subject stays full.
 
-The relation is visible in `st agents --json`, status, and assigned work. It is suitable for a tree or graph UI.
+The relation is visible in `st agents ls --json`, status, and assigned work. It is suitable for a tree or graph UI.
 
 The relation does not create permission, lifecycle, scheduling, or mandatory reporting behavior.
 
-Missing targets, self-relations, and cycles create warnings during preview. They do not block publication or another agent.
+The target must be declared: a missing grouping target blocks publication. A top-level
+seat grouped under itself produces a warning. Grouping does not check for cycles.
 
 ## Host documents
 
@@ -1945,22 +1952,6 @@ over on its final approval. The successor generation reopens the run: compatible
 work carries forward, each unchanged failed step starts its next attempt, and changed, cancelled,
 and final work starts again.
 
-### Deferred declarative revision intent
-
-A future KDL operation can propose a produced mission revision against one live mission run.
-
-The operation should compile into the existing revision proposal claims. It must not create a second revision or generation model.
-
-Publishing a mission revision alone must not move an active run. The declaration must identify the target run and exact revision.
-
-A parent mission could target a linked child run. This would let a controller publish the parent mission from a shell heredoc.
-
-The mission could then sequence the proposal and verify the successor generation with normal dependencies and gates.
-
-A human-only approval must remain an external authorized claim. Publishing the controlling KDL must not imply that approval.
-
-This direction is deferred. The first design must define target selection, authority, idempotency, cancellation, and failure behavior.
-
 ### Immutable generations
 
 Each accepted revision creates one immutable successor generation. The stable mission-run subject points to the current generation.
@@ -2004,6 +1995,32 @@ The default `restart-active` cutover creates the successor after approval. Open 
 The reconciler creates the successor after the active work reaches a stable state. Cancellation returns the run to its normal phase.
 
 The run keeps its initial revision and root revision. Its current revision is the revision of its current generation.
+
+### Seats across mission revision
+
+A revision carries an unchanged completed declaring step's **currently selected agents** into the successor generation. Each agent keeps its public identity, placement, terminal binding and launch configuration. The revision writes a new canonical `intent.desired` claim with the successor generation and declaring step, and updates the declared managed mission environment for future launches, in the same transaction that creates the successor steps and supersedes the predecessor. Replication and agent cards read that same declaration. Retained processes keep their launch-time environment; authority follows current store ownership. A completed outcome stays completed; this does not fabricate a worker claim, wake acknowledgment or runtime readiness.
+
+The cutover then retires declarations that were removed or whose declaring step changed. A changed declaring step executes again under its ordinary dependency, baseline and lifecycle rules. A root stop remains selected when an unchanged completed step is carried; revision does not resurrect that seat. Normal cancellation and finally cleanup still stop run-owned agents.
+
+This is deliberately limited to selected agents with readable members and stable declaration text after interpolation. A carried completed step that still owns an exec, schedule or other non-agent declaration is rejected with `unsafe-completed-declaration-carry`. A declaration whose name or configuration changes through generation, revision or step interpolation is also rejected. Change the declaring step explicitly when its effects should run again. Reopening a failed terminal run with completed declaring steps requires that explicit change, because its cleanup may already have ended those declarations. The API checks before publishing the candidate, and both immediate and declared revision writers recheck under the cutover transaction; a refusal leaves the current generation intact.
+
+### Missing desired agents
+
+After dependencies, baselines and admission deadlines permit a step, an absent assigned or available agent blocks it with `no eligible agent is present in the desired graph`. This includes ready work whose binding was subsequently removed. Agentless steps, person assignments, dependency waits and legitimate seat queues do not trigger this diagnosis. Cleanup stops that retain a seat for already-ready work in another run preserve that queue. A previously ready unclaimed step also becomes blocked if its desired binding is removed or root-stopped; a root stop blocks quietly without raising a fault.
+
+The reconciler raises an existing `operational.failure` with stable `fields.condition = "mission-no-eligible-agent"`. Its targets are the mission run, current generation and blocked step. Existing fault ownership routes it to the requester or owning agent. The reason identifies the missing binding and suggests declaring a seat or revising the assignment. A run with no advancing work and an assignment-blocked step reports `blocked`.
+
+Episodes are deduplicated by generation, step and readiness epoch. Only the latest episode for a run is visible. It disappears when the targeted step regains an eligible desired binding, the generation changes, or the run leaves its normal phase or ends. A later loss of eligibility after readiness has a new epoch. Desired presence is not proof that a runtime or harness is ready.
+
+Doctor reports `mission-no-eligible-agent` as a failure when an existing current fault episode has lasted at least five minutes. Fault attention still appears immediately on admitted missing eligibility. Doctor reuses its current attention/fault snapshot and looks up the exact episode claim by ID; it publishes no additional fault, timer or recovery claim. The clock measures the age of that episode, while currentness is live state, not a historical snapshot at that clock. Eligibility restoration, an explicit root stop, cutover and terminal state remove the current diagnosis through the same fault currentness. The check lists at most twenty overdue episodes and reports the remaining count.
+
+Eligibility reads register the absent binding as a dependency. Its later publication dirties the settled blocked run directly. Quiet root stops and deduplicated episodes return from reader checks without joining the writer queue. A needed fault writer rechecks the run, generation, step and bindings under its transaction and uses an indexed source lookup for deduplication; it adds no polling loop or replay of historical operational episodes.
+
+### Revision controls
+
+`cargo test -p st3 --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
+
+`scripts/st3-revision-seat-eval/run ST3_FIXTURE_BINARY OUTPUT_DIR` runs actual CLI controls on a private daemon and real PTYs, using invented garden seats and `sleep` commands. It checks four builders across repeated revisions, explicit stop, removal and intentional cancellation with finally cleanup. It also removes a mission-owned binding after its declaring step completes, checks the missing-agent fault delivered to the requester, restores eligibility and cancels the control. All sockets, HOME/XDG directories and terminal roots are isolated. It writes `result.json` and tears down its own runtimes.
 
 ## Immutable documents
 
