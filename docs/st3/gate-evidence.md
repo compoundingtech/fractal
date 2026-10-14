@@ -310,6 +310,13 @@ or skipped ones and runs already done, observes the rest and records each in
 for GitHub reads and the push, and the observer's own `HOME` for its private configuration. State
 (`scratch.git`, `observed.jsonl`) lives in `--state-dir` (default `~/.local/state/evidence-observe`).
 
+The controller never records a check that the evidence gate skipped. A gate job that decides to skip ends
+with a step named `evidence skip taken` and still concludes success; if the controller recorded the check
+anyway, one real run would keep refreshing its own skips. It therefore reads the run's jobs, and any record
+whose check has an `evidence-gate-<check>` job whose `evidence skip taken` step ran is neither imported nor
+published (the summary names it). If the jobs cannot be read nothing is recorded. It also refuses any run
+that is not a run of `Workspace CI`, so it can never act on its own workflow's runs.
+
 The server rejects a shallow push, and the pack carries the source commit without its history, so
 the script first fetches the source's missing parents from the repository. Run
 `python3 scripts/ci-evidence-observe-test` for the cases (signature verified, verifier refusal,

@@ -182,12 +182,48 @@ def push_token():
     return done.stdout.strip() if done.returncode == 0 else ''
 
 
-def latest_attempt(repository, run_id):
+OBSERVED_WORKFLOW = 'Workspace CI'
+SKIP_STEP = 'evidence skip taken'
+
+
+def run_info(repository, run_id):
     done = subprocess.run(['gh', 'api', f'repos/{repository}/actions/runs/{run_id}'], capture_output=True, timeout=120)
     try:
-        return int(json.loads(done.stdout)['run_attempt'])
-    except (ValueError, KeyError, TypeError):
+        return json.loads(done.stdout)
+    except ValueError:
+        raise Failure(f'cannot read run {run_id} of {repository} from GitHub')
+
+
+def latest_attempt(repository, run_id):
+    try:
+        return int(run_info(repository, run_id)['run_attempt'])
+    except (KeyError, TypeError, ValueError, Failure):
         raise SystemExit(f'cannot read run {run_id} of {repository} from GitHub')
+
+
+def skip_taken_checks(repository, run_id, attempt):
+    """Checks whose evidence-gate job ended with the step `evidence skip taken`.
+
+    Such a job concludes success without having run its check. A note for that check would let one
+    real run refresh its own skips forever, so the controller never records it. If the jobs cannot
+    be read, nothing is recorded (fail closed).
+    """
+    skipped, page = set(), 1
+    while True:
+        done = subprocess.run(['gh', 'api', f'repos/{repository}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100&page={page}'],
+                              capture_output=True, timeout=120)
+        try:
+            jobs = json.loads(done.stdout)['jobs']
+        except (ValueError, KeyError, TypeError):
+            raise Failure(f'cannot read the jobs of run {run_id} attempt {attempt}, so skips cannot be ruled out')
+        for job in jobs:
+            name = job.get('name', '')
+            if name.startswith('evidence-gate-') and any(
+                    step.get('name') == SKIP_STEP and step.get('conclusion') == 'success' for step in job.get('steps', [])):
+                skipped.add(name[len('evidence-gate-'):])
+        if len(jobs) < 100:
+            return skipped
+        page += 1
 
 
 MAX_TRIES = 3
@@ -238,6 +274,10 @@ def one_run(args, run, attempt):
         observer = json.loads(args.observer)
         if not (isinstance(observer, list) and observer and all(isinstance(a, str) for a in observer)):
             raise Failure('--observer must be a JSON array of strings')
+        info = run_info(args.repository, run)
+        if info.get('name') != OBSERVED_WORKFLOW:
+            raise Failure(f'run {run} is a run of {info.get("name")!r}, not {OBSERVED_WORKFLOW!r}: never acting on any other workflow, this one included')
+        skipped = skip_taken_checks(args.repository, run, attempt)
         artifact = args.artifact or source_artifact(args.repository, run, attempt)
         response = observe(observer, args.repository, run, attempt, artifact)
         for key, expected in (('repository', args.repository), ('run', run), ('attempt', attempt)):
@@ -276,6 +316,9 @@ def one_run(args, run, attempt):
             tree = body['subject'][0]['digest']['gitTree']
             source = body['subject'][0]['name']
             checks = sorted(body['predicate']['observed'].get('checks', {}))
+            if skipped & set(checks):
+                summary.setdefault('skip_taken', []).append({'record': record, 'checks': sorted(skipped & set(checks))})
+                continue
             entry = {'record': record, 'tier': tier, 'checks': checks, 'tree': tree,
                      'verified': False, 'newly_recorded': bool(produced.get('newly_recorded'))}
             summary['records'].append(entry)
@@ -369,6 +412,8 @@ def write_summary(summary):
                      f'signing latency {metrics.get("signing_latency_ms")} ms')
     if summary.get('trust_limitation'):
         lines.append(f'- trust limitation: {summary["trust_limitation"]}')
+    for taken in summary.get('skip_taken', []):
+        lines.append(f'- not recorded, the evidence gate skipped it in this run: `{", ".join(taken["checks"])}` (`{taken["record"]}`)')
     if summary.get('nothing_to_attest'):
         lines.append(f'- nothing to attest: {summary["nothing_to_attest"]}')
     for failure in summary.get('failures', []):
