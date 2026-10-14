@@ -1686,6 +1686,7 @@ export type SubjectNoteCreate = {
 };
 
 export type SubjectNoteResult = {
+  id: string;
   note: (SubjectNote | null);
 };
 

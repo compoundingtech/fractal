@@ -47,10 +47,12 @@ public struct SubjectNotes: Codable, Sendable, Equatable {
     public let notes: [SubjectNote]
 }
 public struct SubjectNoteResult: Codable, Sendable, Equatable {
+    public let id: String
     public let note: SubjectNote?
-    enum CodingKeys: String, CodingKey { case note }
+    enum CodingKeys: String, CodingKey { case id, note }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
         try container.encode(note, forKey: .note)
     }
 }

@@ -3034,6 +3034,7 @@ export type SubjectNote = typeof SubjectNote.Type
 export type SubjectNoteEncoded = typeof SubjectNote.Encoded
 
 export const SubjectNoteResult = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String.check(Schema.isPattern(new RegExp("^note/", "u"))),
   "note": Schema.OptionFromNullOr(SubjectNote)
 }).annotate({ identifier: "SubjectNoteResult" }))()
 export type SubjectNoteResult = typeof SubjectNoteResult.Type
