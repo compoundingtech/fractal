@@ -127,6 +127,12 @@ pub(super) fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunVi
     let mut inputs = captured?;
     let mut definitions = BTreeMap::<String, Option<DefinitionIndex>>::new();
     for view in &mut inputs.views {
+        // A pending available-to step or a draining run can become visible without joining a
+        // new generation. Record every candidate before filtering, as the shared work read does,
+        // so its own transition invalidates the seat's work.
+        smallclaims::touched::note_read(|| view.subject.clone());
+        smallclaims::touched::note_read(|| view.run.clone());
+        smallclaims::touched::note_read(|| view.generation.clone());
         let generation = generation_id_from_subject(&view.generation);
         if !definitions.contains_key(generation) {
             let mission = inputs

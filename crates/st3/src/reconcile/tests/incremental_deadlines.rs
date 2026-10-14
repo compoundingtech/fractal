@@ -676,6 +676,10 @@ fn mechanical_gate_does_not_accept_unproved_or_late_completion() {
             "wrong-incarnation" | "multiple-launches" | "mixed-launches"
         ) {
             fixture.launch_as("old-runner");
+        } else {
+            // Every case starts with a real fixture publication. The controls
+            // below invalidate its completion evidence, not its admission.
+            fixture.launch_as("runner");
         }
         assert!(matches!(
             fixture.mechanical().unwrap(),

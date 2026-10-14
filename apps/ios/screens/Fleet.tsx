@@ -10,6 +10,7 @@ import { useStore } from '../store';
 import { TABS } from '../tabs';
 import { theme } from '../theme';
 import { Button, Field, ListRow, Note, Screen, SectionHeader, T } from '../ui';
+import { QualitySection } from './Quality';
 import { UsageCard } from './Usage';
 import { UNPINNED_WARNING } from '../pairingProof';
 import { fabricTargetLabel } from '../fabricTarget';
@@ -62,6 +63,7 @@ export function FleetScreen() {
       <StatusLine />
       {inventoryGranted === false ? <Note>This member’s inventories are read, not followed.</Note> : null}
       <UsageCard />
+      <QualitySection />
       <SectionHeader title="machines" count={data.machines.length} />
       {data.machines.map(machine => <View key={machine.id}>
         <ListRow

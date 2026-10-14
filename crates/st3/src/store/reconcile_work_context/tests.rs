@@ -471,6 +471,7 @@ fn batched_work_metadata_keeps_seeded_real_handoff_carry_and_supersession() {
     let carried = &initial[pick];
     let handed = &initial[(pick + 1) % initial.len()];
     let claim = |actor: &str, key: &str| WorkRequest {
+        wait_ms: None,
         actor: Some(actor.into()),
         incarnation: Some(format!("{actor}-one")),
         summary: None,
@@ -691,6 +692,7 @@ fn claim_for_handoff(store: &Store, subject: &str) {
             subject,
             "claim",
             &WorkRequest {
+                wait_ms: None,
                 actor: Some(ACTOR.into()),
                 incarnation: Some("support-worker-one".into()),
                 summary: None,

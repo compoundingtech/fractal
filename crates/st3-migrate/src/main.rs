@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
-use st2::eval_spec::{Check, JsonScalar, JudgeKind, Spec as EvalSpec};
+use st_drivers::eval_spec::{Check, JsonScalar, JudgeKind, Spec as EvalSpec};
 use walkdir::WalkDir;
 
 const WAIT_TEAM_DONE: &[u8] = include_bytes!("../assets/wait-team-done.sh");
@@ -218,7 +218,7 @@ fn migrate_evals(args: TreeArgs) -> Result<()> {
     let mut report = new_report("evals", &args);
     for input in eval_definition_files(&args.input)? {
         let source = fs::read_to_string(&input)?;
-        let spec = match st2::eval_spec::parse_spec(&source) {
+        let spec = match st_drivers::eval_spec::parse_spec(&source) {
             Ok(spec) if spec.eval.is_some() => spec,
             Ok(_) => continue,
             Err(error) => {
@@ -266,7 +266,7 @@ fn transform_declaration(source: &str, running: Option<bool>) -> Result<String> 
     let document: KdlDocument = source
         .parse()
         .with_context(|| format!("parse legacy checkpoint KDL after harness rewrite:\n{source}"))?;
-    let version = st2::kdl_version::document_version(&document)?;
+    let version = agent_spec::kdl_version::document_version(&document)?;
     let roots = document
         .nodes()
         .iter()
@@ -276,7 +276,7 @@ fn transform_declaration(source: &str, running: Option<bool>) -> Result<String> 
         return Ok(source.to_owned());
     }
     anyhow::ensure!(
-        st2::kdl_version::ST2_KDL_VERSIONS.contains(&version),
+        agent_spec::kdl_version::ST2_KDL_VERSIONS.contains(&version),
         "the source uses unsupported KDL version {version}"
     );
     anyhow::ensure!(!document.nodes().is_empty(), "the declaration is empty");
@@ -1067,7 +1067,7 @@ fn slug(value: &str) -> String {
 /// sends as a message because an st harness takes no startup prompt.
 fn write_eval_agent(
     output: &mut String,
-    agent: &st2::eval_spec::SpecAgent,
+    agent: &st_drivers::eval_spec::SpecAgent,
     restart: &str,
     host: &str,
 ) -> Option<String> {
@@ -1285,7 +1285,7 @@ fn infer_model(command: &str) -> Option<String> {
         .map(|pair| pair[1].trim_matches(['\'', '"']).to_owned())
 }
 
-fn infer_agent_model(agent: &st2::eval_spec::SpecAgent) -> Option<String> {
+fn infer_agent_model(agent: &st_drivers::eval_spec::SpecAgent) -> Option<String> {
     match agent.driver.as_ref() {
         Some(Driver::Claude(driver)) => driver.model.clone(),
         Some(Driver::Codex(driver)) => driver.model.clone(),
@@ -1804,7 +1804,7 @@ agent "worker" {
               }
             }
         "#;
-        let spec = st2::eval_spec::parse_spec(source).unwrap();
+        let spec = st_drivers::eval_spec::parse_spec(source).unwrap();
         let cell = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
 
@@ -1869,7 +1869,7 @@ agent "worker" {
               judges { judge "result" { exec "true" } }
             }
         "#;
-        let spec = st2::eval_spec::parse_spec(source).unwrap();
+        let spec = st_drivers::eval_spec::parse_spec(source).unwrap();
         let cell = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
 
@@ -1900,7 +1900,7 @@ agent "worker" {
               judges { judge "result" { exec "true" } }
             }
         "#;
-        let spec = st2::eval_spec::parse_spec(source).unwrap();
+        let spec = st_drivers::eval_spec::parse_spec(source).unwrap();
         let cell = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
 

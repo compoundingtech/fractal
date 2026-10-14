@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Harness drivers, native delivery, and catalog support shared by st2 and st3"
 license = "MIT"
-build = "../../build.rs"
+build = "build.rs"
 autotests = false
 
 [dependencies]

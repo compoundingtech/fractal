@@ -5,7 +5,7 @@ set -Eeuo pipefail
 JQ_BIN=${ST3_SOAK_JQ_BIN:-$(command -v jq)}
 STATE_DIR=${ST3_SOAK_IDLE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/st3/idle-soak}
 LOG=${ST3_IDLE_REPORT_LOG:-$STATE_DIR/events.jsonl}
-NOW=${ST3_IDLE_REPORT_NOW_UNIX:-$(/bin/date -u +%s)}
+NOW=${ST3_IDLE_REPORT_NOW_UNIX:-$(date -u +%s)}
 DURATION=${ST3_IDLE_REPORT_DURATION_SECONDS:-86400}
 MAX_GAP=${ST3_IDLE_REPORT_MAX_GAP_SECONDS:-180}
 MIN_SAMPLES=${ST3_IDLE_REPORT_MIN_SAMPLES:-1200}
@@ -20,7 +20,7 @@ inputs=("$LOG")
 remote_rows=
 if [[ ${ST3_IDLE_REPORT_REMOTE:-0} == 1 ]]; then
   : "${FABRIC_BIN:?set FABRIC_BIN to the installed Fabric executable}"
-  if ! remote_rows=$(/usr/bin/timeout -k 5s 120s "$FABRIC_BIN" exec example-mac -- \
+  if ! remote_rows=$(timeout -k 5s 120s "$FABRIC_BIN" exec example-mac -- \
     /bin/sh -c 'exec /bin/cat "$HOME/.local/state/st3/idle-soak/events.jsonl"'); then
     echo 'ExampleMac idle evidence is unavailable through Fabric' >&2
     exit 1
@@ -70,5 +70,5 @@ report=$("$JQ_BIN" -sc --argjson now "$NOW" --argjson duration "$DURATION" \
   [analyze("example-linux"; 15), analyze("example-mac"; 50)] as $hosts |
   {pass:($hosts | all(.pass)), window_seconds:$duration, hosts:$hosts}
 ' "${inputs[@]}" 3<<<"$remote_rows")
-/usr/bin/printf '%s\n' "$report"
+printf '%s\n' "$report"
 "$JQ_BIN" -e '.pass' <<<"$report" >/dev/null
