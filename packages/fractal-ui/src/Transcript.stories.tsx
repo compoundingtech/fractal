@@ -72,6 +72,7 @@ export const AdjacentReasoning: Story = {
     await expect(canvas.getAllByRole('button', { name: 'Thinking' })).toHaveLength(1)
   },
 }
+export const AdjacentReasoningLight: Story = { ...AdjacentReasoning, args: { scheme: 'light' } }
 export const Settled: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })

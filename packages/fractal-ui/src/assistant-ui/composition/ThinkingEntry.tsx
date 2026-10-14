@@ -11,7 +11,7 @@ export function ThinkingEntry({ text: value, streaming = false }: { text: string
   return <ThinkingDisclosure streaming={streaming}><Markdown text={value} streaming={streaming} /></ThinkingDisclosure>
 }
 
-/** One disclosure per adjacent run; source ids and individual Markdown boundaries remain intact. */
+/** One disclosure for a turn's reasoning; source ids and individual Markdown boundaries remain intact. */
 export function ThinkingRun({ items }: { readonly items: readonly ReasoningItem[] }) {
   return <ThinkingDisclosure streaming={items.some(item => item.streaming)}>
     {items.map(item => <div key={item.id} data-conversation-entry-id={item.id}><Markdown text={item.text} streaming={item.streaming} /></div>)}
