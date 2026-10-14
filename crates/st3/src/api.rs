@@ -1683,6 +1683,11 @@ fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
     if code == Some(published_lists::WORK_LIST_ENDED) {
         return false;
     }
+    // An unconfirmed mutation needs the exact original request, not a generic
+    // transient retry that might replace its identity or its signed bytes.
+    if code == Some("message-send-unconfirmed") {
+        return false;
+    }
     if matches!(code, Some(
         "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired"
         | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle"
@@ -1762,6 +1767,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "blob-expired"
         | "database-busy"
         | "database-locked"
+        | "message-send-unconfirmed"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" => "validation-failed".into(),
         "launch-review-not-authorized"
