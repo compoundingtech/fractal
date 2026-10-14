@@ -213,6 +213,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
                         in_reply_to: None,
                         session_id: None,
                         tags: vec![],
+                        kind: st3_client::MessageKind::Wake,
                         attachments: vec![],
                         signature: None,
                     },
@@ -923,13 +924,9 @@ agent "example/operations/coordinator" {
     value(
         &run_cli(
             &socket,
-            &[
-                "agents",
-                "apply",
-                parent.to_str().unwrap(),
-                "--as",
-                "person/operator",
-            ],
+            &["apply", "--no-gate-check", parent.to_str().unwrap(),
+            "--as",
+            "person/operator",],
         )
         .await,
     );
@@ -951,7 +948,7 @@ agent "example/operations/deputy" {
     let applied = run_cli_with_agent_env(
         &socket,
         actor,
-        &["agents", "apply", deputy.to_str().unwrap(), "--as", actor],
+        &["apply", "--no-gate-check", deputy.to_str().unwrap(), "--as", actor],
     )
     .await;
     value(&applied);
@@ -968,13 +965,9 @@ agent "example/operations/deputy" {
         &run_cli_with_agent_env(
             &socket,
             actor,
-            &[
-                "missions",
-                "publish",
-                mission.to_str().unwrap(),
-                "--as",
-                actor,
-            ],
+            &["apply", mission.to_str().unwrap(),
+            "--as",
+            actor,],
         )
         .await,
     );
@@ -2925,6 +2918,7 @@ mission "reported-work" state="ready" {
     let (docs, build) = (step("docs"), step("build"));
     let seat = build.assigned_to.clone().unwrap();
     let request = |key: &str, summary: &str| st3::model::WorkRequest {
+        wait_ms: None,
         actor: Some(seat.clone()),
         incarnation: Some("reporter:1".into()),
         summary: Some(summary.into()),
@@ -3031,6 +3025,28 @@ mission "reported-work" state="ready" {
         reported("docs")["completion_summary"],
         "Published the guide"
     );
+
+    let shown = run_cli_human(&socket, &["work", "show", &docs.subject]).await;
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    assert!(
+        String::from_utf8(shown.stdout)
+            .unwrap()
+            .contains("Submitted incarnation: reporter:1")
+    );
+    let shown = value(&run_cli(&socket, &["work", "show", &docs.subject]).await);
+    assert_eq!(shown["value"]["submitted_incarnation"], "reporter:1");
+    assert!(shown["value"]["claimant"].is_null());
+    assert!(shown["value"]["claim_incarnation"].is_null());
+    let client = st3_client::Client::unix_as(&socket, "person/requester");
+    let resource = client.work_get(&docs.subject).await.unwrap().value;
+    let st3_client::Resource::Work(work) = resource else {
+        panic!("expected typed work")
+    };
+    assert_eq!(work.submitted_incarnation.as_deref(), Some("reporter:1"));
 
     server.abort();
 }
@@ -3627,6 +3643,12 @@ async fn serve_creation_api(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let store = store.clone();
             async move {
+                // This fixture supplies provider observations without launching a binary.
+                if request.uri().path() == "/v1/harnesses" {
+                    return axum::response::IntoResponse::into_response(axum::Json(serde_json::json!({
+                        "api_version": "st3.v1", "value": ["omp"]
+                    })));
+                }
                 let applied = matches!(
                     request.uri().path(),
                     "/v1/intent/apply" | "/v1/client/actions"
@@ -3719,13 +3741,9 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
         value(
             &run_cli(
                 &socket,
-                &[
-                    "agents",
-                    "apply",
-                    source.to_str().unwrap(),
-                    "--as",
-                    "person/avery",
-                ],
+                &["apply", "--no-gate-check", source.to_str().unwrap(),
+                "--as",
+                "person/avery",],
             )
             .await,
         );
@@ -3837,13 +3855,9 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
     value(
         &run_cli(
             &socket,
-            &[
-                "agents",
-                "apply",
-                source.to_str().unwrap(),
-                "--as",
-                "person/avery",
-            ],
+            &["apply", "--no-gate-check", source.to_str().unwrap(),
+            "--as",
+            "person/avery",],
         )
         .await,
     );
@@ -4073,13 +4087,9 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
     value(
         &run_cli(
             &socket,
-            &[
-                "missions",
-                "publish",
-                mission.to_str().unwrap(),
-                "--as",
-                "person/avery",
-            ],
+            &["apply", mission.to_str().unwrap(),
+            "--as",
+            "person/avery",],
         )
         .await,
     );
@@ -4492,5 +4502,213 @@ async fn provenance_is_visible_in_show_preview_and_revise() {
             .unwrap()
             .is_none()
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn note_cli_round_trip_uses_configured_person_and_preserves_metadata() {
+    let root = tempfile::tempdir().unwrap();
+    let config_home = root.path().join("config");
+    std::fs::create_dir_all(config_home.join("st3")).unwrap();
+    std::fs::write(
+        config_home.join("st3/config.toml"),
+        "person = \"person/avery\"\n",
+    ).unwrap();
+    let state = test_state(root.path());
+    let fleet = "3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69";
+    let key = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
+    state.store.bind_fleet(fleet).unwrap();
+    state.store.pin_fleet_anchor(key.public()).unwrap();
+    state.store.set_member_key(Some(key.clone())).unwrap();
+    state.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+    state.store.append_claim(&ClaimInput {
+        subject: format!("daemon/{}", state.node),
+        kind: "daemon.started".into(),
+        actor: None,
+        fields: serde_json::from_value(serde_json::json!({
+            "status": "running", "features": {"person_directive_note": 1}
+        })).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let socket = root.path().join("st3.sock");
+    let served = socket.clone();
+    let app = st3::api::router(state.clone());
+    let server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    for _ in 0..200 {
+        if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let set = value(&run_lane_cli(&socket, &config_home, None, true, &[
+        "note", "set", "Approval-looking words do not approve a gate",
+        "--expires-at", "2099-01-01T00:00:00Z",
+    ]).await);
+    assert_eq!(set["note"]["person"], "person/avery");
+    assert_eq!(set["note"]["author"], "person/avery");
+    assert_eq!(set["note"]["text"], "Approval-looking words do not approve a gate");
+    assert!(set["note"]["time"].as_str().is_some_and(|time| !time.is_empty()));
+    assert!(set["note"]["revision"].as_str().is_some_and(|revision| !revision.is_empty()));
+    let read = value(&run_lane_cli(&socket, &config_home, None, true, &["note"]).await);
+    assert_eq!(read["notes"][0], set["note"]);
+    let human = run_lane_cli(&socket, &config_home, None, false, &["note"]).await;
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Approval-looking words"));
+    let unrelated = value(&run_lane_cli(&socket, &config_home, None, true, &[
+        "note", "--actor", "person/other",
+    ]).await);
+    assert_eq!(unrelated["notes"], serde_json::json!([]));
+    let replaced = value(&run_lane_cli(&socket, &config_home, None, true, &[
+        "note", "set", "New context",
+    ]).await);
+    assert_ne!(replaced["note"]["revision"], set["note"]["revision"]);
+    assert!(replaced["note"]["expires_at"].is_null());
+    let cleared = value(&run_lane_cli(&socket, &config_home, None, true, &["note", "clear"]).await);
+    assert!(cleared["note"].is_null());
+    let empty = value(&run_lane_cli(&socket, &config_home, None, true, &["note"]).await);
+    assert_eq!(empty["notes"], serde_json::json!([]));
+    let _expired = value(&run_lane_cli(&socket, &config_home, None, true, &[
+        "note", "set", "Old context", "--expires-at", "2000-01-01T00:00:00Z",
+    ]).await);
+    let expired_read = value(&run_lane_cli(&socket, &config_home, None, true, &["note"]).await);
+    assert_eq!(expired_read["notes"], serde_json::json!([]));
+    for args in [
+        vec!["note", "set", "   "],
+        vec!["note", "set", "context", "--expires-at", "not-a-timestamp"],
+    ] {
+        let output = run_lane_cli(&socket, &config_home, None, true, &args).await;
+        assert!(!output.status.success());
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn note_cli_harness_cannot_write_or_borrow_configured_person() {
+    let root = tempfile::tempdir().unwrap();
+    let config_home = root.path().join("config");
+    std::fs::create_dir_all(config_home.join("st3")).unwrap();
+    std::fs::write(config_home.join("st3/config.toml"), "person = \"person/avery\"\n").unwrap();
+    let socket = root.path().join("absent.sock");
+    for args in [
+        vec!["note", "set", "context"],
+        vec!["note", "clear"],
+        vec!["note", "clear", "--actor", "person/avery"],
+        vec!["note", "--actor", "person/avery"],
+    ] {
+        let output = run_lane_cli(&socket, &config_home, Some("agent/helper"), true, &args).await;
+        let refusal = failure(&output);
+        assert!(refusal.contains("agent"), "{refusal}");
+        assert!(!refusal.contains("daemon"), "{refusal}");
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mission_and_work_detail_reads_ignore_script_actor_with_one_notice() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let store = state.store.clone();
+    let intent = st3::graph::parse_intent(
+        r#"version 2
+mission "orchid-actor" state="ready" {
+  goal "Check read actor compatibility."
+  step "build" { assigned-to "person/avery" }
+}
+"#,
+        store.origin(),
+    )
+    .unwrap();
+    store.apply_internal(&intent, "cli-read-actor").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "orchid-actor".into(),
+            revision: None,
+            workspace: root.path().to_str().unwrap().into(),
+            requester: Some("person/avery".into()),
+            mode: Some("run".into()),
+            inputs: Default::default(),
+            idempotency_key: "cli-read-actor".into(),
+        })
+        .unwrap();
+    let socket = root.path().join("st3.sock");
+    let served = socket.clone();
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        st3::api::serve_unix_with_ready(&served, st3::api::router(state), || {
+            ready.send(()).unwrap();
+        })
+        .await
+    });
+    started.await.unwrap();
+    for (command, subject) in [
+        ("missions", run.subject.as_str()),
+        ("work", run.steps[0].subject.as_str()),
+    ] {
+        let plain_human = run_cli_human(&socket, &[command, "show", subject]).await;
+        assert!(
+            plain_human.status.success(),
+            "{}",
+            String::from_utf8_lossy(&plain_human.stderr)
+        );
+        let plain_json = value(&run_cli(&socket, &[command, "show", subject]).await);
+        for actor in ["agent/example/operator", "person/avery"] {
+            for json in [false, true] {
+                let args = [command, "show", subject, "--as", actor];
+                let output = if json {
+                    run_cli(&socket, &args).await
+                } else {
+                    run_cli_human(&socket, &args).await
+                };
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .lines()
+                        .collect::<Vec<_>>(),
+                    ["st: --as is ignored for this read; no actor is required"]
+                );
+                if json {
+                    let returned = value(&output);
+                    // Work detail includes a per-request envelope; compare its resource.
+                    if command == "work" {
+                        assert_eq!(returned["value"], plain_json["value"]);
+                    } else {
+                        assert_eq!(returned, plain_json);
+                    }
+                } else {
+                    assert_eq!(output.stdout, plain_human.stdout);
+                }
+            }
+        }
+        let seat_read = run_cli_with_agent_env(
+            &socket,
+            "agent/example/seat",
+            &[command, "show", subject, "--as", "person/avery"],
+        )
+        .await;
+        let returned = value(&seat_read);
+        assert_eq!(
+            String::from_utf8_lossy(&seat_read.stderr)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["st: --as is ignored for this read; no actor is required"]
+        );
+        if command == "work" {
+            assert_eq!(returned["value"], plain_json["value"]);
+        } else {
+            assert_eq!(returned, plain_json);
+        }
+        let help = run_cli_human(&socket, &[command, "show", "--help"]).await;
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(help.contains("--as <ACTOR>"), "{help}");
+        assert!(help.contains("ignored with one notice"), "{help}");
+    }
     server.abort();
 }

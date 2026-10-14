@@ -5,18 +5,15 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Option from 'effect/Option'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { observed, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
-import { SidebarAgentRow } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import { within } from 'storybook/test'
-import { sidebarRow } from './sidebarRow.ts'
-import { fleetFromAgents } from '../data/projections.ts'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: (...styles: unknown[]) => ({ 'data-style-contract': JSON.stringify(Object.assign({}, ...styles.filter(style => typeof style === 'object' && style !== null))) }) }))
+vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
 const gateway = 'gateway.example.invalid'
 const agent = decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle', blocked_on: null, fault: null, revision: '1', updated_at: '2026-10-04T12:00:00.000Z' })
@@ -75,24 +72,6 @@ const footerStatus = () => sidebar().querySelector('footer [role="status"]')!
 
 // Both the real data derivation and the kit's SidebarAgentRow DOM participate.
 describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
-  it('keeps the flat production row name equal to its visible identity and status in its description', async () => {
-    const item = sidebarRow({ agent: fleetFromAgents([agent]).agents[0]!, stale: false, now: 5000 })
-    await act(async () => root.render(<SidebarAgentRow item={item} now={5000} layout="SR2-A" extraSignals={[]} onOpen={() => undefined} />))
-    const row = host.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
-    const visibleName = [row.querySelector('[data-row-column="title-text"]')!.textContent, row.querySelector('[data-row-field="host"]')!.textContent].join(' ')
-    const button = within(row).getByRole('button', { name: visibleName })
-    expect(button.hasAttribute('aria-label')).toBe(false)
-    const description = document.getElementById(button.getAttribute('aria-describedby')!)!.textContent
-    expect(description).toContain(item.statusLabel)
-    expect(description).not.toMatch(/unknown|unread/i)
-    // Restore the old naming policy: the same accessible-name criterion must reject it.
-    const labelledBy = button.getAttribute('aria-labelledby')!
-    button.removeAttribute('aria-labelledby')
-    button.setAttribute('aria-label', `${item.title}, ${item.statusLabel}, unread unknown`)
-    expect(within(row).queryByRole('button', { name: visibleName })).toBeNull()
-    button.removeAttribute('aria-label')
-    button.setAttribute('aria-labelledby', labelledBy)
-  })
   it('dismisses the hovered row on navigation while preserving every roster node', async () => {
     const other: Agent = { ...agent, id: 'agent/other', name: 'Other Agent' }
     registry.set(agents, observed({ value: [agent, other] }))
@@ -152,49 +131,47 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
   })
 })
 
-describe('kit sidebar time placement', () => {
-  it.each([undefined, 0, 2])('names the same flat row from name, host and harness with reported unread=%s', async unread => {
-    const item = { ref: 'agent/atlas', id: 'atlas', title: 'Atlas Builder', host: 'host-1', harness: 'seat-1', status: 'unobserved', statusLabel: 'Not observed', freshness: 'live', children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, unread } as const
-    await act(async () => root.render(<SidebarAgentRow item={item} now={5000} layout="SR2-B" extraSignals={['X-model']} onOpen={() => undefined} />))
-    const row = host.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
-    const button = within(row).getByRole('button', { name: 'Atlas Builder host-1 seat-1' })
-    const description = document.getElementById(button.getAttribute('aria-describedby')!)!.textContent
-    expect(description).toContain('Not observed')
-    expect(description).not.toMatch(/unknown/i)
-    if (unread === undefined) expect(description).not.toMatch(/unread/i)
-    else expect(description).toContain(`Unread: ${unread}`)
-  })
-  it('reclaims the time track for nested titles while retaining time and the status glyph', async () => {
-    const item = { ref: 'agent/example', id: 'agent/example', title: 'Example Agent', host: 'host/example', status: 'idle', statusLabel: 'Idle', freshness: 'live', children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Known', at: 4000, kind: 'turn-completed' } } as const
-    const mountRow = async (timePlacement: 'column' | 'subtitle') => {
-      await act(async () => root.render(<SidebarAgentRow inTree item={item} now={5000} extraSignals={[]} timePlacement={timePlacement} />))
-      return host.querySelector('[data-testid="taste-agent-row"]')!
+describe('shipped live sidebar machine query', () => {
+  it('applies typed hosts to the real roster and preserves substring text and stripped highlights', async () => {
+    const candidates: readonly Agent[] = [
+      { ...agent, id: 'agent/compiler', name: 'Compiler Alpha', host_id: Option.some('host/dev3') },
+      { ...agent, id: 'agent/sidebar', name: 'Sidebar Beta', host_id: Option.some('host/DEV5') },
+      // Text looks like a matching host but must not satisfy a machine facet.
+      { ...agent, id: 'agent/decoy', name: 'Compiler dev3 decoy', host_id: Option.some('host/laptop24') },
+    ]
+    registry.set(agents, observed({ value: candidates }))
+    await mount(1440)
+    const input = sidebar().querySelector<HTMLInputElement>('input')!
+    expect(input.getAttribute('aria-description')).toMatch(/machine:.*host:/)
+    const search = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
     }
-    // jsdom cannot measure layout. Assert the real kit's emitted grid contract instead;
-    // browser measurements cover the resulting pixels, including fonts and RAC padding.
-    const column = await mountRow('column')
-    const previousGrid = JSON.parse(column.getAttribute('data-style-contract')!).gridTemplateColumns
-    expect(previousGrid).toContain('var(--sidebar-metric-track')
-    expect(column.querySelector('[data-row-column="time"] [data-row-field="last-turn"]')).not.toBeNull()
-    const subtitle = await mountRow('subtitle')
-    const nextGrid = JSON.parse(subtitle.getAttribute('data-style-contract')!).gridTemplateColumns
-    expect(nextGrid).toContain('0px 0px max-content')
-    expect(nextGrid).not.toContain('var(--sidebar-metric-track')
-    // Real 1440x900 browser fixture: the flat reference title at 256px is 170px.
-    // Read the emitted kit geometry, not jsdom's (nonexistent) layout. RAC's live
-    // tree adds no inset; the roster contributes 8px on each side and hierarchy 8px.
-    const geometry = JSON.parse(subtitle.getAttribute('data-style-contract')!)
-    const signals = JSON.parse(subtitle.querySelector('[data-row-trailing-signals]')!.getAttribute('data-style-contract')!)
-    const px = (value: string) => Number.parseFloat(value)
-    for (const level of [2, 3]) {
-      const width = 256 - 16 - (level - 1) * 8 - 2 * px(geometry.paddingInline)
-        - px(nextGrid) - px(signals.minWidth) - px(signals.marginInlineStart) - 3 * px(geometry.columnGap)
-      expect(width, `level ${level} versus measured flat reference`).toBeGreaterThanOrEqual(170)
+    const names = () => [...roster().querySelectorAll('[data-testid="taste-agent-row"]')].map(row => row.textContent)
+    expect(names()).toHaveLength(3)
+    for (const [query, expected] of [
+      ['machine:dev3', ['Compiler Alpha']],
+      ['machine:dev3,dev5', ['Compiler Alpha', 'Sidebar Beta']],
+      ['HOST:DEV', ['Compiler Alpha', 'Sidebar Beta']],
+      ['machine:dev host:dev3', ['Compiler Alpha']],
+      ['machine:dev3 host:dev5', []],
+      ['machine:dev9', []],
+      ['machine: host:,,', ['Compiler Alpha', 'Sidebar Beta', 'Compiler dev3 decoy']],
+      ['Alpha machine:DEV', ['Compiler Alpha']],
+      ['cmp machine:dev', []],
+      ['dev3', ['Compiler Alpha', 'Compiler dev3 decoy']],
+      ['machine:host/dev3', []],
+    ] as const) {
+      await search(query)
+      expect(names()).toHaveLength(expected.length)
+      expected.forEach(name => expect(roster().textContent).toContain(name))
     }
-    expect(subtitle.querySelector('[data-row-column="time"]')).toBeNull()
-    expect(subtitle.querySelector('[data-row-column="subtitle"] [data-row-field="last-turn"]')).not.toBeNull()
-    expect(subtitle.querySelector('[data-row-column="status"]')).not.toBeNull()
-    // Negative control: the unchanged/default layout cannot satisfy the reclaimed-track contract.
-    expect(previousGrid).not.toContain('0px 0px max-content')
+    await search('machine:dev3')
+    expect(roster().querySelectorAll('mark')).toHaveLength(0)
+    await search('Alpha machine:dev3')
+    expect([...roster().querySelectorAll('mark')].map(mark => mark.textContent).join('')).toContain('Alpha')
+    expect([...roster().querySelectorAll('mark')].some(mark => mark.textContent?.includes('machine:'))).toBe(false)
   })
 })

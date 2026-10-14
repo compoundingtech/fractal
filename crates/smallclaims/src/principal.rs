@@ -144,6 +144,27 @@ pub struct ClaimSignature {
     pub signed_fields: Vec<String>,
 }
 
+/// The `attachments` entry of a `message.sent` claim that is the message's long body: the first
+/// of type `text/plain` with a 64-hex hash, a `host/` origin and a size of 1 byte to 256 KiB.
+/// Readers and the judge both take it from here, so a claim cannot verify against one body and
+/// display another.
+pub fn message_body_entry(attachments: &Value) -> Option<&Value> {
+    attachments.as_array()?.iter().find(|entry| {
+        entry.get("media_type").and_then(Value::as_str) == Some("text/plain")
+            && entry.get("sha256").and_then(Value::as_str).is_some_and(|hash| {
+                hash.len() == 64 && hash.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
+            && entry
+                .get("origin")
+                .and_then(Value::as_str)
+                .is_some_and(|origin| origin.starts_with("host/"))
+            && entry
+                .get("size")
+                .and_then(Value::as_u64)
+                .is_some_and(|size| (1..=256 * 1024).contains(&size))
+    })
+}
+
 /// A signature over named fields of a claim, laid out as text a device builds without CBOR:
 /// see [`fields_signing_bytes`].
 pub const FIELDS_FORMAT: &str = "fields-v1";

@@ -119,6 +119,8 @@ export const geometryVars = stylex.defineVars({
   sidebarThree: '68px', workExpandedMax: 'min(18rem, 50dvh)', timelineStub: '16px',
   transcriptFrameHeight: '640px',
   threadViewportMin: '96px',
+  polishNarrow: '440px', polishWide: '1440px',
+  changelogMax: '420px', changelogHeight: '560px',
   estimatedMessageHeight: '160px',
 
 })
@@ -134,7 +136,7 @@ export const geometryNumbers = {
   footer: 40,
   drawerMin: 120, drawerMax: 600,
   resizeStep: 8, resizeStepLarge: 32, splitMinRatio: 0.1, splitMaxRatio: 0.9,
-  tooltipOffset: 6, contextOffset: 8, scrollEndTolerance: 1, followAffordanceBand: 40,
+  tooltipOffset: 6, contextOffset: 8, scrollEndTolerance: 1,
   estimatedMessageHeight: 160,
   threadViewportMin: 96,
 } as const
@@ -143,9 +145,6 @@ export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',
   ease: 'ease', linear: 'linear',
 })
-
-/** Numeric twin for imperative motion that shares the standard duration. */
-export const motionNumbers = { standard: 200 } as const
 
 export const elevationVars = stylex.defineVars({
   popover: '0 18px 44px -18px rgb(0 0 0 / 80%)',

@@ -1,18 +1,18 @@
 {
   "schema": "effect-utils/buck2-pnpm-sha256/v2",
-  "lockfileFingerprint": "sha256:eae97317179cfa36e8ed623d8c8ed7e37e557b7eecc25e6a1a984f6424d3d12b",
+  "lockfileFingerprint": "sha256:c2decd459e502a604791d0b5e7b3e99f41d5e4605a5a49ea96fdf7b23c5c23e2",
   "source": "pnpm-lock.yaml",
   "generator": "buck2/dependencies/pnpm-lock.sha256.json.genie.ts",
   "regenerate": "devenv tasks run genie:run",
   "packages": {
-    "effect@4.0.0-rc.118": {
+    "effect@4.0.0": {
       "bins": {},
       "classification": "public",
-      "integrity": "sha512-hxhpCd+swzrtu9lnyPpEFre2ODQzJ9qxgyL1oHIEY8NKnW4PxTbM1XzplMZXiAsLD62HO+KJc41Nqxr9T791ZQ==",
-      "packageIdentity": "effect@4.0.0-rc.118",
-      "registryUrl": "https://registry.npmjs.org/effect/-/effect-4.0.0-rc.118.tgz",
-      "sha256": "e1ccff11ed06bf4a6a1a74307fbb233090144990704b9322deb7cffd81f3aadd",
-      "sizeBytes": 8907110
+      "integrity": "sha512-ooc1TG5t+FfzgYnFz2ff6BBKyZ7EwBRVXC7c4RhQUAD6/TZ2gTXXMeb4WX7a19ozQo4J73/QW+S00YAIresoMQ==",
+      "packageIdentity": "effect@4.0.0",
+      "registryUrl": "https://registry.npmjs.org/effect/-/effect-4.0.0.tgz",
+      "sha256": "eff6ca16140c491380cfdb4bcbc51be6a51f1ac2d402ebc8420e76ccf3e0e19a",
+      "sizeBytes": 8913724
     },
     "typescript@6.0.3": {
       "bins": {
@@ -27,5 +27,5 @@
       "sizeBytes": 4515854
     }
   },
-  "fingerprint": "sha256:a0755a465fd305d29d1b90c810aed670c279d4a2116a5930f08d8399cb248bca"
+  "fingerprint": "sha256:da0d5d011d8f05deee9dbd0931757d2a978e0a20ff883fd782a32312b3177786"
 }

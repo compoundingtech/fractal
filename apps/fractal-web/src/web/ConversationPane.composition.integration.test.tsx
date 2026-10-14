@@ -18,8 +18,6 @@ import type * as Kit from '@smalltalk/fractal-ui/assistant-ui'
 import type * as KitRuntime from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import type * as KitTranscript from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type * as KitComposer from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
-import type * as KitViewport from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
-import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import type { ConversationRuntimeOptions, TranscriptTurn } from '@smalltalk/fractal-ui/assistant-ui'
 import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
@@ -41,18 +39,11 @@ const source = vi.hoisted(() => ({
   send: vi.fn(),
   capabilities: vi.fn(),
   runtimeOptions: undefined as ConversationRuntimeOptions | undefined,
-  staticWorkLog: false,
+  setDraft: undefined as ((text: string) => void) | undefined,
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
-  transcriptHistories: [] as React.ComponentProps<typeof Kit.Transcript>['history'][],
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
   composerProps: [] as React.ComponentProps<typeof Kit.EmbraceComposer>[],
-  setDraft: undefined as ((text: string) => void) | undefined,
-  viewportCommits: [] as {
-    readonly anchorHistory: React.ComponentProps<typeof KitViewport.EmbraceScrollViewport>['anchorHistory']
-    readonly rowIds: readonly string[]
-    readonly renderedIds: readonly string[]
-  }[],
 }))
 
 vi.mock('../data/react.tsx', async () => {
@@ -68,13 +59,12 @@ vi.mock('../data/react.tsx', async () => {
   useGrants: () => ({ actions: 'ungranted', messageSend: source.sendEnabled ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
   })
 })
-
 // Tap the input seams but keep the real kit/runtime rendering and effects.
 vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx', async importOriginal => {
   const kit = await importOriginal<typeof KitRuntime>()
   const DraftProbe = () => {
     const aui = useAui()
-    source.setDraft = text => aui.composer().setText(text)
+    source.setDraft = text => aui.composer.setText(text)
     return null
   }
   return {
@@ -91,11 +81,9 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript
   return {
     ...kit,
     Transcript: (props: React.ComponentProps<typeof Kit.Transcript>) => {
-      source.transcriptHistories.push(props.history)
       source.transcriptTurns.push(props.turns)
       source.scrollToBottomKeys.push(props.scrollToBottomKey)
-      // Exercise the kit's read-only presentation without weakening the host's required navigation API.
-      return <kit.Transcript {...props} onOpenTool={source.staticWorkLog ? undefined : props.onOpenTool} />
+      return <kit.Transcript {...props} />
     },
   }
 })
@@ -106,24 +94,6 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx', 
     EmbraceComposer: (props: React.ComponentProps<typeof Kit.EmbraceComposer>) => {
       source.composerProps.push(props)
       return <kit.EmbraceComposer {...props} />
-    },
-  }
-})
-vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx', async importOriginal => {
-  const kit = await importOriginal<typeof KitViewport>()
-  return {
-    ...kit,
-    EmbraceScrollViewport: (props: React.ComponentProps<typeof KitViewport.EmbraceScrollViewport>) => {
-      React.useLayoutEffect(() => {
-        const lane = container.querySelector('[data-testid="transcript-scroll"]')
-        source.viewportCommits.push({
-          anchorHistory: props.anchorHistory,
-          rowIds: props.items.map(row => row.id),
-          renderedIds: Array.from(lane?.querySelectorAll('[data-item-id], [data-scroll-anchor-id]') ?? [],
-            row => row.getAttribute('data-item-id') ?? row.getAttribute('data-scroll-anchor-id')).filter((id): id is string => id !== null),
-        })
-      })
-      return <kit.EmbraceScrollViewport {...props} />
     },
   }
 })
@@ -151,13 +121,11 @@ beforeEach(() => {
   source.send.mockReset()
   source.capabilities.mockReset()
   source.runtimeOptions = undefined
-  source.staticWorkLog = false
+  source.setDraft = undefined
   source.runtimeItems = []
   source.transcriptTurns = []
-  source.transcriptHistories = []
   source.scrollToBottomKeys = []
   source.composerProps = []
-  source.viewportCommits = []
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   // jsdom has no layout observers; the kit instantiates one while attaching scroll.
   // Test-environment sizing (react-aria renders every row) needs no measured entries.
@@ -190,119 +158,6 @@ const mount = async (ux?: UxTelemetry) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
-  it('waits for actual source adoption without painting stranded rows or replacing the composer', async () => {
-    source.sendEnabled = true
-    source.feed = { _tag: 'Waiting' }
-    source.sync = { status: { _tag: 'Requested', since: 990 }, observedAt: 990 }
-    await mount()
-    expect(container.querySelector('[data-testid="transcript-placeholder"]')?.textContent).toBe('')
-    expect(container.querySelector('[data-testid="transcript-history-slot"]')).not.toBeNull()
-    const strandedPaints: Element[] = []
-    const observer = new MutationObserver(records => {
-      for (const record of records) for (const node of record.addedNodes) if (node instanceof Element) {
-        if (node.matches('[data-testid="transcript-stranded"]')) strandedPaints.push(node)
-        strandedPaints.push(...node.querySelectorAll('[data-testid="transcript-stranded"]'))
-      }
-    })
-    observer.observe(container, { childList: true, subtree: true })
-    const loadingInput = container.querySelector('textarea')
-    await act(async () => { source.setDraft!('Retain this unsent draft') })
-    loadingInput!.setSelectionRange(7, 11)
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: true, observation: { empty: false } } }
-    source.sync = { status: { _tag: 'Live', since: 1000 }, observedAt: 1000 }
-    try { await mount() } finally { observer.disconnect() }
-    expect(strandedPaints).toHaveLength(0)
-    const readyInput = container.querySelector('textarea')
-    expect(readyInput).toBe(loadingInput)
-    expect(readyInput?.value).toBe('Retain this unsent draft')
-    expect(readyInput?.selectionStart).toBe(7)
-    expect(readyInput?.selectionEnd).toBe(11)
-    expect(container.querySelector('[data-testid="transcript-placeholder"]')).toBeNull()
-    expect(container.querySelector('[data-testid="history-boundary"]')).not.toBeNull()
-    readyInput?.focus()
-    source.feed = { ...source.feed, value: { ...source.feed.value, items: [...scenario] } }
-    await mount()
-    expect(container.querySelector('textarea')).toBe(readyInput)
-    expect(document.activeElement).toBe(readyInput)
-    expect(readyInput?.selectionStart).toBe(7)
-    expect(readyInput?.selectionEnd).toBe(11)
-  })
-
-  it('keeps an overflowing visible suffix stable instead of growing it at idle, and finds older rows on demand', async () => {
-    const rows: ConversationItem[] = Array.from({ length: 30 }, (_, index) => ({
-      _tag: 'Text', id: `long-${index}`, role: 'assistant', text: `History row ${index}`, attachments: [], streaming: false, at: at(index),
-    }))
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: rows, hasOlder: false, observation: { empty: false } } }
-    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
-    const height = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      return this.dataset.testid === 'transcript-scroll' ? 1000 : 0
-    })
-    const client = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(700)
-    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      return new DOMRect(0, 0, 700, this.dataset.testid === 'transcript-turn' ? 500 : 700)
-    })
-    const idle = vi.fn((_task: () => void) => 1)
-    vi.stubGlobal('requestIdleCallback', idle)
-    vi.stubGlobal('cancelIdleCallback', () => {})
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0))
-    try {
-      await mount()
-      await act(async () => {
-        const { promise, resolve } = Promise.withResolvers<void>()
-        setTimeout(resolve, 25)
-        await promise
-      })
-      expect(text()).not.toContain('History row 0')
-      expect(text()).toContain('History row 29')
-      const before = container.querySelectorAll('[data-testid="transcript-message"]').length
-      await act(async () => { idle.mock.calls[0]?.[0]() })
-      expect(container.querySelectorAll('[data-testid="transcript-message"]')).toHaveLength(before)
-      expect(idle).not.toHaveBeenCalled()
-      const lane = container.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')!
-      expect(lane.dataset.followState).toBe('attached')
-      await act(async () => { lane.dispatchEvent(new Event('scroll')) })
-      expect(container.querySelectorAll('[data-testid="transcript-message"]')).toHaveLength(before)
-      await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true })) })
-      expect(text()).toContain('History row 0')
-    } finally { height.mockRestore(); client.mockRestore(); bounds.mockRestore() }
-  })
-
-  it.each([false, true])('groups all eleven reasoning entries of a work log into one disclosure (tool between=%s)', async separated => {
-    const reasoning: ConversationItem[] = Array.from({ length: 11 }, (_, index) => ({
-      _tag: 'Reasoning', id: `thought-${index}`, text: `Thought number ${index + 1}.`, streaming: false, at: at(index + 1),
-    }))
-    const items = separated ? [...reasoning.slice(0, 5), scenario[1]!, ...reasoning.slice(5)] : reasoning
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!, ...items, scenario[3]!], hasOlder: false, observation: { empty: false } } }
-    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
-    // Native find exposes the complete history before asserting the full-turn grouping.
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => setTimeout(() => callback(0), 0))
-    await mount()
-    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true })) })
-    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')!.click() })
-    // Grouping is asserted on the complete turn, including the older reasoning prefix.
-    await vi.waitFor(() => expect(container.querySelectorAll('[data-testid="thinking-entry"] button')).toHaveLength(1), { timeout: 5000 })
-    const disclosures = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="thinking-entry"] button')]
-    expect(disclosures).toHaveLength(1)
-    expect(disclosures.every(button => button.getAttribute('aria-expanded') === 'false')).toBe(true)
-    expect(text()).not.toContain('Thought number 1.')
-    for (const button of disclosures) await act(async () => { button.click() })
-    expect([...container.querySelectorAll('[data-testid="thinking-entry"] [data-conversation-entry-id]')].map(element => element.textContent))
-      .toEqual(reasoning.map(item => item._tag === 'Reasoning' ? item.text : ''))
-  })
-
-  it('does not recall pending, failed, or other-human transcript messages as submitted drafts', async () => {
-    const own = scenario[0]!
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [
-      own,
-      { ...own, id: 'pending/one', _tag: 'Text', role: 'user', text: 'Pending', attachments: [], streaming: false, at: at(1), sendState: { _tag: 'Pending' } },
-      { _tag: 'Text', id: 'failed', role: 'user', text: 'Failed', attachments: [], streaming: false, at: at(2), sendState: { _tag: 'Failed', reason: 'failed', detail: 'Refused' } },
-      { _tag: 'Text', id: 'other', role: 'user', text: 'Other human', attachments: [], streaming: false, at: at(3), sender: { kind: 'human', label: 'Other person' } },
-    ], hasOlder: false, observation: { empty: false } } }
-    await mount()
-    expect(source.composerProps.at(-1)?.history).toBeUndefined()
-    expect(source.composerProps.at(-1)?.historySource?.available).toBe(false)
-    expect(source.composerProps.at(-1)?.historySource?.get()).toEqual([])
-  })
   it('insets the composer dock so its focus outline stays inside the viewport', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     await mount()
@@ -360,69 +215,6 @@ describe('ConversationPane composition activation', () => {
       client.mockRestore()
       if (elementFromPoint === undefined) Reflect.deleteProperty(document, 'elementFromPoint')
       else Object.defineProperty(document, 'elementFromPoint', elementFromPoint)
-    }
-  })
-  it.each([true, false])('restores a leading partial work summary after prefix and prompt backfill (hasOlder=%s)', async hasOlder => {
-    const store = new ViewportStore()
-    let summaryTop = 925
-    const height = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(3000)
-    const client = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400)
-    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      const lane = this.closest<HTMLElement>('[data-testid="transcript-scroll"]')
-      const top = this.hasAttribute('data-scroll-anchor-id') ? summaryTop - (lane?.scrollTop ?? 0) : 0
-      return { top, bottom: top + 200, left: 0, right: 800, width: 800, height: 200, x: 0, y: top, toJSON: () => ({}) }
-    })
-    const point = Object.getOwnPropertyDescriptor(document, 'elementFromPoint')
-    Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => container.querySelector('[data-scroll-anchor-id]') })
-    const frames = new Map<number, FrameRequestCallback>()
-    let nextFrame = 0
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++nextFrame, callback); return nextFrame })
-    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
-    const flush = async () => {
-      await act(async () => {
-        const pending = [...frames.values()]
-        frames.clear()
-        pending.forEach(callback => callback(0))
-      })
-    }
-    const show = async (key: string, items: readonly ConversationItem[], older: boolean) => {
-      source.feed = { _tag: 'Observed', freshness: 'live', value: { items, hasOlder: older, observation: { empty: false } } }
-      source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
-      await act(async () => root!.render(<ViewportStoreContext.Provider value={store}><ConversationPane agentRef={key} agentName="Example Agent" onOpenTool={call => opened.push(call)} /></ViewportStoreContext.Provider>))
-      await flush()
-      return container.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')!
-    }
-    const earlier: ConversationItem = { ...scenario[1]!, id: 'earlier-tool', _tag: 'ToolCall', callId: 'earlier-call', name: 'read', input: {}, status: 'success', callSeen: true, at: at(0) }
-    try {
-      const lane = await show('a', scenario.slice(1, 5), true)
-      await act(async () => {
-        lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -900 }))
-        lane.scrollTop = 901
-        lane.dispatchEvent(new Event('scroll'))
-      })
-      await flush()
-      await show('b', scenario.slice(0, 5), false)
-      expect(store.get('a')?.anchor).toMatchObject({ id: '["work-summary","read"]', offset: 24 })
-      if (hasOlder) {
-        summaryTop += 300
-        const prefixed = await show('a', [earlier, ...scenario.slice(1, 5)], true)
-        expect(prefixed.querySelector('[data-scroll-anchor-id]')?.getBoundingClientRect().top).toBe(24)
-        await show('b', scenario.slice(0, 5), false)
-      }
-      summaryTop += 300
-      // A bounded window may omit the captured member even while its summary is mounted.
-      const newerWork = Array.from({ length: 12 }, (_, index): ConversationItem => ({ ...earlier, id: `newer-tool/${index}`, callId: `newer-call/${index}` }))
-      const completed = await show('a', [scenario[0]!, earlier, ...scenario.slice(1, 5), ...newerWork], hasOlder)
-      expect(completed.querySelector('[data-scroll-anchor-id]')?.getAttribute('data-scroll-anchor-id')).toBe('["work-summary","p1"]')
-      expect(JSON.parse(completed.querySelector('[data-scroll-anchor-id]')!.getAttribute('data-scroll-anchor-members')!)).toContain('read')
-      expect(completed.querySelector('[data-scroll-anchor-id]')?.getBoundingClientRect().top).toBe(24)
-      expect(completed.scrollTop).toBe(hasOlder ? 1501 : 1201)
-    } finally {
-      height.mockRestore()
-      client.mockRestore()
-      bounds.mockRestore()
-      if (point === undefined) Reflect.deleteProperty(document, 'elementFromPoint')
-      else Object.defineProperty(document, 'elementFromPoint', point)
     }
   })
   it('restores a detached conversation across switches and eviction, but reload follows the end', async () => {
@@ -678,143 +470,6 @@ describe('ConversationPane composition activation', () => {
     expect(container.querySelector('[data-testid="history-boundary"] button')).toBeNull()
   })
 
-  it.each(['interactive', 'static'] as const)('gives source-rendered tool, thinking and %s work-summary rows persistable leaf ids', async presentation => {
-    source.staticWorkLog = presentation === 'static'
-    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
-    const show = async (items: readonly ConversationItem[]) => {
-      source.feed = { _tag: 'Observed', freshness: 'live', value: { items, hasOlder: false, observation: { empty: false } } }
-      await act(async () => root!.render(<ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} />))
-    }
-    await show(scenario.slice(0, 5))
-    const turn = container.querySelector('[data-testid="transcript-turn"]')!
-    const summary = turn.querySelector<HTMLElement>('[data-testid="work-log"] > button, [data-testid="work-log"] > div')!
-    expect(summary.getAttribute('data-scroll-anchor-id')).toBe('["work-summary","p1"]')
-    if (presentation === 'interactive') await act(async () => { summary.click() })
-    const tool = turn.querySelector('[data-tool-status]')!
-    const thinking = turn.querySelector('[data-testid="thinking-entry"]')!
-    expect(tool.getAttribute('data-item-id')).toBe('read')
-    expect(thinking.getAttribute('data-scroll-anchor-id')).toBe('["thinking-summary","p1"]')
-    expect(tool.querySelector('[data-testid="tool-detail-preview"]')?.closest('[data-item-id]')).toBe(tool)
-    await act(async () => { thinking.querySelector<HTMLButtonElement>('button')!.click() })
-    expect(thinking.textContent).toContain('Compare the observed selection')
-    const reasoning = thinking.querySelector('[data-item-id="reasoning"]')!
-    expect(thinking.querySelector('p')?.closest('[data-item-id]')).toBe(reasoning)
-
-    // Older source turns can land above the work log without changing any nested row's identity.
-    const older: readonly ConversationItem[] = [
-      { _tag: 'Text', id: 'older/prompt', role: 'user', text: 'Earlier prompt', attachments: [], streaming: false, at: at(0) },
-      { _tag: 'Text', id: 'older/answer', role: 'assistant', text: 'Earlier answer', attachments: [], streaming: false, at: at(0) },
-    ]
-    await show([...older, ...scenario.slice(0, 5)])
-    expect(container.querySelector('[data-item-id="read"][data-tool-status]')).toBe(tool)
-    expect(container.querySelector('[data-testid="thinking-entry"][data-scroll-anchor-id]')).toBe(thinking)
-    expect(container.querySelector('[data-item-id="reasoning"][data-conversation-entry-id]')).toBe(reasoning)
-    expect(summary.getAttribute('data-scroll-anchor-id')).toBe('["work-summary","p1"]')
-    if (presentation === 'interactive') {
-      await act(async () => { summary.click() })
-      expect(turn.querySelector('[data-tool-status]')).toBeNull()
-      expect(turn.querySelector('[data-testid="thinking-entry"]')).toBeNull()
-      expect(summary.getAttribute('data-scroll-anchor-id')).toBe('["work-summary","p1"]')
-    }
-  })
-
-  it('keeps full source anchor membership before rendered-prefix adoption and bounded reveal', async () => {
-    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
-    const items = Array.from({ length: 12 }, (_, index) => scenario.slice(0, 5).map(item =>
-      item._tag === 'ToolCall' ? { ...item, id: `turn/${index}/${item.id}`, callId: `call/${index}` } : { ...item, id: `turn/${index}/${item.id}` })).flat()
-    const show = async (messages: readonly ConversationItem[]) => {
-      source.feed = { _tag: 'Observed', freshness: 'live', value: { items: messages, hasOlder: false, observation: { empty: false } } }
-      await mount()
-    }
-    await show(items)
-    // The bounded branch mounts six source rows, not six complete turns.
-    expect(container.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(2)
-    expect(container.querySelector('[data-testid="user-message"][data-item-id="turn/0/p1"]')).toBeNull()
-    const newest = container.querySelector('[data-testid="transcript-turn"][data-item-id="turn/11/p1"]')!
-    await act(async () => { newest.querySelector<HTMLButtonElement>('[data-testid="work-log"] > button')!.click() })
-    const suffix: readonly ConversationItem[] = [
-      { _tag: 'ToolCall', id: 'suffix/tool', callId: 'suffix/call', name: 'read', input: {}, status: 'success', callSeen: true, result: { content: 'New output', isError: false, at: at(10) }, at: at(9) },
-      { _tag: 'Reasoning', id: 'suffix/thinking', text: 'New reasoning', streaming: false, at: at(11) },
-      { _tag: 'Text', id: 'suffix/answer', role: 'assistant', text: 'New answer', attachments: [], streaming: false, at: at(12) },
-    ]
-    source.viewportCommits = []
-    await show([...items, ...suffix])
-    const expectedIds = new Set([
-      ...items.map(item => item.id), ...suffix.map(item => item.id),
-      ...Array.from({ length: 12 }, (_, index) => JSON.stringify(['work-summary', `turn/${index}/p1`])),
-      ...Array.from({ length: 12 }, (_, index) => JSON.stringify(['thinking-summary', `turn/${index}/p1`])),
-    ])
-    const pending = source.viewportCommits.find(commit => commit.renderedIds.includes('turn/11/answer') && !commit.renderedIds.includes('suffix/answer'))
-    expect(pending).toBeDefined()
-    expect(pending?.anchorHistory?._tag).toBe('Complete')
-    if (pending?.anchorHistory?._tag !== 'Complete') throw new Error('Expected authoritative source membership before adoption')
-    expect(new Set(pending.anchorHistory.ids)).toEqual(expectedIds)
-    expect(pending.renderedIds).not.toContain('suffix/tool')
-    expect(pending.renderedIds).not.toContain('suffix/thinking')
-
-    const bounded = source.viewportCommits.at(-1)!
-    expect(bounded.rowIds).toContain('turn/0/p1')
-    expect(bounded.renderedIds).not.toContain('turn/0/p1')
-    expect(bounded.anchorHistory?._tag).toBe('Complete')
-    if (bounded.anchorHistory?._tag !== 'Complete') throw new Error('Expected authoritative source membership before bounded reveal')
-    expect(new Set(bounded.anchorHistory.ids)).toEqual(expectedIds)
-    expect(bounded.anchorHistory.ids).not.toContain('missing/source-row')
-    expect(container.querySelector('[data-tool-status][data-item-id="suffix/tool"]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="thinking-entry"][data-scroll-anchor-id]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="agent-message"][data-item-id="suffix/answer"]')).not.toBeNull()
-
-    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true })) })
-    expect(container.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(12)
-    expect(container.querySelector('[data-testid="user-message"][data-item-id="turn/0/p1"]')).not.toBeNull()
-    expect(source.viewportCommits.at(-1)?.anchorHistory).toBe(bounded.anchorHistory)
-  })
-  it('keeps Waiting and Unavailable history partial despite retained Live sync until an Observed page arrives', async () => {
-    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
-    source.feed = { _tag: 'Waiting' }
-    await mount()
-    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Partial' })
-    source.feed = { _tag: 'Unavailable', reason: 'failed', detail: 'Synthetic unavailable page' }
-    await mount()
-    expect(source.transcriptHistories.at(-1)).toEqual({ _tag: 'Unobserved' })
-    expect(container.querySelector('[data-testid="transcript-scroll"]')).toBeNull()
-    source.feed = { _tag: 'Waiting' }
-    await mount()
-    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Partial' })
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false, observation: { empty: true } } }
-    await mount()
-    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Complete', ids: [] })
-  })
-
-  it('distinguishes partial or unobserved history from complete source membership and authoritative empty history', async () => {
-    source.feed = { _tag: 'Waiting' }
-    source.sync = { status: { _tag: 'Requested', since: 990 }, observedAt: 990 }
-    await mount()
-    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Partial' })
-
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false, observation: { empty: true } } }
-    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
-    await mount()
-    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Complete', ids: [] })
-    source.sync = { status: { _tag: 'Requested', since: 990 }, observedAt: 990 }
-    await mount()
-    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Partial' })
-
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario.slice(0, 5), hasOlder: false, observation: { empty: false } } }
-    await mount()
-    expect(source.viewportCommits.at(-1)?.anchorHistory?._tag).toBe('Complete')
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario.slice(0, 5), hasOlder: true, observation: { empty: false } } }
-    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
-    await mount()
-    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Partial' })
-
-    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [scenario[0]!], hasOlder: false, observation: { empty: false } } }
-    await mount()
-    const removed = source.viewportCommits.at(-1)?.anchorHistory
-    expect(removed?._tag).toBe('Complete')
-    if (removed?._tag !== 'Complete') throw new Error('Expected complete source membership after removal')
-    expect([...new Set(removed.ids)]).toEqual(['p1'])
-  })
-
   it('hands an opened tool call to the host surface from the kit work log', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario.slice(0, 5), hasOlder: false, observation: { empty: false } } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
@@ -823,6 +478,8 @@ describe('ConversationPane composition activation', () => {
     const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')
     expect(fold?.textContent).toContain('Worked for 7s')
     await act(async () => { fold!.click() })
+    const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')
+    await act(async () => { raw!.click() })
     const open = await act(async () => {
       const button = container.querySelector<HTMLButtonElement>('button[aria-label="Open Reading information tool detail"]')
       button?.click()
@@ -846,7 +503,103 @@ describe('ConversationPane composition activation', () => {
     await act(async () => { fold!.click() })
     const log = container.querySelector('[data-testid="work-log"]')!
     expect(log.querySelector('[data-tool-status="success"]')?.textContent).not.toContain('No output')
+    const preview = log.querySelector('[data-testid="tool-detail-preview"]')!
+    expect(preview.textContent).not.toContain(output)
+    expect(preview.querySelector('pre')).toBeNull()
+    const raw = [...preview.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')
+    expect(raw?.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => { raw!.click() })
     expect(log.querySelector('[data-testid="tool-detail-preview"]')?.textContent).toContain('export const rows = []')
+  })
+
+  it('keeps failed command diagnostics behind the banner raw disclosure', async () => {
+    const diagnostic = '/tmp/example/ready-step-test.fixture\nTraceback (most recent call last):\n  File "/tmp/example/check.py", line 4\nAssertionError: expected ready state'
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [scenario[0]!, { _tag: 'ToolCall', id: 'failed-run', callId: 'failed-call', name: 'run',
+        input: { command: 'python check.py', summary: 'Checking ready state' }, status: 'error', callSeen: true, at: at(1),
+        result: { content: diagnostic, isError: true, at: at(3) } }],
+      hasOlder: false, observation: { empty: false },
+    } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    const banner = container.querySelector<HTMLElement>('[data-error-overlay]')!
+    expect(banner.textContent).toContain('Command did not complete')
+    expect(banner.textContent).toContain('AssertionError: expected ready state')
+    expect(banner.textContent).not.toContain('/tmp/example')
+    expect(banner.textContent).not.toContain('Traceback')
+    const raw = [...banner.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
+    expect(raw.getAttribute('aria-expanded')).toBe('false')
+    await act(async () => { raw.click() })
+    expect(banner.textContent).toContain(diagnostic)
+  })
+
+  it.each([
+    ['/tmp/example/ready-step-test.fixture\nPermissionError: cannot read /tmp/example/check.py', 'PermissionError: cannot read …/check.py'],
+    ['/tmp/example/ready-step-test.fixture', 'Tool failed; no readable reason was recorded.'],
+    ['Traceback (most recent call last):\n  File "/app/command.py", line 571, in run\n    stdout, stderr = process.communicate(input, timeout=timeout)\nsubprocess.TimeoutExpired: Command \'sleep 60\' timed out after 30 seconds', 'Command timed out after 30s'],
+    ['Traceback (most recent call last):\n  File "/app/check.py", line 4\n    run_check()\nProcess exited with code 2', 'Exited with code 2'],
+  ])('uses a readable failed tool reason instead of a path tail: %s', async (diagnostic, reason) => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [scenario[0]!, { _tag: 'ToolCall', id: 'failed-run', callId: 'failed-call', name: 'run',
+        input: { command: 'check' }, status: 'error', callSeen: true, at: at(1),
+        result: { content: diagnostic, isError: true, at: at(3) } }],
+      hasOlder: false, observation: { empty: false },
+    } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    expect(container.querySelector('[data-error-overlay]')?.textContent).toContain(reason)
+    const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')!
+    await act(async () => { fold.click() })
+    const row = container.querySelector<HTMLElement>('[data-tool-status="error"]')!
+    const open = row.querySelector<HTMLButtonElement>('button')
+    if (open !== null) await act(async () => { open.click() })
+    expect(row.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe(reason)
+    expect(row.querySelector('pre')).toBeNull()
+  })
+
+  it('shows a subprocess script only as unescaped code in the raw disclosure', async () => {
+    const diagnostic = "Traceback (most recent call last):\n    raise TimeoutExpired(\nsubprocess.TimeoutExpired: Command '['sh', '-c', '\\nset -eu\\necho \\'ready\\'\\n']' timed out after 30 seconds"
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [scenario[0]!, { _tag: 'ToolCall', id: 'failed-run', callId: 'failed-call', name: 'run',
+        input: { command: 'check' }, status: 'error', callSeen: true, at: at(1),
+        result: { content: diagnostic, isError: true, at: at(3) } }],
+      hasOlder: false, observation: { empty: false },
+    } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    const banner = container.querySelector<HTMLElement>('[data-error-overlay]')!
+    expect(banner.textContent).toContain('Command timed out after 30s')
+    expect(banner.textContent).not.toContain('set -eu')
+    const raw = [...banner.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
+    await act(async () => { raw.click() })
+    expect(banner.querySelector('[data-testid="error-overlay-command"] code')?.textContent).toBe("set -eu\necho 'ready'\n")
+  })
+
+  it.each([
+    ['its own source when the failure names no command', { command: 'pnpm test --filter app' }, 'Process exited with code 2', 'Exited with code 2', 'pnpm test --filter app'],
+    ['the subprocess command a timeout names', { code: 'run_step()' }, "subprocess.TimeoutExpired: Command '['sh', '-c', '\\nset -eu\\nmake check\\n']' timed out after 30 seconds", 'Command timed out after 30s', 'set -eu\nmake check\n'],
+  ])('shows a failed row its readable command: %s', async (_name, input, diagnostic, reason, command) => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [scenario[0]!, { _tag: 'ToolCall', id: 'failed-run', callId: 'failed-call', name: 'run',
+        input, status: 'error', callSeen: true, at: at(1),
+        result: { content: diagnostic, isError: true, at: at(3) } }],
+      hasOlder: false, observation: { empty: false },
+    } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    await mount()
+    const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')!
+    await act(async () => { fold.click() })
+    const row = container.querySelector<HTMLElement>('[data-tool-status="error"]')!
+    const open = row.querySelector<HTMLButtonElement>('button')
+    if (open !== null) await act(async () => { open.click() })
+    const preview = container.querySelector<HTMLElement>('[data-testid="tool-detail-preview"]')!
+    expect(preview.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe(reason)
+    expect(preview.querySelector('[data-testid="tool-raw-input"]')).toBeNull()
+    expect(preview.querySelector('[data-testid="tool-command"]')).toBeNull()
+    const raw = [...preview.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
+    await act(async () => { raw.click() })
+    expect(preview.querySelector('[data-testid="tool-command"] code')?.textContent).toBe(command)
+    expect(preview.querySelector('[data-testid="tool-raw-input"] code')?.textContent).toBe(JSON.stringify(input, null, 2))
   })
 
   it('keeps optimistic send state visible on its prompt', async () => {

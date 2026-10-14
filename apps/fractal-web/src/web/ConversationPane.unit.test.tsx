@@ -207,13 +207,13 @@ describe('ConversationPane kit composition', () => {
     }
     visit(tree)
     // Structural hosts plus app-owned authorization recovery copy; transcript presentation remains kit-owned.
-    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div', 'p'])
+    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'p'])
     expect(pane).toContain('<Button onPress={() => { void binding.recover() }}>Check sending access</Button>')
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
-    expect(workspace).toContain('createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} ux={ux} />, paneHost)')
+    expect(workspace).toContain('createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} ux={ux} />, paneHost)')
     expect(workspace).toContain("hiddenPane: { contentVisibility: 'hidden'")
-    expect(workspace).toContain('<ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} ux={ux} visible={shown} />')
+    expect(workspace).toContain('<ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />')
     expect(workspace).not.toContain('This subject has no available native view.')
   })
 })

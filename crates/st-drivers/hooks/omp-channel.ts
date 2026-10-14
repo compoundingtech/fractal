@@ -49,8 +49,8 @@ const HELLO_TIMEOUT_MS = 5000;
 // result it never saw. So a message that arrives during a running turn is held and steered when
 // the batch's last `tool_call` returns its `tool_result` (omp announces every call of a batch
 // before any runs, and awaits the handler), or when the run ends. Either way it lands where the
-// steer would have. A message never waits longer than this behind a running tool call: a longer
-// command is backgrounded as before. It was chosen below st3's 15-second work-wake retry.
+// steer would have. Ordinary tool calls wait at most this long; native asks and approvals
+// instead hold mail outside omp until the person answers, cancels, or the session ends.
 const HOLD_MAX_MS = 10_000;
 
 type Frame = {
@@ -578,6 +578,7 @@ export default function (pi: ExtensionAPI) {
   // Holding mail during a running turn; `HOLD_MAX_MS` explains why and where it is released.
   const toolCallsInFlight = () => (state.toolCallsInFlight ??= new Set<string>());
   const heldMessages = () => (state.held ??= []);
+  const humanBlocked = () => Boolean(state.pendingAskToolCallId || state.pendingApproval);
   const clearHoldTimer = () => {
     if (state.holdTimer !== undefined) clearTimeout(state.holdTimer);
     state.holdTimer = undefined;
@@ -621,9 +622,15 @@ export default function (pi: ExtensionAPI) {
   /** Hand every held message to omp now, in arrival order. */
   const release = (): Promise<void> => {
     clearHoldTimer();
-    const batch = heldMessages().splice(0);
+    if (humanBlocked()) return Promise.resolve();
+    // A deferred boundary may release only its eligible prefix, never a newer batch's mail.
+    const last = heldMessages().at(-1);
+    if (!last) return Promise.resolve();
     const deliver = async () => {
-      const current = batch.filter((message) => message.channel === state.child);
+      if (humanBlocked()) return;
+      const end = heldMessages().indexOf(last);
+      if (end < 0) return;
+      const current = heldMessages().splice(0, end + 1).filter((message) => message.channel === state.child);
       if (current.length > 0) await handOff(current);
     };
     state.handoff = (state.handoff ?? Promise.resolve()).then(deliver, deliver);
@@ -632,6 +639,7 @@ export default function (pi: ExtensionAPI) {
 
   /** Bound the wait behind a running tool call, never the wait for the model to finish streaming. */
   const armHoldCap = () => {
+    if (humanBlocked()) return;
     if (state.holdTimer !== undefined) return;
     if (heldMessages().length === 0 || toolCallsInFlight().size === 0) return;
     state.holdTimer = setTimeout(() => {
@@ -644,7 +652,7 @@ export default function (pi: ExtensionAPI) {
   /** Deliver a message from the channel now, or hold it while omp is running a turn. */
   const receive = (message: HeldMessage): Promise<void> => {
     heldMessages().push(message);
-    if (state.running || toolCallsInFlight().size > 0) {
+    if (humanBlocked() || state.running || toolCallsInFlight().size > 0) {
       armHoldCap();
       return Promise.resolve();
     }
@@ -784,6 +792,8 @@ export default function (pi: ExtensionAPI) {
     sendContext(ctx);
     const end = event as AgentEndFrame;
     if (end.willContinue !== true) {
+      state.pendingAskToolCallId = undefined;
+      state.pendingApproval = false;
       state.running = false;
       toolCallsInFlight().clear();
       // Nothing runs now, so held mail is handed over at once, exactly as a message arriving at
@@ -872,6 +882,7 @@ export default function (pi: ExtensionAPI) {
     const question = firstAskQuestion(event);
     if (!question || typeof event.toolCallId !== "string") return;
     state.pendingAskToolCallId = event.toolCallId;
+    clearHoldTimer();
     cancelSettle();
     sendFrame({
       type: "state",
@@ -884,6 +895,9 @@ export default function (pi: ExtensionAPI) {
   on("tool_result", async (rawEvent, ctx) => {
     const event = rawEvent as ToolResultFrame;
     sendTimeline("tool_result", rawEvent);
+    const answeredAsk = typeof event.toolCallId === "string" &&
+      event.toolCallId === state.pendingAskToolCallId;
+    if (answeredAsk) state.pendingAskToolCallId = undefined;
     if (typeof event.toolCallId === "string") {
       const calls = toolCallsInFlight();
       calls.delete(event.toolCallId);
@@ -891,13 +905,9 @@ export default function (pi: ExtensionAPI) {
       // this batch boundary, and after the batch's commands have run.
       if (calls.size === 0 && heldMessages().length > 0) await release();
     }
-    if (
-      typeof event.toolCallId !== "string" ||
-      event.toolCallId !== state.pendingAskToolCallId
-    ) {
-      return;
-    }
-    state.pendingAskToolCallId = undefined;
+    if (!answeredAsk) return;
+    if (state.pendingApproval) return;
+    armHoldCap();
     if (idleProof(ctx)) {
       sendFrame({ type: "state", state: "idle" });
       return;
@@ -911,6 +921,7 @@ export default function (pi: ExtensionAPI) {
   type ApprovalFrame = { toolName?: unknown };
   on("tool_approval_requested", async (rawEvent) => {
     state.pendingApproval = true;
+    clearHoldTimer();
     if (state.pendingAskToolCallId) return;
     const event = rawEvent as ApprovalFrame;
     const tool = typeof event.toolName === "string" ? event.toolName : "unknown";
@@ -926,6 +937,8 @@ export default function (pi: ExtensionAPI) {
   on("tool_approval_resolved", async (_event, ctx) => {
     state.pendingApproval = false;
     if (state.pendingAskToolCallId) return;
+    if (toolCallsInFlight().size === 0) await release();
+    else armHoldCap();
     if (idleProof(ctx)) {
       sendFrame({ type: "state", state: "idle" });
       return;

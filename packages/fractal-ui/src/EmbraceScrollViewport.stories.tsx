@@ -21,14 +21,12 @@ const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => req
 export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const viewport = canvas.getByTestId('scroll-viewport')
-  await document.fonts.ready
   await frame()
   await expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1)
   await userEvent.click(canvas.getByRole('button', { name: 'Append message' }))
   await frame()
   await expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1)
   viewport.focus()
-  viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -400, bubbles: true }))
   viewport.scrollTop = 240
   viewport.dispatchEvent(new Event('scroll'))
   await frame()
@@ -37,14 +35,15 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
   await userEvent.click(canvas.getByRole('button', { name: 'Append message' }))
   await frame()
   await expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1)
-  await expect(canvas.getByRole('button', { name: 'Scroll to end' })).toBeVisible()
+  await expect(canvas.getByRole('button', { name: 'New messages ↓' })).toBeVisible()
   await userEvent.click(canvas.getByRole('button', { name: 'Change width' }))
   await frame()
-  await expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1)
-  await userEvent.click(canvas.getByRole('button', { name: 'Scroll to end' }))
+  // ResizeObserver schedules compensation on the next frame; two frames alone race that work.
+  await waitFor(() => expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1))
+  await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
   await frame()
-  await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1))
-  await expect(canvas.queryByRole('button', { name: 'Scroll to end' })).toBeNull()
+  await expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1)
+  await expect(canvas.queryByRole('button', { name: 'New messages ↓' })).toBeNull()
 } }
 export const FollowingAndAnchoredLight: Story = { ...FollowingAndAnchored, args: { scheme: 'light' } }
 export const AllStates: Story = { render: args => <ScrollStory {...args} /> }

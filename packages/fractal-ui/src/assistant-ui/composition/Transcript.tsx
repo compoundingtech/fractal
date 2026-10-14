@@ -1,25 +1,24 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { flushSync } from 'react-dom'
 import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
-import { EmbraceScrollViewport, type EmbraceScrollViewportHandle, type ViewportAnchorHistory } from '../EmbraceScrollViewport'
+import { EmbraceScrollViewport } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
-import { formatWorkDuration, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
+import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
 import { SyncLine } from '../st3-views/SyncLine'
 import { syncLine } from '../st3-views/sync-line'
 import type { SyncStatus } from '../st3-views/sync-status'
 import { ErrorOverlay, ErrorOverlayHost } from './ErrorOverlay'
-import { HighlightedSource, Markdown, MarkdownImagePolicy, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
-import { ThinkingEntry, ThinkingRun } from './ThinkingEntry'
-import { SendFailure, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
-import { TranscriptSkeleton } from './TranscriptSkeleton'
+import { HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
+import { ThinkingEntry } from './ThinkingEntry'
+import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
 import { Icon } from './Icons'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
 
+export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
   readonly id: string
   /** Omitted when the visible history starts mid-turn or has assistant-only output. */
@@ -27,11 +26,13 @@ export interface TranscriptTurn {
   /** Exact runtime source references. The host owns turn/participant boundaries. */
   readonly items: readonly ConversationItem[]
   readonly work: WorkLogTurn
+  /** Host-owned interaction state; the kit never infers a pending question from output text. */
+  readonly activity?: LiveActivityState
   readonly senderCaptions?: Readonly<Record<string, string | undefined>>
 }
 /** `Unavailable` is the whole status: one host reason line and no sync line. `detail` may be diagnostic, so it stays behind "Show details". `action` is the host's recovery, e.g. `{ label: 'Try again', onPress }`. */
 export type TranscriptAvailability = { readonly _tag: 'Available' } | { readonly _tag: 'Unavailable'; readonly reason: string; readonly detail?: string; readonly action?: { readonly label: string; readonly onPress: () => void } }
-export type TranscriptHistory = { readonly _tag: 'Unobserved' } | { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void }
+export type TranscriptHistory = { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void }
 export interface TranscriptProps {
   readonly turns: readonly TranscriptTurn[]
   readonly title: string
@@ -46,11 +47,11 @@ export interface TranscriptProps {
   readonly resolveImage?: MarkdownImageResolver
   /** Opens a deferred image outside the page (for hosts whose CSP forbids inline remote images). */
   readonly onLoadImage?: MarkdownImageOpener
+  /** The host's own inline references in message Markdown, such as a `doc/…` name it can open. */
+  readonly renderInlineReference?: InlineReferenceRenderer
   readonly availability?: TranscriptAvailability
   readonly history?: TranscriptHistory
   readonly emptyState?: React.ReactNode | TranscriptEmptyState
-  /** Host-owned first-publication body; an empty body can keep a switch lane stable. */
-  readonly loadingState?: React.ReactNode
   /** Workbench conversation key for the owning surface's scroll memory. */
   readonly viewportKey?: string
   /** Host command, e.g. the newest own pending send: a changed key brings the latest turn into view. */
@@ -72,7 +73,21 @@ function TranscriptMessage() {
 const messageComponents = { Message: TranscriptMessage }
 export function UserMessage({ item }: { readonly item: TextItem & { readonly role: 'user' } }) {
   const onRetrySend = React.useContext(RetrySend)
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span {...stylex.props(styles.userText)}>{item.text}</span>{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
+  const [expanded, setExpanded] = React.useState(false)
+  const [overflows, setOverflows] = React.useState(false)
+  const text = React.useRef<HTMLSpanElement>(null)
+  const textId = React.useId()
+  const long = item.text.length > 600 || item.text.split('\n').length > 8
+  React.useLayoutEffect(() => {
+    const element = text.current
+    if (element === null || expanded) return
+    const measure = () => setOverflows(element.scrollHeight > element.clientHeight)
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    measure()
+    return () => observer.disconnect()
+  }, [item.text, expanded])
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}{item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
 /** Settled metadata remains below the prose; unknown time is omitted rather than invented. */
 export function AgentMessage({ item, senderLine }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string }) {
@@ -84,12 +99,27 @@ export function AgentMessage({ item, senderLine }: { readonly item: (TextItem & 
     {!streaming && <div data-testid="answer-meta" {...stylex.props(styles.answerMeta)}><ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy)}><Icon name="copy" size={14} /></ActionBarPrimitive.Copy>{Number.isFinite(completed) && <time dateTime={new Date(completed).toISOString()}>{new Date(completed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>}
   </MessagePrimitive.Root>
 }
-/** F3: four observed output lines, remaining count and a host-owned Open action. */
+/** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. */
 export function ToolDetailPreview({ call, onOpen }: { readonly call: WorkLogCall; readonly onOpen?: (call: WorkLogCall) => void }) {
+  const [rawOpen, setRawOpen] = React.useState(false)
   const output = call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')
   const lines = output.split('\n')
   const remaining = Math.max(0, lines.length - Number(output.endsWith('\n')) - 4)
-  return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}><pre {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>{onOpen !== undefined && <div data-testid="tool-preview-actions" {...stylex.props(styles.previewActions)}>{remaining > 0 && <><span data-testid="tool-preview-remaining">+{remaining} {remaining === 1 ? 'line' : 'lines'}</span><span aria-hidden="true">·</span></>}<Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open</Button></div>}</div>
+  const command = readableCommand(call)
+  const showOutput = (call.detail ?? '') !== '' || call.rawInput === undefined
+  return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
+    <p>{call.summary ?? call.title} · {call.status}</p>
+    {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
+    <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
+      <Button slot="trigger" {...stylex.props(styles.previewOpen)}>Show raw input/output</Button>
+      <DisclosurePanel>{rawOpen && <>
+        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}>{call.rawInput}</code></pre>}
+        {command !== undefined ? <pre data-testid="tool-command" {...stylex.props(styles.output, styles.command)}><code>{command}</code></pre> : call.rawInput === undefined && call.argsSummary !== undefined && <pre {...stylex.props(styles.output)}>{call.argsSummary}</pre>}
+        {showOutput && <pre {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>}
+        {onOpen !== undefined && <div data-testid="tool-preview-actions" {...stylex.props(styles.previewActions)}>{remaining > 0 && <><span data-testid="tool-preview-remaining">+{remaining} {remaining === 1 ? 'line' : 'lines'}</span><span aria-hidden="true">·</span></>}<Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open</Button></div>}
+      </>}</DisclosurePanel>
+    </Disclosure>
+  </div>
 }
 /** Source text an unadopted item can show without the runtime; absent when the item carries none. */
 const strandedText = (item: ConversationItem): string | undefined => {
@@ -101,61 +131,6 @@ const strandedText = (item: ConversationItem): string | undefined => {
     case 'Status': return item.detail
     default: return undefined
   }
-}
-/**
- * Marks turns and turn groups more than a viewport away from the scroller's visible area as `data-distant`; only those
- * skip rendering (`content-visibility: auto`). Turns near the reader render uncontained, so their painting and focus
- * rings match a transcript without containment. A box's first report follows its first layout, so
- * `contain-intrinsic-size: auto` has its real height before it is ever skipped. Reports from a hidden scroller (no root
- * bounds) are ignored.
- */
-class TurnProximity {
-  private observer: IntersectionObserver | undefined
-  private readonly boxes = new Set<Element>()
-  readonly attach = (root: Element | null | undefined) => {
-    if (root == null || typeof IntersectionObserver === 'undefined') return
-    const observer = new IntersectionObserver(entries => {
-      for (const entry of entries) if (entry.rootBounds !== null && entry.rootBounds.height > 0) entry.target.toggleAttribute('data-distant', !entry.isIntersecting)
-    }, { root, rootMargin: '100% 0px' })
-    this.observer = observer
-    for (const box of this.boxes) observer.observe(box)
-    return () => {
-      observer.disconnect()
-      if (this.observer === observer) this.observer = undefined
-    }
-  }
-  readonly observe = (box: HTMLElement | null) => {
-    if (box === null) return
-    this.boxes.add(box)
-    this.observer?.observe(box)
-    return () => {
-      this.boxes.delete(box)
-      this.observer?.unobserve(box)
-      box.removeAttribute('data-distant')
-    }
-  }
-}
-/** EmbraceScrollViewport renders scroller > content > children. */
-const scrollerOf = (timeline: Element | null) => timeline?.parentElement?.parentElement
-const TurnProximityRef = React.createContext<TurnProximity['observe'] | undefined>(undefined)
-const turnGroupSize = 16
-/**
- * Turns from `start` in fixed groups of 16 counted from the turn at `origin`. The caller keeps `origin` on the same
- * turn while it stays in the transcript, so neither prepended history nor new turns move an existing turn to another
- * group: turns keep their React identity, disclosure state and focus. A distant full group skips as one box:
- * revealing a pane styles the groups, not every turn. A partial group (the oldest one while older turns backfill or
- * history is prepended, the newest one while turns arrive) is not observed and has no layout box: its children
- * participate in the outer timeline, avoiding a moving aggregate box during bounded prefix backfill. Once full
- * it renders a frame at its full height before its first report can mark it distant.
- */
-const turnGroups = (turns: readonly TranscriptTurn[], start: number, origin: number) => {
-  const groups: { readonly key: number; readonly turns: readonly TranscriptTurn[] }[] = []
-  for (let key = Math.floor((start - origin) / turnGroupSize), first = origin + key * turnGroupSize; first < turns.length; key++, first += turnGroupSize) groups.push({ key, turns: turns.slice(Math.max(first, start), first + turnGroupSize) })
-  return groups
-}
-function TurnGroup({ full, children }: { readonly full: boolean; readonly children: React.ReactNode }) {
-  const observe = React.useContext(TurnProximityRef)
-  return <div ref={full ? observe : undefined} {...stylex.props(styles.timeline, styles.turnSkip, !full && styles.partialGroup)}>{children}</div>
 }
 /** Fallback for an item the runtime never adopted: visible in place, never silently dropped. */
 function StrandedItem({ item }: { readonly item: ConversationItem }) {
@@ -188,91 +163,47 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
-/** The window is counted in source rows, not turns: a single agent turn can contain thousands of entries. */
-type MountedTurns = { readonly _tag: 'NewestPage' } | { readonly _tag: 'From'; readonly id: string } | { readonly _tag: 'All' }
-const newestPageRows = 6
-const backfillChunkRows = 4
-const mountedStart = (mounted: MountedTurns, rows: readonly ConversationItem[]) =>
-  mounted._tag === 'All' ? 0 : mounted._tag === 'NewestPage' ? Math.max(0, rows.length - newestPageRows) : Math.max(0, rows.findIndex(row => row.id === mounted.id))
-/** Keep the owning turn's identity and summary, and the newest prompt even outside the source-row suffix. */
-const windowTurns = (turns: readonly TranscriptTurn[], start: number): readonly TranscriptTurn[] => {
-  let offset = 0
-  return turns.flatMap((turn, index) => {
-    const length = turn.items.length + (turn.prompt === undefined ? 0 : 1)
-    const skip = Math.max(0, start - offset)
-    offset += length
-    if (length > 0 && skip >= length) return []
-    if (skip === 0) return [turn]
-    let itemStart = skip - (turn.prompt === undefined ? 0 : 1)
-    // Keep a contiguous reasoning disclosure whole, including its first-item key, across prefix reveals.
-    while (itemStart > 0 && turn.items[itemStart]?._tag === 'Reasoning' && turn.items[itemStart - 1]?._tag === 'Reasoning') itemStart--
-    const items = turn.items.slice(itemStart)
-    const ids = new Set(items.map(item => item.id))
-    return [{ ...turn, prompt: index === turns.length - 1 ? turn.prompt : undefined, items, work: { ...turn.work, calls: turn.work.calls.filter(call => ids.has(call.id)) } }]
-  })
-}
-/** Older engines and non-layout DOMs lack checkVisibility; retained hidden ancestors still must not backfill. */
-const hasVisibleBox = (element: HTMLElement): boolean => {
-  if (typeof element.checkVisibility === 'function') return element.checkVisibility()
-  for (let ancestor: HTMLElement | null = element; ancestor !== null; ancestor = ancestor.parentElement) {
-    const style = element.ownerDocument.defaultView?.getComputedStyle(ancestor)
-    if (style?.display === 'none' || style?.contentVisibility === 'hidden') return false
-  }
-  return true
-}
-/** Growing a partial turn must not re-render the already mounted message subtrees. */
-const PreparedMessage = React.memo(function PreparedMessage({ item, stranded, caption }: { readonly item: ConversationItem; readonly stranded: boolean; readonly caption?: string }) {
-  return stranded ? <StrandedItem item={item} /> : <SenderCaption.Provider value={caption}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></SenderCaption.Provider>
-})
-/** Non-reasoning entries terminate a run, even when the work log renders those entries elsewhere. */
-const reasoningRuns = (items: readonly ConversationItem[]) => {
-  const runs: Extract<ConversationItem, { _tag: 'Reasoning' }>[][] = []
-  let run: Extract<ConversationItem, { _tag: 'Reasoning' }>[] | undefined
-  for (const item of items) {
-    if (item._tag !== 'Reasoning') { run = undefined; continue }
-    if (run === undefined) { run = []; runs.push(run) }
-    run.push(item)
-  }
-  return runs
-}
-const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
+const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
-  // The work log lists tool calls separately, so every thought of the turn is visually adjacent: one disclosure.
-  const reasoning = turn.items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning')
-  return <section ref={React.useContext(TurnProximityRef)} data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn, styles.turnSkip)}>
-    {turn.prompt !== undefined && <PreparedMessage item={turn.prompt} stranded={stranded?.has(turn.prompt.id) ?? false} />}
-    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={JSON.stringify(['work-summary', turn.id])} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" scrollAnchorId={JSON.stringify(['thinking-summary', turn.id])} items={reasoning} /> : undefined} />}
-    {turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning').map(item => <PreparedMessage key={item.id} item={item} stranded={stranded?.has(item.id) ?? false} caption={turn.senderCaptions?.[item.id]} />)}
-    {turn.work.running && <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.liveActivity)}><span aria-hidden="true">◌</span></div>}
+  const reasoning = turn.items.filter(item => item._tag === 'Reasoning')
+  return <section data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
+    {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
+    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.map(item => <ThinkingEntry key={item.id} text={item.text} streaming={item.streaming} />)} />}
+    {turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning').map(item => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></SenderCaption.Provider>)}
+    {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
   </section>
 })
+/** Host clock keeps elapsed labels deterministic and pauses with the conversation clock. */
+export function LiveActivity({ state, startedAt, now }: { readonly state: LiveActivityState; readonly startedAt?: string; readonly now: number }) {
+  const started = Date.parse(startedAt ?? '')
+  const duration = Number.isFinite(started) && started <= now ? formatWorkDuration(now - started) || '<1s' : ''
+  const waiting = state._tag === 'WaitingForAnswer'
+  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><span aria-hidden="true" {...stylex.props(styles.liveRing, waiting && styles.waitingRing)} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{waiting ? `Waiting for your answer${duration === '' ? '' : ` · ${duration}`}` : `Working${duration === '' ? '' : ` for ${duration}`}`}</span></div>
+}
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext }: TranscriptProps) {
+export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext }: TranscriptProps) {
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
-  // adopted messages a task later. A child effect runs before its provider's adoption effect, so
-  // a host render alone cannot classify missing ids as stranded. The adoption store first confirms
-  // the source snapshot reached the runtime; ids it holds remain pending until publication, while
-  // ids it did not adopt may render their fallback. Only unpublished ids subscribe to this seam.
+  // adopted messages a task later. Recording the snapshot after its commit is the adoption epoch.
+  // An id is pending (deferred so the turn stays mounted) while its snapshot has not been through a
+  // commit or while the runtime holds it and the store has yet to publish it; once committed and
+  // absent from the runtime, it is stranded. Only unpublished ids depend on the epoch or on runtime
+  // adoption, so neither is recorded while every id is published: a freshly mounted pane commits once.
   const [adoptionEpoch, setAdoptionEpoch] = React.useState<readonly TranscriptTurn[]>()
   const published = React.useMemo(() => new Set(messages.map(message => message.id)), [messages])
   const unpublished = React.useMemo(() => turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]).filter(id => !published.has(id)), [turns, published])
   const adoption = React.useContext(RuntimeAdoptedIds)
   const getHeldKey = () => {
     const held = adoption?.get()
-    const source = adoption?.getSourceIds()
-    return JSON.stringify({ held: held === undefined ? [] : unpublished.filter(id => held.has(id)), sourceAdopted: adoption === undefined || source !== undefined && unpublished.every(id => source.has(id)) })
+    return JSON.stringify(held === undefined ? [] : unpublished.filter(id => held.has(id)))
   }
   const heldKey = React.useSyncExternalStore(adoption?.subscribe ?? staticSubscription, getHeldKey, getHeldKey)
-  const { runtimeIds, sourceAdopted } = React.useMemo(() => {
-    const snapshot = JSON.parse(heldKey)
-    return { runtimeIds: new Set<string>(snapshot.held), sourceAdopted: snapshot.sourceAdopted === true }
-  }, [heldKey])
+  const runtimeIds = React.useMemo(() => new Set<string>(JSON.parse(heldKey)), [heldKey])
   React.useEffect(() => {
-    if (sourceAdopted && adoptionEpoch !== turns && unpublished.some(id => !runtimeIds.has(id))) setAdoptionEpoch(turns)
-  }, [turns, unpublished, runtimeIds, adoptionEpoch, sourceAdopted])
+    if (adoptionEpoch !== turns && unpublished.some(id => !runtimeIds.has(id))) setAdoptionEpoch(turns)
+  }, [turns, unpublished, runtimeIds, adoptionEpoch])
   const { committed, stranded } = React.useMemo(() => {
     const settled = new Set(adoptionEpoch?.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]))
     const stranded = new Set<string>()
@@ -298,69 +229,7 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   React.useEffect(() => {
     if (strandedIds !== '' && process.env.NODE_ENV !== 'production') console.warn(`Transcript: the runtime never adopted ${strandedIds}; showing a fallback row.`)
   }, [strandedIds])
-  const timeline = React.useRef<HTMLDivElement>(null)
-  const viewport = React.useRef<EmbraceScrollViewportHandle>(null)
-  const [proximity] = React.useState(() => new TurnProximity())
-  React.useLayoutEffect(() => proximity.attach(scrollerOf(timeline.current)), [proximity, committed.length === 0])
-  // Mount a bounded suffix, filling the visible lane before paint. Older rows are
-  // demanded by history-top navigation or browser find, not idle-time visible growth.
-  const [mounted, setMounted] = React.useState<MountedTurns>({ _tag: 'NewestPage' })
-  const source = React.useMemo(() => committed.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]), [committed])
-  const start = mountedStart(mounted, source)
-  const visibleTurns = React.useMemo(() => windowTurns(committed, start), [committed, start])
-  const turnStart = committed.length - visibleTurns.length
-  // The group grid hangs off the first turn this transcript showed, for as long as that turn stays in it.
-  const [gridTurn, setGridTurn] = React.useState<string | undefined>(undefined)
-  let gridOrigin = committed.findIndex(turn => turn.id === gridTurn)
-  if (gridOrigin === -1 && committed.length > 0) {
-    gridOrigin = 0
-    setGridTurn(committed[0]!.id)
-  }
-  const latest = React.useRef({ source, start })
-  React.useLayoutEffect(() => { latest.current = { source, start } })
-  const mountOlder = React.useCallback((all: boolean) => {
-    const { source, start } = latest.current
-    if (start === 0) return
-    const update = () => flushSync(() => setMounted(all ? { _tag: 'All' } : { _tag: 'From', id: source[Math.max(0, start - backfillChunkRows)]!.id }))
-    // The lane owns compensation: followers stay at the end, readers keep their row.
-    if (viewport.current === null) update()
-    else viewport.current.preserveLayout(update)
-  }, [])
-  const backfilling = start > 0
-  React.useLayoutEffect(() => {
-    const scroller = scrollerOf(timeline.current)
-    if (start > 0 && scroller instanceof HTMLElement && hasVisibleBox(scroller) && scroller.clientHeight > 0 && scroller.scrollHeight <= scroller.clientHeight) setMounted({ _tag: 'From', id: source[Math.max(0, start - backfillChunkRows)]!.id })
-  }, [start, source, visibleTurns])
-  // Native find must work as soon as the first bounded page can paint.
-  React.useLayoutEffect(() => {
-    const scroller = scrollerOf(timeline.current)
-    if (!backfilling || scroller == null) return
-    const nearTop = () => { if (scroller instanceof HTMLElement && scroller.dataset.followState === 'detached' && scroller.scrollTop < scroller.clientHeight) mountOlder(false) }
-    const find = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'f') mountOlder(true) }
-    const view = scroller.ownerDocument.defaultView
-    scroller.addEventListener('scroll', nearTop, { passive: true })
-    view?.addEventListener('keydown', find, { capture: true })
-    return () => {
-      scroller.removeEventListener('scroll', nearTop)
-      view?.removeEventListener('keydown', find, { capture: true })
-    }
-  }, [backfilling, mountOlder])
-  const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage }), [resolveImage, onLoadImage])
-  // Source membership stays authoritative while adoption, folding or bounded backfill leaves rows unmounted.
-  const anchorHistory = React.useMemo<ViewportAnchorHistory>(() => history._tag === 'Complete' && (turns.length > 0 || sync._tag === 'Live')
-    ? { _tag: 'Complete', ids: turns.flatMap(turn => {
-      const hasReasoning = turn.items.some(item => item._tag === 'Reasoning')
-      return [
-        turn.id,
-        ...(turn.prompt === undefined ? [] : [turn.prompt.id]),
-        ...turn.items.map(item => item.id),
-        ...(turn.work.calls.length > 0 || hasReasoning ? [JSON.stringify(['work-summary', turn.id])] : []),
-        ...(hasReasoning ? [JSON.stringify(['thinking-summary', turn.id])] : []),
-      ]
-    }) }
-    : { _tag: 'Partial' }, [turns, history._tag, sync._tag])
-  // Summary ownership comes from the full source, never its adopted or bounded rendered prefix.
-  const summaryMembers = React.useMemo(() => new Map(turns.map(turn => [turn.id, turn.items.filter(item => item._tag === 'ToolCall' || item._tag === 'Reasoning').map(item => item.id)])), [turns])
+  const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage, renderInlineReference }), [resolveImage, onLoadImage, renderInlineReference])
   // New rows or changed content are news; send state, tool status and timing are metadata.
   const rows = React.useMemo(() => committed.map(turn => ({ id: turn.id, version: (turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).map(contentVersion).join(' ') })), [committed])
   const running = [...committed].reverse().find(turn => turn.work.running)
@@ -372,25 +241,23 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
     {availability.action !== undefined && <Button data-testid="transcript-unavailable-action" onPress={availability.action.onPress} {...stylex.props(styles.unavailableAction)}>{availability.action.label}</Button>}
     {availability.detail !== undefined && <Disclosure {...stylex.props(styles.unavailableDetails)}><Button slot="trigger" {...stylex.props(styles.historyLoad)}>Show details</Button><DisclosurePanel><p data-testid="transcript-unavailable-detail" {...stylex.props(styles.unavailableDetail)}>{availability.detail}</p></DisclosurePanel></Disclosure>}
   </div></section>
-  const empty = committed.length === 0 && turns.length === 0 && sync._tag === 'Live'
+  const empty = committed.length === 0 && sync._tag === 'Live'
     ? <div aria-label="Empty conversation" data-testid="transcript-empty" {...stylex.props(styles.emptyBody)}><TranscriptEmptyContent emptyState={emptyState} /></div>
-    : loadingState ?? <TranscriptSkeleton sync={sync} now={now} observedAt={observedAt} onRetrySync={onRetrySync} />
+    : <div data-testid="transcript-placeholder" aria-label="Loading conversation" {...stylex.props(styles.placeholder)}><p role="status">Loading conversation…</p><SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} /><div aria-hidden="true" {...stylex.props(styles.turn)}><div {...stylex.props(styles.skeletonPrompt)} /><div {...stylex.props(styles.skeletonWork)} /><div {...stylex.props(styles.skeletonAnswer)} /></div></div>
   return <MarkdownImagePolicy.Provider value={imageOptions}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>
       {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
       {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
     </header>
-    <ErrorOverlayHost lane><EmbraceScrollViewport ref={viewport} items={rows} anchorHistory={anchorHistory} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
-      <div data-testid="transcript-history-slot" {...stylex.props(styles.historyBoundary)}>
-        {start > 0 && <Button data-testid="transcript-reveal-earlier" onPress={() => mountOlder(true)} {...stylex.props(styles.historyLoad)}>Show earlier messages</Button>}
-        {history._tag === 'HasOlder' && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
-      </div>
-      {committed.length === 0 ? empty : <div ref={timeline} {...stylex.props(styles.timeline)}><TurnProximityRef.Provider value={proximity.observe}>{turnGroups(visibleTurns, 0, gridOrigin - turnStart).map(group => <TurnGroup key={group.key} full={group.turns.length === turnGroupSize}>{group.turns.map(turn => <PreparedTurn key={turn.id} turn={turn} summaryMemberIds={summaryMembers.get(turn.id)} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}</TurnGroup>)}</TurnProximityRef.Provider></div>}
+    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
+      {history._tag === 'HasOlder' && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
+      {committed.length === 0 ? empty : <div {...stylex.props(styles.timeline)}>{committed.map(turn => <PreparedTurn key={turn.id} turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}</div>}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider>
 }
 const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
+const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } })
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
@@ -398,12 +265,10 @@ const styles = stylex.create({
   lane: { flex: '1 1 0', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none' },
   // The shared reading column keeps rows and a reading-column composer on the same bounds.
   content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
-  partialGroup: { display: 'contents' },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
-  // Turns and full turn groups far from the reader skip style, layout and paint; `auto` keeps each box's last rendered
-  // height as its placeholder, recorded while the box renders.
-  turnSkip: { contentVisibility: { default: 'visible', ':is([data-distant])': 'auto' }, containIntrinsicSize: `auto ${g.estimatedMessageHeight}` },
   user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
+  userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
+  userDisclosure: { paddingBlock: 0, lineHeight: t.metaLeading, alignSelf: 'flex-start' },
   answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fgSoft, flexShrink: 0 }, sender: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },
   semantic: { display: 'flex', minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   semanticText: { minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
@@ -413,9 +278,15 @@ const styles = stylex.create({
   runningProgress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm, overflow: 'hidden', backgroundColor: surface.rowActive },
   runningSegment: { display: 'block', width: '25%', height: '100%', backgroundColor: accent.primary, animationName: runSweep, animationDuration: m.pulse, animationTimingFunction: m.linear, animationIterationCount: 'infinite', animationDirection: 'alternate', '@media (prefers-reduced-motion: reduce)': { animationName: 'none', transform: 'translateX(150%)' } },
   liveActivity: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.uiSize },
+  liveRing: { width: g.status, height: g.status, boxSizing: 'border-box', flexShrink: 0, borderRadius: r.full, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderTopColor: ink.fgMuted, animationName: liveSpin, animationDuration: m.spin, animationTimingFunction: m.linear, animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
+  waitingRing: { animationName: 'none' },
+  liveLabel: { color: ink.fgSoft },
   preview: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginBlock: s.sm, marginInlineStart: s.md, backgroundColor: surface.codeBg, borderRadius: r.sm, padding: s.md, gap: s.xs },
   output: { margin: 0, width: '100%', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.metaLeading, color: ink.fgSoft }, outputCode: { fontFamily: t.fontMono, fontSize: t.codeSize },
+  command: { boxSizing: 'border-box', marginBlockEnd: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.codeBg, color: ink.fg },
+  errorReason: { margin: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.metaSize },
   previewActions: { display: 'flex', alignItems: 'center', gap: s.xs, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.metaSize }, previewOpen: { minHeight: g.toolRow, padding: 0, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  placeholder: { display: 'flex', flexDirection: 'column', gap: s.lg }, skeletonPrompt: { width: '100%', height: `calc(${t.bodyLeading} + ${s.md})`, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, backgroundColor: surface.rowActive }, skeletonWork: { height: g.toolRow, width: '30%', borderRadius: r.sm, backgroundColor: surface.rowActive }, skeletonAnswer: { height: g.resourceCard, width: '80%', borderRadius: r.sm, backgroundColor: surface.rowHover },
   empty: { backgroundColor: surface.washSubtle },
   emptyBody: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: s.sm, padding: s.xl, textAlign: 'center' },
   historyBoundary: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: s.md, minHeight: g.controlMd, flexShrink: 0 },
