@@ -56,17 +56,34 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-// Opening the daemon never pays for the optional usage estimate's historical backfill.
-pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
-    flush(transaction)
-}
-
-fn ensure_ready(transaction: &Transaction<'_>) -> Result<()> {
-    let filled: bool = transaction.query_row(
+fn ready(transaction: &Transaction<'_>) -> Result<bool> {
+    Ok(transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')",
         [],
         |row| row.get(0),
-    )?;
+    )?)
+}
+
+// Opening the daemon never pays for the optional usage estimate's historical backfill, but
+// coordination metadata still bootstraps in bounded pages.
+pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
+    if ready(transaction)? {
+        flush_with_coordination(transaction, true, true)?;
+    }
+    coordination::initialize(transaction)?;
+    // A corrupt historical body must leave counts incomplete without preventing startup.
+    // Roll back this entire bounded page, including any counts preceding the bad body.
+    transaction.execute_batch("SAVEPOINT coordination_startup")?;
+    if let Err(error) = coordination::backfill(transaction) {
+        transaction.execute_batch("ROLLBACK TO coordination_startup")?;
+        eprintln!("st3: WARN coordination bootstrap remains incomplete: {error}");
+    }
+    transaction.execute_batch("RELEASE coordination_startup")?;
+    Ok(())
+}
+
+fn ensure_ready(transaction: &Transaction<'_>) -> Result<()> {
+    let filled = ready(transaction)?;
     if !filled {
         transaction.execute_batch(
             "DELETE FROM agent_message_sends;
@@ -75,7 +92,9 @@ fn ensure_ready(transaction: &Transaction<'_>) -> Result<()> {
              SELECT DISTINCT subject FROM claims WHERE kind='message.sent';",
         )?;
     }
-    flush_pending(transaction)?;
+    // The older allowance cache can prime all history. New coordination metadata must
+    // still bootstrap in bounded pages rather than piggyback on that legacy rebuild.
+    flush_with_coordination(transaction, filled, true)?;
     if !filled {
         transaction.execute(
             "INSERT INTO meta(key,value) VALUES('agent_message_days_v1','1')",
@@ -88,14 +107,17 @@ fn ensure_ready(transaction: &Transaction<'_>) -> Result<()> {
 fn eligible(fields: &Value) -> bool {
     let from = fields["from"].as_str().unwrap_or_default();
     let to = fields["to"].as_str().unwrap_or_default();
-    if !from.starts_with("agent/") || !to.starts_with("agent/") {
-        return false;
-    }
+    from.starts_with("agent/") && to.starts_with("agent/") && !synthetic(fields)
+}
+
+pub(super) fn synthetic(fields: &Value) -> bool {
+    let from = fields["from"].as_str().unwrap_or_default();
+    let to = fields["to"].as_str().unwrap_or_default();
     if [from, to]
         .iter()
         .any(|seat| seat.contains("delivery-probe/") || seat.contains("delivery-soak"))
     {
-        return false;
+        return true;
     }
     if fields["tags"].as_array().is_some_and(|tags| {
         tags.iter().any(|tag| {
@@ -112,7 +134,7 @@ fn eligible(fields: &Value) -> bool {
             )
         })
     }) {
-        return false;
+        return true;
     }
     let title = fields["title"]
         .as_str()
@@ -122,7 +144,7 @@ fn eligible(fields: &Value) -> bool {
     while let Some(rest) = title.strip_prefix("re:") {
         title = rest.trim_start();
     }
-    ![
+    [
         "soak request",
         "soak reply",
         "channel check",
@@ -139,23 +161,24 @@ fn eligible(fields: &Value) -> bool {
 }
 
 pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
-    let ready: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='agent_message_days_v1')",
-        [],
-        |row| row.get(0),
-    )?;
-    if ready {
-        flush_pending(transaction)?;
-    }
-    Ok(())
+    // Before the lazy usage backfill has run, sends still sync coordination metadata, but the
+    // day counts wait for the first estimate, which rebuilds them from every retained send.
+    let counts = ready(transaction)?;
+    let synced = flush_with_coordination(transaction, true, counts)?;
+    coordination::cover_synced_sends(transaction, &synced)
 }
 
-fn flush_pending(transaction: &Transaction<'_>) -> Result<()> {
+/// Returns the subjects it flushed.
+fn flush_with_coordination(
+    transaction: &Transaction<'_>,
+    coordination_live: bool,
+    count_sends: bool,
+) -> Result<BTreeSet<String>> {
     let pending = transaction
         .prepare_cached("SELECT subject FROM local_agent_message_pending")?
         .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for subject in pending {
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    for subject in &pending {
         // Earliest send time is stable across replication order and duplicate send claims.
         let sent: Option<(u64, String)> = transaction
             .query_row(
@@ -166,9 +189,15 @@ fn flush_pending(transaction: &Transaction<'_>) -> Result<()> {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        if coordination_live && sent.is_none() {
+            coordination::sync(transaction, subject, None)?;
+        }
         let desired = sent
             .map(|(at, body)| -> Result<_> {
                 let body: Value = serde_json::from_str(&body)?;
+                if coordination_live {
+                    coordination::sync(transaction, subject, Some((at, &body["fields"])))?;
+                }
                 Ok(eligible(&body["fields"])
                     .then(|| (at, body["fields"]["to"].as_str().unwrap().to_owned())))
             })
@@ -181,7 +210,7 @@ fn flush_pending(transaction: &Transaction<'_>) -> Result<()> {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if current != desired {
+        if count_sends && current != desired {
             transaction.execute(
                 "DELETE FROM agent_message_sends WHERE subject=?1",
                 [&subject],
@@ -198,7 +227,7 @@ fn flush_pending(transaction: &Transaction<'_>) -> Result<()> {
             [&subject],
         )?;
     }
-    Ok(())
+    Ok(pending)
 }
 
 #[derive(Clone, Copy, Deserialize)]

@@ -282,6 +282,10 @@ pub struct ReplicationExportRequest {
     pub inventory: ReplicationInventory,
     #[serde(default)]
     pub summary_only: bool,
+    /// Classify a full summary requested only by the local recent-inbound guard.
+    /// Older local daemons ignore this field; it never changes the exported exchange.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub authority_guard: bool,
     /// The other side's signature requests, to answer in the exported exchange.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signature_requests: Vec<ReplicaEnvelopeId>,
@@ -421,7 +425,23 @@ pub struct UnhealthyProjection {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReplicationWorkerStatusRequest {
+    pub peer: String,
+    pub worker: ReplicationWorkerStatus,
+}
+
+/// Host-local worker state; absent after restart until the worker next attempts a peer.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ReplicationWorkerStatus {
+    pub phase: String,
+    pub last_attempt_at_unix_ms: u128,
+    pub next_retry_at_unix_ms: Option<u128>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplicationPeerStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<ReplicationWorkerStatus>,
     pub peer: String,
     pub status: String,
     pub last_success_at_unix_ms: Option<u128>,
@@ -446,6 +466,17 @@ pub struct ReplicationPeerStatus {
     /// inventory make the projection comparison premature.
     #[serde(default)]
     pub projection_comparison_waiting: bool,
+    /// Why the comparison is premature, in words; absent when it is not waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_comparison_waiting_reason: Option<String>,
+    /// What the reported comparison found: whether every comparable projection was equal.
+    /// Absent while waiting and for a peer that sends no projection digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_graphs_equal: Option<bool>,
+    /// When the exchange that made that comparison happened. A comparison held from an
+    /// earlier aligned exchange is older than the latest exchange.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_compared_at_unix_ms: Option<u128>,
     /// How far apart the two envelope sets were at the last exchange that measured them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<ReplicationPeerSync>,
