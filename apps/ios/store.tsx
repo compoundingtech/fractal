@@ -280,11 +280,12 @@ function useAppStore(proof?: FabricProfile) {
     const state = reporting.current;
     state.send = () => {
       if (state.busy || Date.now() - state.last < 30_000) return;
-      const batch = observations.nextReport();
-      if (!batch) return;
-      const report = toObservationReport(batch);
-      if (!report.samples.length) { observations.accepted(batch.report_id); return; }
+      // Preparing a batch can synchronously notify ready while it closes a minute.
       state.busy = true;
+      const batch = observations.nextReport();
+      if (!batch) { state.busy = false; return; }
+      const report = toObservationReport(batch);
+      if (!report.samples.length) { observations.accepted(batch.report_id); state.busy = false; return; }
       state.last = Date.now();
       void client.observationsReport(report as never).then(
         () => observations.accepted(batch.report_id),
