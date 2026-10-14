@@ -18,7 +18,7 @@ use serde::Deserialize;
 /// The actor st records for what its limits policy does.
 pub const LIMITS_ACTOR: &str = "daemon/limits";
 
-const ACCOUNT_READING_WINDOW_MS: u64 = 3_600_000;
+pub(crate) const ACCOUNT_READING_WINDOW_MS: u64 = 3_600_000;
 
 fn select_account_reading(readings: Vec<AccountLimit>) -> AccountLimit {
     // A partial snapshot after a relaunch can know only the five-hour window. It is not a
@@ -111,8 +111,41 @@ pub struct AccountLimit {
 pub struct LimitsPolicy {
     pub stop_at_weekly_percent: u32,
     pub keep: BTreeSet<String>,
+    /// Accounts never stopped: a declared account name or a provider label.
+    pub exempt_accounts: BTreeSet<String>,
+    /// Harnesses never stopped, whatever their account.
+    pub exempt_harnesses: BTreeSet<String>,
     pub notify: String,
     pub fresh_ms: u64,
+}
+
+impl LimitsPolicy {
+    /// The policy a `[limits]` section describes, or `None` while it is disabled.
+    pub fn from_config(config: &crate::config::LimitsConfig) -> Option<Self> {
+        if !config.enabled {
+            return None;
+        }
+        Some(Self {
+            stop_at_weekly_percent: config.stop_at_weekly_percent,
+            keep: config.keep.iter().cloned().collect(),
+            exempt_accounts: config.exempt_accounts.iter().cloned().collect(),
+            exempt_harnesses: config.exempt_harnesses.iter().cloned().collect(),
+            notify: config.notify.clone()?,
+            fresh_ms: config.fresh_ms().ok()?,
+        })
+    }
+
+    /// Whether this account's seats are never stopped, whenever they started: it is exempt by
+    /// the declared name, the provider's label, or its harness.
+    pub fn exempts(&self, limit: &AccountLimit) -> bool {
+        self.exempt_harnesses.contains(&limit.driver)
+            || self.exempt_accounts.contains(&limit.account)
+            || limit
+                .account_ref
+                .as_ref()
+                .is_some_and(|name| self.exempt_accounts.contains(name))
+            || self.exempt_accounts.contains(&episode_account(limit))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -125,7 +158,7 @@ pub struct LimitsOutcome {
     pub notified: Vec<String>,
 }
 
-fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
+pub(crate) fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
     let fields = body.get("fields")?;
     let driver = fields["driver"].as_str()?.to_owned();
     let identity = fields["account"]
@@ -378,14 +411,23 @@ pub(crate) fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> 
     Ok(claims.len())
 }
 
+/// Empty the projection and fold every `harness.limits` claim into it again, in one
+/// transaction: what a checkpoint proof's copy reads, as a node that never trimmed would.
+pub(crate) fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute("DELETE FROM account_limit_readings", [])?;
+    transaction.execute("DELETE FROM account_limit_seats", [])?;
+    transaction.execute("DELETE FROM meta WHERE key=?1", [LIMITS_CURSOR])?;
+    while flush_limits_page(transaction, LIMITS_CATCH_UP_PAGE)? == LIMITS_CATCH_UP_PAGE {}
+    Ok(())
+}
+
 pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
     type Key = (String, String, Option<String>);
-    let mut weekly = BTreeMap::<Key, Vec<AccountLimit>>::new();
-    let mut partial = BTreeMap::<Key, Vec<AccountLimit>>::new();
     let mut statement = connection.prepare_cached(
         "SELECT driver, account, account_ref, weekly, origin, subject, body
          FROM account_limit_readings",
     )?;
+    let mut rows = Vec::new();
     for row in statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -397,17 +439,61 @@ pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLi
             row.get::<_, String>(6)?,
         ))
     })? {
-        let (driver, account, account_ref, is_weekly, origin, subject, body) = row?;
+        rows.push(row?);
+    }
+    // A seat that reported under a provider identity and later under a declared account is one
+    // login that changed identity (a re-login), not two accounts: the identity's readings are the
+    // declared account's. Only a seat's own reports link them, so nothing else is ever merged.
+    let mut named = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for (driver, _, account_ref, _, _, subject, _) in &rows {
+        if !account_ref.is_empty() {
+            named
+                .entry((driver.clone(), subject.clone()))
+                .or_default()
+                .insert(account_ref.clone());
+        }
+    }
+    let mut alias = BTreeMap::<(String, String), String>::new();
+    for (driver, account, account_ref, _, _, subject, _) in &rows {
+        if account_ref.is_empty()
+            && let Some(declared) = named
+                .get(&(driver.clone(), subject.clone()))
+                .and_then(|names| names.first())
+        {
+            let entry = alias.entry((driver.clone(), account.clone()));
+            entry
+                .and_modify(|current| {
+                    if declared < current {
+                        *current = declared.clone();
+                    }
+                })
+                .or_insert_with(|| declared.clone());
+        }
+    }
+    let resolve = |driver: String, account: String, account_ref: String| -> Key {
+        match alias.get(&(driver.clone(), account.clone())) {
+            Some(declared) if account_ref.is_empty() => (
+                driver.clone(),
+                st_drivers::account::account_label(&driver, &format!("declared:{declared}")),
+                Some(declared.clone()),
+            ),
+            _ => (driver, account, (!account_ref.is_empty()).then_some(account_ref)),
+        }
+    };
+    let mut weekly = BTreeMap::<Key, Vec<AccountLimit>>::new();
+    let mut partial = BTreeMap::<Key, Vec<AccountLimit>>::new();
+    for (driver, account, account_ref, is_weekly, origin, subject, body) in rows {
         let body: Value = serde_json::from_str(&body)?;
         let Some((mut limit, _)) = reading(&origin, &body) else {
             continue;
         };
         limit.measured_by = subject;
-        let key = (
-            driver,
-            account,
-            (!account_ref.is_empty()).then_some(account_ref),
-        );
+        let key = resolve(driver, account, account_ref);
+        if let Some(declared) = &key.2 {
+            limit.account = key.1.clone();
+            limit.account_ref = Some(declared.clone());
+            limit.identified = true;
+        }
         if is_weekly {
             weekly.entry(key).or_default().push(limit);
         } else {
@@ -437,11 +523,7 @@ pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLi
         ))
     })? {
         let (seat, driver, account, account_ref) = row?;
-        let key = (
-            driver,
-            account,
-            (!account_ref.is_empty()).then_some(account_ref),
-        );
+        let key = resolve(driver, account, account_ref);
         accounts
             .get_mut(&key)
             .expect("the seat reported an account")
@@ -641,6 +723,9 @@ impl Store {
             let Some(weekly) = limit.weekly_percent else {
                 continue;
             };
+            if policy.exempts(&limit) {
+                continue;
+            }
             if weekly < f64::from(policy.stop_at_weekly_percent)
                 || limit
                     .weekly_resets_at_unix_ms
@@ -1295,6 +1380,8 @@ mod tests {
         let policy = LimitsPolicy {
             stop_at_weekly_percent: 95,
             keep: BTreeSet::from([coordinator.to_owned()]),
+            exempt_accounts: BTreeSet::new(),
+            exempt_harnesses: BTreeSet::new(),
             notify: "agent/alder.operations".into(),
             fresh_ms: HOUR as u64,
         };
@@ -1445,6 +1532,8 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         LimitsPolicy {
             stop_at_weekly_percent: 95,
             keep: BTreeSet::new(),
+            exempt_accounts: BTreeSet::new(),
+            exempt_harnesses: BTreeSet::new(),
             notify: "agent/alder.operations".into(),
             fresh_ms: HOUR as u64,
         }
@@ -2066,6 +2155,8 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         let policy = LimitsPolicy {
             stop_at_weekly_percent: 95,
             keep: BTreeSet::new(),
+            exempt_accounts: BTreeSet::new(),
+            exempt_harnesses: BTreeSet::new(),
             notify: "agent/alder.operations".into(),
             fresh_ms: HOUR as u64,
         };
@@ -2086,5 +2177,133 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
             LimitsOutcome::default()
         );
         assert!(live(&store, "agent/alder.seat"));
+    }
+    #[test]
+    fn a_seat_started_later_on_an_exempt_account_is_never_stopped() {
+        let store = Store::open_memory("alder").unwrap();
+        let now = now_ms();
+        let first = "agent/alder.first";
+        let later = "agent/alder.later";
+        declare(&store, first, "alder");
+        read(&store, first, Some("claude/aaaa"), 99.0, now);
+        let exempt = LimitsPolicy {
+            exempt_accounts: BTreeSet::from(["claude/aaaa".to_owned()]),
+            ..policy()
+        };
+        assert_eq!(
+            store.enforce_account_limits(&exempt, now).unwrap(),
+            LimitsOutcome::default()
+        );
+        // A seat started after the account passed its threshold, and after the config named it.
+        declare(&store, later, "alder");
+        read(&store, later, Some("claude/aaaa"), 99.0, now + 1);
+        assert_eq!(
+            store.enforce_account_limits(&exempt, now + 1).unwrap(),
+            LimitsOutcome::default()
+        );
+        assert!(live(&store, first) && live(&store, later));
+        // The same readings stop both once the account is no longer exempt, so a reload applies.
+        let outcome = store.enforce_account_limits(&policy(), now + 2).unwrap();
+        assert_eq!(outcome.stopped, [first, later]);
+    }
+
+    #[test]
+    fn exemptions_match_a_label_a_declared_name_or_a_harness_and_nothing_else() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let now = now_ms();
+        read_account(&store, "agent/alder.single", "ada/one", "codex/one", 99.0, now);
+        let limit = store.account_limits().unwrap().remove(0);
+        let with = |accounts: &[&str], harnesses: &[&str]| LimitsPolicy {
+            exempt_accounts: accounts.iter().map(|name| (*name).to_owned()).collect(),
+            exempt_harnesses: harnesses.iter().map(|name| (*name).to_owned()).collect(),
+            ..policy()
+        };
+        assert!(!with(&[], &[]).exempts(&limit));
+        assert!(with(&["ada/one"], &[]).exempts(&limit), "the declared name");
+        assert!(with(&["account/ada/one"], &[]).exempts(&limit));
+        assert!(with(&[limit.account.as_str()], &[]).exempts(&limit), "the label");
+        assert!(with(&[], &["codex"]).exempts(&limit), "the harness");
+        assert!(!with(&["ada/two"], &["claude"]).exempts(&limit));
+    }
+
+    fn read_unnamed(store: &Store, seat: &str, label: &str, weekly: f64, measured_at: u128) {
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "harness.limits".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("driver".into(), json!("codex")),
+                    ("account".into(), json!(label)),
+                    ("weekly_percent".into(), json!(weekly)),
+                    (
+                        "weekly_resets_at_unix_ms".into(),
+                        json!(1_800_000_000_000_u64),
+                    ),
+                    ("measured_at_unix_ms".into(), json!(measured_at as u64)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("unnamed-{seat}-{label}-{measured_at}")),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_relogin_that_changes_the_provider_identity_leaves_one_declared_account_with_the_live_reading() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let now = now_ms();
+        let sixty_hours = 60 * HOUR;
+        // Sixty hours ago the login was seen twice: by a bound seat, and by a seat that sets the
+        // login directory itself and so reported under the provider's identity.
+        read_account(&store, "agent/alder.pooled", "ada/one", "codex/ignored", 84.0, now - sixty_hours);
+        read_unnamed(&store, "agent/alder.walker", "codex/before-login", 84.0, now - sixty_hours);
+        // The login was renewed. The walker now runs on the declared account and says so,
+        // and the live reading is higher.
+        read_account(&store, "agent/alder.walker", "ada/one", "codex/ignored", 94.0, now - 30_000);
+        read_account(&store, "agent/alder.other", "ada/two", "codex/ignored", 90.0, now - 30_000);
+
+        let limits = store.account_limits().unwrap();
+        let mut rows = limits
+            .iter()
+            .map(|limit| (limit.account_ref.as_deref(), limit.weekly_percent))
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            rows,
+            [(Some("ada/one"), Some(94.0)), (Some("ada/two"), Some(90.0))],
+            "{limits:?}"
+        );
+        assert!(
+            limits.iter().all(|limit| limit.account != "codex/before-login"),
+            "the old identity is the declared account, not a second row"
+        );
+        let one = limits.iter().find(|limit| limit.account_ref.as_deref() == Some("ada/one")).unwrap();
+        assert!(one.identified && one.measured_at_unix_ms > (now - HOUR) as u64);
+        assert!(one.seats.contains(&"agent/alder.walker".to_owned()));
+
+        // The pool picks by the live reading: ada/one at 94 is worse than ada/two at 90, where the
+        // sixty-hour-old 84 would have kept choosing ada/one.
+        let binding = store.seat_binding("agent/alder.other").unwrap().unwrap();
+        let chosen = store
+            .account_for_start("agent/alder.other", &binding, "alder", now)
+            .unwrap();
+        assert_eq!(chosen.account.name, "ada/two");
+    }
+
+    #[test]
+    fn identity_readings_with_no_seat_in_common_are_never_attributed_to_a_declared_account() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let now = now_ms();
+        read_account(&store, "agent/alder.pooled", "ada/one", "codex/ignored", 40.0, now - 30_000);
+        read_unnamed(&store, "agent/alder.stranger", "codex/someone-else", 70.0, now - 30_000);
+
+        let limits = store.account_limits().unwrap();
+
+        assert_eq!(limits.len(), 2, "{limits:?}");
+        assert!(limits.iter().any(|limit| limit.account == "codex/someone-else" && limit.account_ref.is_none()));
     }
 }

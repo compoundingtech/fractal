@@ -11,7 +11,7 @@ export type ActionCommon = {
   parameters: {
 
 };
-  type: "arrangement.edit" | "custom.reply" | "attention.resolve" | "review.approve" | "review.reject" | "review.request-changes" | "message.send" | "message.read" | "message.close" | "launch.create" | "launch.revise" | "launch.preview" | "launch.approve" | "launch.cancel" | "mission.start" | "mission.revise" | "mission.approve-revision" | "mission.cancel-revision" | "mission.cancel" | "session.import" | "work.ask" | "work.done" | "work.cancel-ask" | "work.claim" | "work.renew" | "work.progress" | "work.complete" | "work.fail" | "work.release" | "work.retry" | "work.publish-mission" | "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume" | "terminal.create" | "terminal.end" | "agent.queue-move" | "lane.join" | "lane.leave" | "lane.move" | "lane.mark" | "lane.approve" | "runtime.stop" | "runtime.restart" | "runtime.reset" | "runtime.context-clear" | "runtime.signal" | "terminal.input" | "terminal.resize" | "terminal.attach" | "terminal.detach" | "pairing.revoke";
+  type: "arrangement.edit" | "custom.reply" | "prompt.respond" | "attention.resolve" | "review.approve" | "review.reject" | "review.request-changes" | "message.send" | "message.read" | "message.close" | "launch.create" | "launch.revise" | "launch.preview" | "launch.approve" | "launch.cancel" | "mission.start" | "mission.revise" | "mission.approve-revision" | "mission.cancel-revision" | "mission.cancel" | "session.import" | "work.ask" | "work.done" | "work.cancel-ask" | "work.claim" | "work.renew" | "work.progress" | "work.complete" | "work.fail" | "work.release" | "work.retry" | "work.publish-mission" | "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume" | "terminal.create" | "terminal.end" | "agent.queue-move" | "lane.join" | "lane.leave" | "lane.move" | "lane.mark" | "lane.approve" | "runtime.stop" | "runtime.restart" | "runtime.reset" | "runtime.context-clear" | "runtime.signal" | "terminal.input" | "terminal.resize" | "terminal.attach" | "terminal.detach" | "pairing.revoke";
 };
 
 export type ActionResult = {
@@ -29,6 +29,7 @@ export type ActorRef = string;
 
 export type Agent = ResourceHeader & {
   active_work_count?: number;
+  activity?: string | null;
   ask?: string | null;
   blocked_on?: string | null;
   checkout?: (AgentCheckout | null);
@@ -36,6 +37,7 @@ export type Agent = ResourceHeader & {
   current_work?: Array<WorkLabel>;
   current_work_ids?: Array<StepRunId>;
   delivery?: (AgentDelivery | null);
+  down_since?: (Timestamp | null);
   driver?: string | null;
   fault?: string | null;
   handoff?: (AgentHandoff | null);
@@ -46,6 +48,7 @@ export type Agent = ResourceHeader & {
   incarnation_id?: string | null;
   kind: "agent";
   last_activity_at?: (Timestamp | null);
+  lifecycle?: AgentLifecycle;
   name: string;
   next_work?: (WorkLabel | null);
   next_work_id?: (Id | null);
@@ -93,6 +96,7 @@ export type AgentCreateParameters = {
 };
 
 export type AgentDeclaration = {
+  accountable?: string;
   id: Id;
   kdl: string;
   revision: string;
@@ -119,6 +123,8 @@ export type AgentHandoff = {
 };
 
 export type AgentId = string;
+
+export type AgentLifecycle = ("standing" | "owner" | "bounded" | string);
 
 export type AgentMessageDay = {
   calibrated_messages: number;
@@ -197,7 +203,7 @@ export type AgentStartParameters = {
   agent: Id;
 };
 
-export type AgentState = ("desired" | "starting" | "running" | "waiting" | "stopped" | "failed" | "suspended" | string);
+export type AgentState = ("desired" | "starting" | "running" | "waiting" | "down" | "stopped" | "failed" | "suspended" | string);
 
 export type AgentStopParameters = {
   agent: Id;
@@ -398,10 +404,13 @@ export type Attention = ResourceHeader & {
   action_parameters?: {
 
 };
-  actions: Array<"custom.reply" | "work.done" | "review.approve" | "review.reject" | "review.request-changes" | "launch.approve" | "launch.cancel" | "mission.approve-revision" | "mission.cancel-revision" | "message.read">;
-  attention_kind: ("human-gate" | "launch-approval" | "revision-approval" | "unread-message" | "person-step" | "agent-request" | "fault" | string);
+  actions: Array<"custom.reply" | "prompt.respond" | "work.done" | "review.approve" | "review.reject" | "review.request-changes" | "launch.approve" | "launch.cancel" | "mission.approve-revision" | "mission.cancel-revision" | "message.read">;
+  alert?: boolean;
+  attention_kind: ("human-gate" | "launch-approval" | "revision-approval" | "unread-message" | "person-step" | "agent-request" | "fault" | "harness-login" | "harness-prompt" | string);
   because?: string;
   blocked?: AttentionBlocked;
+  conversation_id?: Id;
+  conversation_ids?: Array<Id>;
   custom_form?: {
 
 };
@@ -489,6 +498,7 @@ export type Capabilities = {
   max_glass_depth?: number;
   max_glass_nodes?: number;
   max_glasses?: number;
+  max_message_bytes?: number;
   max_page_items: number;
   max_response_bytes: number;
   max_wait_ms: number;
@@ -528,8 +538,18 @@ export type ClientConnections = {
 };
 
 export type CollectionCommand = ({
+  actor?: null;
+  collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person?: string | null;
+  since_ms?: number;
+  status?: null;
+  until_ms?: number;
+} | {
   actor?: string | null;
-  collection: "missions" | "attention" | "agents" | "work" | "glasses";
+  collection: "missions" | "attention" | "agents" | "work" | "glasses" | "summary";
   id: string;
   kind: "subscribe";
   limit?: number;
@@ -585,6 +605,7 @@ export type CollectionFrame = ({
 } | {
   collection: "conversation";
   has_more?: boolean;
+  header?: ConversationHeader;
   id: string;
   items: Array<TimelineEntry>;
   kind: "conversation";
@@ -606,9 +627,26 @@ export type CollectionFrame = ({
   retryable?: boolean;
 } | SubjectCollectionFrame);
 
-export type CollectionName = "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements";
+export type CollectionName = "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
+
+export type ConnectedClient = ResourceHeader & {
+  actor: string;
+  client?: string | null;
+  connected: boolean;
+  device_id?: string;
+  device_name?: string;
+  follows: Array<string>;
+  kind: "connected-client";
+  last_seen: Timestamp;
+  member: string;
+  person: string;
+  since: Timestamp;
+  streams: number;
+  via: "local" | "gateway" | "tailscale";
+};
 
 export type ConversationChanges = {
+  header?: unknown;
   items: Array<TimelineEntry>;
   kind: "conversation-changes";
   next_cursor: Cursor;
@@ -630,6 +668,23 @@ export type ConversationContentRef = {
   reason?: string;
   ref: string;
   size?: number;
+};
+
+export type ConversationHeader = {
+  ask?: ConversationHeaderField;
+  context?: ConversationHeaderField;
+  cost?: ConversationHeaderField;
+  jobs?: ConversationHeaderField;
+  model?: ConversationHeaderField;
+  subagents?: ConversationHeaderField;
+  todos?: ConversationHeaderField;
+  working?: ConversationHeaderField;
+};
+
+export type ConversationHeaderField = {
+  as_of: Timestamp;
+  source: "register" | "transcript";
+  value: unknown;
 };
 
 export type ConversationSearch = {
@@ -711,6 +766,19 @@ export type Diagnostic = {
   severity: "info" | "warning" | "error";
 };
 
+export type DirectiveNote = {
+  author: string;
+  expires_at?: (Timestamp | null);
+  person: string;
+  revision: string;
+  text: string;
+  time: Timestamp;
+};
+
+export type DirectiveNotes = {
+  notes: Array<DirectiveNote>;
+};
+
 export type DocumentContent = {
   bytes: Array<number>;
   reference: string;
@@ -720,10 +788,10 @@ export type Envelope = {
   api_version: "st3.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SubjectProjection | SubjectsPage | SubjectClaimsPage | SubjectHistoryPage | SubjectSchemas);
+  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
 };
 
-export type ErrorCode = ("attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "internal" | string);
+export type ErrorCode = ("attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "internal" | string);
 
 export type ErrorEnvelope = {
   api_version: "st3.client.v0";
@@ -845,6 +913,18 @@ export type HostRepositories = {
 };
 
 export type Id = string;
+
+export type JobSummary = {
+  duration_ms?: number;
+  ended_at?: Timestamp;
+  exit_code?: number;
+  id: string;
+  name?: string;
+  output_bytes?: number;
+  started_at?: Timestamp;
+  state: string;
+  type?: string;
+};
 
 export type Lane = ResourceHeader & {
   approver_id: (Id | null);
@@ -1005,6 +1085,8 @@ export type MailBacklog = {
 
 export type Message = ResourceHeader & {
   attachments?: Array<Attachment>;
+  body_bytes?: number;
+  body_ref?: string;
   content: string;
   from: Id;
   in_reply_to?: (Id | null);
@@ -1015,6 +1097,13 @@ export type Message = ResourceHeader & {
   tags?: Array<string>;
   title?: string | null;
   to: Id;
+};
+
+export type MessageBody = {
+  bytes: number;
+  complete?: boolean;
+  message: string;
+  text: string;
 };
 
 export type MessageProvenance = {
@@ -1065,9 +1154,10 @@ export type MissionRunSummary = {
 
 } | null;
   current_steps: Array<{
-  assignee?: (AgentId | null);
-  claimant?: (AgentId | null);
+  assignee?: (ActorRef | null);
+  claimant?: (ActorRef | null);
   id: StepRunId;
+  progress_at?: (Timestamp | null);
   since: Timestamp;
   state: WorkState;
   title: string | null;
@@ -1093,12 +1183,12 @@ export type MissionState = ("draft" | "ready" | "retired" | "running" | "standin
 
 export type MissionStep = {
   agentless?: boolean;
-  assignee?: (AgentId | null);
+  assignee?: (ActorRef | null);
   attempt: number;
   blocked_reason?: string | null;
   blockers?: Array<Id>;
   claim_expires_at?: (Timestamp | null);
-  claimant?: (AgentId | null);
+  claimant?: (ActorRef | null);
   constraints?: Array<string>;
   goals?: Array<string>;
   id: Id;
@@ -1107,7 +1197,9 @@ export type MissionStep = {
   loop_reason?: string | null;
   loop_round?: number | null;
   next_wake_at?: (Timestamp | null);
+  nudged_at?: (Timestamp | null);
   path: string;
+  progress_at?: (Timestamp | null);
   since: Timestamp;
   state: WorkState;
   title?: string | null;
@@ -1117,7 +1209,7 @@ export type MissionStep = {
 
 export type MissionWake = {
   acknowledged_by?: string | null;
-  assignee: AgentId;
+  assignee: ActorRef;
   assignee_state: string;
   attempts: number;
   failure?: string | null;
@@ -1127,13 +1219,54 @@ export type MissionWake = {
 
 export type MustAct = ("you" | "agent" | "system" | "blocked" | "nobody" | string);
 
-export type NativeAccountClaim = (NativeAccountIntentDesiredClaim | NativeAccountPublicationOperationClaim);
+export type ObservationAccepted = {
+  accepted: true;
+};
 
-export type NativeAccountDescriptor = {
-  claim_schema_ids: {"intent.desired":"subject-claim-schema/393f90dede71caa16da067dc8bb9f40d572c0ef4416aa5b0e85cd5b0780dbe0b/account/intent.desired","publication.operation":"subject-claim-schema/44cbda0c0621af1988bd38018b80ec99eaae463b76f2076fa668b7dbd1dad5fb/account/publication.operation"};
-  descriptor: {"claims":{"intent.desired":{"additional_fields":false,"audience":"shared","fields":{"desired":{"immutable":false,"reference":false,"required":false,"value_type":"object"},"kind":{"immutable":false,"reference":false,"required":false,"value_type":"string"},"revision":{"immutable":false,"reference":false,"required":false,"value_type":"string"}},"retention":"durable","special":"account_desired","special_output":null},"publication.operation":{"additional_fields":false,"audience":"shared","fields":{"action":{"immutable":false,"reference":false,"required":false,"value_type":"string"},"operation":{"immutable":false,"reference":false,"required":false,"value_type":"string"},"status":{"immutable":false,"reference":false,"required":false,"value_type":"string","values":["accepted"]}},"retention":"durable","special":null,"special_output":null}},"custom_payload":null,"family":"account","identity":"account","pattern":"account/NAME","reference_contract":{"custom_suffix_pattern":"[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)+","families":["account","agent","arrangement","attention","checkpoint","checkpoint-excusal","custom","daemon","doc","exec","external","file","fleet-invite","gate-operation","github-post","glass","host","lane","loop-run","message","mission","mission-run","observer","owned-set","person","planning-session","pty","repair","resource","revision-proposal","rule","run-generation","schedule","sekret","step-run","subscription"],"file_host_pattern":"[a-zA-Z0-9][a-zA-Z0-9._@-]*","forbidden_pattern":"[\\u0000-\\u0020\\u007f-\\u009f\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]","max_utf8_bytes":512},"special":["account_desired"],"value_semantics":{"numbers":"finite_json","optional_keys":"absent_or_null","special_payloads":"canonical_projector_only","unknown_kinds_and_fields":"withheld"},"wire_version":1};
-  family: "account";
-  schema_id: "subject-schema/42697d859c47a53115223950e5d876f20128973537d2765b3eb52f5bf6b4d324/account";
+export type ObservationLatency = {
+  buckets: Array<[number, number]>;
+  carrier: "fabric" | "tailscale" | "lan";
+  count: number;
+  interval_end: string;
+  interval_start: string;
+  kind: "latency";
+  max_ms: number;
+  over_target: number;
+  path?: "direct" | "relay";
+  target: "ios-open-to-live" | "ios-connect" | "ios-message-ack" | "ios-conversation-open" | "ios-terminal-open" | "ios-recover";
+};
+
+export type ObservationLiveShare = {
+  carrier: "fabric" | "tailscale" | "lan";
+  foreground_ms: number;
+  interval_end: string;
+  interval_start: string;
+  kind: "live-share";
+  live_ms: number;
+  path?: "direct" | "relay";
+  target: "ios-live-share";
+};
+
+export type ObservationReport = {
+  report_id: string;
+  samples: Array<ObservationSample>;
+};
+
+export type ObservationResponse = {
+  api_version: "st3.client.v0";
+  request_id: RequestId;
+  value: ObservationAccepted;
+};
+
+export type ObservationSample = (ObservationLatency | ObservationLiveShare);
+
+export type Observer = ResourceHeader & {
+  kind: "observer";
+  owner_generation_id: string | null;
+  owner_run_id: string | null;
+  owner_step_id: string | null;
+  spec: ObserverSpec;
+  state: string;
 };
 
 export type NativeAccountIntentDesiredClaim = {
@@ -1322,12 +1455,12 @@ export type NativeAgentHarnessContextClearResultClaim = {
   schema_id: "subject-claim-schema/9f7a94b53e7fa41e56a1c6775b88700ada86ae2aeec63570519f7edbb87df032/agent/harness.context-clear.result";
 };
 
-export type NativeAgentHarnessContextClearResultClaimFields = {
-  context_epoch?: (string | null);
-  incarnation_id?: (string | null);
-  reason?: (string | null);
-  result?: ("confirmed" | "failed" | "indeterminate" | null);
-  runtime_id?: (string | null);
+export type PersonAnswer = {
+  id?: string;
+  label?: string;
+  outcome: "accept" | "decline" | "request_changes" | "selected" | "custom" | "feedback" | "read" | "dismissed";
+  text?: string;
+  type: "decision" | "choice" | "feedback" | "update";
 };
 
 export type NativeAgentHarnessDiagnosticClaim = {
@@ -1535,10 +1668,14 @@ export type NativeAgentPrincipalKeyGrantedClaim = {
   schema_id: "subject-claim-schema/b19a1aea5442351909bb510a7fb064362f229d7b7ff2bbb2a2bf21ee65328b36/agent/principal.key-granted";
 };
 
-export type NativeAgentPrincipalKeyGrantedClaimFields = {
-  label?: (string | null);
-  role?: ("root" | "device" | "agent" | "plugin" | null);
+export type PromptRespondParameters = {
+  answer: "allow" | "deny";
+  episode: string;
+  target_id: Id;
 };
+
+export type PublicationDefinition = {
+  declaration: {
 
 export type NativeAgentPrincipalKeyRevokedClaim = {
   fields: NativeAgentPrincipalKeyRevokedClaimFields;
@@ -1722,25 +1859,14 @@ export type NativeAgentRuntimeReadinessDeadlineReachedClaim = {
   schema_id: "subject-claim-schema/6d04949ac8af110fd8f414a7a2ec077f664ba80b31195720a16df447fbaf122f/agent/runtime.readiness-deadline-reached";
 };
 
-export type NativeAgentRuntimeReadinessDeadlineReachedClaimFields = {
-  deadline_unix_ms?: (string | null);
-  driver?: (string | null);
-  incarnation_id?: (string | null);
-  reason?: (string | null);
-  runtime_id?: (string | null);
-};
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
 
-export type NativeAgentRuntimeReconcileDecisionClaim = {
-  fields: NativeAgentRuntimeReconcileDecisionClaimFields;
-  id: string;
-  kind: "runtime.reconcile-decision";
-  omitted_fields: Array<string>;
-  payload_availability: "available" | "withheld" | "unavailable";
-  provenance: SubjectProvenance;
-  reason?: string;
-  ref: NativeAgentSubjectRef;
-  retention: "durable";
-  schema_id: "subject-claim-schema/7ffb504f1396e12def131e8591ffc8a80b7eaad65cffa55616784a2c8038f1eb/agent/runtime.reconcile-decision";
+export type ResourceHeader = {
+  id: Id;
+  kind: ("attention" | "message" | "launch" | "launch-variant" | "launch-decision" | "launch-approval" | "mission" | "work" | "agent" | "runtime" | "observer" | "subscription" | "lane" | "machine" | "device" | "operation" | "history" | "session" | "glass" | "arrangement" | "summary" | "connected-client" | "usage" | string);
+  operational?: Operational;
+  revision: Revision;
+  updated_at: Timestamp;
 };
 
 export type NativeAgentRuntimeReconcileDecisionClaimFields = {
@@ -7491,6 +7617,7 @@ export type Snapshot = {
   host_id: HostId;
   id: SnapshotId;
   projection_version: "client-projection.v0";
+  published_at?: Timestamp;
   store_index: number;
 };
 
@@ -7539,40 +7666,21 @@ export type StructuredRequest = {
   why_person: string;
 };
 
-export type SubjectClaim = (NativeAccountIntentDesiredClaim | NativeAccountPublicationOperationClaim | NativeAgentAgentAccountClaim | NativeAgentAgentPlacementSourceOfflineClaim | NativeAgentAgentPresenceClaim | NativeAgentAgentQueueMovedClaim | NativeAgentDeliveryHoldClaim | NativeAgentHarnessContextClearRequestedClaim | NativeAgentHarnessContextClearResultClaim | NativeAgentHarnessDiagnosticClaim | NativeAgentHarnessLimitsClaim | NativeAgentHarnessObservedClaim | NativeAgentHarnessUsageClaim | NativeAgentIntentDesiredClaim | NativeAgentOperationalFailureClaim | NativeAgentOperationalRecoveredClaim | NativeAgentPrincipalKeyGrantedClaim | NativeAgentPrincipalKeyRevokedClaim | NativeAgentPublicationOperationClaim | NativeAgentRuntimeActionDeadlineReachedClaim | NativeAgentRuntimeActionFailedClaim | NativeAgentRuntimeActionRequestedClaim | NativeAgentRuntimeActionSucceededClaim | NativeAgentRuntimeObservedClaim | NativeAgentRuntimeReadinessDeadlineReachedClaim | NativeAgentRuntimeReconcileDecisionClaim | NativeAgentRuntimeRestartWindowResetClaim | NativeAgentSubagentAppearedClaim | NativeAgentSubagentEndedClaim | NativeAgentSubagentRenewedClaim | NativeAgentTerminalInputRequestedClaim | NativeAgentTerminalInputResultClaim | NativeAgentWorkspaceObservedClaim | NativeArrangementIntentDesiredClaim | NativeArrangementPublicationOperationClaim | NativeAttentionAttentionRequestedClaim | NativeAttentionAttentionResolvedClaim | NativeAttentionIntentDesiredClaim | NativeAttentionPublicationOperationClaim | NativeCheckpointCheckpointSealedClaim | NativeCheckpointCheckpointVerifiedClaim | NativeCheckpointExcusalCheckpointExcusedClaim | NativeCheckpointExcusalIntentDesiredClaim | NativeCheckpointExcusalPublicationOperationClaim | NativeCheckpointIntentDesiredClaim | NativeCheckpointOperationalFailureClaim | NativeCheckpointOperationalRecoveredClaim | NativeCheckpointPublicationOperationClaim | NativeCustomIntentDesiredClaim | NativeCustomPublicationOperationClaim | NativeDaemonDaemonDiagnosticClaim | NativeDaemonDaemonStartedClaim | NativeDaemonIntentDesiredClaim | NativeDaemonOperationalFailureClaim | NativeDaemonOperationalRecoveredClaim | NativeDaemonPublicationOperationClaim | NativeDaemonReconcileFaultClaim | NativeDocDocBoundClaim | NativeDocIntentDesiredClaim | NativeDocPublicationOperationClaim | NativeExecIntentDesiredClaim | NativeExecOperationalFailureClaim | NativeExecOperationalRecoveredClaim | NativeExecPublicationOperationClaim | NativeExecRuntimeActionDeadlineReachedClaim | NativeExecRuntimeActionFailedClaim | NativeExecRuntimeActionRequestedClaim | NativeExecRuntimeActionSucceededClaim | NativeExecRuntimeObservedClaim | NativeExecRuntimeReconcileDecisionClaim | NativeExecRuntimeRestartWindowResetClaim | NativeExternalIntentDesiredClaim | NativeExternalPublicationOperationClaim | NativeFileFileObservedClaim | NativeFileIntentDesiredClaim | NativeFilePublicationOperationClaim | NativeFleetInviteFleetInviteCreatedClaim | NativeFleetInviteFleetInviteRedeemedClaim | NativeFleetInviteFleetInviteRevokedClaim | NativeFleetInviteIntentDesiredClaim | NativeFleetInvitePublicationOperationClaim | NativeGateOperationGateRequestedClaim | NativeGateOperationGateResultClaim | NativeGateOperationIntentDesiredClaim | NativeGateOperationPublicationOperationClaim | NativeGateOperationRuntimeActionDeadlineReachedClaim | NativeGateOperationRuntimeActionFailedClaim | NativeGateOperationRuntimeActionRequestedClaim | NativeGateOperationRuntimeActionSucceededClaim | NativeGateOperationRuntimeObservedClaim | NativeGithubPostGithubPostedClaim | NativeGithubPostIntentDesiredClaim | NativeGithubPostPublicationOperationClaim | NativeGlassGlassDeletedClaim | NativeGlassGlassUpsertedClaim | NativeGlassIntentDesiredClaim | NativeGlassPublicationOperationClaim | NativeHostFleetMemberAdmittedClaim | NativeHostFleetMemberEndpointsClaim | NativeHostFleetMemberLeftClaim | NativeHostFleetMemberRemovedClaim | NativeHostIntentDesiredClaim | NativeHostPublicationOperationClaim | NativeHostTransportObservedClaim | NativeLaneIntentDesiredClaim | NativeLaneLaneApprovedClaim | NativeLaneLaneJoinedClaim | NativeLaneLaneLeftClaim | NativeLaneLaneMarkedClaim | NativeLaneLaneMovedClaim | NativeLanePublicationOperationClaim | NativeLoopRunIntentDesiredClaim | NativeLoopRunLoopRoundDispatchClaim | NativeLoopRunLoopRoundResultClaim | NativeLoopRunLoopStateClaim | NativeLoopRunOperationalFailureClaim | NativeLoopRunOperationalRecoveredClaim | NativeLoopRunPublicationOperationClaim | NativeMessageIntentDesiredClaim | NativeMessageMessageClosedClaim | NativeMessageMessageDeliveredClaim | NativeMessageMessageReadClaim | NativeMessageMessageSentClaim | NativeMessageMessageStagedClaim | NativeMessagePublicationOperationClaim | NativeMissionIntentDesiredClaim | NativeMissionMissionProducedClaim | NativeMissionMissionPublishedClaim | NativeMissionPublicationOperationClaim | NativeMissionRunEvalVerdictClaim | NativeMissionRunIntentDesiredClaim | NativeMissionRunMissionRunCreatedClaim | NativeMissionRunMissionRunStateClaim | NativeMissionRunOperationalFailureClaim | NativeMissionRunOperationalRecoveredClaim | NativeMissionRunPublicationOperationClaim | NativeMissionRunReconcileFaultClaim | NativeObserverIntentDesiredClaim | NativeObserverObserverObservedClaim | NativeObserverObserverRefreshRequestedClaim | NativeObserverObserverStateClaim | NativeObserverOperationalFailureClaim | NativeObserverOperationalRecoveredClaim | NativeObserverPublicationOperationClaim | NativeObserverReconcileFaultClaim | NativeOwnedSetIntentDesiredClaim | NativeOwnedSetOwnedSetRevisedClaim | NativeOwnedSetPublicationOperationClaim | NativePersonIntentDesiredClaim | NativePersonPrincipalKeyGrantedClaim | NativePersonPrincipalKeyRevokedClaim | NativePersonPublicationOperationClaim | NativePlanningSessionIntentDesiredClaim | NativePlanningSessionPlanningSessionApprovedClaim | NativePlanningSessionPlanningSessionCancelledClaim | NativePlanningSessionPlanningSessionCandidateSubmittedClaim | NativePlanningSessionPlanningSessionPreviewedClaim | NativePlanningSessionPlanningSessionQuestionAnsweredClaim | NativePlanningSessionPlanningSessionQuestionRequestedClaim | NativePlanningSessionPlanningSessionRevisionRequestedClaim | NativePlanningSessionPlanningSessionStartedClaim | NativePlanningSessionPublicationOperationClaim | NativePtyIntentDesiredClaim | NativePtyOperationalFailureClaim | NativePtyOperationalRecoveredClaim | NativePtyPublicationOperationClaim | NativePtyRuntimeActionDeadlineReachedClaim | NativePtyRuntimeActionFailedClaim | NativePtyRuntimeActionRequestedClaim | NativePtyRuntimeActionSucceededClaim | NativePtyRuntimeObservedClaim | NativePtyRuntimeReconcileDecisionClaim | NativePtyRuntimeRestartWindowResetClaim | NativePtyTerminalInputRequestedClaim | NativePtyTerminalInputResultClaim | NativeRepairIntentDesiredClaim | NativeRepairPublicationOperationClaim | NativeRepairRecordRepairedClaim | NativeRepairRepairAppliedClaim | NativeResourceIntentDesiredClaim | NativeResourceOperationalFailureClaim | NativeResourceOperationalRecoveredClaim | NativeResourcePublicationOperationClaim | NativeResourceResourceObservedClaim | NativeRevisionProposalIntentDesiredClaim | NativeRevisionProposalPublicationOperationClaim | NativeRevisionProposalRevisionProposalAppliedClaim | NativeRevisionProposalRevisionProposalApprovedClaim | NativeRevisionProposalRevisionProposalCancelledClaim | NativeRevisionProposalRevisionProposalCreatedClaim | NativeRuleIntentDesiredClaim | NativeRulePublicationOperationClaim | NativeRuleRuleAuditedClaim | NativeRuleRuleSetClaim | NativeRunGenerationIntentDesiredClaim | NativeRunGenerationPublicationOperationClaim | NativeRunGenerationRunGenerationCreatedClaim | NativeRunGenerationRunGenerationStateClaim | NativeRunGenerationRunGenerationSupersededClaim | NativeScheduleIntentDesiredClaim | NativeScheduleOperationalFailureClaim | NativeScheduleOperationalRecoveredClaim | NativeSchedulePublicationOperationClaim | NativeScheduleReconcileFaultClaim | NativeScheduleRuntimeReconcileDecisionClaim | NativeScheduleScheduleOccurrenceCancelledClaim | NativeScheduleScheduleOccurrenceReachedClaim | NativeScheduleScheduleOccurrenceScheduledClaim | NativeScheduleScheduleWorkFailedClaim | NativeScheduleScheduleWorkRequestedClaim | NativeScheduleScheduleWorkStartedClaim | NativeSekretIntentDesiredClaim | NativeSekretPublicationOperationClaim | NativeStepRunIntentDesiredClaim | NativeStepRunMissionProducedClaim | NativeStepRunOperationalFailureClaim | NativeStepRunOperationalRecoveredClaim | NativeStepRunPublicationOperationClaim | NativeStepRunReconcileFaultClaim | NativeStepRunStepRunCarriedClaim | NativeStepRunStepRunRetriedClaim | NativeStepRunStepRunStateClaim | NativeStepRunWorkClaimedClaim | NativeStepRunWorkExtendedClaim | NativeStepRunWorkFailedClaim | NativeStepRunWorkPersonAskedClaim | NativeStepRunWorkPersonCancelledClaim | NativeStepRunWorkPersonDoneClaim | NativeStepRunWorkProgressClaim | NativeStepRunWorkReleasedClaim | NativeStepRunWorkRenewedClaim | NativeStepRunWorkSubmittedClaim | NativeSubscriptionIntentDesiredClaim | NativeSubscriptionOperationalFailureClaim | NativeSubscriptionOperationalRecoveredClaim | NativeSubscriptionPublicationOperationClaim | NativeSubscriptionReconcileFaultClaim | NativeSubscriptionSubscriptionBatchSentClaim | NativeSubscriptionSubscriptionMissionDeferredClaim | NativeSubscriptionSubscriptionMissionFailedClaim | NativeSubscriptionSubscriptionMissionRequestCancelledClaim | NativeSubscriptionSubscriptionMissionRequestReleasedClaim | NativeSubscriptionSubscriptionMissionRequestedClaim | NativeSubscriptionSubscriptionMissionStartedClaim | NativeSubscriptionSubscriptionStateClaim | NativeSubscriptionSubscriptionWatchEndedClaim | NativeCustomCustomClaim);
-
-export type SubjectClaimsPage = {
-  collection: "subject-claims";
-  coverage: SubjectHistoryCoverage;
-  filters: {
-  [key: string]: string;
+export type SubagentSummary = {
+  agent?: string;
+  conversation?: {
+  session_id: Id;
 };
-  items: Array<SubjectClaim>;
-  kind: "page";
-  local_fence: SubjectLocalFence;
-  page: PageInfo;
-  replicated?: ReplicatedNotice;
-  sync?: SyncNotice;
+  cost_usd?: number;
+  duration_ms?: number;
+  id: string;
+  name?: string;
+  requests?: number;
+  status: string;
+  task?: string;
+  tokens?: number;
+  tool_count?: number;
 };
-
-export type SubjectCollectionFrame = ({
-  collection: "subjects";
-  has_more: boolean;
-  id: string;
-  items: Array<SubjectProjection>;
-  kind: "snapshot";
-  order: Array<Id>;
-  snapshot: Snapshot;
-} | {
-  collection: "subjects";
-  has_more: boolean;
-  id: string;
-  kind: "changes";
-  order: Array<Id>;
-  removes: Array<Id>;
-  snapshot: Snapshot;
-  upserts: Array<SubjectProjection>;
-});
 
 export type SubjectDefinition = {
   conflicts: Array<string>;
@@ -7709,6 +7817,26 @@ export type SubscriptionSpec = {
   workspace?: string | null;
 };
 
+export type Summary = ResourceHeader & {
+  active_missions: number;
+  agents_as_of?: {
+  published_at: Timestamp;
+  store_index: number;
+};
+  alerts?: number;
+  kind: "summary";
+  machines: SummaryMachines;
+  needs_you: number;
+  person_id: string | null;
+  working_agents: number;
+};
+
+export type SummaryMachines = {
+  connected: number;
+  indirect: number;
+  offline: number;
+};
+
 export type SyncNotice = {
   peers: Array<SyncPeer>;
   state: "catching-up" | "diverged";
@@ -7843,6 +7971,24 @@ export type TerminalScreen = {
   truncated: boolean;
 };
 
+export type TimelineAskAnswer = {
+  custom?: string;
+  note?: string;
+  question: string;
+  selected: Array<string>;
+};
+
+export type TimelineAskQuestion = {
+  id: string;
+  multi: boolean;
+  options: Array<{
+  description?: string;
+  label: string;
+}>;
+  question: string;
+  recommended?: number;
+};
+
 export type TimelineBlock = {
   continuation?: ConversationContentRef;
   id: string;
@@ -7852,6 +7998,7 @@ export type TimelineBlock = {
 };
   payload: unknown;
   source_type: string;
+  view?: unknown;
   visibility?: string;
 };
 
@@ -7860,6 +8007,7 @@ export type TimelineContentBody = (unknown | unknown);
 export type TimelineDelta = {
   entry?: TimelineEntry;
   entry_id: Id;
+  header?: unknown;
   operation: "append" | "replace" | "finalize";
   revision: number;
 };
@@ -7892,6 +8040,7 @@ export type TimelineErrorBody = {
 export type TimelineMessageBody = {
   attachments?: Array<Attachment>;
   blocks?: Array<TimelineBlock>;
+  body_bytes?: number;
   from?: ParticipantRef;
   message_id: string;
   provenance?: MessageProvenance;
@@ -7902,6 +8051,7 @@ export type TimelineMessageBody = {
 };
 
 export type TimelinePage = {
+  header?: unknown;
   items: Array<TimelineEntry>;
   kind: "timeline-page";
   page: PageInfo;
@@ -7921,6 +8071,11 @@ export type TimelineStatusBody = {
   blocks?: Array<TimelineBlock>;
   detail?: string;
   status: TimelineStatus;
+};
+
+export type TimelineTodoItem = {
+  content: string;
+  status: string;
 };
 
 export type TimelineToolCallBody = {
@@ -7973,10 +8128,269 @@ export type TimelineUsageBody = {
   turn_id?: string;
 };
 
+export type TimelineView = (TimelineViewBash | TimelineViewEdit | TimelineViewWrite | TimelineViewRead | TimelineViewSearch | TimelineViewTodo | TimelineViewAsk | TimelineViewTask | TimelineViewHub | TimelineViewEval | TimelineViewGeneric | TimelineViewIrc | TimelineViewJob | TimelineViewSkill | TimelineViewCompaction | TimelineViewAssistantError | TimelineViewModelChange | TimelineViewThinkingLevel | TimelineViewTitle | TimelineViewSessionExit | TimelineViewToolStart | TimelineViewResetBoundary | TimelineViewCredentialPin | {
+  type: string;
+});
+
+export type TimelineViewAsk = {
+  answers?: Array<TimelineAskAnswer>;
+  call_id?: string;
+  intent?: string;
+  is_error?: boolean;
+  questions?: Array<TimelineAskQuestion>;
+  tool: string;
+  type: "ask";
+};
+
+export type TimelineViewAssistantError = {
+  api?: string;
+  error_id?: number;
+  is_error: boolean;
+  label: string;
+  message: string;
+  model?: string;
+  presentation: "full" | "compact-recovered" | "none";
+  provider?: string;
+  retry?: {
+  attempt?: number;
+  kind?: string;
+  note?: string;
+  recovered_at?: Timestamp;
+  recovery?: string;
+  status?: string;
+  superseded_by?: {
+  model?: string;
+  provider?: string;
+  response_id?: string;
+  timestamp?: number;
+};
+};
+  status: "failed" | "recovered" | "superseded";
+  stop_reason?: string;
+  type: "assistant_error";
+};
+
+export type TimelineViewBash = {
+  background?: boolean;
+  call_id?: string;
+  command?: string;
+  cwd?: string;
+  env_keys?: Array<string>;
+  exit_code?: number;
+  intent?: string;
+  is_error?: boolean;
+  timed_out?: boolean;
+  timeout_s?: number;
+  tool: string;
+  type: "bash";
+  wall_ms?: number;
+};
+
+export type TimelineViewCompaction = {
+  method?: string;
+  short_summary?: string;
+  summary?: string;
+  tokens_after?: number;
+  tokens_before?: number;
+  type: "compaction";
+};
+
+export type TimelineViewCredentialPin = {
+  provider: string;
+  type: "credential_pin";
+};
+
+export type TimelineViewEdit = {
+  call_id?: string;
+  diff?: string;
+  first_changed_line?: number;
+  input_bytes?: number;
+  intent?: string;
+  is_error?: boolean;
+  ops?: number;
+  path?: string;
+  tool: string;
+  type: "edit";
+};
+
+export type TimelineViewEval = {
+  code?: string;
+  code_bytes: number;
+  intent?: string;
+  language: string;
+  reset?: boolean;
+  timeout_s?: number;
+  title?: string;
+  tool: string;
+  type: "eval";
+};
+
+export type TimelineViewGeneric = {
+  call_id?: string;
+  intent?: string;
+  is_error?: boolean;
+  name?: string;
+  tool: string;
+  type: "generic";
+  wall_ms?: number;
+};
+
+export type TimelineViewHub = {
+  call_id?: string;
+  intent?: string;
+  is_error?: boolean;
+  jobs?: Array<JobSummary>;
+  message?: string;
+  name?: string;
+  op: string;
+  state?: string;
+  target?: string;
+  timed_out?: boolean;
+  timeout_s?: number;
+  tool: string;
+  type: "hub";
+};
+
+export type TimelineViewIrc = {
+  from: string;
+  message: string;
+  message_id: string;
+  reply_to?: string;
+  type: "irc";
+};
+
+export type TimelineViewJob = {
+  jobs: Array<JobSummary>;
+  type: "job";
+};
+
+export type TimelineViewModelChange = {
+  fallback?: boolean;
+  model: string;
+  role?: string;
+  type: "model_change";
+};
+
+export type TimelineViewRead = {
+  intent?: string;
+  path: string;
+  range?: string;
+  tool: string;
+  type: "read";
+};
+
+export type TimelineViewResetBoundary = {
+  type: "reset_boundary";
+};
+
+export type TimelineViewSearch = {
+  call_id?: string;
+  case?: boolean;
+  engine: "grep" | "glob" | "web";
+  file_count?: number;
+  file_limit_reached?: number;
+  gitignore?: boolean;
+  hidden?: boolean;
+  intent?: string;
+  is_error?: boolean;
+  limit?: number;
+  match_count?: number;
+  path?: string;
+  pattern?: string;
+  per_file_limit_reached?: number;
+  query?: string;
+  skip?: number;
+  tool: string;
+  truncated?: boolean;
+  type: "search";
+  warning?: string;
+};
+
+export type TimelineViewSessionExit = {
+  kind: string;
+  reason: string;
+  type: "session_exit";
+};
+
+export type TimelineViewSkill = {
+  args?: unknown;
+  name: string;
+  path?: string;
+  type: "skill";
+};
+
+export type TimelineViewTask = {
+  agents?: Array<SubagentSummary>;
+  async?: boolean;
+  call_id?: string;
+  context?: string;
+  intent?: string;
+  is_error?: boolean;
+  tasks?: Array<{
+  agent?: string;
+  name?: string;
+  task: string;
+}>;
+  tool: string;
+  total_ms?: number;
+  type: "task";
+};
+
+export type TimelineViewThinkingLevel = {
+  configured?: boolean;
+  level: string;
+  type: "thinking_level";
+};
+
+export type TimelineViewTitle = {
+  previous?: string;
+  source?: string;
+  title: string;
+  type: "title";
+};
+
+export type TimelineViewTodo = {
+  call_id?: string;
+  intent?: string;
+  is_error?: boolean;
+  items?: Array<TimelineTodoItem>;
+  op?: string;
+  phase?: string;
+  phases?: Array<{
+  items: Array<TimelineTodoItem>;
+  name: string;
+}>;
+  task?: string;
+  tool: string;
+  type: "todo";
+};
+
+export type TimelineViewToolStart = {
+  call_id: string;
+  started_at: Timestamp;
+  tool: string;
+  type: "tool_start";
+};
+
+export type TimelineViewWrite = {
+  bytes: number;
+  content?: string;
+  intent?: string;
+  line_count?: number;
+  path: string;
+  tool: string;
+  type: "write";
+};
+
 export type Timestamp = string;
 
 export type UnknownResource = ResourceHeader & {
   kind?: string;
+};
+
+export type Usage = ResourceHeader & {
+  kind: "usage";
+  value: UsagePeriod;
 };
 
 export type UsageContext = {
@@ -8165,10 +8579,13 @@ export type Work = ResourceHeader & {
   last_progress?: string | null;
   mission_id?: (Id | null);
   mission_run_id: Id;
+  nudged_at_unix_ms?: number | null;
   path: string;
   person_answers?: Array<PersonAnswerRecord>;
+  progress_at?: (Timestamp | null);
   readiness_epoch: number;
   state: WorkState;
+  submitted_incarnation?: string | null;
   timeout_ms?: number | null;
   title?: string | null;
   usage?: (UsageSummary | null);
@@ -8176,6 +8593,7 @@ export type Work = ResourceHeader & {
 
 export type WorkLabel = {
   goal?: string | null;
+  holder_down_since?: (Timestamp | null);
   id: Id;
   mission_id: MissionId;
   mission_run_id: MissionRunId;
@@ -8297,6 +8715,7 @@ export type ActionRequest =
   attachments?: Array<AttachmentInput>;
   content: string;
   in_reply_to?: Id;
+  kind?: "silent" | "wake";
   session_id?: Id;
   signature?: DeviceSignature;
   tags?: Array<string>;
@@ -8318,6 +8737,7 @@ export type ActionRequest =
   workspace: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.request-changes'; parameters: TargetParameters; fence: Fence }) |

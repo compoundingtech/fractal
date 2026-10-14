@@ -271,6 +271,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn subject_definition(&self, subject: &str, show_env_values: bool) -> Result<Envelope<SubjectDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/subject-definition?subject={{}}&show_env_values={{show_env_values}}\", percent_encode(subject))).await }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -318,6 +320,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn terminal_screen(&self, terminal_id: &str) -> Result<Envelope<TerminalScreen>, ClientError> {{ self.terminal_screen_internal(terminal_id).await }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {{ self.get(&format!(\"/v1/client/message-bodies/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "agent-queue.get" {
@@ -445,6 +449,8 @@ fn swift_operation_methods(
                 out,
                 "    public func conversationSearch(text: String, agent: String? = nil, since: String? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ConversationSearch> {{ var query: [URLQueryItem] = [.init(name: \"text\", value: text)]; for (name, value) in [(\"agent\", agent), (\"since\", since), (\"cursor\", cursor)] {{ if let value {{ query.append(.init(name: name, value: value)) }} }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/conversations/search\", query: query) }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -467,6 +473,8 @@ fn swift_operation_methods(
                 out,
                 "    public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> {{ try await get(\"v1/client/agent-workspaces/\\(id)\") }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> {{ try await get(\"v1/client/message-bodies/\\(id)\") }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> {{ try await get(\"v1/client/status-history/\\(id)\") }}")?;
         } else if id == "agent-declaration.get" {
@@ -696,12 +704,15 @@ fn validate_surfaces(
         bail!("KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}", known.len());
     }
     for definition in [
+        "DirectiveNote",
+        "DirectiveNotes",
         "ResourceObservation",
         "ResourcesFilter",
         "ResourcesPage",
         "AttentionBlocked",
         "AttentionTargetState",
         "DocumentContent",
+        "MessageBody",
         "AgentDeclaration",
         "AgentWorkspace",
         "StatusHistory",
@@ -737,6 +748,9 @@ fn validate_surfaces(
         "TimelineEntry",
         "TimelinePage",
         "ConversationChanges",
+        "ObservationReport",
+        "ObservationAccepted",
+        "ObservationResponse",
         "PairingBegin",
         "PairingChallenge",
         "PairingComplete",
@@ -769,6 +783,7 @@ fn validate_surfaces(
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
     for token in [
+        "pub async fn observations_report",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
         "pub async fn terminal_stream",
@@ -785,6 +800,7 @@ fn validate_surfaces(
         "func timeline(",
         "cursor: String?",
         "func events(",
+        "func observationsReport(",
         "func beginPairing(",
         "func completePairing(",
         "func terminalScreen(",
@@ -1058,6 +1074,7 @@ fn ts_type(value: &Value) -> Result<String> {
         Some("integer" | "number") => "number".into(),
         Some("boolean") => "boolean".into(),
         Some("null") => "null".into(),
+        Some("array") if value.get("prefixItems").is_some() => format!("[{}]", value["prefixItems"].as_array().context("tuple items")?.iter().map(ts_type).collect::<Result<Vec<_>>>()?.join(", ")),
         Some("array") => format!("Array<{}>", ts_type(&value["items"])?),
         Some("object") => ts_object(value)?,
         Some(other) => bail!("unsupported TypeScript schema type `{other}`"),
@@ -1144,6 +1161,23 @@ fn ts_conditional_body(value: &Value) -> Result<Option<String>> {
     }
 }
 
+/// The typed `TimelineView` and `ConversationHeader` schemas serve schema consumers and docs;
+/// generated clients carry both as loose JSON, so the raw TypeScript model renders the named
+/// fields as `unknown` instead of projecting every definition.
+fn ts_loose_json_fields(definition: &Value, fields: &[&str]) -> Value {
+    let mut loose = definition.clone();
+    for field in fields {
+        if let Some(properties) = loose
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .and_then(|properties| properties.get_mut(*field))
+        {
+            *properties = Value::Object(serde_json::Map::new());
+        }
+    }
+    loose
+}
+
 fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     let mut out = format!(
@@ -1153,6 +1187,13 @@ fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
         if name == "ActionRequest" {
             continue;
         }
+        let loose = match name.as_str() {
+            "TimelineBlock" => ts_loose_json_fields(definition, &["view"]),
+            "TimelinePage" | "ConversationChanges" | "TimelineDelta" => {
+                ts_loose_json_fields(definition, &["header"])
+            }
+            _ => definition.clone(),
+        };
         let shape = if name == "Resource" {
             // UnknownResource's open `kind: string` would defeat discriminant narrowing in the
             // raw union; like the Rust and Swift clients, raw TypeScript models known kinds only.
@@ -1162,7 +1203,7 @@ fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
             }
             ts_type(&known)?
         } else {
-            ts_conditional_body(definition)?.unwrap_or(ts_type(definition)?)
+            ts_conditional_body(&loose)?.unwrap_or(ts_type(&loose)?)
         };
         writeln!(out, "export type {name} = {shape};\n")?;
     }
@@ -1273,6 +1314,8 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(options: EventOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events'); }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    async notesList(): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes'); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,

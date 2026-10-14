@@ -31,6 +31,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case missionRevise = "mission.revise"
     case missionStart = "mission.start"
     case pairingRevoke = "pairing.revoke"
+    case promptRespond = "prompt.respond"
     case reviewApprove = "review.approve"
     case reviewReject = "review.reject"
     case reviewRequestChanges = "review.request-changes"
@@ -60,6 +61,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ReadOperation: String, CaseIterable, Sendable {
+    case notesList = "notes.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
     case hostRepositories = "host.repositories"
@@ -84,6 +86,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case attentionGet = "attention.get"
     case messagesList = "messages.list"
     case messagesGet = "messages.get"
+    case messageBodyGet = "message-body.get"
     case launchesList = "launches.list"
     case launchesGet = "launches.get"
     case launchVariantsList = "launch-variants.list"
@@ -128,6 +131,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
 }
 
 public let st3ClientReadPaths: [ReadOperation: String] = [
+    .notesList: "/v1/client/notes",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
     .hostRepositories: "/v1/client/hosts/{id}/repositories",
@@ -152,6 +156,7 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .attentionGet: "/v1/client/attention/{id}",
     .messagesList: "/v1/client/messages",
     .messagesGet: "/v1/client/messages/{id}",
+    .messageBodyGet: "/v1/client/message-bodies/{id}",
     .launchesList: "/v1/client/launches",
     .launchesGet: "/v1/client/launches/{id}",
     .launchVariantsList: "/v1/client/launches/{id}/variants",

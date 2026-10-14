@@ -179,7 +179,7 @@ export const ActionCommon = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")),
   "parameters": Schema.Record(Schema.String, Schema.Unknown),
-  "type": Schema.Literals(["arrangement.edit","custom.reply","attention.resolve","review.approve","review.reject","review.request-changes","message.send","message.read","message.close","launch.create","launch.revise","launch.preview","launch.approve","launch.cancel","mission.start","mission.revise","mission.approve-revision","mission.cancel-revision","mission.cancel","session.import","work.ask","work.done","work.cancel-ask","work.claim","work.renew","work.progress","work.complete","work.fail","work.release","work.retry","work.publish-mission","agent.create","agent.stop","agent.start","agent.suspend","agent.resume","terminal.create","terminal.end","agent.queue-move","lane.join","lane.leave","lane.move","lane.mark","lane.approve","runtime.stop","runtime.restart","runtime.reset","runtime.context-clear","runtime.signal","terminal.input","terminal.resize","terminal.attach","terminal.detach","pairing.revoke"])
+  "type": Schema.Literals(["arrangement.edit","custom.reply","prompt.respond","attention.resolve","review.approve","review.reject","review.request-changes","message.send","message.read","message.close","launch.create","launch.revise","launch.preview","launch.approve","launch.cancel","mission.start","mission.revise","mission.approve-revision","mission.cancel-revision","mission.cancel","session.import","work.ask","work.done","work.cancel-ask","work.claim","work.renew","work.progress","work.complete","work.fail","work.release","work.retry","work.publish-mission","agent.create","agent.stop","agent.start","agent.suspend","agent.resume","terminal.create","terminal.end","agent.queue-move","lane.join","lane.leave","lane.move","lane.mark","lane.approve","runtime.stop","runtime.restart","runtime.reset","runtime.context-clear","runtime.signal","terminal.input","terminal.resize","terminal.attach","terminal.detach","pairing.revoke"])
 }).annotate({ identifier: "ActionCommon" }))()
 export type ActionCommon = typeof ActionCommon.Type
 export type ActionCommonEncoded = typeof ActionCommon.Encoded
@@ -379,6 +379,15 @@ export const PersonStepParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonStepParameters = typeof PersonStepParameters.Type
 export type PersonStepParametersEncoded = typeof PersonStepParameters.Encoded
 
+/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers (allow or deny). */
+export const PromptRespondParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "answer": Schema.Literals(["allow","deny"]),
+  "episode": Schema.String,
+  "target_id": Id
+}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers (allow or deny)." }))()
+export type PromptRespondParameters = typeof PromptRespondParameters.Type
+export type PromptRespondParametersEncoded = typeof PromptRespondParameters.Encoded
+
 export const TargetParameters = /*#__PURE__*/ (() => Schema.Struct({
   "evidence": optionalKey(Schema.Array(Id)),
   "reason": optionalKey(Schema.String),
@@ -399,6 +408,7 @@ export type TerminalCreateParametersEncoded = typeof TerminalCreateParameters.En
 export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": ArrangementEditParameters, "type": Schema.Literal("arrangement.edit") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": CustomReplyParameters, "type": Schema.Literal("custom.reply") }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": PromptRespondParameters, "type": Schema.Literal("prompt.respond") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentCreateParameters, "type": Schema.Literal("agent.create") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
 "fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentStopParameters, "type": Schema.Literal("agent.stop") }),
@@ -414,7 +424,8 @@ export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": PersonStepParameters, "type": Schema.Literals(["work.done","work.cancel-ask"]) }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "attention_id": Id, "outcome": Schema.String, "reason": optionalKey(Schema.String) }), "type": Schema.Literal("attention.resolve") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literals(["review.approve","review.reject","review.request-changes"]) }),
-  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "attachments": optionalKey(Schema.Array(AttachmentInput).check(Schema.isMaxLength(4))), "content": Schema.String, "in_reply_to": optionalKey(Id), "session_id": optionalKey(Id), "signature": optionalKey(DeviceSignature), "tags": optionalKey(Schema.Array(Schema.String).check(Schema.isUnique())), "title": optionalKey(Schema.String), "to": Id }), "type": Schema.Literal("message.send") }),
+  Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "attachments": optionalKey(Schema.Array(AttachmentInput).check(Schema.isMaxLength(4))), "content": Schema.String, "in_reply_to": optionalKey(Id), /** Wake is the default; silent holds unread mail until the next real wake. */
+"kind": optionalKey(Schema.Literals(["silent","wake"])).annotate({ description: "Wake is the default; silent holds unread mail until the next real wake." }), "session_id": optionalKey(Id), "signature": optionalKey(DeviceSignature), "tags": optionalKey(Schema.Array(Schema.String).check(Schema.isUnique())), "title": optionalKey(Schema.String), "to": Id }), "type": Schema.Literal("message.send") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literals(["message.read","message.close"]) }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "effort": optionalKey(Schema.String.check(Schema.isMinLength(1))), "model": optionalKey(Schema.String.check(Schema.isMinLength(1))), "provider": optionalKey(Schema.Literals(["codex","claude","pi","omp","opencode"])), "request": Schema.String, "target": Schema.Union([Schema.Struct({ "mission_id": Id, "type": Schema.Literal("new-mission"), "workspace": Schema.String }), Schema.Struct({ "generation_id": Id, "mission_run_id": Id, "type": Schema.Literal("mission-run") })], { mode: "oneOf" }), "title": Schema.String }), "type": Schema.Literal("launch.create") }),
   Schema.Struct({ "api_version": Schema.Literal("st3.client.v0"), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "feedback": Schema.String, "launch_id": Id }), "type": Schema.Literal("launch.revise") }),
@@ -528,6 +539,11 @@ export const AgentId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent)/[^
 export type AgentId = typeof AgentId.Type
 export type AgentIdEncoded = typeof AgentId.Encoded
 
+/** Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown. */
+export const AgentLifecycle = /*#__PURE__*/ (() => openEnum(["standing","owner","bounded"]).annotate({ identifier: "AgentLifecycle", description: "Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown." }))()
+export type AgentLifecycle = typeof AgentLifecycle.Type
+export type AgentLifecycleEncoded = typeof AgentLifecycle.Encoded
+
 /** Whether the daemon can currently reach the agent runtime. */
 export const AgentReachability = /*#__PURE__*/ (() => openEnum(["local","remote","unreachable","unknown","reachable","indeterminate"]).annotate({ identifier: "AgentReachability", description: "Whether the daemon can currently reach the agent runtime." }))()
 export type AgentReachability = typeof AgentReachability.Type
@@ -540,8 +556,8 @@ export const AgentRelationship = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentRelationship = typeof AgentRelationship.Type
 export type AgentRelationshipEncoded = typeof AgentRelationship.Encoded
 
-/** Desired/observed agent seat state. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`. */
-export const AgentState = /*#__PURE__*/ (() => openEnum(["desired","starting","running","waiting","stopped","failed","suspended"]).annotate({ identifier: "AgentState", description: "Desired/observed agent seat state. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`." }))()
+/** Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`. */
+export const AgentState = /*#__PURE__*/ (() => openEnum(["desired","starting","running","waiting","down","stopped","failed","suspended"]).annotate({ identifier: "AgentState", description: "Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`." }))()
 export type AgentState = typeof AgentState.Type
 export type AgentStateEncoded = typeof AgentState.Encoded
 
@@ -698,6 +714,8 @@ export type WorkStateEncoded = typeof WorkState.Encoded
 
 export const WorkLabel = /*#__PURE__*/ (() => Schema.Struct({
   "goal": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** Set on a seat's current work when the seat is `down`: the step is claimed by a holder with no session, and its progress and activity predate that. */
+  "holder_down_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Set on a seat's current work when the seat is `down`: the step is claimed by a holder with no session, and its progress and activity predate that." }),
   "id": Id,
   "mission_id": MissionId,
   "mission_run_id": MissionRunId,
@@ -711,6 +729,8 @@ export type WorkLabelEncoded = typeof WorkLabel.Encoded
 
 export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "active_work_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** What the seat is doing that is neither ordinary work nor a wait on a person, shown as its status and never as an alert: compacting while its harness compacts its conversation (Claude Code, Codex and omp report both edges). Absent otherwise and on older daemons; clients show unknown values as plain text. */
+  "activity": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "What the seat is doing that is neither ordinary work nor a wait on a person, shown as its status and never as an alert: compacting while its harness compacts its conversation (Claude Code, Codex and omp report both edges). Absent otherwise and on older daemons; clients show unknown values as plain text." }),
   /** Structured human ask kind (question, permission, or review); meaningful only while blocked_on is human. */
   "ask": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Structured human ask kind (question, permission, or review); meaningful only while blocked_on is human." }),
   /** Current incarnation's harness blocking axis; human means a person must answer before it continues. */
@@ -723,6 +743,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "current_work_ids": optionalKey(Schema.Array(StepRunId)),
   /** Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`. */
   "delivery": Schema.OptionFromOptionalNullOr(AgentDelivery, NULL_NONE).annotate({ description: "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." }),
+  /** When a `down` seat began waiting for a session; null in every other state. */
+  "down_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When a `down` seat began waiting for a session; null in every other state." }),
   "driver": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   /** Current member reconcile failure; cleared by a successful pass. */
   "fault": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Current member reconcile failure; cleared by a successful pass." }),
@@ -737,6 +759,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "incarnation_id": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "kind": Schema.Literal("agent"),
   "last_activity_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  /** The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row. */
+  "lifecycle": optionalKey(AgentLifecycle),
   "name": Schema.String,
   "next_work": Schema.OptionFromOptionalNullOr(WorkLabel, NULL_NONE),
   "next_work_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
@@ -774,6 +798,7 @@ export type Agent = typeof Agent.Type
 export type AgentEncoded = typeof Agent.Encoded
 
 export const AgentDeclaration = /*#__PURE__*/ (() => Schema.Struct({
+  "accountable": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^person/[A-Za-z0-9_.-]+$", "u")))),
   "id": Id,
   "kdl": Schema.String,
   "revision": Schema.String,
@@ -1055,11 +1080,17 @@ export type PersonUpdateEncoded = typeof PersonUpdate.Encoded
 
 export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "action_parameters": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
-  "actions": Schema.Array(Schema.Literals(["custom.reply","work.done","review.approve","review.reject","review.request-changes","launch.approve","launch.cancel","mission.approve-revision","mission.cancel-revision","message.read"])),
-  "attention_kind": Schema.Union([Schema.Literals(["human-gate","launch-approval","revision-approval","unread-message","person-step","agent-request","fault"]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
+  "actions": Schema.Array(Schema.Literals(["custom.reply","prompt.respond","work.done","review.approve","review.reject","review.request-changes","launch.approve","launch.cancel","mission.approve-revision","mission.cancel-revision","message.read"])),
+  /** Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts. */
+  "alert": optionalKey(Schema.Boolean).annotate({ description: "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." }),
+  "attention_kind": Schema.Union([Schema.Literals(["human-gate","launch-approval","revision-approval","unread-message","person-step","agent-request","fault","harness-login","harness-prompt"]), Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_.-]+$", "u")))]),
   "because": optionalKey(Schema.String),
   /** The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask. */
   "blocked": optionalKey(AttentionBlocked),
+  /** The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it. */
+  "conversation_id": optionalKey(Id),
+  /** Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all. */
+  "conversation_ids": optionalKey(Schema.Array(Id)).annotate({ description: "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." }),
   /** Data-only registered reply form; absent on native attention. */
   "custom_form": optionalKey(Schema.Record(Schema.String, Schema.Unknown)).annotate({ description: "Data-only registered reply form; absent on native attention." }),
   "detail": Schema.String,
@@ -1138,7 +1169,8 @@ export const Capabilities = /*#__PURE__*/ (() => Schema.Struct({
   "capabilities": Schema.Array(Capability),
   "event_cursor": Cursor,
   "kind": Schema.Literal("capabilities"),
-  "limits": Schema.Struct({ "max_arrangement_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_folders": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_key_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_name_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_operations": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_placements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_resource_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_event_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_glass_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_depth": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_nodes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glasses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_page_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1024)), "max_wait_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
+  "limits": Schema.Struct({ "max_arrangement_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_folders": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_key_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_name_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_operations": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_placements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_resource_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_event_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_glass_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_depth": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_nodes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glasses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), /** The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096. */
+"max_message_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))).annotate({ description: "The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096." }), "max_page_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1024)), "max_wait_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
   /** Compile-time build identity of the responding daemon; absent on older servers. */
   "machine_version": optionalKey(Schema.String).annotate({ description: "Compile-time build identity of the responding daemon; absent on older servers." }),
   "oldest_event_cursor": Cursor,
@@ -1186,7 +1218,8 @@ export type SubjectSubscription = typeof SubjectSubscription.Type
 export type SubjectSubscriptionEncoded = typeof SubjectSubscription.Encoded
 
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","work","glasses"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId) }),
   Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id }),
@@ -1197,9 +1230,64 @@ export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
 export type CollectionCommand = typeof CollectionCommand.Type
 export type CollectionCommandEncoded = typeof CollectionCommand.Encoded
 
-export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements"]).annotate({ identifier: "CollectionName" }))()
+export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements","summary","clients","usage","machines","devices","sessions","terminals"]).annotate({ identifier: "CollectionName" }))()
 export type CollectionName = typeof CollectionName.Type
 export type CollectionNameEncoded = typeof CollectionName.Encoded
+
+/** One conversation header field: its latest value, where it came from and when. */
+export const ConversationHeaderField = /*#__PURE__*/ (() => Schema.Struct({
+  "as_of": Timestamp,
+  /** register: live latest-wins value; transcript: derived from the fold window */
+  "source": Schema.Literals(["register","transcript"]).annotate({ description: "register: live latest-wins value; transcript: derived from the fold window" }),
+  /** Field value, any JSON; see each ConversationHeader property for its shape */
+  "value": Schema.Unknown.annotate({ description: "Field value, any JSON; see each ConversationHeader property for its shape" })
+}).annotate({ identifier: "ConversationHeaderField", description: "One conversation header field: its latest value, where it came from and when." }))()
+export type ConversationHeaderField = typeof ConversationHeaderField.Type
+export type ConversationHeaderFieldEncoded = typeof ConversationHeaderField.Encoded
+
+/** Optional conversation header on timeline pages and delta responses (conversation-blocks.v1). A field is absent when neither source has it; `working` comes only from the register and the register wins over the transcript once live. */
+export const ConversationHeader = /*#__PURE__*/ (() => Schema.Struct({
+  /** value: {call_id, questions: [TimelineAskQuestion]} or null for the last ask call without a matching result */
+  "ask": optionalKey(ConversationHeaderField),
+  /** value: {tokens: integer|null, window: integer|null} */
+  "context": optionalKey(ConversationHeaderField),
+  /** value: {usd: number, window: true when the fold window is truncated} */
+  "cost": optionalKey(ConversationHeaderField),
+  /** value: [JobSummary], latest state per job id, keeping non-terminal ones */
+  "jobs": optionalKey(ConversationHeaderField),
+  /** value: model id string */
+  "model": optionalKey(ConversationHeaderField),
+  /** value: [SubagentSummary], task outputs whose status is not terminal */
+  "subagents": optionalKey(ConversationHeaderField),
+  /** value: [{phase, items: [TimelineTodoItem]}] */
+  "todos": optionalKey(ConversationHeaderField),
+  /** value: boolean */
+  "working": optionalKey(ConversationHeaderField)
+}).annotate({ identifier: "ConversationHeader", description: "Optional conversation header on timeline pages and delta responses (conversation-blocks.v1). A field is absent when neither source has it; `working` comes only from the register and the register wins over the transcript once live." }))()
+export type ConversationHeader = typeof ConversationHeader.Type
+export type ConversationHeaderEncoded = typeof ConversationHeader.Encoded
+
+export const ConnectedClient = /*#__PURE__*/ (() => Schema.Struct({
+  "actor": Schema.String,
+  "client": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "connected": Schema.Boolean,
+  "device_id": optionalKey(Schema.String),
+  "device_name": optionalKey(Schema.String),
+  "follows": Schema.Array(Schema.String),
+  "id": Id,
+  "kind": Schema.Literal("connected-client"),
+  "last_seen": Timestamp,
+  "member": Schema.String,
+  "operational": optionalKey(Operational),
+  "person": Schema.String,
+  "revision": Revision,
+  "since": Timestamp,
+  "streams": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "updated_at": Timestamp,
+  "via": Schema.Literals(["local","gateway","tailscale"])
+}).annotate({ identifier: "ConnectedClient" }))()
+export type ConnectedClient = typeof ConnectedClient.Type
+export type ConnectedClientEncoded = typeof ConnectedClient.Encoded
 
 export const Device = /*#__PURE__*/ (() => Schema.Struct({
   "expires_at": Timestamp,
@@ -1534,6 +1622,10 @@ export type MachineEncoded = typeof Machine.Encoded
 
 export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "attachments": optionalKey(Schema.Array(Attachment)),
+  /** The length in UTF-8 bytes of the whole text, with body_ref. */
+  "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "The length in UTF-8 bytes of the whole text, with body_ref." }),
+  /** Present when content is only the start of a longer message; read the whole text with message-body.get. */
+  "body_ref": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u")))).annotate({ description: "Present when content is only the start of a longer message; read the whole text with message-body.get." }),
   "content": Schema.String,
   "from": Id,
   "id": Id,
@@ -1569,7 +1661,7 @@ export type MissionRunOutcomeEncoded = typeof MissionRunOutcome.Encoded
 
 export const MissionWake = /*#__PURE__*/ (() => Schema.Struct({
   "acknowledged_by": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
-  "assignee": AgentId,
+  "assignee": ActorRef,
   "assignee_state": Schema.String,
   "attempts": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "failure": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
@@ -1581,12 +1673,12 @@ export type MissionWakeEncoded = typeof MissionWake.Encoded
 
 export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "agentless": optionalKey(Schema.Boolean),
-  "assignee": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE),
+  "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
   "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "blocked_reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "blockers": optionalKey(Schema.Array(Id)),
   "claim_expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
-  "claimant": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE),
+  "claimant": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
   "constraints": optionalKey(Schema.Array(Schema.String)),
   "goals": optionalKey(Schema.Array(Schema.String)),
   "id": Id,
@@ -1597,7 +1689,11 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "loop_round": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Current round of this step's loop, enriched on mission detail reads." }),
   /** Observed not-before time: earliest work eligibility, not a promise of wake dispatch. */
   "next_wake_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Observed not-before time: earliest work eligibility, not a promise of wake dispatch." }),
+  /** When st last nudged this held step's holder for idling with nothing set to wake it. */
+  "nudged_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When st last nudged this held step's holder for idling with nothing set to wake it." }),
   "path": Schema.String,
+  /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
+  "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "since": Timestamp,
   "state": WorkState,
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
@@ -1616,7 +1712,8 @@ export type MustActEncoded = typeof MustAct.Encoded
 export const MissionRunSummary = /*#__PURE__*/ (() => Schema.Struct({
   "after": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
   "blocker": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE),
-  "current_steps": Schema.Array(Schema.Struct({ "assignee": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE), "claimant": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE), "id": StepRunId, "since": Timestamp, "state": WorkState, "title": Schema.OptionFromNullOr(Schema.String) })),
+  "current_steps": Schema.Array(Schema.Struct({ "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE), "claimant": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE), "id": StepRunId, /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
+"progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }), "since": Timestamp, "state": WorkState, "title": Schema.OptionFromNullOr(Schema.String) })),
   "deadline": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "generation_id": optionalKey(RunGenerationId),
   "id": MissionRunId,
@@ -1789,9 +1886,38 @@ export const Subscription = /*#__PURE__*/ (() => Schema.Struct({
 export type Subscription = typeof Subscription.Type
 export type SubscriptionEncoded = typeof Subscription.Encoded
 
+export const SummaryMachines = /*#__PURE__*/ (() => Schema.Struct({
+  "connected": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "indirect": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "offline": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "SummaryMachines" }))()
+export type SummaryMachines = typeof SummaryMachines.Type
+export type SummaryMachinesEncoded = typeof SummaryMachines.Encoded
+
+/** Complete current source counts, independent of list page limits. One summary/current resource per authorized subscription. Unavailable source coverage sends resync, never inferred zero counts. */
+export const Summary = /*#__PURE__*/ (() => Schema.Struct({
+  "active_missions": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** The published agents roster the agent counts came from, when a background refresher prepares it: its graph cut and when it was published. Absent when the counts come from this snapshot itself. */
+  "agents_as_of": optionalKey(Schema.Struct({ "published_at": Timestamp, "store_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) })).annotate({ description: "The published agents roster the agent counts came from, when a background refresher prepares it: its graph cut and when it was published. Absent when the counts come from this snapshot itself." }),
+  /** Open alerts: items that block or wait on this person. Updates are not counted. Absent on daemons that predate alerts. */
+  "alerts": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Open alerts: items that block or wait on this person. Updates are not counted. Absent on daemons that predate alerts." }),
+  "id": Id,
+  "kind": Schema.Literal("summary"),
+  "machines": SummaryMachines,
+  /** The alert count; an older daemon also counted unread updates. */
+  "needs_you": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "The alert count; an older daemon also counted unread updates." }),
+  "operational": optionalKey(Operational),
+  "person_id": Schema.OptionFromNullOr(Schema.String),
+  "revision": Revision,
+  "updated_at": Timestamp,
+  "working_agents": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "Summary", description: "Complete current source counts, independent of list page limits. One summary/current resource per authorized subscription. Unavailable source coverage sends resync, never inferred zero counts." }))()
+export type Summary = typeof Summary.Type
+export type SummaryEncoded = typeof Summary.Encoded
+
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set"]),
+  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -1799,10 +1925,102 @@ export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
 export type UnknownResource = typeof UnknownResource.Type
 export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 
+export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
+  "account": Schema.String,
+  "account_ref": optionalKey(Schema.String),
+  "driver": Schema.String,
+  "five_hour_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "five_hour_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "host": Schema.String,
+  /** The source named a provider identity or declared account; independent of quota freshness. Absent on older servers. */
+  "identified": optionalKey(Schema.Boolean).annotate({ description: "The source named a provider identity or declared account; independent of quota freshness. Absent on older servers." }),
+  "measured_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "measured_by": Schema.String,
+  "plan": optionalKey(Schema.String),
+  "seats": Schema.Array(Schema.String),
+  "weekly_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "weekly_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "UsageLimit" }))()
+export type UsageLimit = typeof UsageLimit.Type
+export type UsageLimitEncoded = typeof UsageLimit.Encoded
+
+export const UsagePricingRates = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_read": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_1h": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_5m": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "input": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePricingRates" }))()
+export type UsagePricingRates = typeof UsagePricingRates.Type
+export type UsagePricingRatesEncoded = typeof UsagePricingRates.Encoded
+
+/** Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown. */
+export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_source": Schema.Literals(["provider_reported","computed","unpriced"]),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "price_table_id": optionalKey(Schema.String),
+  "price_table_version": optionalKey(Schema.String),
+  "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
+export type UsagePricing = typeof UsagePricing.Type
+export type UsagePricingEncoded = typeof UsagePricing.Encoded
+
+export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
+  "account": optionalKey(Schema.String),
+  "agent": Id,
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "host": optionalKey(Schema.String),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "mission_run": optionalKey(Id),
+  "model": optionalKey(Schema.String),
+  "native_session_id": optionalKey(Schema.String),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "pricing": optionalKey(Schema.String),
+  "pricing_provenance": optionalKey(Schema.Array(UsagePricing)),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "step": optionalKey(Id),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsageRow" }))()
+export type UsageRow = typeof UsageRow.Type
+export type UsageRowEncoded = typeof UsageRow.Encoded
+
+export const UsagePeriod = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_messages": optionalKey(AgentMessageEstimate),
+  "limits": optionalKey(Schema.Array(UsageLimit)),
+  "rows": Schema.Array(UsageRow),
+  "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePeriod" }))()
+export type UsagePeriod = typeof UsagePeriod.Type
+export type UsagePeriodEncoded = typeof UsagePeriod.Encoded
+
+export const Usage = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Id,
+  "kind": Schema.Literal("usage"),
+  "operational": optionalKey(Operational),
+  "revision": Revision,
+  "updated_at": Timestamp,
+  "value": UsagePeriod
+}).annotate({ identifier: "Usage" }))()
+export type Usage = typeof Usage.Type
+export type UsageEncoded = typeof Usage.Encoded
+
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   "label": optionalKey(Schema.String),
-  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read"]),
+  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read","dismissed"]),
   "text": optionalKey(Schema.String),
   "type": Schema.Literals(["decision","choice","feedback","update"])
 }).annotate({ identifier: "PersonAnswer" }))()
@@ -1845,13 +2063,19 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   /** The mission this work's run belongs to. */
   "mission_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE).annotate({ description: "The mission this work's run belongs to." }),
   "mission_run_id": Id,
+  /** When st last nudged this held step's holder for idling with nothing set to wake it. */
+  "nudged_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.DateTimeUtcFromMillis.check(epochRange))), NULL_NONE).annotate({ description: "When st last nudged this held step's holder for idling with nothing set to wake it." }),
   "operational": optionalKey(Operational),
   "path": Schema.String,
   /** Responses to the asks this attempt made, or a person ask's own response. */
   "person_answers": optionalKey(Schema.Array(PersonAnswerRecord)).annotate({ description: "Responses to the asks this attempt made, or a person ask's own response." }),
+  /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
+  "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "revision": Revision,
   "state": WorkState,
+  /** Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match. */
+  "submitted_incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match." }),
   "timeout_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1))), NULL_NONE),
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "updated_at": Timestamp,
@@ -1861,6 +2085,9 @@ export type Work = typeof Work.Type
 export type WorkEncoded = typeof Work.Encoded
 
 export const Resource = /*#__PURE__*/ (() => Schema.Union([
+  ConnectedClient,
+  Usage,
+  Summary,
   Attention,
   Message,
   Launch,
@@ -1893,6 +2120,8 @@ export const Snapshot = /*#__PURE__*/ (() => Schema.Struct({
   "host_id": HostId,
   "id": SnapshotId,
   "projection_version": Schema.Literal("client-projection.v0"),
+  /** For rows a background refresher prepared, such as the agents roster: when it published them. They reflect `store_index`, and local activity up to this time. */
+  "published_at": optionalKey(Timestamp),
   "store_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 }).annotate({ identifier: "Snapshot", description: "The complete projected state at one local store index and projection version." }))()
 export type Snapshot = typeof Snapshot.Type
@@ -1925,7326 +2154,405 @@ export const NativeAccountIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struc
   "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
   "provenance": SubjectProvenance,
   "reason": optionalKey(Schema.String),
-  "ref": NativeAccountSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/393f90dede71caa16da067dc8bb9f40d572c0ef4416aa5b0e85cd5b0780dbe0b/account/intent.desired")
-}).annotate({ identifier: "NativeAccountIntentDesiredClaim" }))()
-export type NativeAccountIntentDesiredClaim = typeof NativeAccountIntentDesiredClaim.Type
-export type NativeAccountIntentDesiredClaimEncoded = typeof NativeAccountIntentDesiredClaim.Encoded
-
-export const NativeAccountPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeAccountPublicationOperationClaimFields" }))()
-export type NativeAccountPublicationOperationClaimFields = typeof NativeAccountPublicationOperationClaimFields.Type
-export type NativeAccountPublicationOperationClaimFieldsEncoded = typeof NativeAccountPublicationOperationClaimFields.Encoded
-
-export const NativeAccountPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAccountPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAccountSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/44cbda0c0621af1988bd38018b80ec99eaae463b76f2076fa668b7dbd1dad5fb/account/publication.operation")
-}).annotate({ identifier: "NativeAccountPublicationOperationClaim" }))()
-export type NativeAccountPublicationOperationClaim = typeof NativeAccountPublicationOperationClaim.Type
-export type NativeAccountPublicationOperationClaimEncoded = typeof NativeAccountPublicationOperationClaim.Encoded
-
-export const NativeAccountClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeAccountIntentDesiredClaim,
-  NativeAccountPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeAccountClaim" }))()
-export type NativeAccountClaim = typeof NativeAccountClaim.Type
-export type NativeAccountClaimEncoded = typeof NativeAccountClaim.Encoded
-
-export const SubjectLocalFence = /*#__PURE__*/ (() => Schema.Struct({
-  "node": Schema.String,
-  "position": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "SubjectLocalFence" }))()
-export type SubjectLocalFence = typeof SubjectLocalFence.Type
-export type SubjectLocalFenceEncoded = typeof SubjectLocalFence.Encoded
-
-export const NativeAccountSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("account"),
-  "heads": Schema.Array(NativeAccountClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeAccountSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/42697d859c47a53115223950e5d876f20128973537d2765b3eb52f5bf6b4d324/account")
-}).annotate({ identifier: "NativeAccountSubject" }))()
-export type NativeAccountSubject = typeof NativeAccountSubject.Type
-export type NativeAccountSubjectEncoded = typeof NativeAccountSubject.Encoded
-
-export const NativeAgentAgentAccountClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "account": Schema.optionalKey(Schema.NullOr(NativeAccountSubjectRef))
-}).annotate({ identifier: "NativeAgentAgentAccountClaimFields" }))()
-export type NativeAgentAgentAccountClaimFields = typeof NativeAgentAgentAccountClaimFields.Type
-export type NativeAgentAgentAccountClaimFieldsEncoded = typeof NativeAgentAgentAccountClaimFields.Encoded
-
-export const NativeAgentSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["agent"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeAgentSubjectRef" }))()
-export type NativeAgentSubjectRef = typeof NativeAgentSubjectRef.Type
-export type NativeAgentSubjectRefEncoded = typeof NativeAgentSubjectRef.Encoded
-
-export const NativeAgentAgentAccountClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentAgentAccountClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("agent.account"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/70a3d05e523b72b81364a45a74702cee4aadc511b01786ec93787d4a865d95e0/agent/agent.account")
-}).annotate({ identifier: "NativeAgentAgentAccountClaim" }))()
-export type NativeAgentAgentAccountClaim = typeof NativeAgentAgentAccountClaim.Type
-export type NativeAgentAgentAccountClaimEncoded = typeof NativeAgentAgentAccountClaim.Encoded
-
-export const NativeAgentAgentPlacementSourceOfflineClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "destination": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentAgentPlacementSourceOfflineClaimFields" }))()
-export type NativeAgentAgentPlacementSourceOfflineClaimFields = typeof NativeAgentAgentPlacementSourceOfflineClaimFields.Type
-export type NativeAgentAgentPlacementSourceOfflineClaimFieldsEncoded = typeof NativeAgentAgentPlacementSourceOfflineClaimFields.Encoded
-
-export const NativeAgentAgentPlacementSourceOfflineClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentAgentPlacementSourceOfflineClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("agent.placement.source-offline"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f9054d18dd15e85ad5df85eebf83fd21b78fcfd5951e73714a8f5aa97494956f/agent/agent.placement.source-offline")
-}).annotate({ identifier: "NativeAgentAgentPlacementSourceOfflineClaim" }))()
-export type NativeAgentAgentPlacementSourceOfflineClaim = typeof NativeAgentAgentPlacementSourceOfflineClaim.Type
-export type NativeAgentAgentPlacementSourceOfflineClaimEncoded = typeof NativeAgentAgentPlacementSourceOfflineClaim.Encoded
-
-export const NativeAgentAgentPresenceClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "presence": Schema.optionalKey(Schema.NullOr(Schema.Literals(["available","busy","dnd","offline"]))),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.Literals(["reachable","unreachable","indeterminate"]))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentAgentPresenceClaimFields" }))()
-export type NativeAgentAgentPresenceClaimFields = typeof NativeAgentAgentPresenceClaimFields.Type
-export type NativeAgentAgentPresenceClaimFieldsEncoded = typeof NativeAgentAgentPresenceClaimFields.Encoded
-
-export const NativeAgentAgentPresenceClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentAgentPresenceClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("agent.presence"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/cb3f1cf8764f59f4c3acb85fecc1df79b8a9c654d07fb35b0cf3446558b06881/agent/agent.presence")
-}).annotate({ identifier: "NativeAgentAgentPresenceClaim" }))()
-export type NativeAgentAgentPresenceClaim = typeof NativeAgentAgentPresenceClaim.Type
-export type NativeAgentAgentPresenceClaimEncoded = typeof NativeAgentAgentPresenceClaim.Encoded
-
-export const NativeMissionRunSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["mission-run"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeMissionRunSubjectRef" }))()
-export type NativeMissionRunSubjectRef = typeof NativeMissionRunSubjectRef.Type
-export type NativeMissionRunSubjectRefEncoded = typeof NativeMissionRunSubjectRef.Encoded
-
-export const NativeAgentAgentQueueMovedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "anchor": Schema.optionalKey(Schema.NullOr(NativeMissionRunSubjectRef)),
-  "placement": Schema.optionalKey(Schema.NullOr(Schema.Literals(["top","bottom","before","after"]))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "run": Schema.optionalKey(Schema.NullOr(NativeMissionRunSubjectRef))
-}).annotate({ identifier: "NativeAgentAgentQueueMovedClaimFields" }))()
-export type NativeAgentAgentQueueMovedClaimFields = typeof NativeAgentAgentQueueMovedClaimFields.Type
-export type NativeAgentAgentQueueMovedClaimFieldsEncoded = typeof NativeAgentAgentQueueMovedClaimFields.Encoded
-
-export const NativeAgentAgentQueueMovedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentAgentQueueMovedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("agent.queue.moved"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/dd48107ecdbafef203c018542afe117dc9e3134db5ab7f03c09d9bcdf2ece535/agent/agent.queue.moved")
-}).annotate({ identifier: "NativeAgentAgentQueueMovedClaim" }))()
-export type NativeAgentAgentQueueMovedClaim = typeof NativeAgentAgentQueueMovedClaim.Type
-export type NativeAgentAgentQueueMovedClaimEncoded = typeof NativeAgentAgentQueueMovedClaim.Encoded
-
-export const NativeAgentDeliveryHoldClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "held": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "legacy_adoption": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "until_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeAgentDeliveryHoldClaimFields" }))()
-export type NativeAgentDeliveryHoldClaimFields = typeof NativeAgentDeliveryHoldClaimFields.Type
-export type NativeAgentDeliveryHoldClaimFieldsEncoded = typeof NativeAgentDeliveryHoldClaimFields.Encoded
-
-export const NativeAgentDeliveryHoldClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentDeliveryHoldClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("delivery.hold"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/6b4c971a761862f66069b5d46d3dca52447b56df5d7cc8dc1f8deef09683c217/agent/delivery.hold")
-}).annotate({ identifier: "NativeAgentDeliveryHoldClaim" }))()
-export type NativeAgentDeliveryHoldClaim = typeof NativeAgentDeliveryHoldClaim.Type
-export type NativeAgentDeliveryHoldClaimEncoded = typeof NativeAgentDeliveryHoldClaim.Encoded
-
-export const NativeAgentHarnessContextClearRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "context_epoch": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentHarnessContextClearRequestedClaimFields" }))()
-export type NativeAgentHarnessContextClearRequestedClaimFields = typeof NativeAgentHarnessContextClearRequestedClaimFields.Type
-export type NativeAgentHarnessContextClearRequestedClaimFieldsEncoded = typeof NativeAgentHarnessContextClearRequestedClaimFields.Encoded
-
-export const NativeAgentHarnessContextClearRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentHarnessContextClearRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("harness.context-clear.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/774ef27d8d0d9ae31cde306501ad560a29e55cc9f6200c0d342e865efcc54865/agent/harness.context-clear.requested")
-}).annotate({ identifier: "NativeAgentHarnessContextClearRequestedClaim" }))()
-export type NativeAgentHarnessContextClearRequestedClaim = typeof NativeAgentHarnessContextClearRequestedClaim.Type
-export type NativeAgentHarnessContextClearRequestedClaimEncoded = typeof NativeAgentHarnessContextClearRequestedClaim.Encoded
-
-export const NativeAgentHarnessContextClearResultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "context_epoch": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "result": Schema.optionalKey(Schema.NullOr(Schema.Literals(["confirmed","failed","indeterminate"]))),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentHarnessContextClearResultClaimFields" }))()
-export type NativeAgentHarnessContextClearResultClaimFields = typeof NativeAgentHarnessContextClearResultClaimFields.Type
-export type NativeAgentHarnessContextClearResultClaimFieldsEncoded = typeof NativeAgentHarnessContextClearResultClaimFields.Encoded
-
-export const NativeAgentHarnessContextClearResultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentHarnessContextClearResultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("harness.context-clear.result"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9f7a94b53e7fa41e56a1c6775b88700ada86ae2aeec63570519f7edbb87df032/agent/harness.context-clear.result")
-}).annotate({ identifier: "NativeAgentHarnessContextClearResultClaim" }))()
-export type NativeAgentHarnessContextClearResultClaim = typeof NativeAgentHarnessContextClearResultClaim.Type
-export type NativeAgentHarnessContextClearResultClaimEncoded = typeof NativeAgentHarnessContextClearResultClaim.Encoded
-
-export const NativeStepRunSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["step-run"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeStepRunSubjectRef" }))()
-export type NativeStepRunSubjectRef = typeof NativeStepRunSubjectRef.Type
-export type NativeStepRunSubjectRefEncoded = typeof NativeStepRunSubjectRef.Encoded
-
-export const NativeAgentHarnessDiagnosticClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "observed_since_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "retry_after_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "retry_attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.Literals(["warning","error"]))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "step_run": Schema.optionalKey(Schema.NullOr(NativeStepRunSubjectRef)),
-  "wake_attempts": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeAgentHarnessDiagnosticClaimFields" }))()
-export type NativeAgentHarnessDiagnosticClaimFields = typeof NativeAgentHarnessDiagnosticClaimFields.Type
-export type NativeAgentHarnessDiagnosticClaimFieldsEncoded = typeof NativeAgentHarnessDiagnosticClaimFields.Encoded
-
-export const NativeAgentHarnessDiagnosticClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentHarnessDiagnosticClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("harness.diagnostic"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a575986cc9c6e21f0389a737c557caf931df8c9c50bb998214ab2f7ccdc35560/agent/harness.diagnostic")
-}).annotate({ identifier: "NativeAgentHarnessDiagnosticClaim" }))()
-export type NativeAgentHarnessDiagnosticClaim = typeof NativeAgentHarnessDiagnosticClaim.Type
-export type NativeAgentHarnessDiagnosticClaimEncoded = typeof NativeAgentHarnessDiagnosticClaim.Encoded
-
-export const NativeAgentHarnessLimitsClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "account": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "account_ref": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "five_hour_percent": Schema.optionalKey(Schema.NullOr(Schema.Number)),
-  "five_hour_resets_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "measured_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "plan": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "weekly_percent": Schema.optionalKey(Schema.NullOr(Schema.Number)),
-  "weekly_resets_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeAgentHarnessLimitsClaimFields" }))()
-export type NativeAgentHarnessLimitsClaimFields = typeof NativeAgentHarnessLimitsClaimFields.Type
-export type NativeAgentHarnessLimitsClaimFieldsEncoded = typeof NativeAgentHarnessLimitsClaimFields.Encoded
-
-export const NativeAgentHarnessLimitsClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentHarnessLimitsClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("harness.limits"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/ba7188ebd1eb84d3b0671600daf641c2dd71bc0df83b5038fd27223c49038faf/agent/harness.limits")
-}).annotate({ identifier: "NativeAgentHarnessLimitsClaim" }))()
-export type NativeAgentHarnessLimitsClaim = typeof NativeAgentHarnessLimitsClaim.Type
-export type NativeAgentHarnessLimitsClaimEncoded = typeof NativeAgentHarnessLimitsClaim.Encoded
-
-export const NativeAgentHarnessObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "background_jobs": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "evidence_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "exit": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "observed_at_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "observed_since_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "ownership_sequence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "quiescent": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "rollout_operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "state": Schema.optionalKey(Schema.NullOr(Schema.Literals(["starting","ready","idle","working","blocked","ended","indeterminate"]))),
-  "transition_sequence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "transport": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentHarnessObservedClaimFields" }))()
-export type NativeAgentHarnessObservedClaimFields = typeof NativeAgentHarnessObservedClaimFields.Type
-export type NativeAgentHarnessObservedClaimFieldsEncoded = typeof NativeAgentHarnessObservedClaimFields.Encoded
-
-export const NativeAgentHarnessObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentHarnessObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("harness.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("latest"),
-  "schema_id": Schema.Literal("subject-claim-schema/53c6be47a643f31ecd091c0c01358adfdb9d9f47889049ae89976882f1423fe9/agent/harness.observed")
-}).annotate({ identifier: "NativeAgentHarnessObservedClaim" }))()
-export type NativeAgentHarnessObservedClaim = typeof NativeAgentHarnessObservedClaim.Type
-export type NativeAgentHarnessObservedClaimEncoded = typeof NativeAgentHarnessObservedClaim.Encoded
-
-export const NativeAgentHarnessUsageClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "account": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "cache_write_1h_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "cache_write_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "cached_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "compactions": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "context_used_percent": Schema.optionalKey(Schema.NullOr(Schema.Number)),
-  "context_used_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "context_window_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "cost": Schema.optionalKey(Schema.NullOr(Schema.Number)),
-  "cost_microusd": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "currency": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "host": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "input_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "last_compaction_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "last_compaction_trigger": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "model": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "observed_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "output_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "owner_run": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "owner_step": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "pricing": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reported_cost_microusd": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "semantics": Schema.optionalKey(Schema.NullOr(Schema.Literals(["context_occupancy","session_cumulative","response","response_rollup"]))),
-  "total_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "unpriced_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeAgentHarnessUsageClaimFields" }))()
-export type NativeAgentHarnessUsageClaimFields = typeof NativeAgentHarnessUsageClaimFields.Type
-export type NativeAgentHarnessUsageClaimFieldsEncoded = typeof NativeAgentHarnessUsageClaimFields.Encoded
-
-export const NativeAgentHarnessUsageClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentHarnessUsageClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("harness.usage"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("latest"),
-  "schema_id": Schema.Literal("subject-claim-schema/53421360312f24ce7f61f39b6d6fdfb9538997957baf35aa276b3605469d6529/agent/harness.usage")
-}).annotate({ identifier: "NativeAgentHarnessUsageClaim" }))()
-export type NativeAgentHarnessUsageClaim = typeof NativeAgentHarnessUsageClaim.Type
-export type NativeAgentHarnessUsageClaimEncoded = typeof NativeAgentHarnessUsageClaim.Encoded
-
-export const NativeAgentIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "desired": Schema.optionalKey(Schema.NullOr(Schema.suspend(() => CanonicalNode))),
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentIntentDesiredClaimFields" }))()
-export type NativeAgentIntentDesiredClaimFields = typeof NativeAgentIntentDesiredClaimFields.Type
-export type NativeAgentIntentDesiredClaimFieldsEncoded = typeof NativeAgentIntentDesiredClaimFields.Encoded
-
-export const NativeAgentIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d52394ebdbf1482e81f987ae79154b7ea559edfd7f708e55eb9c4620a52d9fd9/agent/intent.desired")
-}).annotate({ identifier: "NativeAgentIntentDesiredClaim" }))()
-export type NativeAgentIntentDesiredClaim = typeof NativeAgentIntentDesiredClaim.Type
-export type NativeAgentIntentDesiredClaimEncoded = typeof NativeAgentIntentDesiredClaim.Encoded
-
-export const NativeAgentOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentOperationalFailureClaimFields" }))()
-export type NativeAgentOperationalFailureClaimFields = typeof NativeAgentOperationalFailureClaimFields.Type
-export type NativeAgentOperationalFailureClaimFieldsEncoded = typeof NativeAgentOperationalFailureClaimFields.Encoded
-
-export const NativeAgentOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/bce6e6a4e1b83d59c9ce25b51a85a20f734c780f2c8a72fc5183e046f935942b/agent/operational.failure")
-}).annotate({ identifier: "NativeAgentOperationalFailureClaim" }))()
-export type NativeAgentOperationalFailureClaim = typeof NativeAgentOperationalFailureClaim.Type
-export type NativeAgentOperationalFailureClaimEncoded = typeof NativeAgentOperationalFailureClaim.Encoded
-
-export const NativeAgentOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentOperationalRecoveredClaimFields" }))()
-export type NativeAgentOperationalRecoveredClaimFields = typeof NativeAgentOperationalRecoveredClaimFields.Type
-export type NativeAgentOperationalRecoveredClaimFieldsEncoded = typeof NativeAgentOperationalRecoveredClaimFields.Encoded
-
-export const NativeAgentOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/edd56b842951a675cb1051b099f227cdce27b022a72f79e8de3671db68b7615f/agent/operational.recovered")
-}).annotate({ identifier: "NativeAgentOperationalRecoveredClaim" }))()
-export type NativeAgentOperationalRecoveredClaim = typeof NativeAgentOperationalRecoveredClaim.Type
-export type NativeAgentOperationalRecoveredClaimEncoded = typeof NativeAgentOperationalRecoveredClaim.Encoded
-
-export const NativeAgentPrincipalKeyGrantedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "label": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "role": Schema.optionalKey(Schema.NullOr(Schema.Literals(["root","device","agent","plugin"])))
-}).annotate({ identifier: "NativeAgentPrincipalKeyGrantedClaimFields" }))()
-export type NativeAgentPrincipalKeyGrantedClaimFields = typeof NativeAgentPrincipalKeyGrantedClaimFields.Type
-export type NativeAgentPrincipalKeyGrantedClaimFieldsEncoded = typeof NativeAgentPrincipalKeyGrantedClaimFields.Encoded
-
-export const NativeAgentPrincipalKeyGrantedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentPrincipalKeyGrantedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("principal.key-granted"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b19a1aea5442351909bb510a7fb064362f229d7b7ff2bbb2a2bf21ee65328b36/agent/principal.key-granted")
-}).annotate({ identifier: "NativeAgentPrincipalKeyGrantedClaim" }))()
-export type NativeAgentPrincipalKeyGrantedClaim = typeof NativeAgentPrincipalKeyGrantedClaim.Type
-export type NativeAgentPrincipalKeyGrantedClaimEncoded = typeof NativeAgentPrincipalKeyGrantedClaim.Encoded
-
-export const NativeAgentPrincipalKeyRevokedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentPrincipalKeyRevokedClaimFields" }))()
-export type NativeAgentPrincipalKeyRevokedClaimFields = typeof NativeAgentPrincipalKeyRevokedClaimFields.Type
-export type NativeAgentPrincipalKeyRevokedClaimFieldsEncoded = typeof NativeAgentPrincipalKeyRevokedClaimFields.Encoded
-
-export const NativeAgentPrincipalKeyRevokedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentPrincipalKeyRevokedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("principal.key-revoked"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4cec7efbb0632d39873f42bc7c79ef0b1089555a62f0222d35c87b29fbf6c253/agent/principal.key-revoked")
-}).annotate({ identifier: "NativeAgentPrincipalKeyRevokedClaim" }))()
-export type NativeAgentPrincipalKeyRevokedClaim = typeof NativeAgentPrincipalKeyRevokedClaim.Type
-export type NativeAgentPrincipalKeyRevokedClaimEncoded = typeof NativeAgentPrincipalKeyRevokedClaim.Encoded
-
-export const NativeAgentPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeAgentPublicationOperationClaimFields" }))()
-export type NativeAgentPublicationOperationClaimFields = typeof NativeAgentPublicationOperationClaimFields.Type
-export type NativeAgentPublicationOperationClaimFieldsEncoded = typeof NativeAgentPublicationOperationClaimFields.Encoded
-
-export const NativeAgentPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/822f0e75303b259d4c78d7520818fc9234088771360845856628b766a1b3c5af/agent/publication.operation")
-}).annotate({ identifier: "NativeAgentPublicationOperationClaim" }))()
-export type NativeAgentPublicationOperationClaim = typeof NativeAgentPublicationOperationClaim.Type
-export type NativeAgentPublicationOperationClaimEncoded = typeof NativeAgentPublicationOperationClaim.Encoded
-
-export const NativeAgentRuntimeActionDeadlineReachedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeAgentRuntimeActionDeadlineReachedClaimFields" }))()
-export type NativeAgentRuntimeActionDeadlineReachedClaimFields = typeof NativeAgentRuntimeActionDeadlineReachedClaimFields.Type
-export type NativeAgentRuntimeActionDeadlineReachedClaimFieldsEncoded = typeof NativeAgentRuntimeActionDeadlineReachedClaimFields.Encoded
-
-export const NativeAgentRuntimeActionDeadlineReachedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentRuntimeActionDeadlineReachedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.deadline-reached"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/0962d4baf1d1d733cabe4a934f8e3f436b6789ea58857c68ad353f1c2762c4cb/agent/runtime.action.deadline-reached")
-}).annotate({ identifier: "NativeAgentRuntimeActionDeadlineReachedClaim" }))()
-export type NativeAgentRuntimeActionDeadlineReachedClaim = typeof NativeAgentRuntimeActionDeadlineReachedClaim.Type
-export type NativeAgentRuntimeActionDeadlineReachedClaimEncoded = typeof NativeAgentRuntimeActionDeadlineReachedClaim.Encoded
-
-export const NativeAgentRuntimeActionFailedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeAgentRuntimeActionFailedClaimFields" }))()
-export type NativeAgentRuntimeActionFailedClaimFields = typeof NativeAgentRuntimeActionFailedClaimFields.Type
-export type NativeAgentRuntimeActionFailedClaimFieldsEncoded = typeof NativeAgentRuntimeActionFailedClaimFields.Encoded
-
-export const NativeAgentRuntimeActionFailedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentRuntimeActionFailedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.failed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/d3336baeaa6c71d2d7c3f8e9e152dff3b29cffd663807904990324f4601a28bf/agent/runtime.action.failed")
-}).annotate({ identifier: "NativeAgentRuntimeActionFailedClaim" }))()
-export type NativeAgentRuntimeActionFailedClaim = typeof NativeAgentRuntimeActionFailedClaim.Type
-export type NativeAgentRuntimeActionFailedClaimEncoded = typeof NativeAgentRuntimeActionFailedClaim.Encoded
-
-export const NativeAgentRuntimeActionRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "deadline_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeAgentRuntimeActionRequestedClaimFields" }))()
-export type NativeAgentRuntimeActionRequestedClaimFields = typeof NativeAgentRuntimeActionRequestedClaimFields.Type
-export type NativeAgentRuntimeActionRequestedClaimFieldsEncoded = typeof NativeAgentRuntimeActionRequestedClaimFields.Encoded
-
-export const NativeAgentRuntimeActionRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentRuntimeActionRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/870f547f298126a6fdbf08f57a40f9a1c165a73c65937944fa379b977c015e0b/agent/runtime.action.requested")
-}).annotate({ identifier: "NativeAgentRuntimeActionRequestedClaim" }))()
-export type NativeAgentRuntimeActionRequestedClaim = typeof NativeAgentRuntimeActionRequestedClaim.Type
-export type NativeAgentRuntimeActionRequestedClaimEncoded = typeof NativeAgentRuntimeActionRequestedClaim.Encoded
-
-export const NativeAgentRuntimeActionSucceededClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeAgentRuntimeActionSucceededClaimFields" }))()
-export type NativeAgentRuntimeActionSucceededClaimFields = typeof NativeAgentRuntimeActionSucceededClaimFields.Type
-export type NativeAgentRuntimeActionSucceededClaimFieldsEncoded = typeof NativeAgentRuntimeActionSucceededClaimFields.Encoded
-
-export const NativeAgentRuntimeActionSucceededClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentRuntimeActionSucceededClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.succeeded"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/4b9f35bda7b7fe9cd9b39c7375b87b23072cdf56dbff3208855f874be69bf400/agent/runtime.action.succeeded")
-}).annotate({ identifier: "NativeAgentRuntimeActionSucceededClaim" }))()
-export type NativeAgentRuntimeActionSucceededClaim = typeof NativeAgentRuntimeActionSucceededClaim.Type
-export type NativeAgentRuntimeActionSucceededClaimEncoded = typeof NativeAgentRuntimeActionSucceededClaim.Encoded
-
-export const NativeAgentRuntimeObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "adopted": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "exit_code": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "exit_signal": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "host": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "shutdown_timeout_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeAgentRuntimeObservedClaimFields" }))()
-export type NativeAgentRuntimeObservedClaimFields = typeof NativeAgentRuntimeObservedClaimFields.Type
-export type NativeAgentRuntimeObservedClaimFieldsEncoded = typeof NativeAgentRuntimeObservedClaimFields.Encoded
-
-export const NativeAgentRuntimeObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentRuntimeObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a233f8edc4f750d000ad9bb013b7d155eede23733077669d3fde5f00b4fc3c5a/agent/runtime.observed")
-}).annotate({ identifier: "NativeAgentRuntimeObservedClaim" }))()
-export type NativeAgentRuntimeObservedClaim = typeof NativeAgentRuntimeObservedClaim.Type
-export type NativeAgentRuntimeObservedClaimEncoded = typeof NativeAgentRuntimeObservedClaim.Encoded
-
-export const NativeAgentRuntimeReadinessDeadlineReachedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "deadline_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentRuntimeReadinessDeadlineReachedClaimFields" }))()
-export type NativeAgentRuntimeReadinessDeadlineReachedClaimFields = typeof NativeAgentRuntimeReadinessDeadlineReachedClaimFields.Type
-export type NativeAgentRuntimeReadinessDeadlineReachedClaimFieldsEncoded = typeof NativeAgentRuntimeReadinessDeadlineReachedClaimFields.Encoded
-
-export const NativeAgentRuntimeReadinessDeadlineReachedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentRuntimeReadinessDeadlineReachedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.readiness-deadline-reached"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("local"),
-  "schema_id": Schema.Literal("subject-claim-schema/6d04949ac8af110fd8f414a7a2ec077f664ba80b31195720a16df447fbaf122f/agent/runtime.readiness-deadline-reached")
-}).annotate({ identifier: "NativeAgentRuntimeReadinessDeadlineReachedClaim" }))()
-export type NativeAgentRuntimeReadinessDeadlineReachedClaim = typeof NativeAgentRuntimeReadinessDeadlineReachedClaim.Type
-export type NativeAgentRuntimeReadinessDeadlineReachedClaimEncoded = typeof NativeAgentRuntimeReadinessDeadlineReachedClaim.Encoded
-
-export const NativeAgentRuntimeReconcileDecisionClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "decision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "gate": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "input_number": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "restart_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentRuntimeReconcileDecisionClaimFields" }))()
-export type NativeAgentRuntimeReconcileDecisionClaimFields = typeof NativeAgentRuntimeReconcileDecisionClaimFields.Type
-export type NativeAgentRuntimeReconcileDecisionClaimFieldsEncoded = typeof NativeAgentRuntimeReconcileDecisionClaimFields.Encoded
-
-export const NativeAgentRuntimeReconcileDecisionClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentRuntimeReconcileDecisionClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.reconcile-decision"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/7ffb504f1396e12def131e8591ffc8a80b7eaad65cffa55616784a2c8038f1eb/agent/runtime.reconcile-decision")
-}).annotate({ identifier: "NativeAgentRuntimeReconcileDecisionClaim" }))()
-export type NativeAgentRuntimeReconcileDecisionClaim = typeof NativeAgentRuntimeReconcileDecisionClaim.Type
-export type NativeAgentRuntimeReconcileDecisionClaimEncoded = typeof NativeAgentRuntimeReconcileDecisionClaim.Encoded
-
-export const NativeAgentRuntimeRestartWindowResetClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentRuntimeRestartWindowResetClaimFields" }))()
-export type NativeAgentRuntimeRestartWindowResetClaimFields = typeof NativeAgentRuntimeRestartWindowResetClaimFields.Type
-export type NativeAgentRuntimeRestartWindowResetClaimFieldsEncoded = typeof NativeAgentRuntimeRestartWindowResetClaimFields.Encoded
-
-export const NativeAgentRuntimeRestartWindowResetClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentRuntimeRestartWindowResetClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.restart-window-reset"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/5eda844c28d802163b714c64d4e368145388ce070ca587ee9d4915bbe844cb43/agent/runtime.restart-window-reset")
-}).annotate({ identifier: "NativeAgentRuntimeRestartWindowResetClaim" }))()
-export type NativeAgentRuntimeRestartWindowResetClaim = typeof NativeAgentRuntimeRestartWindowResetClaim.Type
-export type NativeAgentRuntimeRestartWindowResetClaimEncoded = typeof NativeAgentRuntimeRestartWindowResetClaim.Encoded
-
-export const NativeAgentSubagentAppearedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "description": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "lease_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "started_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "step_run": Schema.optionalKey(Schema.NullOr(NativeStepRunSubjectRef)),
-  "subagent_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "subagent_type": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentSubagentAppearedClaimFields" }))()
-export type NativeAgentSubagentAppearedClaimFields = typeof NativeAgentSubagentAppearedClaimFields.Type
-export type NativeAgentSubagentAppearedClaimFieldsEncoded = typeof NativeAgentSubagentAppearedClaimFields.Encoded
-
-export const NativeAgentSubagentAppearedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentSubagentAppearedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subagent.appeared"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/ca4985cd89f7f495870cacbe72b9d656a4e69ef15d9dcde98836bcb55af4e987/agent/subagent.appeared")
-}).annotate({ identifier: "NativeAgentSubagentAppearedClaim" }))()
-export type NativeAgentSubagentAppearedClaim = typeof NativeAgentSubagentAppearedClaim.Type
-export type NativeAgentSubagentAppearedClaimEncoded = typeof NativeAgentSubagentAppearedClaim.Encoded
-
-export const NativeAgentSubagentEndedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "cache_write_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "cached_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "duration_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "ended_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "input_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "outcome": Schema.optionalKey(Schema.NullOr(Schema.Literals(["completed","failed","interrupted","expired","session-ended","harness-exited","seat-stopped"]))),
-  "output_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "subagent_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "total_tokens": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeAgentSubagentEndedClaimFields" }))()
-export type NativeAgentSubagentEndedClaimFields = typeof NativeAgentSubagentEndedClaimFields.Type
-export type NativeAgentSubagentEndedClaimFieldsEncoded = typeof NativeAgentSubagentEndedClaimFields.Encoded
-
-export const NativeAgentSubagentEndedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentSubagentEndedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subagent.ended"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/8301b6b4c3844c0c446ff1a11817a81ac3116fe33ba8f4b9d25d284c2fe68f36/agent/subagent.ended")
-}).annotate({ identifier: "NativeAgentSubagentEndedClaim" }))()
-export type NativeAgentSubagentEndedClaim = typeof NativeAgentSubagentEndedClaim.Type
-export type NativeAgentSubagentEndedClaimEncoded = typeof NativeAgentSubagentEndedClaim.Encoded
-
-export const NativeAgentSubagentRenewedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "lease_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "subagent_id": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentSubagentRenewedClaimFields" }))()
-export type NativeAgentSubagentRenewedClaimFields = typeof NativeAgentSubagentRenewedClaimFields.Type
-export type NativeAgentSubagentRenewedClaimFieldsEncoded = typeof NativeAgentSubagentRenewedClaimFields.Encoded
-
-export const NativeAgentSubagentRenewedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentSubagentRenewedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subagent.renewed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c718e73bbd2d807d37cbd4b007b2390d290a45a7f9ef468e5ae27158b126f31c/agent/subagent.renewed")
-}).annotate({ identifier: "NativeAgentSubagentRenewedClaim" }))()
-export type NativeAgentSubagentRenewedClaim = typeof NativeAgentSubagentRenewedClaim.Type
-export type NativeAgentSubagentRenewedClaimEncoded = typeof NativeAgentSubagentRenewedClaim.Encoded
-
-export const NativeAgentTerminalInputRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "byte_count": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "intent": Schema.optionalKey(Schema.NullOr(Schema.Literals(["context-compaction"]))),
-  "mode": Schema.optionalKey(Schema.NullOr(Schema.Literals(["line","raw","key","text","binary"]))),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "sequence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeAgentTerminalInputRequestedClaimFields" }))()
-export type NativeAgentTerminalInputRequestedClaimFields = typeof NativeAgentTerminalInputRequestedClaimFields.Type
-export type NativeAgentTerminalInputRequestedClaimFieldsEncoded = typeof NativeAgentTerminalInputRequestedClaimFields.Encoded
-
-export const NativeAgentTerminalInputRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentTerminalInputRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("terminal.input.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/1f2bdcec4b8e6d885e8d23b71d8558f9db06269a5cbdb7dbe993d4f233e2e186/agent/terminal.input.requested")
-}).annotate({ identifier: "NativeAgentTerminalInputRequestedClaim" }))()
-export type NativeAgentTerminalInputRequestedClaim = typeof NativeAgentTerminalInputRequestedClaim.Type
-export type NativeAgentTerminalInputRequestedClaimEncoded = typeof NativeAgentTerminalInputRequestedClaim.Encoded
-
-export const NativeAgentTerminalInputResultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "result": Schema.optionalKey(Schema.NullOr(Schema.Literals(["written","failed"]))),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "sequence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeAgentTerminalInputResultClaimFields" }))()
-export type NativeAgentTerminalInputResultClaimFields = typeof NativeAgentTerminalInputResultClaimFields.Type
-export type NativeAgentTerminalInputResultClaimFieldsEncoded = typeof NativeAgentTerminalInputResultClaimFields.Encoded
-
-export const NativeAgentTerminalInputResultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentTerminalInputResultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("terminal.input.result"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/74c637e3e33e281208e9d6d4d89c406ef402c4c4b3819054dd224591892017e7/agent/terminal.input.result")
-}).annotate({ identifier: "NativeAgentTerminalInputResultClaim" }))()
-export type NativeAgentTerminalInputResultClaim = typeof NativeAgentTerminalInputResultClaim.Type
-export type NativeAgentTerminalInputResultClaimEncoded = typeof NativeAgentTerminalInputResultClaim.Encoded
-
-export const NativeAgentWorkspaceObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "host": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "repository": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "workspace": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAgentWorkspaceObservedClaimFields" }))()
-export type NativeAgentWorkspaceObservedClaimFields = typeof NativeAgentWorkspaceObservedClaimFields.Type
-export type NativeAgentWorkspaceObservedClaimFieldsEncoded = typeof NativeAgentWorkspaceObservedClaimFields.Encoded
-
-export const NativeAgentWorkspaceObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAgentWorkspaceObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("workspace.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAgentSubjectRef,
-  "retention": Schema.Literal("latest"),
-  "schema_id": Schema.Literal("subject-claim-schema/33ffec1e4cf6b62777c47e0925c8c1d9a6c33ac8c4d3382f37b698e32f6e86e0/agent/workspace.observed")
-}).annotate({ identifier: "NativeAgentWorkspaceObservedClaim" }))()
-export type NativeAgentWorkspaceObservedClaim = typeof NativeAgentWorkspaceObservedClaim.Type
-export type NativeAgentWorkspaceObservedClaimEncoded = typeof NativeAgentWorkspaceObservedClaim.Encoded
-
-export const NativeAgentClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeAgentAgentAccountClaim,
-  NativeAgentAgentPlacementSourceOfflineClaim,
-  NativeAgentAgentPresenceClaim,
-  NativeAgentAgentQueueMovedClaim,
-  NativeAgentDeliveryHoldClaim,
-  NativeAgentHarnessContextClearRequestedClaim,
-  NativeAgentHarnessContextClearResultClaim,
-  NativeAgentHarnessDiagnosticClaim,
-  NativeAgentHarnessLimitsClaim,
-  NativeAgentHarnessObservedClaim,
-  NativeAgentHarnessUsageClaim,
-  NativeAgentIntentDesiredClaim,
-  NativeAgentOperationalFailureClaim,
-  NativeAgentOperationalRecoveredClaim,
-  NativeAgentPrincipalKeyGrantedClaim,
-  NativeAgentPrincipalKeyRevokedClaim,
-  NativeAgentPublicationOperationClaim,
-  NativeAgentRuntimeActionDeadlineReachedClaim,
-  NativeAgentRuntimeActionFailedClaim,
-  NativeAgentRuntimeActionRequestedClaim,
-  NativeAgentRuntimeActionSucceededClaim,
-  NativeAgentRuntimeObservedClaim,
-  NativeAgentRuntimeReadinessDeadlineReachedClaim,
-  NativeAgentRuntimeReconcileDecisionClaim,
-  NativeAgentRuntimeRestartWindowResetClaim,
-  NativeAgentSubagentAppearedClaim,
-  NativeAgentSubagentEndedClaim,
-  NativeAgentSubagentRenewedClaim,
-  NativeAgentTerminalInputRequestedClaim,
-  NativeAgentTerminalInputResultClaim,
-  NativeAgentWorkspaceObservedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeAgentClaim" }))()
-export type NativeAgentClaim = typeof NativeAgentClaim.Type
-export type NativeAgentClaimEncoded = typeof NativeAgentClaim.Encoded
-
-export const NativeAgentSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("agent"),
-  "heads": Schema.Array(NativeAgentClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeAgentSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/b88b3075694762947ef815000712217ed79b1038e8d86727e3419083f860c1e3/agent")
-}).annotate({ identifier: "NativeAgentSubject" }))()
-export type NativeAgentSubject = typeof NativeAgentSubject.Type
-export type NativeAgentSubjectEncoded = typeof NativeAgentSubject.Encoded
-
-export const NativeArrangementIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeArrangementIntentDesiredClaimFields" }))()
-export type NativeArrangementIntentDesiredClaimFields = typeof NativeArrangementIntentDesiredClaimFields.Type
-export type NativeArrangementIntentDesiredClaimFieldsEncoded = typeof NativeArrangementIntentDesiredClaimFields.Encoded
-
-export const NativeArrangementSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["arrangement"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeArrangementSubjectRef" }))()
-export type NativeArrangementSubjectRef = typeof NativeArrangementSubjectRef.Type
-export type NativeArrangementSubjectRefEncoded = typeof NativeArrangementSubjectRef.Encoded
-
-export const NativeArrangementIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeArrangementIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeArrangementSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/8fa349bc749b9bcd9685ffef46d00d6eacdec3e4b21f6a82d23a3e6e6a90d505/arrangement/intent.desired")
-}).annotate({ identifier: "NativeArrangementIntentDesiredClaim" }))()
-export type NativeArrangementIntentDesiredClaim = typeof NativeArrangementIntentDesiredClaim.Type
-export type NativeArrangementIntentDesiredClaimEncoded = typeof NativeArrangementIntentDesiredClaim.Encoded
-
-export const NativeArrangementPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeArrangementPublicationOperationClaimFields" }))()
-export type NativeArrangementPublicationOperationClaimFields = typeof NativeArrangementPublicationOperationClaimFields.Type
-export type NativeArrangementPublicationOperationClaimFieldsEncoded = typeof NativeArrangementPublicationOperationClaimFields.Encoded
-
-export const NativeArrangementPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeArrangementPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeArrangementSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9cc0a9de5048fc6da8d402f72d287e2a922edb4f09036a8b12b9934e285995a9/arrangement/publication.operation")
-}).annotate({ identifier: "NativeArrangementPublicationOperationClaim" }))()
-export type NativeArrangementPublicationOperationClaim = typeof NativeArrangementPublicationOperationClaim.Type
-export type NativeArrangementPublicationOperationClaimEncoded = typeof NativeArrangementPublicationOperationClaim.Encoded
-
-export const NativeArrangementClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeArrangementIntentDesiredClaim,
-  NativeArrangementPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeArrangementClaim" }))()
-export type NativeArrangementClaim = typeof NativeArrangementClaim.Type
-export type NativeArrangementClaimEncoded = typeof NativeArrangementClaim.Encoded
-
-export const NativeArrangementSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("arrangement"),
-  "heads": Schema.Array(NativeArrangementClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeArrangementSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/f16b757cdf7636fd49a860d2f941cc033f5d2581cadd0f89b5ecca59b2c14f99/arrangement")
-}).annotate({ identifier: "NativeArrangementSubject" }))()
-export type NativeArrangementSubject = typeof NativeArrangementSubject.Type
-export type NativeArrangementSubjectEncoded = typeof NativeArrangementSubject.Encoded
-
-export type NativeJsonObject = {  } & { readonly [key: string]: NativeJsonValue }
-export type NativeJsonObjectEncoded = {  } & { readonly [key: string]: NativeJsonValueEncoded }
-export const NativeJsonObject: Schema.Codec<NativeJsonObject, NativeJsonObjectEncoded> = /*#__PURE__*/ (() => Schema.Record(Schema.String, Schema.suspend(() => NativeJsonValue)).annotate({ identifier: "NativeJsonObject" }))()
-
-export type NativeJsonValue = (null) | (boolean) | (number) | (string) | (ReadonlyArray<NativeJsonValue>) | (NativeJsonObject)
-export type NativeJsonValueEncoded = (null) | (boolean) | (number) | (string) | (ReadonlyArray<NativeJsonValueEncoded>) | (NativeJsonObjectEncoded)
-export const NativeJsonValue: Schema.Codec<NativeJsonValue, NativeJsonValueEncoded> = /*#__PURE__*/ (() => Schema.Union([Schema.Null, Schema.Boolean, Schema.Number, Schema.String, Schema.Array(Schema.suspend(() => NativeJsonValue)), Schema.suspend(() => NativeJsonObject)]).annotate({ identifier: "NativeJsonValue" }))()
-
-export const NativePersonSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["person"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativePersonSubjectRef" }))()
-export type NativePersonSubjectRef = typeof NativePersonSubjectRef.Type
-export type NativePersonSubjectRefEncoded = typeof NativePersonSubjectRef.Encoded
-
-export const NativeAttentionAttentionRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "closed_by": Schema.optionalKey(Schema.NullOr(Schema.Literals(["person","st"]))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativePersonSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.Literals(["warning","error"]))),
-  "step": Schema.optionalKey(Schema.NullOr(NativeStepRunSubjectRef)),
-  "step_attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "targets": Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.suspend(() => NativeJsonValue)))),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "until": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAttentionAttentionRequestedClaimFields" }))()
-export type NativeAttentionAttentionRequestedClaimFields = typeof NativeAttentionAttentionRequestedClaimFields.Type
-export type NativeAttentionAttentionRequestedClaimFieldsEncoded = typeof NativeAttentionAttentionRequestedClaimFields.Encoded
-
-export const NativeAttentionSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["attention"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeAttentionSubjectRef" }))()
-export type NativeAttentionSubjectRef = typeof NativeAttentionSubjectRef.Type
-export type NativeAttentionSubjectRefEncoded = typeof NativeAttentionSubjectRef.Encoded
-
-export const NativeAttentionAttentionRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAttentionAttentionRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("attention.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAttentionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c42e606084d7b75f5bd78437bb06c2044ff2189ae95f05d43eead75a5dfa8cf0/attention/attention.requested")
-}).annotate({ identifier: "NativeAttentionAttentionRequestedClaim" }))()
-export type NativeAttentionAttentionRequestedClaim = typeof NativeAttentionAttentionRequestedClaim.Type
-export type NativeAttentionAttentionRequestedClaimEncoded = typeof NativeAttentionAttentionRequestedClaim.Encoded
-
-export const NativeAttentionAttentionResolvedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "outcome": Schema.optionalKey(Schema.NullOr(Schema.Literals(["resolved","dismissed","withdrawn"]))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAttentionAttentionResolvedClaimFields" }))()
-export type NativeAttentionAttentionResolvedClaimFields = typeof NativeAttentionAttentionResolvedClaimFields.Type
-export type NativeAttentionAttentionResolvedClaimFieldsEncoded = typeof NativeAttentionAttentionResolvedClaimFields.Encoded
-
-export const NativeAttentionAttentionResolvedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAttentionAttentionResolvedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("attention.resolved"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAttentionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/72f60f17b6cfdb8613b7adee1fcc352f32a811ff4f4d920e128c65cb8b02f669/attention/attention.resolved")
-}).annotate({ identifier: "NativeAttentionAttentionResolvedClaim" }))()
-export type NativeAttentionAttentionResolvedClaim = typeof NativeAttentionAttentionResolvedClaim.Type
-export type NativeAttentionAttentionResolvedClaimEncoded = typeof NativeAttentionAttentionResolvedClaim.Encoded
-
-export const NativeAttentionIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeAttentionIntentDesiredClaimFields" }))()
-export type NativeAttentionIntentDesiredClaimFields = typeof NativeAttentionIntentDesiredClaimFields.Type
-export type NativeAttentionIntentDesiredClaimFieldsEncoded = typeof NativeAttentionIntentDesiredClaimFields.Encoded
-
-export const NativeAttentionIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAttentionIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAttentionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c9e0c55af88400a4ad8d22d3d3873e38f1a3413ad7ea0dc23d5051eebdaaa95f/attention/intent.desired")
-}).annotate({ identifier: "NativeAttentionIntentDesiredClaim" }))()
-export type NativeAttentionIntentDesiredClaim = typeof NativeAttentionIntentDesiredClaim.Type
-export type NativeAttentionIntentDesiredClaimEncoded = typeof NativeAttentionIntentDesiredClaim.Encoded
-
-export const NativeAttentionPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeAttentionPublicationOperationClaimFields" }))()
-export type NativeAttentionPublicationOperationClaimFields = typeof NativeAttentionPublicationOperationClaimFields.Type
-export type NativeAttentionPublicationOperationClaimFieldsEncoded = typeof NativeAttentionPublicationOperationClaimFields.Encoded
-
-export const NativeAttentionPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeAttentionPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeAttentionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/6bde231144269a2eb81dcacdaebacdccfaa8e85c386e09aa388c49e07445484f/attention/publication.operation")
-}).annotate({ identifier: "NativeAttentionPublicationOperationClaim" }))()
-export type NativeAttentionPublicationOperationClaim = typeof NativeAttentionPublicationOperationClaim.Type
-export type NativeAttentionPublicationOperationClaimEncoded = typeof NativeAttentionPublicationOperationClaim.Encoded
-
-export const NativeAttentionClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeAttentionAttentionRequestedClaim,
-  NativeAttentionAttentionResolvedClaim,
-  NativeAttentionIntentDesiredClaim,
-  NativeAttentionPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeAttentionClaim" }))()
-export type NativeAttentionClaim = typeof NativeAttentionClaim.Type
-export type NativeAttentionClaimEncoded = typeof NativeAttentionClaim.Encoded
-
-export const NativeAttentionSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("attention"),
-  "heads": Schema.Array(NativeAttentionClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeAttentionSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/4c9601c62409598b4ed0e6c22048d5af7ac14b113fea59838d14589af45b4ec4/attention")
-}).annotate({ identifier: "NativeAttentionSubject" }))()
-export type NativeAttentionSubject = typeof NativeAttentionSubject.Type
-export type NativeAttentionSubjectEncoded = typeof NativeAttentionSubject.Encoded
-
-export const NativeCheckpointExcusalCheckpointExcusedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "writer": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeCheckpointExcusalCheckpointExcusedClaimFields" }))()
-export type NativeCheckpointExcusalCheckpointExcusedClaimFields = typeof NativeCheckpointExcusalCheckpointExcusedClaimFields.Type
-export type NativeCheckpointExcusalCheckpointExcusedClaimFieldsEncoded = typeof NativeCheckpointExcusalCheckpointExcusedClaimFields.Encoded
-
-export const NativeCheckpointExcusalSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["checkpoint-excusal"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeCheckpointExcusalSubjectRef" }))()
-export type NativeCheckpointExcusalSubjectRef = typeof NativeCheckpointExcusalSubjectRef.Type
-export type NativeCheckpointExcusalSubjectRefEncoded = typeof NativeCheckpointExcusalSubjectRef.Encoded
-
-export const NativeCheckpointExcusalCheckpointExcusedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointExcusalCheckpointExcusedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("checkpoint.excused"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointExcusalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a4202dfb59033cad284ca2f25e5fa7415433f2611c49a5b0ecc0bdbc4cb0976d/checkpoint-excusal/checkpoint.excused")
-}).annotate({ identifier: "NativeCheckpointExcusalCheckpointExcusedClaim" }))()
-export type NativeCheckpointExcusalCheckpointExcusedClaim = typeof NativeCheckpointExcusalCheckpointExcusedClaim.Type
-export type NativeCheckpointExcusalCheckpointExcusedClaimEncoded = typeof NativeCheckpointExcusalCheckpointExcusedClaim.Encoded
-
-export const NativeCheckpointExcusalIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeCheckpointExcusalIntentDesiredClaimFields" }))()
-export type NativeCheckpointExcusalIntentDesiredClaimFields = typeof NativeCheckpointExcusalIntentDesiredClaimFields.Type
-export type NativeCheckpointExcusalIntentDesiredClaimFieldsEncoded = typeof NativeCheckpointExcusalIntentDesiredClaimFields.Encoded
-
-export const NativeCheckpointExcusalIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointExcusalIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointExcusalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d9f833a33e24870ed8618274ca37a1590a1d5d312bb4624f1a65fcdb74c547ce/checkpoint-excusal/intent.desired")
-}).annotate({ identifier: "NativeCheckpointExcusalIntentDesiredClaim" }))()
-export type NativeCheckpointExcusalIntentDesiredClaim = typeof NativeCheckpointExcusalIntentDesiredClaim.Type
-export type NativeCheckpointExcusalIntentDesiredClaimEncoded = typeof NativeCheckpointExcusalIntentDesiredClaim.Encoded
-
-export const NativeCheckpointExcusalPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeCheckpointExcusalPublicationOperationClaimFields" }))()
-export type NativeCheckpointExcusalPublicationOperationClaimFields = typeof NativeCheckpointExcusalPublicationOperationClaimFields.Type
-export type NativeCheckpointExcusalPublicationOperationClaimFieldsEncoded = typeof NativeCheckpointExcusalPublicationOperationClaimFields.Encoded
-
-export const NativeCheckpointExcusalPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointExcusalPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointExcusalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/884df03b0c886890b011a6ca2146e301b9d976b8d18837b63174ac7837b09fc2/checkpoint-excusal/publication.operation")
-}).annotate({ identifier: "NativeCheckpointExcusalPublicationOperationClaim" }))()
-export type NativeCheckpointExcusalPublicationOperationClaim = typeof NativeCheckpointExcusalPublicationOperationClaim.Type
-export type NativeCheckpointExcusalPublicationOperationClaimEncoded = typeof NativeCheckpointExcusalPublicationOperationClaim.Encoded
-
-export const NativeCheckpointExcusalClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeCheckpointExcusalCheckpointExcusedClaim,
-  NativeCheckpointExcusalIntentDesiredClaim,
-  NativeCheckpointExcusalPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeCheckpointExcusalClaim" }))()
-export type NativeCheckpointExcusalClaim = typeof NativeCheckpointExcusalClaim.Type
-export type NativeCheckpointExcusalClaimEncoded = typeof NativeCheckpointExcusalClaim.Encoded
-
-export const NativeCheckpointExcusalSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("checkpoint-excusal"),
-  "heads": Schema.Array(NativeCheckpointExcusalClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeCheckpointExcusalSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/3ba8a6d84fcae0d429e86526eb0b35480b7dec90fa343f1c7a11a090ca9386d5/checkpoint-excusal")
-}).annotate({ identifier: "NativeCheckpointExcusalSubject" }))()
-export type NativeCheckpointExcusalSubject = typeof NativeCheckpointExcusalSubject.Type
-export type NativeCheckpointExcusalSubjectEncoded = typeof NativeCheckpointExcusalSubject.Encoded
-
-export const NativeCheckpointCheckpointSealedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "build": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "checkpoint_protocol": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "cut_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "rules_digest": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "sealed_count": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "sealed_digest": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeCheckpointCheckpointSealedClaimFields" }))()
-export type NativeCheckpointCheckpointSealedClaimFields = typeof NativeCheckpointCheckpointSealedClaimFields.Type
-export type NativeCheckpointCheckpointSealedClaimFieldsEncoded = typeof NativeCheckpointCheckpointSealedClaimFields.Encoded
-
-export const NativeCheckpointSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["checkpoint"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeCheckpointSubjectRef" }))()
-export type NativeCheckpointSubjectRef = typeof NativeCheckpointSubjectRef.Type
-export type NativeCheckpointSubjectRefEncoded = typeof NativeCheckpointSubjectRef.Encoded
-
-export const NativeCheckpointCheckpointSealedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointCheckpointSealedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("checkpoint.sealed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9d4ebe946cff188df847f85359754b8932d349c87fd437482aae8910ad34353e/checkpoint/checkpoint.sealed")
-}).annotate({ identifier: "NativeCheckpointCheckpointSealedClaim" }))()
-export type NativeCheckpointCheckpointSealedClaim = typeof NativeCheckpointCheckpointSealedClaim.Type
-export type NativeCheckpointCheckpointSealedClaimEncoded = typeof NativeCheckpointCheckpointSealedClaim.Encoded
-
-export const NativeCheckpointCheckpointVerifiedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "build": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "checkpoint_protocol": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "cut_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "drop_digest": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "dropped_claims": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "dropped_envelopes": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "graph_digest": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reader_digest": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "retained_digest": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "rules_digest": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "sealed_digest": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeCheckpointCheckpointVerifiedClaimFields" }))()
-export type NativeCheckpointCheckpointVerifiedClaimFields = typeof NativeCheckpointCheckpointVerifiedClaimFields.Type
-export type NativeCheckpointCheckpointVerifiedClaimFieldsEncoded = typeof NativeCheckpointCheckpointVerifiedClaimFields.Encoded
-
-export const NativeCheckpointCheckpointVerifiedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointCheckpointVerifiedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("checkpoint.verified"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a90b70557929e4fb5aa77c5de6a4ec03f5918031fc5916d22ca88411040b397a/checkpoint/checkpoint.verified")
-}).annotate({ identifier: "NativeCheckpointCheckpointVerifiedClaim" }))()
-export type NativeCheckpointCheckpointVerifiedClaim = typeof NativeCheckpointCheckpointVerifiedClaim.Type
-export type NativeCheckpointCheckpointVerifiedClaimEncoded = typeof NativeCheckpointCheckpointVerifiedClaim.Encoded
-
-export const NativeCheckpointIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeCheckpointIntentDesiredClaimFields" }))()
-export type NativeCheckpointIntentDesiredClaimFields = typeof NativeCheckpointIntentDesiredClaimFields.Type
-export type NativeCheckpointIntentDesiredClaimFieldsEncoded = typeof NativeCheckpointIntentDesiredClaimFields.Encoded
-
-export const NativeCheckpointIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/0def1b31b6d64d1b0d1c0bd6c8924bcb530b15434f68d5175ca20a0778fc1ae2/checkpoint/intent.desired")
-}).annotate({ identifier: "NativeCheckpointIntentDesiredClaim" }))()
-export type NativeCheckpointIntentDesiredClaim = typeof NativeCheckpointIntentDesiredClaim.Type
-export type NativeCheckpointIntentDesiredClaimEncoded = typeof NativeCheckpointIntentDesiredClaim.Encoded
-
-export const NativeCheckpointOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeCheckpointOperationalFailureClaimFields" }))()
-export type NativeCheckpointOperationalFailureClaimFields = typeof NativeCheckpointOperationalFailureClaimFields.Type
-export type NativeCheckpointOperationalFailureClaimFieldsEncoded = typeof NativeCheckpointOperationalFailureClaimFields.Encoded
-
-export const NativeCheckpointOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9f77b609b129d01ef5682366b33a2145af799d65d5eb4019805378d2b2faecd6/checkpoint/operational.failure")
-}).annotate({ identifier: "NativeCheckpointOperationalFailureClaim" }))()
-export type NativeCheckpointOperationalFailureClaim = typeof NativeCheckpointOperationalFailureClaim.Type
-export type NativeCheckpointOperationalFailureClaimEncoded = typeof NativeCheckpointOperationalFailureClaim.Encoded
-
-export const NativeCheckpointOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeCheckpointOperationalRecoveredClaimFields" }))()
-export type NativeCheckpointOperationalRecoveredClaimFields = typeof NativeCheckpointOperationalRecoveredClaimFields.Type
-export type NativeCheckpointOperationalRecoveredClaimFieldsEncoded = typeof NativeCheckpointOperationalRecoveredClaimFields.Encoded
-
-export const NativeCheckpointOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/0183fdd231ca1b03c9bc897de821070375174c84a4d08c9e9ce810360f8af37d/checkpoint/operational.recovered")
-}).annotate({ identifier: "NativeCheckpointOperationalRecoveredClaim" }))()
-export type NativeCheckpointOperationalRecoveredClaim = typeof NativeCheckpointOperationalRecoveredClaim.Type
-export type NativeCheckpointOperationalRecoveredClaimEncoded = typeof NativeCheckpointOperationalRecoveredClaim.Encoded
-
-export const NativeCheckpointPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeCheckpointPublicationOperationClaimFields" }))()
-export type NativeCheckpointPublicationOperationClaimFields = typeof NativeCheckpointPublicationOperationClaimFields.Type
-export type NativeCheckpointPublicationOperationClaimFieldsEncoded = typeof NativeCheckpointPublicationOperationClaimFields.Encoded
-
-export const NativeCheckpointPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCheckpointPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCheckpointSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/85024741086d51f0b1634d0058392f1c5793ccfb1ebd34ccab73d95344959013/checkpoint/publication.operation")
-}).annotate({ identifier: "NativeCheckpointPublicationOperationClaim" }))()
-export type NativeCheckpointPublicationOperationClaim = typeof NativeCheckpointPublicationOperationClaim.Type
-export type NativeCheckpointPublicationOperationClaimEncoded = typeof NativeCheckpointPublicationOperationClaim.Encoded
-
-export const NativeCheckpointClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeCheckpointCheckpointSealedClaim,
-  NativeCheckpointCheckpointVerifiedClaim,
-  NativeCheckpointIntentDesiredClaim,
-  NativeCheckpointOperationalFailureClaim,
-  NativeCheckpointOperationalRecoveredClaim,
-  NativeCheckpointPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeCheckpointClaim" }))()
-export type NativeCheckpointClaim = typeof NativeCheckpointClaim.Type
-export type NativeCheckpointClaimEncoded = typeof NativeCheckpointClaim.Encoded
-
-export const NativeCheckpointSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("checkpoint"),
-  "heads": Schema.Array(NativeCheckpointClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeCheckpointSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/e8c8ec98a089093f24a042c322106495b0a6c1d2202032dd553af74269ba8d93/checkpoint")
-}).annotate({ identifier: "NativeCheckpointSubject" }))()
-export type NativeCheckpointSubject = typeof NativeCheckpointSubject.Type
-export type NativeCheckpointSubjectEncoded = typeof NativeCheckpointSubject.Encoded
-
-export const NativeCustomCustomClaimFields = /*#__PURE__*/ (() => Schema.Record(Schema.String, Schema.suspend(() => NativeJsonValue)).annotate({ identifier: "NativeCustomCustomClaimFields" }))()
-export type NativeCustomCustomClaimFields = typeof NativeCustomCustomClaimFields.Type
-export type NativeCustomCustomClaimFieldsEncoded = typeof NativeCustomCustomClaimFields.Encoded
-
-export const NativeCustomSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["custom"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeCustomSubjectRef" }))()
-export type NativeCustomSubjectRef = typeof NativeCustomSubjectRef.Type
-export type NativeCustomSubjectRefEncoded = typeof NativeCustomSubjectRef.Encoded
-
-export const NativeCustomCustomClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCustomCustomClaimFields,
-  "id": Schema.String,
-  "kind": Schema.String.check(Schema.isPattern(new RegExp("^custom\\.[a-zA-Z0-9_-]+(?:\\.[a-zA-Z0-9_-]+)+$", "u"))),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCustomSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.String.check(Schema.isPattern(new RegExp("^subject-claim-schema/[a-f0-9]{64}/custom/custom\\.[a-zA-Z0-9_.-]+$", "u")))
-}).check(Schema.makeFilter((claim: { readonly kind: string; readonly schema_id: string; readonly ref: string }) => RawSubjects.isSupportedCustomClaim(claim), { expected: "the locally compiled concrete custom kind descriptor and allowed custom reference" })).annotate({ identifier: "NativeCustomCustomClaim" }))()
-export type NativeCustomCustomClaim = typeof NativeCustomCustomClaim.Type
-export type NativeCustomCustomClaimEncoded = typeof NativeCustomCustomClaim.Encoded
-
-export const NativeCustomIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeCustomIntentDesiredClaimFields" }))()
-export type NativeCustomIntentDesiredClaimFields = typeof NativeCustomIntentDesiredClaimFields.Type
-export type NativeCustomIntentDesiredClaimFieldsEncoded = typeof NativeCustomIntentDesiredClaimFields.Encoded
-
-export const NativeCustomIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCustomIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCustomSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/da0d9928bc38b31784a360fd9a642c60bbffde0e9fe3484d25ad5c6862915d33/custom/intent.desired")
-}).annotate({ identifier: "NativeCustomIntentDesiredClaim" }))()
-export type NativeCustomIntentDesiredClaim = typeof NativeCustomIntentDesiredClaim.Type
-export type NativeCustomIntentDesiredClaimEncoded = typeof NativeCustomIntentDesiredClaim.Encoded
-
-export const NativeCustomPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeCustomPublicationOperationClaimFields" }))()
-export type NativeCustomPublicationOperationClaimFields = typeof NativeCustomPublicationOperationClaimFields.Type
-export type NativeCustomPublicationOperationClaimFieldsEncoded = typeof NativeCustomPublicationOperationClaimFields.Encoded
-
-export const NativeCustomPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeCustomPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeCustomSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/dd701ae64814d04fb95b3c0ab206d025abd3788bc71a6e70f28703461d007623/custom/publication.operation")
-}).annotate({ identifier: "NativeCustomPublicationOperationClaim" }))()
-export type NativeCustomPublicationOperationClaim = typeof NativeCustomPublicationOperationClaim.Type
-export type NativeCustomPublicationOperationClaimEncoded = typeof NativeCustomPublicationOperationClaim.Encoded
-
-export const NativeCustomClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeCustomCustomClaim,
-  NativeCustomIntentDesiredClaim,
-  NativeCustomPublicationOperationClaim
-], { mode: "oneOf" }).annotate({ identifier: "NativeCustomClaim" }))()
-export type NativeCustomClaim = typeof NativeCustomClaim.Type
-export type NativeCustomClaimEncoded = typeof NativeCustomClaim.Encoded
-
-export const NativeCustomSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("custom"),
-  "heads": Schema.Array(NativeCustomClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeCustomSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/9ee8a1ea413659fa75c86e5c8459bc24987d4051e923474679be0f31bcb388cf/custom")
-}).annotate({ identifier: "NativeCustomSubject" }))()
-export type NativeCustomSubject = typeof NativeCustomSubject.Type
-export type NativeCustomSubjectEncoded = typeof NativeCustomSubject.Encoded
-
-export const NativeDaemonDaemonDiagnosticClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.Literals(["warning","error"]))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeDaemonDaemonDiagnosticClaimFields" }))()
-export type NativeDaemonDaemonDiagnosticClaimFields = typeof NativeDaemonDaemonDiagnosticClaimFields.Type
-export type NativeDaemonDaemonDiagnosticClaimFieldsEncoded = typeof NativeDaemonDaemonDiagnosticClaimFields.Encoded
-
-export const NativeDaemonSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["daemon"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeDaemonSubjectRef" }))()
-export type NativeDaemonSubjectRef = typeof NativeDaemonSubjectRef.Type
-export type NativeDaemonSubjectRefEncoded = typeof NativeDaemonSubjectRef.Encoded
-
-export const NativeDaemonDaemonDiagnosticClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDaemonDaemonDiagnosticClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("daemon.diagnostic"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDaemonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/e844da093dc2e3b822b92551995c211886022a8ce40744123e5228c702cbfb74/daemon/daemon.diagnostic")
-}).annotate({ identifier: "NativeDaemonDaemonDiagnosticClaim" }))()
-export type NativeDaemonDaemonDiagnosticClaim = typeof NativeDaemonDaemonDiagnosticClaim.Type
-export type NativeDaemonDaemonDiagnosticClaimEncoded = typeof NativeDaemonDaemonDiagnosticClaim.Encoded
-
-export const NativeDaemonDaemonStartedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "pid": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "schema": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "schema_digest": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["running"]))),
-  "version": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeDaemonDaemonStartedClaimFields" }))()
-export type NativeDaemonDaemonStartedClaimFields = typeof NativeDaemonDaemonStartedClaimFields.Type
-export type NativeDaemonDaemonStartedClaimFieldsEncoded = typeof NativeDaemonDaemonStartedClaimFields.Encoded
-
-export const NativeDaemonDaemonStartedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDaemonDaemonStartedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("daemon.started"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDaemonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d23105bc4f14c35408d24f5d6539f3fe9ae4892570e4f1372be1aa04db6e7788/daemon/daemon.started")
-}).annotate({ identifier: "NativeDaemonDaemonStartedClaim" }))()
-export type NativeDaemonDaemonStartedClaim = typeof NativeDaemonDaemonStartedClaim.Type
-export type NativeDaemonDaemonStartedClaimEncoded = typeof NativeDaemonDaemonStartedClaim.Encoded
-
-export const NativeDaemonIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeDaemonIntentDesiredClaimFields" }))()
-export type NativeDaemonIntentDesiredClaimFields = typeof NativeDaemonIntentDesiredClaimFields.Type
-export type NativeDaemonIntentDesiredClaimFieldsEncoded = typeof NativeDaemonIntentDesiredClaimFields.Encoded
-
-export const NativeDaemonIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDaemonIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDaemonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/49f6c022646e7b14edb1e020fd1e823b19e238ecac3413c38888bf22dcff169a/daemon/intent.desired")
-}).annotate({ identifier: "NativeDaemonIntentDesiredClaim" }))()
-export type NativeDaemonIntentDesiredClaim = typeof NativeDaemonIntentDesiredClaim.Type
-export type NativeDaemonIntentDesiredClaimEncoded = typeof NativeDaemonIntentDesiredClaim.Encoded
-
-export const NativeDaemonOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeDaemonOperationalFailureClaimFields" }))()
-export type NativeDaemonOperationalFailureClaimFields = typeof NativeDaemonOperationalFailureClaimFields.Type
-export type NativeDaemonOperationalFailureClaimFieldsEncoded = typeof NativeDaemonOperationalFailureClaimFields.Encoded
-
-export const NativeDaemonOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDaemonOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDaemonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/20b4f5b55a354f5f6dba140deb44085bc3c29d258320c49dca3309091d5205a7/daemon/operational.failure")
-}).annotate({ identifier: "NativeDaemonOperationalFailureClaim" }))()
-export type NativeDaemonOperationalFailureClaim = typeof NativeDaemonOperationalFailureClaim.Type
-export type NativeDaemonOperationalFailureClaimEncoded = typeof NativeDaemonOperationalFailureClaim.Encoded
-
-export const NativeDaemonOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeDaemonOperationalRecoveredClaimFields" }))()
-export type NativeDaemonOperationalRecoveredClaimFields = typeof NativeDaemonOperationalRecoveredClaimFields.Type
-export type NativeDaemonOperationalRecoveredClaimFieldsEncoded = typeof NativeDaemonOperationalRecoveredClaimFields.Encoded
-
-export const NativeDaemonOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDaemonOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDaemonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/bd9177f62ab6382bc62153ee5cc91ac2c683fafb3bc937a2c9a4d5377b4f5f78/daemon/operational.recovered")
-}).annotate({ identifier: "NativeDaemonOperationalRecoveredClaim" }))()
-export type NativeDaemonOperationalRecoveredClaim = typeof NativeDaemonOperationalRecoveredClaim.Type
-export type NativeDaemonOperationalRecoveredClaimEncoded = typeof NativeDaemonOperationalRecoveredClaim.Encoded
-
-export const NativeDaemonPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeDaemonPublicationOperationClaimFields" }))()
-export type NativeDaemonPublicationOperationClaimFields = typeof NativeDaemonPublicationOperationClaimFields.Type
-export type NativeDaemonPublicationOperationClaimFieldsEncoded = typeof NativeDaemonPublicationOperationClaimFields.Encoded
-
-export const NativeDaemonPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDaemonPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDaemonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/7dab122d5fd14f79d9abdceef7367116946049b2fe98d60720eb753015eb04b0/daemon/publication.operation")
-}).annotate({ identifier: "NativeDaemonPublicationOperationClaim" }))()
-export type NativeDaemonPublicationOperationClaim = typeof NativeDaemonPublicationOperationClaim.Type
-export type NativeDaemonPublicationOperationClaimEncoded = typeof NativeDaemonPublicationOperationClaim.Encoded
-
-export const NativeDaemonReconcileFaultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "scope": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["faulted","recovered"])))
-}).annotate({ identifier: "NativeDaemonReconcileFaultClaimFields" }))()
-export type NativeDaemonReconcileFaultClaimFields = typeof NativeDaemonReconcileFaultClaimFields.Type
-export type NativeDaemonReconcileFaultClaimFieldsEncoded = typeof NativeDaemonReconcileFaultClaimFields.Encoded
-
-export const NativeDaemonReconcileFaultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDaemonReconcileFaultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("reconcile.fault"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDaemonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/fc9f0682f1045a6e3797a7edfe7ecb202463a5d9179769836bb6eb3ff6b0255f/daemon/reconcile.fault")
-}).annotate({ identifier: "NativeDaemonReconcileFaultClaim" }))()
-export type NativeDaemonReconcileFaultClaim = typeof NativeDaemonReconcileFaultClaim.Type
-export type NativeDaemonReconcileFaultClaimEncoded = typeof NativeDaemonReconcileFaultClaim.Encoded
-
-export const NativeDaemonClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeDaemonDaemonDiagnosticClaim,
-  NativeDaemonDaemonStartedClaim,
-  NativeDaemonIntentDesiredClaim,
-  NativeDaemonOperationalFailureClaim,
-  NativeDaemonOperationalRecoveredClaim,
-  NativeDaemonPublicationOperationClaim,
-  NativeDaemonReconcileFaultClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeDaemonClaim" }))()
-export type NativeDaemonClaim = typeof NativeDaemonClaim.Type
-export type NativeDaemonClaimEncoded = typeof NativeDaemonClaim.Encoded
-
-export const NativeDaemonSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("daemon"),
-  "heads": Schema.Array(NativeDaemonClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeDaemonSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/22d47bdf08680e9a9062b7d98c5fd17f97a4aad1d92f44d33614e29605753ac1/daemon")
-}).annotate({ identifier: "NativeDaemonSubject" }))()
-export type NativeDaemonSubject = typeof NativeDaemonSubject.Type
-export type NativeDaemonSubjectEncoded = typeof NativeDaemonSubject.Encoded
-
-export const NativeDocDocBoundClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "executable": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "hash": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "name": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "size": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeDocDocBoundClaimFields" }))()
-export type NativeDocDocBoundClaimFields = typeof NativeDocDocBoundClaimFields.Type
-export type NativeDocDocBoundClaimFieldsEncoded = typeof NativeDocDocBoundClaimFields.Encoded
-
-export const NativeDocSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["doc"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeDocSubjectRef" }))()
-export type NativeDocSubjectRef = typeof NativeDocSubjectRef.Type
-export type NativeDocSubjectRefEncoded = typeof NativeDocSubjectRef.Encoded
-
-export const NativeDocDocBoundClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDocDocBoundClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("doc.bound"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDocSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/013db996da271cc1ca3a16cceb00c051b2591643989594d4b03db873304e4bd6/doc/doc.bound")
-}).annotate({ identifier: "NativeDocDocBoundClaim" }))()
-export type NativeDocDocBoundClaim = typeof NativeDocDocBoundClaim.Type
-export type NativeDocDocBoundClaimEncoded = typeof NativeDocDocBoundClaim.Encoded
-
-export const NativeDocIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeDocIntentDesiredClaimFields" }))()
-export type NativeDocIntentDesiredClaimFields = typeof NativeDocIntentDesiredClaimFields.Type
-export type NativeDocIntentDesiredClaimFieldsEncoded = typeof NativeDocIntentDesiredClaimFields.Encoded
-
-export const NativeDocIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDocIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDocSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3260f2734496a53e13b5cbe832f6116b6ebcfb58e623146e52554dbd85e25261/doc/intent.desired")
-}).annotate({ identifier: "NativeDocIntentDesiredClaim" }))()
-export type NativeDocIntentDesiredClaim = typeof NativeDocIntentDesiredClaim.Type
-export type NativeDocIntentDesiredClaimEncoded = typeof NativeDocIntentDesiredClaim.Encoded
-
-export const NativeDocPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeDocPublicationOperationClaimFields" }))()
-export type NativeDocPublicationOperationClaimFields = typeof NativeDocPublicationOperationClaimFields.Type
-export type NativeDocPublicationOperationClaimFieldsEncoded = typeof NativeDocPublicationOperationClaimFields.Encoded
-
-export const NativeDocPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeDocPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeDocSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d91647dccfedf1bb4853d8874229c1fbd270045358877e5bd7f4441865a79cd5/doc/publication.operation")
-}).annotate({ identifier: "NativeDocPublicationOperationClaim" }))()
-export type NativeDocPublicationOperationClaim = typeof NativeDocPublicationOperationClaim.Type
-export type NativeDocPublicationOperationClaimEncoded = typeof NativeDocPublicationOperationClaim.Encoded
-
-export const NativeDocClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeDocDocBoundClaim,
-  NativeDocIntentDesiredClaim,
-  NativeDocPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeDocClaim" }))()
-export type NativeDocClaim = typeof NativeDocClaim.Type
-export type NativeDocClaimEncoded = typeof NativeDocClaim.Encoded
-
-export const NativeDocSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("doc"),
-  "heads": Schema.Array(NativeDocClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeDocSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/06c16e76de98d760f0eb2766da275358c3a750a22af7a4e5f335756b4d184f71/doc")
-}).annotate({ identifier: "NativeDocSubject" }))()
-export type NativeDocSubject = typeof NativeDocSubject.Type
-export type NativeDocSubjectEncoded = typeof NativeDocSubject.Encoded
-
-export const NativeExecIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeExecIntentDesiredClaimFields" }))()
-export type NativeExecIntentDesiredClaimFields = typeof NativeExecIntentDesiredClaimFields.Type
-export type NativeExecIntentDesiredClaimFieldsEncoded = typeof NativeExecIntentDesiredClaimFields.Encoded
-
-export const NativeExecSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["exec"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeExecSubjectRef" }))()
-export type NativeExecSubjectRef = typeof NativeExecSubjectRef.Type
-export type NativeExecSubjectRefEncoded = typeof NativeExecSubjectRef.Encoded
-
-export const NativeExecIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c594479d5342894bced452aadbc904f2eb2b62f10f35892cffb2d13bae5ddab6/exec/intent.desired")
-}).annotate({ identifier: "NativeExecIntentDesiredClaim" }))()
-export type NativeExecIntentDesiredClaim = typeof NativeExecIntentDesiredClaim.Type
-export type NativeExecIntentDesiredClaimEncoded = typeof NativeExecIntentDesiredClaim.Encoded
-
-export const NativeExecOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeExecOperationalFailureClaimFields" }))()
-export type NativeExecOperationalFailureClaimFields = typeof NativeExecOperationalFailureClaimFields.Type
-export type NativeExecOperationalFailureClaimFieldsEncoded = typeof NativeExecOperationalFailureClaimFields.Encoded
-
-export const NativeExecOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f272afeb2c579e90d16ecad1c90e65f7eff4e448b2ef39b9e765c1771e2ebaca/exec/operational.failure")
-}).annotate({ identifier: "NativeExecOperationalFailureClaim" }))()
-export type NativeExecOperationalFailureClaim = typeof NativeExecOperationalFailureClaim.Type
-export type NativeExecOperationalFailureClaimEncoded = typeof NativeExecOperationalFailureClaim.Encoded
-
-export const NativeExecOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeExecOperationalRecoveredClaimFields" }))()
-export type NativeExecOperationalRecoveredClaimFields = typeof NativeExecOperationalRecoveredClaimFields.Type
-export type NativeExecOperationalRecoveredClaimFieldsEncoded = typeof NativeExecOperationalRecoveredClaimFields.Encoded
-
-export const NativeExecOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c155577d3a594cdee6286629d9bb44cfd897a5f701be57da1f6e5e21bea43ae8/exec/operational.recovered")
-}).annotate({ identifier: "NativeExecOperationalRecoveredClaim" }))()
-export type NativeExecOperationalRecoveredClaim = typeof NativeExecOperationalRecoveredClaim.Type
-export type NativeExecOperationalRecoveredClaimEncoded = typeof NativeExecOperationalRecoveredClaim.Encoded
-
-export const NativeExecPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeExecPublicationOperationClaimFields" }))()
-export type NativeExecPublicationOperationClaimFields = typeof NativeExecPublicationOperationClaimFields.Type
-export type NativeExecPublicationOperationClaimFieldsEncoded = typeof NativeExecPublicationOperationClaimFields.Encoded
-
-export const NativeExecPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3395cbfd23849a8a1e992d374806a2ef7a75972595f12edf50f0f55ebd7d79c5/exec/publication.operation")
-}).annotate({ identifier: "NativeExecPublicationOperationClaim" }))()
-export type NativeExecPublicationOperationClaim = typeof NativeExecPublicationOperationClaim.Type
-export type NativeExecPublicationOperationClaimEncoded = typeof NativeExecPublicationOperationClaim.Encoded
-
-export const NativeExecRuntimeActionDeadlineReachedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeExecRuntimeActionDeadlineReachedClaimFields" }))()
-export type NativeExecRuntimeActionDeadlineReachedClaimFields = typeof NativeExecRuntimeActionDeadlineReachedClaimFields.Type
-export type NativeExecRuntimeActionDeadlineReachedClaimFieldsEncoded = typeof NativeExecRuntimeActionDeadlineReachedClaimFields.Encoded
-
-export const NativeExecRuntimeActionDeadlineReachedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecRuntimeActionDeadlineReachedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.deadline-reached"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/333c6b8936cea0db50cae1d9e57dfd405363aa5b1b9fc8c87399ccce047a2e11/exec/runtime.action.deadline-reached")
-}).annotate({ identifier: "NativeExecRuntimeActionDeadlineReachedClaim" }))()
-export type NativeExecRuntimeActionDeadlineReachedClaim = typeof NativeExecRuntimeActionDeadlineReachedClaim.Type
-export type NativeExecRuntimeActionDeadlineReachedClaimEncoded = typeof NativeExecRuntimeActionDeadlineReachedClaim.Encoded
-
-export const NativeExecRuntimeActionFailedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeExecRuntimeActionFailedClaimFields" }))()
-export type NativeExecRuntimeActionFailedClaimFields = typeof NativeExecRuntimeActionFailedClaimFields.Type
-export type NativeExecRuntimeActionFailedClaimFieldsEncoded = typeof NativeExecRuntimeActionFailedClaimFields.Encoded
-
-export const NativeExecRuntimeActionFailedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecRuntimeActionFailedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.failed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/6491cb2bcb234d52e5c6b0888c296591ac795b68d0151e5ce8f115410bb5854a/exec/runtime.action.failed")
-}).annotate({ identifier: "NativeExecRuntimeActionFailedClaim" }))()
-export type NativeExecRuntimeActionFailedClaim = typeof NativeExecRuntimeActionFailedClaim.Type
-export type NativeExecRuntimeActionFailedClaimEncoded = typeof NativeExecRuntimeActionFailedClaim.Encoded
-
-export const NativeExecRuntimeActionRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "deadline_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeExecRuntimeActionRequestedClaimFields" }))()
-export type NativeExecRuntimeActionRequestedClaimFields = typeof NativeExecRuntimeActionRequestedClaimFields.Type
-export type NativeExecRuntimeActionRequestedClaimFieldsEncoded = typeof NativeExecRuntimeActionRequestedClaimFields.Encoded
-
-export const NativeExecRuntimeActionRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecRuntimeActionRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/c99cdf8037a0886e0f8e440f280831f4e75896fccecc31ff19bbb34364227b29/exec/runtime.action.requested")
-}).annotate({ identifier: "NativeExecRuntimeActionRequestedClaim" }))()
-export type NativeExecRuntimeActionRequestedClaim = typeof NativeExecRuntimeActionRequestedClaim.Type
-export type NativeExecRuntimeActionRequestedClaimEncoded = typeof NativeExecRuntimeActionRequestedClaim.Encoded
-
-export const NativeExecRuntimeActionSucceededClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeExecRuntimeActionSucceededClaimFields" }))()
-export type NativeExecRuntimeActionSucceededClaimFields = typeof NativeExecRuntimeActionSucceededClaimFields.Type
-export type NativeExecRuntimeActionSucceededClaimFieldsEncoded = typeof NativeExecRuntimeActionSucceededClaimFields.Encoded
-
-export const NativeExecRuntimeActionSucceededClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecRuntimeActionSucceededClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.succeeded"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/1b9195e164dca012e1d99878136604f9df0a7895d67cf4afa1755d61c7b7eb50/exec/runtime.action.succeeded")
-}).annotate({ identifier: "NativeExecRuntimeActionSucceededClaim" }))()
-export type NativeExecRuntimeActionSucceededClaim = typeof NativeExecRuntimeActionSucceededClaim.Type
-export type NativeExecRuntimeActionSucceededClaimEncoded = typeof NativeExecRuntimeActionSucceededClaim.Encoded
-
-export const NativeExecRuntimeObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "adopted": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "exit_code": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "exit_signal": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "host": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "shutdown_timeout_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeExecRuntimeObservedClaimFields" }))()
-export type NativeExecRuntimeObservedClaimFields = typeof NativeExecRuntimeObservedClaimFields.Type
-export type NativeExecRuntimeObservedClaimFieldsEncoded = typeof NativeExecRuntimeObservedClaimFields.Encoded
-
-export const NativeExecRuntimeObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecRuntimeObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/1033c8d3377f5170701420265e3b6998a89bc1bb5fd2db9c2c0e4de43ada52e5/exec/runtime.observed")
-}).annotate({ identifier: "NativeExecRuntimeObservedClaim" }))()
-export type NativeExecRuntimeObservedClaim = typeof NativeExecRuntimeObservedClaim.Type
-export type NativeExecRuntimeObservedClaimEncoded = typeof NativeExecRuntimeObservedClaim.Encoded
-
-export const NativeExecRuntimeReconcileDecisionClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "decision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "gate": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "input_number": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "restart_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeExecRuntimeReconcileDecisionClaimFields" }))()
-export type NativeExecRuntimeReconcileDecisionClaimFields = typeof NativeExecRuntimeReconcileDecisionClaimFields.Type
-export type NativeExecRuntimeReconcileDecisionClaimFieldsEncoded = typeof NativeExecRuntimeReconcileDecisionClaimFields.Encoded
-
-export const NativeExecRuntimeReconcileDecisionClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecRuntimeReconcileDecisionClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.reconcile-decision"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3b90e154b6fdc60ae52d8a229718e6b99bfc4c2649d87d1c146b0ed5987b6deb/exec/runtime.reconcile-decision")
-}).annotate({ identifier: "NativeExecRuntimeReconcileDecisionClaim" }))()
-export type NativeExecRuntimeReconcileDecisionClaim = typeof NativeExecRuntimeReconcileDecisionClaim.Type
-export type NativeExecRuntimeReconcileDecisionClaimEncoded = typeof NativeExecRuntimeReconcileDecisionClaim.Encoded
-
-export const NativeExecRuntimeRestartWindowResetClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeExecRuntimeRestartWindowResetClaimFields" }))()
-export type NativeExecRuntimeRestartWindowResetClaimFields = typeof NativeExecRuntimeRestartWindowResetClaimFields.Type
-export type NativeExecRuntimeRestartWindowResetClaimFieldsEncoded = typeof NativeExecRuntimeRestartWindowResetClaimFields.Encoded
-
-export const NativeExecRuntimeRestartWindowResetClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExecRuntimeRestartWindowResetClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.restart-window-reset"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExecSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/80e5884e921cb26f84db7c260862be356975c7a1ecfaa29647b7f964c0c92da1/exec/runtime.restart-window-reset")
-}).annotate({ identifier: "NativeExecRuntimeRestartWindowResetClaim" }))()
-export type NativeExecRuntimeRestartWindowResetClaim = typeof NativeExecRuntimeRestartWindowResetClaim.Type
-export type NativeExecRuntimeRestartWindowResetClaimEncoded = typeof NativeExecRuntimeRestartWindowResetClaim.Encoded
-
-export const NativeExecClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeExecIntentDesiredClaim,
-  NativeExecOperationalFailureClaim,
-  NativeExecOperationalRecoveredClaim,
-  NativeExecPublicationOperationClaim,
-  NativeExecRuntimeActionDeadlineReachedClaim,
-  NativeExecRuntimeActionFailedClaim,
-  NativeExecRuntimeActionRequestedClaim,
-  NativeExecRuntimeActionSucceededClaim,
-  NativeExecRuntimeObservedClaim,
-  NativeExecRuntimeReconcileDecisionClaim,
-  NativeExecRuntimeRestartWindowResetClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeExecClaim" }))()
-export type NativeExecClaim = typeof NativeExecClaim.Type
-export type NativeExecClaimEncoded = typeof NativeExecClaim.Encoded
-
-export const NativeExecSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("exec"),
-  "heads": Schema.Array(NativeExecClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeExecSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/c84985eb00d0d70d9e37132ee77424b08d95928f1d52263f3be3d9cce3f409ee/exec")
-}).annotate({ identifier: "NativeExecSubject" }))()
-export type NativeExecSubject = typeof NativeExecSubject.Type
-export type NativeExecSubjectEncoded = typeof NativeExecSubject.Encoded
-
-export const NativeExternalIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeExternalIntentDesiredClaimFields" }))()
-export type NativeExternalIntentDesiredClaimFields = typeof NativeExternalIntentDesiredClaimFields.Type
-export type NativeExternalIntentDesiredClaimFieldsEncoded = typeof NativeExternalIntentDesiredClaimFields.Encoded
-
-export const NativeExternalSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["external"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeExternalSubjectRef" }))()
-export type NativeExternalSubjectRef = typeof NativeExternalSubjectRef.Type
-export type NativeExternalSubjectRefEncoded = typeof NativeExternalSubjectRef.Encoded
-
-export const NativeExternalIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExternalIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExternalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/0bfa8f9ca960d257143f24f72fdc26bbd09ab0e4ef7176cc0d334790a4a7981d/external/intent.desired")
-}).annotate({ identifier: "NativeExternalIntentDesiredClaim" }))()
-export type NativeExternalIntentDesiredClaim = typeof NativeExternalIntentDesiredClaim.Type
-export type NativeExternalIntentDesiredClaimEncoded = typeof NativeExternalIntentDesiredClaim.Encoded
-
-export const NativeExternalPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeExternalPublicationOperationClaimFields" }))()
-export type NativeExternalPublicationOperationClaimFields = typeof NativeExternalPublicationOperationClaimFields.Type
-export type NativeExternalPublicationOperationClaimFieldsEncoded = typeof NativeExternalPublicationOperationClaimFields.Encoded
-
-export const NativeExternalPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeExternalPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeExternalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/665b6e7a0159d13f0f96dc021398bbe039fc51cf6ad9796a371288f0b0aac090/external/publication.operation")
-}).annotate({ identifier: "NativeExternalPublicationOperationClaim" }))()
-export type NativeExternalPublicationOperationClaim = typeof NativeExternalPublicationOperationClaim.Type
-export type NativeExternalPublicationOperationClaimEncoded = typeof NativeExternalPublicationOperationClaim.Encoded
-
-export const NativeExternalClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeExternalIntentDesiredClaim,
-  NativeExternalPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeExternalClaim" }))()
-export type NativeExternalClaim = typeof NativeExternalClaim.Type
-export type NativeExternalClaimEncoded = typeof NativeExternalClaim.Encoded
-
-export const NativeExternalSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("external"),
-  "heads": Schema.Array(NativeExternalClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeExternalSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/13ffacc4a21a5d472cc2ce00df8cea4344c6ec980ebde7a6787f30ffa1553489/external")
-}).annotate({ identifier: "NativeExternalSubject" }))()
-export type NativeExternalSubject = typeof NativeExternalSubject.Type
-export type NativeExternalSubjectEncoded = typeof NativeExternalSubject.Encoded
-
-export const NativeFileFileObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "content_hash": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "mode": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "path": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["observed","unreadable"])))
-}).annotate({ identifier: "NativeFileFileObservedClaimFields" }))()
-export type NativeFileFileObservedClaimFields = typeof NativeFileFileObservedClaimFields.Type
-export type NativeFileFileObservedClaimFieldsEncoded = typeof NativeFileFileObservedClaimFields.Encoded
-
-export const NativeFileSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["file"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeFileSubjectRef" }))()
-export type NativeFileSubjectRef = typeof NativeFileSubjectRef.Type
-export type NativeFileSubjectRefEncoded = typeof NativeFileSubjectRef.Encoded
-
-export const NativeFileFileObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeFileFileObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("file.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeFileSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/886baff5bc70247862e52d0356c5e345c448abdbca1af1ea77a09488a10999e3/file/file.observed")
-}).annotate({ identifier: "NativeFileFileObservedClaim" }))()
-export type NativeFileFileObservedClaim = typeof NativeFileFileObservedClaim.Type
-export type NativeFileFileObservedClaimEncoded = typeof NativeFileFileObservedClaim.Encoded
-
-export const NativeFileIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeFileIntentDesiredClaimFields" }))()
-export type NativeFileIntentDesiredClaimFields = typeof NativeFileIntentDesiredClaimFields.Type
-export type NativeFileIntentDesiredClaimFieldsEncoded = typeof NativeFileIntentDesiredClaimFields.Encoded
-
-export const NativeFileIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeFileIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeFileSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d049a11effbc7541aca8de9b544953861937bb8ad265b6823aba5b7ff33e8da6/file/intent.desired")
-}).annotate({ identifier: "NativeFileIntentDesiredClaim" }))()
-export type NativeFileIntentDesiredClaim = typeof NativeFileIntentDesiredClaim.Type
-export type NativeFileIntentDesiredClaimEncoded = typeof NativeFileIntentDesiredClaim.Encoded
-
-export const NativeFilePublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeFilePublicationOperationClaimFields" }))()
-export type NativeFilePublicationOperationClaimFields = typeof NativeFilePublicationOperationClaimFields.Type
-export type NativeFilePublicationOperationClaimFieldsEncoded = typeof NativeFilePublicationOperationClaimFields.Encoded
-
-export const NativeFilePublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeFilePublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeFileSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/22aa062dd74f98fe673a5f7bf2ed6bbe472f883b9fb75ebeec73025f589e78b1/file/publication.operation")
-}).annotate({ identifier: "NativeFilePublicationOperationClaim" }))()
-export type NativeFilePublicationOperationClaim = typeof NativeFilePublicationOperationClaim.Type
-export type NativeFilePublicationOperationClaimEncoded = typeof NativeFilePublicationOperationClaim.Encoded
-
-export const NativeFileClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeFileFileObservedClaim,
-  NativeFileIntentDesiredClaim,
-  NativeFilePublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeFileClaim" }))()
-export type NativeFileClaim = typeof NativeFileClaim.Type
-export type NativeFileClaimEncoded = typeof NativeFileClaim.Encoded
-
-export const NativeFileSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("file"),
-  "heads": Schema.Array(NativeFileClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeFileSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/930400f2dbaf3e574f7322104f18a447ad8ca1fc71bfeaad58deeacaff954bef/file")
-}).annotate({ identifier: "NativeFileSubject" }))()
-export type NativeFileSubject = typeof NativeFileSubject.Type
-export type NativeFileSubjectEncoded = typeof NativeFileSubject.Encoded
-
-export const NativeHostSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["host"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeHostSubjectRef" }))()
-export type NativeHostSubjectRef = typeof NativeHostSubjectRef.Type
-export type NativeHostSubjectRefEncoded = typeof NativeHostSubjectRef.Encoded
-
-export const NativeFleetInviteFleetInviteCreatedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "created_by": Schema.optionalKey(Schema.NullOr(NativePersonSubjectRef)),
-  "expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "name": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "sponsor": Schema.optionalKey(Schema.NullOr(NativeHostSubjectRef))
-}).annotate({ identifier: "NativeFleetInviteFleetInviteCreatedClaimFields" }))()
-export type NativeFleetInviteFleetInviteCreatedClaimFields = typeof NativeFleetInviteFleetInviteCreatedClaimFields.Type
-export type NativeFleetInviteFleetInviteCreatedClaimFieldsEncoded = typeof NativeFleetInviteFleetInviteCreatedClaimFields.Encoded
-
-export const NativeFleetInviteSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["fleet-invite"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeFleetInviteSubjectRef" }))()
-export type NativeFleetInviteSubjectRef = typeof NativeFleetInviteSubjectRef.Type
-export type NativeFleetInviteSubjectRefEncoded = typeof NativeFleetInviteSubjectRef.Encoded
-
-export const NativeFleetInviteFleetInviteCreatedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeFleetInviteFleetInviteCreatedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("fleet.invite-created"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeFleetInviteSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/e909bdc77127aba03dfbcddb7e79672e495f25a92a4edcf33ddc2abf318752a6/fleet-invite/fleet.invite-created")
-}).annotate({ identifier: "NativeFleetInviteFleetInviteCreatedClaim" }))()
-export type NativeFleetInviteFleetInviteCreatedClaim = typeof NativeFleetInviteFleetInviteCreatedClaim.Type
-export type NativeFleetInviteFleetInviteCreatedClaimEncoded = typeof NativeFleetInviteFleetInviteCreatedClaim.Encoded
-
-export const NativeFleetInviteFleetInviteRedeemedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "name": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeFleetInviteFleetInviteRedeemedClaimFields" }))()
-export type NativeFleetInviteFleetInviteRedeemedClaimFields = typeof NativeFleetInviteFleetInviteRedeemedClaimFields.Type
-export type NativeFleetInviteFleetInviteRedeemedClaimFieldsEncoded = typeof NativeFleetInviteFleetInviteRedeemedClaimFields.Encoded
-
-export const NativeFleetInviteFleetInviteRedeemedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeFleetInviteFleetInviteRedeemedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("fleet.invite-redeemed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeFleetInviteSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3e9013652c9ddfa47c81a8ea45f06b20d1dd28d4c8ceaba0e5be7a16afad3af9/fleet-invite/fleet.invite-redeemed")
-}).annotate({ identifier: "NativeFleetInviteFleetInviteRedeemedClaim" }))()
-export type NativeFleetInviteFleetInviteRedeemedClaim = typeof NativeFleetInviteFleetInviteRedeemedClaim.Type
-export type NativeFleetInviteFleetInviteRedeemedClaimEncoded = typeof NativeFleetInviteFleetInviteRedeemedClaim.Encoded
-
-export const NativeFleetInviteFleetInviteRevokedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revoked_by": Schema.optionalKey(Schema.NullOr(NativePersonSubjectRef))
-}).annotate({ identifier: "NativeFleetInviteFleetInviteRevokedClaimFields" }))()
-export type NativeFleetInviteFleetInviteRevokedClaimFields = typeof NativeFleetInviteFleetInviteRevokedClaimFields.Type
-export type NativeFleetInviteFleetInviteRevokedClaimFieldsEncoded = typeof NativeFleetInviteFleetInviteRevokedClaimFields.Encoded
-
-export const NativeFleetInviteFleetInviteRevokedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeFleetInviteFleetInviteRevokedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("fleet.invite-revoked"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeFleetInviteSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9b8d72f04db96924da60ab28ae3d548d03087f292039de97d37cfe765518ce96/fleet-invite/fleet.invite-revoked")
-}).annotate({ identifier: "NativeFleetInviteFleetInviteRevokedClaim" }))()
-export type NativeFleetInviteFleetInviteRevokedClaim = typeof NativeFleetInviteFleetInviteRevokedClaim.Type
-export type NativeFleetInviteFleetInviteRevokedClaimEncoded = typeof NativeFleetInviteFleetInviteRevokedClaim.Encoded
-
-export const NativeFleetInviteIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeFleetInviteIntentDesiredClaimFields" }))()
-export type NativeFleetInviteIntentDesiredClaimFields = typeof NativeFleetInviteIntentDesiredClaimFields.Type
-export type NativeFleetInviteIntentDesiredClaimFieldsEncoded = typeof NativeFleetInviteIntentDesiredClaimFields.Encoded
-
-export const NativeFleetInviteIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeFleetInviteIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeFleetInviteSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/193fe90e89529b919b56e1de1b78007db7ef2fbf8fa3e9b9d410c954e8d0f910/fleet-invite/intent.desired")
-}).annotate({ identifier: "NativeFleetInviteIntentDesiredClaim" }))()
-export type NativeFleetInviteIntentDesiredClaim = typeof NativeFleetInviteIntentDesiredClaim.Type
-export type NativeFleetInviteIntentDesiredClaimEncoded = typeof NativeFleetInviteIntentDesiredClaim.Encoded
-
-export const NativeFleetInvitePublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeFleetInvitePublicationOperationClaimFields" }))()
-export type NativeFleetInvitePublicationOperationClaimFields = typeof NativeFleetInvitePublicationOperationClaimFields.Type
-export type NativeFleetInvitePublicationOperationClaimFieldsEncoded = typeof NativeFleetInvitePublicationOperationClaimFields.Encoded
-
-export const NativeFleetInvitePublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeFleetInvitePublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeFleetInviteSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/adfd951b94300feb6e536efc7b5d2d9e210365f99f787751d6d12722e3219bf0/fleet-invite/publication.operation")
-}).annotate({ identifier: "NativeFleetInvitePublicationOperationClaim" }))()
-export type NativeFleetInvitePublicationOperationClaim = typeof NativeFleetInvitePublicationOperationClaim.Type
-export type NativeFleetInvitePublicationOperationClaimEncoded = typeof NativeFleetInvitePublicationOperationClaim.Encoded
-
-export const NativeFleetInviteClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeFleetInviteFleetInviteCreatedClaim,
-  NativeFleetInviteFleetInviteRedeemedClaim,
-  NativeFleetInviteFleetInviteRevokedClaim,
-  NativeFleetInviteIntentDesiredClaim,
-  NativeFleetInvitePublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeFleetInviteClaim" }))()
-export type NativeFleetInviteClaim = typeof NativeFleetInviteClaim.Type
-export type NativeFleetInviteClaimEncoded = typeof NativeFleetInviteClaim.Encoded
-
-export const NativeFleetInviteSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("fleet-invite"),
-  "heads": Schema.Array(NativeFleetInviteClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeFleetInviteSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/26f14f60258abbcf142c446452954ee37150b57751ad86cb3d8ef6a0ca664da3/fleet-invite")
-}).annotate({ identifier: "NativeFleetInviteSubject" }))()
-export type NativeFleetInviteSubject = typeof NativeFleetInviteSubject.Type
-export type NativeFleetInviteSubjectEncoded = typeof NativeFleetInviteSubject.Encoded
-
-export const NativeGateOperationGateRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "baseline": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "gate": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "mission_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "mode": Schema.optionalKey(Schema.NullOr(Schema.Literals(["approve","feedback"]))),
-  "model": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "owner": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "question": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "runner": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "step_definition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "token_budget": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeGateOperationGateRequestedClaimFields" }))()
-export type NativeGateOperationGateRequestedClaimFields = typeof NativeGateOperationGateRequestedClaimFields.Type
-export type NativeGateOperationGateRequestedClaimFieldsEncoded = typeof NativeGateOperationGateRequestedClaimFields.Encoded
-
-export const NativeGateOperationSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["gate-operation"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeGateOperationSubjectRef" }))()
-export type NativeGateOperationSubjectRef = typeof NativeGateOperationSubjectRef.Type
-export type NativeGateOperationSubjectRefEncoded = typeof NativeGateOperationSubjectRef.Encoded
-
-export const NativeGateOperationGateRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationGateRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("gate.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/cafb9ad0eed2d6e3d1765ee0e19a38d22abed66bdc5490cf88af580541e484c6/gate-operation/gate.requested")
-}).annotate({ identifier: "NativeGateOperationGateRequestedClaim" }))()
-export type NativeGateOperationGateRequestedClaim = typeof NativeGateOperationGateRequestedClaim.Type
-export type NativeGateOperationGateRequestedClaimEncoded = typeof NativeGateOperationGateRequestedClaim.Encoded
-
-export const NativeGateOperationGateResultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "baseline": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "decision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "field": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "gate": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "stage": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "token_usage": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "verdict": Schema.optionalKey(Schema.NullOr(Schema.Literals(["pass","fail","error","feedback"])))
-}).annotate({ identifier: "NativeGateOperationGateResultClaimFields" }))()
-export type NativeGateOperationGateResultClaimFields = typeof NativeGateOperationGateResultClaimFields.Type
-export type NativeGateOperationGateResultClaimFieldsEncoded = typeof NativeGateOperationGateResultClaimFields.Encoded
-
-export const NativeGateOperationGateResultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationGateResultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("gate.result"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b644ebef16c42a7824f9905048cbd114457cf296c59170e5bb5c866913567aa8/gate-operation/gate.result")
-}).annotate({ identifier: "NativeGateOperationGateResultClaim" }))()
-export type NativeGateOperationGateResultClaim = typeof NativeGateOperationGateResultClaim.Type
-export type NativeGateOperationGateResultClaimEncoded = typeof NativeGateOperationGateResultClaim.Encoded
-
-export const NativeGateOperationIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeGateOperationIntentDesiredClaimFields" }))()
-export type NativeGateOperationIntentDesiredClaimFields = typeof NativeGateOperationIntentDesiredClaimFields.Type
-export type NativeGateOperationIntentDesiredClaimFieldsEncoded = typeof NativeGateOperationIntentDesiredClaimFields.Encoded
-
-export const NativeGateOperationIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9b4931fbedce6e7b7f3e6398f0b6dc7468b6acfb2055203e03e7f111bdc3b34c/gate-operation/intent.desired")
-}).annotate({ identifier: "NativeGateOperationIntentDesiredClaim" }))()
-export type NativeGateOperationIntentDesiredClaim = typeof NativeGateOperationIntentDesiredClaim.Type
-export type NativeGateOperationIntentDesiredClaimEncoded = typeof NativeGateOperationIntentDesiredClaim.Encoded
-
-export const NativeGateOperationPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeGateOperationPublicationOperationClaimFields" }))()
-export type NativeGateOperationPublicationOperationClaimFields = typeof NativeGateOperationPublicationOperationClaimFields.Type
-export type NativeGateOperationPublicationOperationClaimFieldsEncoded = typeof NativeGateOperationPublicationOperationClaimFields.Encoded
-
-export const NativeGateOperationPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/67a0cdac239674ace8594cd666f57f0722590df09e0255608db8f9b433e60d61/gate-operation/publication.operation")
-}).annotate({ identifier: "NativeGateOperationPublicationOperationClaim" }))()
-export type NativeGateOperationPublicationOperationClaim = typeof NativeGateOperationPublicationOperationClaim.Type
-export type NativeGateOperationPublicationOperationClaimEncoded = typeof NativeGateOperationPublicationOperationClaim.Encoded
-
-export const NativeGateOperationRuntimeActionDeadlineReachedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeGateOperationRuntimeActionDeadlineReachedClaimFields" }))()
-export type NativeGateOperationRuntimeActionDeadlineReachedClaimFields = typeof NativeGateOperationRuntimeActionDeadlineReachedClaimFields.Type
-export type NativeGateOperationRuntimeActionDeadlineReachedClaimFieldsEncoded = typeof NativeGateOperationRuntimeActionDeadlineReachedClaimFields.Encoded
-
-export const NativeGateOperationRuntimeActionDeadlineReachedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationRuntimeActionDeadlineReachedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.deadline-reached"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/174588369ee9ebfaf76b4b9f681c2c5d7350692e043dbc1d91a655095f9129d1/gate-operation/runtime.action.deadline-reached")
-}).annotate({ identifier: "NativeGateOperationRuntimeActionDeadlineReachedClaim" }))()
-export type NativeGateOperationRuntimeActionDeadlineReachedClaim = typeof NativeGateOperationRuntimeActionDeadlineReachedClaim.Type
-export type NativeGateOperationRuntimeActionDeadlineReachedClaimEncoded = typeof NativeGateOperationRuntimeActionDeadlineReachedClaim.Encoded
-
-export const NativeGateOperationRuntimeActionFailedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeGateOperationRuntimeActionFailedClaimFields" }))()
-export type NativeGateOperationRuntimeActionFailedClaimFields = typeof NativeGateOperationRuntimeActionFailedClaimFields.Type
-export type NativeGateOperationRuntimeActionFailedClaimFieldsEncoded = typeof NativeGateOperationRuntimeActionFailedClaimFields.Encoded
-
-export const NativeGateOperationRuntimeActionFailedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationRuntimeActionFailedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.failed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/f09ebdcc7175cc818e69a942292840d6b8e9721014e9256c6384977af0e8376a/gate-operation/runtime.action.failed")
-}).annotate({ identifier: "NativeGateOperationRuntimeActionFailedClaim" }))()
-export type NativeGateOperationRuntimeActionFailedClaim = typeof NativeGateOperationRuntimeActionFailedClaim.Type
-export type NativeGateOperationRuntimeActionFailedClaimEncoded = typeof NativeGateOperationRuntimeActionFailedClaim.Encoded
-
-export const NativeGateOperationRuntimeActionRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "deadline_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeGateOperationRuntimeActionRequestedClaimFields" }))()
-export type NativeGateOperationRuntimeActionRequestedClaimFields = typeof NativeGateOperationRuntimeActionRequestedClaimFields.Type
-export type NativeGateOperationRuntimeActionRequestedClaimFieldsEncoded = typeof NativeGateOperationRuntimeActionRequestedClaimFields.Encoded
-
-export const NativeGateOperationRuntimeActionRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationRuntimeActionRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/cfb10adde51c6dda91f002fdd7c6bb6aa1fa200c436535f5c8a0ca3d2f3f2b80/gate-operation/runtime.action.requested")
-}).annotate({ identifier: "NativeGateOperationRuntimeActionRequestedClaim" }))()
-export type NativeGateOperationRuntimeActionRequestedClaim = typeof NativeGateOperationRuntimeActionRequestedClaim.Type
-export type NativeGateOperationRuntimeActionRequestedClaimEncoded = typeof NativeGateOperationRuntimeActionRequestedClaim.Encoded
-
-export const NativeGateOperationRuntimeActionSucceededClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeGateOperationRuntimeActionSucceededClaimFields" }))()
-export type NativeGateOperationRuntimeActionSucceededClaimFields = typeof NativeGateOperationRuntimeActionSucceededClaimFields.Type
-export type NativeGateOperationRuntimeActionSucceededClaimFieldsEncoded = typeof NativeGateOperationRuntimeActionSucceededClaimFields.Encoded
-
-export const NativeGateOperationRuntimeActionSucceededClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationRuntimeActionSucceededClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.succeeded"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/6842f8f3ed1e4f30158eba68e5a612443c6b3268e8078173fb86a8f235777e9e/gate-operation/runtime.action.succeeded")
-}).annotate({ identifier: "NativeGateOperationRuntimeActionSucceededClaim" }))()
-export type NativeGateOperationRuntimeActionSucceededClaim = typeof NativeGateOperationRuntimeActionSucceededClaim.Type
-export type NativeGateOperationRuntimeActionSucceededClaimEncoded = typeof NativeGateOperationRuntimeActionSucceededClaim.Encoded
-
-export const NativeGateOperationRuntimeObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "adopted": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "exit_code": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "exit_signal": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "host": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "shutdown_timeout_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeGateOperationRuntimeObservedClaimFields" }))()
-export type NativeGateOperationRuntimeObservedClaimFields = typeof NativeGateOperationRuntimeObservedClaimFields.Type
-export type NativeGateOperationRuntimeObservedClaimFieldsEncoded = typeof NativeGateOperationRuntimeObservedClaimFields.Encoded
-
-export const NativeGateOperationRuntimeObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGateOperationRuntimeObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGateOperationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/88a455ffb904e7c11c8c1100b46b301a4203750d910e1d0fa252783a88eba702/gate-operation/runtime.observed")
-}).annotate({ identifier: "NativeGateOperationRuntimeObservedClaim" }))()
-export type NativeGateOperationRuntimeObservedClaim = typeof NativeGateOperationRuntimeObservedClaim.Type
-export type NativeGateOperationRuntimeObservedClaimEncoded = typeof NativeGateOperationRuntimeObservedClaim.Encoded
-
-export const NativeGateOperationClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeGateOperationGateRequestedClaim,
-  NativeGateOperationGateResultClaim,
-  NativeGateOperationIntentDesiredClaim,
-  NativeGateOperationPublicationOperationClaim,
-  NativeGateOperationRuntimeActionDeadlineReachedClaim,
-  NativeGateOperationRuntimeActionFailedClaim,
-  NativeGateOperationRuntimeActionRequestedClaim,
-  NativeGateOperationRuntimeActionSucceededClaim,
-  NativeGateOperationRuntimeObservedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeGateOperationClaim" }))()
-export type NativeGateOperationClaim = typeof NativeGateOperationClaim.Type
-export type NativeGateOperationClaimEncoded = typeof NativeGateOperationClaim.Encoded
-
-export const NativeGateOperationSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("gate-operation"),
-  "heads": Schema.Array(NativeGateOperationClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeGateOperationSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/9089b0df7b667a9cbf79b3bba41802ae5fee0edeea99f9786b5a4355c4676c2f/gate-operation")
-}).annotate({ identifier: "NativeGateOperationSubject" }))()
-export type NativeGateOperationSubject = typeof NativeGateOperationSubject.Type
-export type NativeGateOperationSubjectEncoded = typeof NativeGateOperationSubject.Encoded
-
-export const NativeGithubPostGithubPostedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "agent": Schema.optionalKey(Schema.NullOr(NativeAgentSubjectRef)),
-  "id": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "item": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.Literals(["comment","review"]))),
-  "login": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "repository": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "url": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeGithubPostGithubPostedClaimFields" }))()
-export type NativeGithubPostGithubPostedClaimFields = typeof NativeGithubPostGithubPostedClaimFields.Type
-export type NativeGithubPostGithubPostedClaimFieldsEncoded = typeof NativeGithubPostGithubPostedClaimFields.Encoded
-
-export const NativeGithubPostSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["github-post"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeGithubPostSubjectRef" }))()
-export type NativeGithubPostSubjectRef = typeof NativeGithubPostSubjectRef.Type
-export type NativeGithubPostSubjectRefEncoded = typeof NativeGithubPostSubjectRef.Encoded
-
-export const NativeGithubPostGithubPostedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGithubPostGithubPostedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("github.posted"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGithubPostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/11930a8351a559701dc71f708561d7f00d3dd07fd8d17b491bed4b9583bfde0d/github-post/github.posted")
-}).annotate({ identifier: "NativeGithubPostGithubPostedClaim" }))()
-export type NativeGithubPostGithubPostedClaim = typeof NativeGithubPostGithubPostedClaim.Type
-export type NativeGithubPostGithubPostedClaimEncoded = typeof NativeGithubPostGithubPostedClaim.Encoded
-
-export const NativeGithubPostIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeGithubPostIntentDesiredClaimFields" }))()
-export type NativeGithubPostIntentDesiredClaimFields = typeof NativeGithubPostIntentDesiredClaimFields.Type
-export type NativeGithubPostIntentDesiredClaimFieldsEncoded = typeof NativeGithubPostIntentDesiredClaimFields.Encoded
-
-export const NativeGithubPostIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGithubPostIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGithubPostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/8793c72f533201f1f67f4586d82b42de4a87b5b7eaa6eff75514eeac5c13a129/github-post/intent.desired")
-}).annotate({ identifier: "NativeGithubPostIntentDesiredClaim" }))()
-export type NativeGithubPostIntentDesiredClaim = typeof NativeGithubPostIntentDesiredClaim.Type
-export type NativeGithubPostIntentDesiredClaimEncoded = typeof NativeGithubPostIntentDesiredClaim.Encoded
-
-export const NativeGithubPostPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeGithubPostPublicationOperationClaimFields" }))()
-export type NativeGithubPostPublicationOperationClaimFields = typeof NativeGithubPostPublicationOperationClaimFields.Type
-export type NativeGithubPostPublicationOperationClaimFieldsEncoded = typeof NativeGithubPostPublicationOperationClaimFields.Encoded
-
-export const NativeGithubPostPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGithubPostPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGithubPostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/66d2ec928ce4dcd01d770ea53bb73db8fd54ef995e9cc976d8bbd5f7a86451d2/github-post/publication.operation")
-}).annotate({ identifier: "NativeGithubPostPublicationOperationClaim" }))()
-export type NativeGithubPostPublicationOperationClaim = typeof NativeGithubPostPublicationOperationClaim.Type
-export type NativeGithubPostPublicationOperationClaimEncoded = typeof NativeGithubPostPublicationOperationClaim.Encoded
-
-export const NativeGithubPostClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeGithubPostGithubPostedClaim,
-  NativeGithubPostIntentDesiredClaim,
-  NativeGithubPostPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeGithubPostClaim" }))()
-export type NativeGithubPostClaim = typeof NativeGithubPostClaim.Type
-export type NativeGithubPostClaimEncoded = typeof NativeGithubPostClaim.Encoded
-
-export const NativeGithubPostSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("github-post"),
-  "heads": Schema.Array(NativeGithubPostClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeGithubPostSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/d2bc3b2d82a6c98e20d22ea39b678c35da9d8a3821079b976bb540c5ef4e7eaf/github-post")
-}).annotate({ identifier: "NativeGithubPostSubject" }))()
-export type NativeGithubPostSubject = typeof NativeGithubPostSubject.Type
-export type NativeGithubPostSubjectEncoded = typeof NativeGithubPostSubject.Encoded
-
-export const NativeGlassGlassDeletedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "base_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "replaced_revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeGlassGlassDeletedClaimFields" }))()
-export type NativeGlassGlassDeletedClaimFields = typeof NativeGlassGlassDeletedClaimFields.Type
-export type NativeGlassGlassDeletedClaimFieldsEncoded = typeof NativeGlassGlassDeletedClaimFields.Encoded
-
-export const NativeGlassSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["glass"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeGlassSubjectRef" }))()
-export type NativeGlassSubjectRef = typeof NativeGlassSubjectRef.Type
-export type NativeGlassSubjectRefEncoded = typeof NativeGlassSubjectRef.Encoded
-
-export const NativeGlassGlassDeletedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGlassGlassDeletedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("glass.deleted"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGlassSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4e94c03664a8ab109d17db17c5291025a31799ccd077ecd3d048f4717a45c853/glass/glass.deleted")
-}).annotate({ identifier: "NativeGlassGlassDeletedClaim" }))()
-export type NativeGlassGlassDeletedClaim = typeof NativeGlassGlassDeletedClaim.Type
-export type NativeGlassGlassDeletedClaimEncoded = typeof NativeGlassGlassDeletedClaim.Encoded
-
-export const NativeGlassGlassUpsertedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "base_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "body": Schema.optionalKey(Schema.NullOr(GlassBody)),
-  "replaced_revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeGlassGlassUpsertedClaimFields" }))()
-export type NativeGlassGlassUpsertedClaimFields = typeof NativeGlassGlassUpsertedClaimFields.Type
-export type NativeGlassGlassUpsertedClaimFieldsEncoded = typeof NativeGlassGlassUpsertedClaimFields.Encoded
-
-export const NativeGlassGlassUpsertedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGlassGlassUpsertedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("glass.upserted"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGlassSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/287011931865d13fa785bdf0613d77963074148965ebeaa789bc498f71c24076/glass/glass.upserted")
-}).annotate({ identifier: "NativeGlassGlassUpsertedClaim" }))()
-export type NativeGlassGlassUpsertedClaim = typeof NativeGlassGlassUpsertedClaim.Type
-export type NativeGlassGlassUpsertedClaimEncoded = typeof NativeGlassGlassUpsertedClaim.Encoded
-
-export const NativeGlassIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeGlassIntentDesiredClaimFields" }))()
-export type NativeGlassIntentDesiredClaimFields = typeof NativeGlassIntentDesiredClaimFields.Type
-export type NativeGlassIntentDesiredClaimFieldsEncoded = typeof NativeGlassIntentDesiredClaimFields.Encoded
-
-export const NativeGlassIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGlassIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGlassSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/0302d743b593ba6fe8c252679b9fd94f0e3fb89d1d0a4fdaf59d81d22b2ba120/glass/intent.desired")
-}).annotate({ identifier: "NativeGlassIntentDesiredClaim" }))()
-export type NativeGlassIntentDesiredClaim = typeof NativeGlassIntentDesiredClaim.Type
-export type NativeGlassIntentDesiredClaimEncoded = typeof NativeGlassIntentDesiredClaim.Encoded
-
-export const NativeGlassPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeGlassPublicationOperationClaimFields" }))()
-export type NativeGlassPublicationOperationClaimFields = typeof NativeGlassPublicationOperationClaimFields.Type
-export type NativeGlassPublicationOperationClaimFieldsEncoded = typeof NativeGlassPublicationOperationClaimFields.Encoded
-
-export const NativeGlassPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeGlassPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeGlassSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a2272915ff0fec83e88fd98801b26c9f2da04d538e33a6d0413e9970ee88c5d6/glass/publication.operation")
-}).annotate({ identifier: "NativeGlassPublicationOperationClaim" }))()
-export type NativeGlassPublicationOperationClaim = typeof NativeGlassPublicationOperationClaim.Type
-export type NativeGlassPublicationOperationClaimEncoded = typeof NativeGlassPublicationOperationClaim.Encoded
-
-export const NativeGlassClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeGlassGlassDeletedClaim,
-  NativeGlassGlassUpsertedClaim,
-  NativeGlassIntentDesiredClaim,
-  NativeGlassPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeGlassClaim" }))()
-export type NativeGlassClaim = typeof NativeGlassClaim.Type
-export type NativeGlassClaimEncoded = typeof NativeGlassClaim.Encoded
-
-export const NativeGlassSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("glass"),
-  "heads": Schema.Array(NativeGlassClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeGlassSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/5c4bd70203b4aa1afe922398e79eeafe2c11c11cd0df16211bf06716273682c8/glass")
-}).annotate({ identifier: "NativeGlassSubject" }))()
-export type NativeGlassSubject = typeof NativeGlassSubject.Type
-export type NativeGlassSubjectEncoded = typeof NativeGlassSubject.Encoded
-
-export const NativeHostFleetMemberAdmittedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "admitted_by": Schema.optionalKey(Schema.NullOr(NativePersonSubjectRef)),
-  "fleet_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "invite": Schema.optionalKey(Schema.NullOr(NativeFleetInviteSubjectRef)),
-  "mode": Schema.optionalKey(Schema.NullOr(Schema.Literals(["listening","dial-out"]))),
-  "sponsor": Schema.optionalKey(Schema.NullOr(NativeHostSubjectRef)),
-  "via": Schema.optionalKey(Schema.NullOr(Schema.Literals(["anchor","invite","migration"]))),
-  "writer_floor": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeHostFleetMemberAdmittedClaimFields" }))()
-export type NativeHostFleetMemberAdmittedClaimFields = typeof NativeHostFleetMemberAdmittedClaimFields.Type
-export type NativeHostFleetMemberAdmittedClaimFieldsEncoded = typeof NativeHostFleetMemberAdmittedClaimFields.Encoded
-
-export const NativeHostFleetMemberAdmittedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeHostFleetMemberAdmittedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("fleet.member-admitted"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeHostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/eb6a0a3af13281c2472c0c78a80b1fd45a250415c3d49e4c872d732e91f5355e/host/fleet.member-admitted")
-}).annotate({ identifier: "NativeHostFleetMemberAdmittedClaim" }))()
-export type NativeHostFleetMemberAdmittedClaim = typeof NativeHostFleetMemberAdmittedClaim.Type
-export type NativeHostFleetMemberAdmittedClaimEncoded = typeof NativeHostFleetMemberAdmittedClaim.Encoded
-
-export const NativeHostFleetMemberEndpointsClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "build": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "mode": Schema.optionalKey(Schema.NullOr(Schema.Literals(["listening","dial-out"])))
-}).annotate({ identifier: "NativeHostFleetMemberEndpointsClaimFields" }))()
-export type NativeHostFleetMemberEndpointsClaimFields = typeof NativeHostFleetMemberEndpointsClaimFields.Type
-export type NativeHostFleetMemberEndpointsClaimFieldsEncoded = typeof NativeHostFleetMemberEndpointsClaimFields.Encoded
-
-export const NativeHostFleetMemberEndpointsClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeHostFleetMemberEndpointsClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("fleet.member-endpoints"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeHostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f93ecdba72f6b6dba2e7a137e6e75c1c15c8bd39acd7ab244dbeb7b40e08716c/host/fleet.member-endpoints")
-}).annotate({ identifier: "NativeHostFleetMemberEndpointsClaim" }))()
-export type NativeHostFleetMemberEndpointsClaim = typeof NativeHostFleetMemberEndpointsClaim.Type
-export type NativeHostFleetMemberEndpointsClaimEncoded = typeof NativeHostFleetMemberEndpointsClaim.Encoded
-
-export const NativeHostFleetMemberLeftClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "high_water": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeHostFleetMemberLeftClaimFields" }))()
-export type NativeHostFleetMemberLeftClaimFields = typeof NativeHostFleetMemberLeftClaimFields.Type
-export type NativeHostFleetMemberLeftClaimFieldsEncoded = typeof NativeHostFleetMemberLeftClaimFields.Encoded
-
-export const NativeHostFleetMemberLeftClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeHostFleetMemberLeftClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("fleet.member-left"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeHostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/517e923a595372b1d09fc9c1d38e6ef89c558693fa7adfcbf81fd1a013eb8038/host/fleet.member-left")
-}).annotate({ identifier: "NativeHostFleetMemberLeftClaim" }))()
-export type NativeHostFleetMemberLeftClaim = typeof NativeHostFleetMemberLeftClaim.Type
-export type NativeHostFleetMemberLeftClaimEncoded = typeof NativeHostFleetMemberLeftClaim.Encoded
-
-export const NativeHostFleetMemberRemovedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "high_water": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "removed_by": Schema.optionalKey(Schema.NullOr(NativePersonSubjectRef))
-}).annotate({ identifier: "NativeHostFleetMemberRemovedClaimFields" }))()
-export type NativeHostFleetMemberRemovedClaimFields = typeof NativeHostFleetMemberRemovedClaimFields.Type
-export type NativeHostFleetMemberRemovedClaimFieldsEncoded = typeof NativeHostFleetMemberRemovedClaimFields.Encoded
-
-export const NativeHostFleetMemberRemovedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeHostFleetMemberRemovedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("fleet.member-removed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeHostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/66d2fdcebfc404c909bccdea1c94b144b19996eba5b19cc13b4577f374fa6d14/host/fleet.member-removed")
-}).annotate({ identifier: "NativeHostFleetMemberRemovedClaim" }))()
-export type NativeHostFleetMemberRemovedClaim = typeof NativeHostFleetMemberRemovedClaim.Type
-export type NativeHostFleetMemberRemovedClaimEncoded = typeof NativeHostFleetMemberRemovedClaim.Encoded
-
-export const NativeHostIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeHostIntentDesiredClaimFields" }))()
-export type NativeHostIntentDesiredClaimFields = typeof NativeHostIntentDesiredClaimFields.Type
-export type NativeHostIntentDesiredClaimFieldsEncoded = typeof NativeHostIntentDesiredClaimFields.Encoded
-
-export const NativeHostIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeHostIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeHostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4fba8718a634678b7fd0bf894130a16119c564826be256de9d475e9bc20f04ec/host/intent.desired")
-}).annotate({ identifier: "NativeHostIntentDesiredClaim" }))()
-export type NativeHostIntentDesiredClaim = typeof NativeHostIntentDesiredClaim.Type
-export type NativeHostIntentDesiredClaimEncoded = typeof NativeHostIntentDesiredClaim.Encoded
-
-export const NativeHostPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeHostPublicationOperationClaimFields" }))()
-export type NativeHostPublicationOperationClaimFields = typeof NativeHostPublicationOperationClaimFields.Type
-export type NativeHostPublicationOperationClaimFieldsEncoded = typeof NativeHostPublicationOperationClaimFields.Encoded
-
-export const NativeHostPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeHostPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeHostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/0962eff905d05516a552cbdedff1df88736574d5793857eb051bca9dc9890d6c/host/publication.operation")
-}).annotate({ identifier: "NativeHostPublicationOperationClaim" }))()
-export type NativeHostPublicationOperationClaim = typeof NativeHostPublicationOperationClaim.Type
-export type NativeHostPublicationOperationClaimEncoded = typeof NativeHostPublicationOperationClaim.Encoded
-
-export const NativeHostTransportObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "last_success_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "protocol": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["up","down","unknown"])))
-}).annotate({ identifier: "NativeHostTransportObservedClaimFields" }))()
-export type NativeHostTransportObservedClaimFields = typeof NativeHostTransportObservedClaimFields.Type
-export type NativeHostTransportObservedClaimFieldsEncoded = typeof NativeHostTransportObservedClaimFields.Encoded
-
-export const NativeHostTransportObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeHostTransportObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("transport.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeHostSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/403506647937de2cf852f6b72dedf9df4f432e3c6e2b34fa56ad41b3042a416a/host/transport.observed")
-}).annotate({ identifier: "NativeHostTransportObservedClaim" }))()
-export type NativeHostTransportObservedClaim = typeof NativeHostTransportObservedClaim.Type
-export type NativeHostTransportObservedClaimEncoded = typeof NativeHostTransportObservedClaim.Encoded
-
-export const NativeHostClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeHostFleetMemberAdmittedClaim,
-  NativeHostFleetMemberEndpointsClaim,
-  NativeHostFleetMemberLeftClaim,
-  NativeHostFleetMemberRemovedClaim,
-  NativeHostIntentDesiredClaim,
-  NativeHostPublicationOperationClaim,
-  NativeHostTransportObservedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeHostClaim" }))()
-export type NativeHostClaim = typeof NativeHostClaim.Type
-export type NativeHostClaimEncoded = typeof NativeHostClaim.Encoded
-
-export const NativeHostSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("host"),
-  "heads": Schema.Array(NativeHostClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeHostSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/090233118e489d04803d05f8559be4e8d9694790551ed55caaf09dc715429060/host")
-}).annotate({ identifier: "NativeHostSubject" }))()
-export type NativeHostSubject = typeof NativeHostSubject.Type
-export type NativeHostSubjectEncoded = typeof NativeHostSubject.Encoded
-
-export const NativeLaneIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeLaneIntentDesiredClaimFields" }))()
-export type NativeLaneIntentDesiredClaimFields = typeof NativeLaneIntentDesiredClaimFields.Type
-export type NativeLaneIntentDesiredClaimFieldsEncoded = typeof NativeLaneIntentDesiredClaimFields.Encoded
-
-export const NativeLaneSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["lane"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeLaneSubjectRef" }))()
-export type NativeLaneSubjectRef = typeof NativeLaneSubjectRef.Type
-export type NativeLaneSubjectRefEncoded = typeof NativeLaneSubjectRef.Encoded
-
-export const NativeLaneIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLaneIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLaneSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/8e69b8561648f5b21b7caa1c24024aa93da19de4ecb12da99768268e824d4e23/lane/intent.desired")
-}).annotate({ identifier: "NativeLaneIntentDesiredClaim" }))()
-export type NativeLaneIntentDesiredClaim = typeof NativeLaneIntentDesiredClaim.Type
-export type NativeLaneIntentDesiredClaimEncoded = typeof NativeLaneIntentDesiredClaim.Encoded
-
-export const NativeLaneLaneApprovedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "entry": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeLaneLaneApprovedClaimFields" }))()
-export type NativeLaneLaneApprovedClaimFields = typeof NativeLaneLaneApprovedClaimFields.Type
-export type NativeLaneLaneApprovedClaimFieldsEncoded = typeof NativeLaneLaneApprovedClaimFields.Encoded
-
-export const NativeLaneLaneApprovedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLaneLaneApprovedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("lane.approved"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLaneSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/fc415d003ad7dd23ee65d5bb5336d1d73040cab81a3132db6948d0605067f568/lane/lane.approved")
-}).annotate({ identifier: "NativeLaneLaneApprovedClaim" }))()
-export type NativeLaneLaneApprovedClaim = typeof NativeLaneLaneApprovedClaim.Type
-export type NativeLaneLaneApprovedClaimEncoded = typeof NativeLaneLaneApprovedClaim.Encoded
-
-export const NativeLaneLaneJoinedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "entry": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeLaneLaneJoinedClaimFields" }))()
-export type NativeLaneLaneJoinedClaimFields = typeof NativeLaneLaneJoinedClaimFields.Type
-export type NativeLaneLaneJoinedClaimFieldsEncoded = typeof NativeLaneLaneJoinedClaimFields.Encoded
-
-export const NativeLaneLaneJoinedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLaneLaneJoinedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("lane.joined"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLaneSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/db78e11e2ec526d732627e27edf50e7bf34d56a9fb6aa68e7539d0a3cedf249d/lane/lane.joined")
-}).annotate({ identifier: "NativeLaneLaneJoinedClaim" }))()
-export type NativeLaneLaneJoinedClaim = typeof NativeLaneLaneJoinedClaim.Type
-export type NativeLaneLaneJoinedClaimEncoded = typeof NativeLaneLaneJoinedClaim.Encoded
-
-export const NativeLaneLaneLeftClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "entry": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "outcome": Schema.optionalKey(Schema.NullOr(Schema.Literals(["completed","removed"]))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeLaneLaneLeftClaimFields" }))()
-export type NativeLaneLaneLeftClaimFields = typeof NativeLaneLaneLeftClaimFields.Type
-export type NativeLaneLaneLeftClaimFieldsEncoded = typeof NativeLaneLaneLeftClaimFields.Encoded
-
-export const NativeLaneLaneLeftClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLaneLaneLeftClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("lane.left"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLaneSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/1bc87b3cc9999afd3635ceaf15e80bdd578a1bf829e0cce94e1d99d3303bbaed/lane/lane.left")
-}).annotate({ identifier: "NativeLaneLaneLeftClaim" }))()
-export type NativeLaneLaneLeftClaim = typeof NativeLaneLaneLeftClaim.Type
-export type NativeLaneLaneLeftClaimEncoded = typeof NativeLaneLaneLeftClaim.Encoded
-
-export const NativeLaneLaneMarkedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "detail": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "entry": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "head": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "state": Schema.optionalKey(Schema.NullOr(Schema.Literals(["waiting","held","ready","running"])))
-}).annotate({ identifier: "NativeLaneLaneMarkedClaimFields" }))()
-export type NativeLaneLaneMarkedClaimFields = typeof NativeLaneLaneMarkedClaimFields.Type
-export type NativeLaneLaneMarkedClaimFieldsEncoded = typeof NativeLaneLaneMarkedClaimFields.Encoded
-
-export const NativeLaneLaneMarkedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLaneLaneMarkedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("lane.marked"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLaneSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f161ad247370b8f24efa63bae5039cbb4a06c71747dba2b152a10efb0b829206/lane/lane.marked")
-}).annotate({ identifier: "NativeLaneLaneMarkedClaim" }))()
-export type NativeLaneLaneMarkedClaim = typeof NativeLaneLaneMarkedClaim.Type
-export type NativeLaneLaneMarkedClaimEncoded = typeof NativeLaneLaneMarkedClaim.Encoded
-
-export const NativeLaneLaneMovedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "anchor": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "entry": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "placement": Schema.optionalKey(Schema.NullOr(Schema.Literals(["top","bottom","before","after"]))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeLaneLaneMovedClaimFields" }))()
-export type NativeLaneLaneMovedClaimFields = typeof NativeLaneLaneMovedClaimFields.Type
-export type NativeLaneLaneMovedClaimFieldsEncoded = typeof NativeLaneLaneMovedClaimFields.Encoded
-
-export const NativeLaneLaneMovedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLaneLaneMovedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("lane.moved"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLaneSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/53409084bd9187aeb24ad4b39a298e972ab6027c65c9e60658ce2ac2ca3c4075/lane/lane.moved")
-}).annotate({ identifier: "NativeLaneLaneMovedClaim" }))()
-export type NativeLaneLaneMovedClaim = typeof NativeLaneLaneMovedClaim.Type
-export type NativeLaneLaneMovedClaimEncoded = typeof NativeLaneLaneMovedClaim.Encoded
-
-export const NativeLanePublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeLanePublicationOperationClaimFields" }))()
-export type NativeLanePublicationOperationClaimFields = typeof NativeLanePublicationOperationClaimFields.Type
-export type NativeLanePublicationOperationClaimFieldsEncoded = typeof NativeLanePublicationOperationClaimFields.Encoded
-
-export const NativeLanePublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLanePublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLaneSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/233c0282971c3cbb11182caa577d1b60364a5b9642400e2e2c5e151fe3d348fc/lane/publication.operation")
-}).annotate({ identifier: "NativeLanePublicationOperationClaim" }))()
-export type NativeLanePublicationOperationClaim = typeof NativeLanePublicationOperationClaim.Type
-export type NativeLanePublicationOperationClaimEncoded = typeof NativeLanePublicationOperationClaim.Encoded
-
-export const NativeLaneClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeLaneIntentDesiredClaim,
-  NativeLaneLaneApprovedClaim,
-  NativeLaneLaneJoinedClaim,
-  NativeLaneLaneLeftClaim,
-  NativeLaneLaneMarkedClaim,
-  NativeLaneLaneMovedClaim,
-  NativeLanePublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeLaneClaim" }))()
-export type NativeLaneClaim = typeof NativeLaneClaim.Type
-export type NativeLaneClaimEncoded = typeof NativeLaneClaim.Encoded
-
-export const NativeLaneSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("lane"),
-  "heads": Schema.Array(NativeLaneClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeLaneSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/d481e9148c12fbfcd59e913d9b683c4663f2a1738c2032676893f2d64c486e14/lane")
-}).annotate({ identifier: "NativeLaneSubject" }))()
-export type NativeLaneSubject = typeof NativeLaneSubject.Type
-export type NativeLaneSubjectEncoded = typeof NativeLaneSubject.Encoded
-
-export const NativeLoopRunIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeLoopRunIntentDesiredClaimFields" }))()
-export type NativeLoopRunIntentDesiredClaimFields = typeof NativeLoopRunIntentDesiredClaimFields.Type
-export type NativeLoopRunIntentDesiredClaimFieldsEncoded = typeof NativeLoopRunIntentDesiredClaimFields.Encoded
-
-export const NativeLoopRunSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["loop-run"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeLoopRunSubjectRef" }))()
-export type NativeLoopRunSubjectRef = typeof NativeLoopRunSubjectRef.Type
-export type NativeLoopRunSubjectRefEncoded = typeof NativeLoopRunSubjectRef.Encoded
-
-export const NativeLoopRunIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLoopRunIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLoopRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/05bd046a6dd0c399dd24d013d29af07214f9e1500cd85a17cdbf9e962d0b801f/loop-run/intent.desired")
-}).annotate({ identifier: "NativeLoopRunIntentDesiredClaim" }))()
-export type NativeLoopRunIntentDesiredClaim = typeof NativeLoopRunIntentDesiredClaim.Type
-export type NativeLoopRunIntentDesiredClaimEncoded = typeof NativeLoopRunIntentDesiredClaim.Encoded
-
-export const NativeLoopRunLoopRoundDispatchClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "candidate": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "dispatch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "item_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "mission_run": Schema.optionalKey(Schema.NullOr(NativeMissionRunSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "round": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["rescheduled"])))
-}).annotate({ identifier: "NativeLoopRunLoopRoundDispatchClaimFields" }))()
-export type NativeLoopRunLoopRoundDispatchClaimFields = typeof NativeLoopRunLoopRoundDispatchClaimFields.Type
-export type NativeLoopRunLoopRoundDispatchClaimFieldsEncoded = typeof NativeLoopRunLoopRoundDispatchClaimFields.Encoded
-
-export const NativeLoopRunLoopRoundDispatchClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLoopRunLoopRoundDispatchClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("loop.round-dispatch"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLoopRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3835a3547c49451f51a9d270aa19ffc9fd620b8919ac421f889aa70ba8d7898f/loop-run/loop.round-dispatch")
-}).annotate({ identifier: "NativeLoopRunLoopRoundDispatchClaim" }))()
-export type NativeLoopRunLoopRoundDispatchClaim = typeof NativeLoopRunLoopRoundDispatchClaim.Type
-export type NativeLoopRunLoopRoundDispatchClaimEncoded = typeof NativeLoopRunLoopRoundDispatchClaim.Encoded
-
-export const NativeLoopRunLoopRoundResultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "candidate": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "feedback": Schema.optionalKey(Schema.NullOr(NativeDocSubjectRef)),
-  "mission_run": Schema.optionalKey(Schema.NullOr(NativeMissionRunSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "round": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["completed","failed","discarded"]))),
-  "token_usage": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeLoopRunLoopRoundResultClaimFields" }))()
-export type NativeLoopRunLoopRoundResultClaimFields = typeof NativeLoopRunLoopRoundResultClaimFields.Type
-export type NativeLoopRunLoopRoundResultClaimFieldsEncoded = typeof NativeLoopRunLoopRoundResultClaimFields.Encoded
-
-export const NativeLoopRunLoopRoundResultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLoopRunLoopRoundResultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("loop.round-result"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLoopRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b1ea4238691a0029aa6aceaff91e4e47ae9b80454816913ab82756bc350060b9/loop-run/loop.round-result")
-}).annotate({ identifier: "NativeLoopRunLoopRoundResultClaim" }))()
-export type NativeLoopRunLoopRoundResultClaim = typeof NativeLoopRunLoopRoundResultClaim.Type
-export type NativeLoopRunLoopRoundResultClaimEncoded = typeof NativeLoopRunLoopRoundResultClaim.Encoded
-
-export const NativeLoopRunLoopStateClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "best_round": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "feedback": Schema.optionalKey(Schema.NullOr(NativeDocSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "round": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["running","completed","failed","exhausted"]))),
-  "winner": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativeLoopRunLoopStateClaimFields" }))()
-export type NativeLoopRunLoopStateClaimFields = typeof NativeLoopRunLoopStateClaimFields.Type
-export type NativeLoopRunLoopStateClaimFieldsEncoded = typeof NativeLoopRunLoopStateClaimFields.Encoded
-
-export const NativeLoopRunLoopStateClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLoopRunLoopStateClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("loop.state"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLoopRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/e3dcb0816cac97d467eb260d0ec68e68671e56195db8b7481439be66bbdbbf43/loop-run/loop.state")
-}).annotate({ identifier: "NativeLoopRunLoopStateClaim" }))()
-export type NativeLoopRunLoopStateClaim = typeof NativeLoopRunLoopStateClaim.Type
-export type NativeLoopRunLoopStateClaimEncoded = typeof NativeLoopRunLoopStateClaim.Encoded
-
-export const NativeLoopRunOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeLoopRunOperationalFailureClaimFields" }))()
-export type NativeLoopRunOperationalFailureClaimFields = typeof NativeLoopRunOperationalFailureClaimFields.Type
-export type NativeLoopRunOperationalFailureClaimFieldsEncoded = typeof NativeLoopRunOperationalFailureClaimFields.Encoded
-
-export const NativeLoopRunOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLoopRunOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLoopRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/1f298e82175c62578c2f1969706bad7e969e50992246ef0f1eedbb141bbc71c0/loop-run/operational.failure")
-}).annotate({ identifier: "NativeLoopRunOperationalFailureClaim" }))()
-export type NativeLoopRunOperationalFailureClaim = typeof NativeLoopRunOperationalFailureClaim.Type
-export type NativeLoopRunOperationalFailureClaimEncoded = typeof NativeLoopRunOperationalFailureClaim.Encoded
-
-export const NativeLoopRunOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeLoopRunOperationalRecoveredClaimFields" }))()
-export type NativeLoopRunOperationalRecoveredClaimFields = typeof NativeLoopRunOperationalRecoveredClaimFields.Type
-export type NativeLoopRunOperationalRecoveredClaimFieldsEncoded = typeof NativeLoopRunOperationalRecoveredClaimFields.Encoded
-
-export const NativeLoopRunOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLoopRunOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLoopRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3adf831aa60e3c4be7e0bedf0c32aab8df88ab9d417e4c545767ec2a4eda130b/loop-run/operational.recovered")
-}).annotate({ identifier: "NativeLoopRunOperationalRecoveredClaim" }))()
-export type NativeLoopRunOperationalRecoveredClaim = typeof NativeLoopRunOperationalRecoveredClaim.Type
-export type NativeLoopRunOperationalRecoveredClaimEncoded = typeof NativeLoopRunOperationalRecoveredClaim.Encoded
-
-export const NativeLoopRunPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeLoopRunPublicationOperationClaimFields" }))()
-export type NativeLoopRunPublicationOperationClaimFields = typeof NativeLoopRunPublicationOperationClaimFields.Type
-export type NativeLoopRunPublicationOperationClaimFieldsEncoded = typeof NativeLoopRunPublicationOperationClaimFields.Encoded
-
-export const NativeLoopRunPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeLoopRunPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeLoopRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/aaf9cf1c5239b2a7614873612664b051ca6c2fe0b8e78219b01e4744d6dbfd4b/loop-run/publication.operation")
-}).annotate({ identifier: "NativeLoopRunPublicationOperationClaim" }))()
-export type NativeLoopRunPublicationOperationClaim = typeof NativeLoopRunPublicationOperationClaim.Type
-export type NativeLoopRunPublicationOperationClaimEncoded = typeof NativeLoopRunPublicationOperationClaim.Encoded
-
-export const NativeLoopRunClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeLoopRunIntentDesiredClaim,
-  NativeLoopRunLoopRoundDispatchClaim,
-  NativeLoopRunLoopRoundResultClaim,
-  NativeLoopRunLoopStateClaim,
-  NativeLoopRunOperationalFailureClaim,
-  NativeLoopRunOperationalRecoveredClaim,
-  NativeLoopRunPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeLoopRunClaim" }))()
-export type NativeLoopRunClaim = typeof NativeLoopRunClaim.Type
-export type NativeLoopRunClaimEncoded = typeof NativeLoopRunClaim.Encoded
-
-export const NativeLoopRunSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("loop-run"),
-  "heads": Schema.Array(NativeLoopRunClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeLoopRunSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/fc0332968dd4ef40d7d4d025405da0166c67f2deac179051095d332d12f9e497/loop-run")
-}).annotate({ identifier: "NativeLoopRunSubject" }))()
-export type NativeLoopRunSubject = typeof NativeLoopRunSubject.Type
-export type NativeLoopRunSubjectEncoded = typeof NativeLoopRunSubject.Encoded
-
-export const NativeMessageIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMessageIntentDesiredClaimFields" }))()
-export type NativeMessageIntentDesiredClaimFields = typeof NativeMessageIntentDesiredClaimFields.Type
-export type NativeMessageIntentDesiredClaimFieldsEncoded = typeof NativeMessageIntentDesiredClaimFields.Encoded
-
-export const NativeMessageSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["message"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeMessageSubjectRef" }))()
-export type NativeMessageSubjectRef = typeof NativeMessageSubjectRef.Type
-export type NativeMessageSubjectRefEncoded = typeof NativeMessageSubjectRef.Encoded
-
-export const NativeMessageIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMessageIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMessageSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b9a22df41c928ec91f943cc2555634974fea2406e98ee92461382fdda16aaeaf/message/intent.desired")
-}).annotate({ identifier: "NativeMessageIntentDesiredClaim" }))()
-export type NativeMessageIntentDesiredClaim = typeof NativeMessageIntentDesiredClaim.Type
-export type NativeMessageIntentDesiredClaimEncoded = typeof NativeMessageIntentDesiredClaim.Encoded
-
-export const NativeMessageMessageClosedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["closed"])))
-}).annotate({ identifier: "NativeMessageMessageClosedClaimFields" }))()
-export type NativeMessageMessageClosedClaimFields = typeof NativeMessageMessageClosedClaimFields.Type
-export type NativeMessageMessageClosedClaimFieldsEncoded = typeof NativeMessageMessageClosedClaimFields.Encoded
-
-export const NativeMessageMessageClosedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMessageMessageClosedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("message.closed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMessageSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b28d4c6e012ccf9f4d9a7d0e17b60f1c5ec1cadc26887bbc769ceb039c957e7c/message/message.closed")
-}).annotate({ identifier: "NativeMessageMessageClosedClaim" }))()
-export type NativeMessageMessageClosedClaim = typeof NativeMessageMessageClosedClaim.Type
-export type NativeMessageMessageClosedClaimEncoded = typeof NativeMessageMessageClosedClaim.Encoded
-
-export const NativeMessageMessageDeliveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "recipient": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["delivered"]))),
-  "transport": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMessageMessageDeliveredClaimFields" }))()
-export type NativeMessageMessageDeliveredClaimFields = typeof NativeMessageMessageDeliveredClaimFields.Type
-export type NativeMessageMessageDeliveredClaimFieldsEncoded = typeof NativeMessageMessageDeliveredClaimFields.Encoded
-
-export const NativeMessageMessageDeliveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMessageMessageDeliveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("message.delivered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMessageSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/6e8d04f24d515019a29b68d4437cfe6285201d90a36a9ed656045d296d23dfc3/message/message.delivered")
-}).annotate({ identifier: "NativeMessageMessageDeliveredClaim" }))()
-export type NativeMessageMessageDeliveredClaim = typeof NativeMessageMessageDeliveredClaim.Type
-export type NativeMessageMessageDeliveredClaimEncoded = typeof NativeMessageMessageDeliveredClaim.Encoded
-
-export const NativeMessageMessageReadClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["read"])))
-}).annotate({ identifier: "NativeMessageMessageReadClaimFields" }))()
-export type NativeMessageMessageReadClaimFields = typeof NativeMessageMessageReadClaimFields.Type
-export type NativeMessageMessageReadClaimFieldsEncoded = typeof NativeMessageMessageReadClaimFields.Encoded
-
-export const NativeMessageMessageReadClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMessageMessageReadClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("message.read"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMessageSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f9eac5fbf1b289dec09218e2f7dd92974c809bed0e70369eb37a947757dfdf36/message/message.read")
-}).annotate({ identifier: "NativeMessageMessageReadClaim" }))()
-export type NativeMessageMessageReadClaim = typeof NativeMessageMessageReadClaim.Type
-export type NativeMessageMessageReadClaimEncoded = typeof NativeMessageMessageReadClaim.Encoded
-
-export const NativeMessageMessageSentClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "content": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "from": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "in_reply_to": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["sent"]))),
-  "tags": Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.suspend(() => NativeJsonValue)))),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "to": Schema.optionalKey(Schema.NullOr(NativeSubjectRef))
-}).annotate({ identifier: "NativeMessageMessageSentClaimFields" }))()
-export type NativeMessageMessageSentClaimFields = typeof NativeMessageMessageSentClaimFields.Type
-export type NativeMessageMessageSentClaimFieldsEncoded = typeof NativeMessageMessageSentClaimFields.Encoded
-
-export const NativeMessageMessageSentClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMessageMessageSentClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("message.sent"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMessageSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a5b852779dd49be75b512ef96951723b24f0f02b425d42e51b803a2ab9bd4e98/message/message.sent")
-}).annotate({ identifier: "NativeMessageMessageSentClaim" }))()
-export type NativeMessageMessageSentClaim = typeof NativeMessageMessageSentClaim.Type
-export type NativeMessageMessageSentClaimEncoded = typeof NativeMessageMessageSentClaim.Encoded
-
-export const NativeMessageMessageStagedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "recipient": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["staged"]))),
-  "transport": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMessageMessageStagedClaimFields" }))()
-export type NativeMessageMessageStagedClaimFields = typeof NativeMessageMessageStagedClaimFields.Type
-export type NativeMessageMessageStagedClaimFieldsEncoded = typeof NativeMessageMessageStagedClaimFields.Encoded
-
-export const NativeMessageMessageStagedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMessageMessageStagedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("message.staged"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMessageSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/22afd89a9660914d9889d3a381cfce219e834a876cbeb846023a2f8986ca4774/message/message.staged")
-}).annotate({ identifier: "NativeMessageMessageStagedClaim" }))()
-export type NativeMessageMessageStagedClaim = typeof NativeMessageMessageStagedClaim.Type
-export type NativeMessageMessageStagedClaimEncoded = typeof NativeMessageMessageStagedClaim.Encoded
-
-export const NativeMessagePublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeMessagePublicationOperationClaimFields" }))()
-export type NativeMessagePublicationOperationClaimFields = typeof NativeMessagePublicationOperationClaimFields.Type
-export type NativeMessagePublicationOperationClaimFieldsEncoded = typeof NativeMessagePublicationOperationClaimFields.Encoded
-
-export const NativeMessagePublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMessagePublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMessageSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/147f438ce1d4ed1e95aed1c580c5a195d638f320f1ca32ed344e67f070f18feb/message/publication.operation")
-}).annotate({ identifier: "NativeMessagePublicationOperationClaim" }))()
-export type NativeMessagePublicationOperationClaim = typeof NativeMessagePublicationOperationClaim.Type
-export type NativeMessagePublicationOperationClaimEncoded = typeof NativeMessagePublicationOperationClaim.Encoded
-
-export const NativeMessageClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeMessageIntentDesiredClaim,
-  NativeMessageMessageClosedClaim,
-  NativeMessageMessageDeliveredClaim,
-  NativeMessageMessageReadClaim,
-  NativeMessageMessageSentClaim,
-  NativeMessageMessageStagedClaim,
-  NativeMessagePublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeMessageClaim" }))()
-export type NativeMessageClaim = typeof NativeMessageClaim.Type
-export type NativeMessageClaimEncoded = typeof NativeMessageClaim.Encoded
-
-export const NativeMessageSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("message"),
-  "heads": Schema.Array(NativeMessageClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeMessageSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/896ca84db032b3733fc7d49a38171e26238c7c7079864cb1bb0a7a2194ac4a76/message")
-}).annotate({ identifier: "NativeMessageSubject" }))()
-export type NativeMessageSubject = typeof NativeMessageSubject.Type
-export type NativeMessageSubjectEncoded = typeof NativeMessageSubject.Encoded
-
-export const NativeMissionRunEvalVerdictClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "verdict": Schema.optionalKey(Schema.NullOr(Schema.Literals(["pass","fail","void"])))
-}).annotate({ identifier: "NativeMissionRunEvalVerdictClaimFields" }))()
-export type NativeMissionRunEvalVerdictClaimFields = typeof NativeMissionRunEvalVerdictClaimFields.Type
-export type NativeMissionRunEvalVerdictClaimFieldsEncoded = typeof NativeMissionRunEvalVerdictClaimFields.Encoded
-
-export const NativeMissionRunEvalVerdictClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionRunEvalVerdictClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("eval.verdict"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/afb577908a193a5339260eaf9582c1afe48fbddd6fe23775a277bd4ecde9d9bd/mission-run/eval.verdict")
-}).annotate({ identifier: "NativeMissionRunEvalVerdictClaim" }))()
-export type NativeMissionRunEvalVerdictClaim = typeof NativeMissionRunEvalVerdictClaim.Type
-export type NativeMissionRunEvalVerdictClaimEncoded = typeof NativeMissionRunEvalVerdictClaim.Encoded
-
-export const NativeMissionRunIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMissionRunIntentDesiredClaimFields" }))()
-export type NativeMissionRunIntentDesiredClaimFields = typeof NativeMissionRunIntentDesiredClaimFields.Type
-export type NativeMissionRunIntentDesiredClaimFieldsEncoded = typeof NativeMissionRunIntentDesiredClaimFields.Encoded
-
-export const NativeMissionRunIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionRunIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/675863d82261396c4d634ad13bb2b598f642d02d751ecbe7e4563db9ec2b9afb/mission-run/intent.desired")
-}).annotate({ identifier: "NativeMissionRunIntentDesiredClaim" }))()
-export type NativeMissionRunIntentDesiredClaim = typeof NativeMissionRunIntentDesiredClaim.Type
-export type NativeMissionRunIntentDesiredClaimEncoded = typeof NativeMissionRunIntentDesiredClaim.Encoded
-
-export const NativeMissionRunMissionRunCreatedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "after": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "current_generation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "deadline_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "generation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "initial_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "mission": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "mode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "parent_step_run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "requester": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "root_mission_run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "root_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "timeout_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "workspace": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMissionRunMissionRunCreatedClaimFields" }))()
-export type NativeMissionRunMissionRunCreatedClaimFields = typeof NativeMissionRunMissionRunCreatedClaimFields.Type
-export type NativeMissionRunMissionRunCreatedClaimFieldsEncoded = typeof NativeMissionRunMissionRunCreatedClaimFields.Encoded
-
-export const NativeMissionRunMissionRunCreatedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionRunMissionRunCreatedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("mission-run.created"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a4e3581c7b5273b274620033708d4b9db2d629a2ec6a5416126ac5e8617806a7/mission-run/mission-run.created")
-}).annotate({ identifier: "NativeMissionRunMissionRunCreatedClaim" }))()
-export type NativeMissionRunMissionRunCreatedClaim = typeof NativeMissionRunMissionRunCreatedClaim.Type
-export type NativeMissionRunMissionRunCreatedClaimEncoded = typeof NativeMissionRunMissionRunCreatedClaim.Encoded
-
-export const NativeMissionRunMissionRunStateClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "completion": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "finally": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "phase": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "previous_phase": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMissionRunMissionRunStateClaimFields" }))()
-export type NativeMissionRunMissionRunStateClaimFields = typeof NativeMissionRunMissionRunStateClaimFields.Type
-export type NativeMissionRunMissionRunStateClaimFieldsEncoded = typeof NativeMissionRunMissionRunStateClaimFields.Encoded
-
-export const NativeMissionRunMissionRunStateClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionRunMissionRunStateClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("mission-run.state"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/5c26d80e9671a2adc48358c537772c067ea77151e6cf0323c7e21ebed8f4c448/mission-run/mission-run.state")
-}).annotate({ identifier: "NativeMissionRunMissionRunStateClaim" }))()
-export type NativeMissionRunMissionRunStateClaim = typeof NativeMissionRunMissionRunStateClaim.Type
-export type NativeMissionRunMissionRunStateClaimEncoded = typeof NativeMissionRunMissionRunStateClaim.Encoded
-
-export const NativeMissionRunOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMissionRunOperationalFailureClaimFields" }))()
-export type NativeMissionRunOperationalFailureClaimFields = typeof NativeMissionRunOperationalFailureClaimFields.Type
-export type NativeMissionRunOperationalFailureClaimFieldsEncoded = typeof NativeMissionRunOperationalFailureClaimFields.Encoded
-
-export const NativeMissionRunOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionRunOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/af1b04d07ebf8fb67f640dfc30f0478425186b4e40620de40d14945bcf4ca2e6/mission-run/operational.failure")
-}).annotate({ identifier: "NativeMissionRunOperationalFailureClaim" }))()
-export type NativeMissionRunOperationalFailureClaim = typeof NativeMissionRunOperationalFailureClaim.Type
-export type NativeMissionRunOperationalFailureClaimEncoded = typeof NativeMissionRunOperationalFailureClaim.Encoded
-
-export const NativeMissionRunOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMissionRunOperationalRecoveredClaimFields" }))()
-export type NativeMissionRunOperationalRecoveredClaimFields = typeof NativeMissionRunOperationalRecoveredClaimFields.Type
-export type NativeMissionRunOperationalRecoveredClaimFieldsEncoded = typeof NativeMissionRunOperationalRecoveredClaimFields.Encoded
-
-export const NativeMissionRunOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionRunOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/e1b68f054080dba1d43da5d9abdd2104d6150040f6fbbddc58974d2d684deb64/mission-run/operational.recovered")
-}).annotate({ identifier: "NativeMissionRunOperationalRecoveredClaim" }))()
-export type NativeMissionRunOperationalRecoveredClaim = typeof NativeMissionRunOperationalRecoveredClaim.Type
-export type NativeMissionRunOperationalRecoveredClaimEncoded = typeof NativeMissionRunOperationalRecoveredClaim.Encoded
-
-export const NativeMissionRunPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeMissionRunPublicationOperationClaimFields" }))()
-export type NativeMissionRunPublicationOperationClaimFields = typeof NativeMissionRunPublicationOperationClaimFields.Type
-export type NativeMissionRunPublicationOperationClaimFieldsEncoded = typeof NativeMissionRunPublicationOperationClaimFields.Encoded
-
-export const NativeMissionRunPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionRunPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/2ee24ea3c334185afe3136e0fa01f03bbbc6dd570ac3bf68a49c85ad9eb4eb60/mission-run/publication.operation")
-}).annotate({ identifier: "NativeMissionRunPublicationOperationClaim" }))()
-export type NativeMissionRunPublicationOperationClaim = typeof NativeMissionRunPublicationOperationClaim.Type
-export type NativeMissionRunPublicationOperationClaimEncoded = typeof NativeMissionRunPublicationOperationClaim.Encoded
-
-export const NativeMissionRunReconcileFaultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "scope": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["faulted","recovered"])))
-}).annotate({ identifier: "NativeMissionRunReconcileFaultClaimFields" }))()
-export type NativeMissionRunReconcileFaultClaimFields = typeof NativeMissionRunReconcileFaultClaimFields.Type
-export type NativeMissionRunReconcileFaultClaimFieldsEncoded = typeof NativeMissionRunReconcileFaultClaimFields.Encoded
-
-export const NativeMissionRunReconcileFaultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionRunReconcileFaultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("reconcile.fault"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/97c271adaf7f3014a0d912a599ac47e15a4be57df521411ed18f5d2164cac5c5/mission-run/reconcile.fault")
-}).annotate({ identifier: "NativeMissionRunReconcileFaultClaim" }))()
-export type NativeMissionRunReconcileFaultClaim = typeof NativeMissionRunReconcileFaultClaim.Type
-export type NativeMissionRunReconcileFaultClaimEncoded = typeof NativeMissionRunReconcileFaultClaim.Encoded
-
-export const NativeMissionRunClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeMissionRunEvalVerdictClaim,
-  NativeMissionRunIntentDesiredClaim,
-  NativeMissionRunMissionRunCreatedClaim,
-  NativeMissionRunMissionRunStateClaim,
-  NativeMissionRunOperationalFailureClaim,
-  NativeMissionRunOperationalRecoveredClaim,
-  NativeMissionRunPublicationOperationClaim,
-  NativeMissionRunReconcileFaultClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeMissionRunClaim" }))()
-export type NativeMissionRunClaim = typeof NativeMissionRunClaim.Type
-export type NativeMissionRunClaimEncoded = typeof NativeMissionRunClaim.Encoded
-
-export const NativeMissionRunSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("mission-run"),
-  "heads": Schema.Array(NativeMissionRunClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeMissionRunSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/4f224f4eb95aabecbb1b9459187ee7b28858e3e50c39916adb7498895de8d40b/mission-run")
-}).annotate({ identifier: "NativeMissionRunSubject" }))()
-export type NativeMissionRunSubject = typeof NativeMissionRunSubject.Type
-export type NativeMissionRunSubjectEncoded = typeof NativeMissionRunSubject.Encoded
-
-export const NativeMissionIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMissionIntentDesiredClaimFields" }))()
-export type NativeMissionIntentDesiredClaimFields = typeof NativeMissionIntentDesiredClaimFields.Type
-export type NativeMissionIntentDesiredClaimFieldsEncoded = typeof NativeMissionIntentDesiredClaimFields.Encoded
-
-export const NativeMissionSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["mission"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeMissionSubjectRef" }))()
-export type NativeMissionSubjectRef = typeof NativeMissionSubjectRef.Type
-export type NativeMissionSubjectRefEncoded = typeof NativeMissionSubjectRef.Encoded
-
-export const NativeMissionIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/11339522adc8cacb5bd60856ad2c4cab0aaea91359dc75e5e26e231b2148d4bb/mission/intent.desired")
-}).annotate({ identifier: "NativeMissionIntentDesiredClaim" }))()
-export type NativeMissionIntentDesiredClaim = typeof NativeMissionIntentDesiredClaim.Type
-export type NativeMissionIntentDesiredClaimEncoded = typeof NativeMissionIntentDesiredClaim.Encoded
-
-export const NativeMissionMissionProducedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "mission": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "name": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "step_definition": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMissionMissionProducedClaimFields" }))()
-export type NativeMissionMissionProducedClaimFields = typeof NativeMissionMissionProducedClaimFields.Type
-export type NativeMissionMissionProducedClaimFieldsEncoded = typeof NativeMissionMissionProducedClaimFields.Encoded
-
-export const NativeMissionMissionProducedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionMissionProducedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("mission.produced"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/034e54782808a8de3679d58210ab4d88fb23a4c9ab0375af07c4684aad8f0ab5/mission/mission.produced")
-}).annotate({ identifier: "NativeMissionMissionProducedClaim" }))()
-export type NativeMissionMissionProducedClaim = typeof NativeMissionMissionProducedClaim.Type
-export type NativeMissionMissionProducedClaimEncoded = typeof NativeMissionMissionProducedClaim.Encoded
-
-export const NativeMissionMissionPublishedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "state": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeMissionMissionPublishedClaimFields" }))()
-export type NativeMissionMissionPublishedClaimFields = typeof NativeMissionMissionPublishedClaimFields.Type
-export type NativeMissionMissionPublishedClaimFieldsEncoded = typeof NativeMissionMissionPublishedClaimFields.Encoded
-
-export const NativeMissionMissionPublishedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionMissionPublishedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("mission.published"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/575711ffad363cb519fbae17564ff026bfcd93649328f76bb2fcf43c87a1feef/mission/mission.published")
-}).annotate({ identifier: "NativeMissionMissionPublishedClaim" }))()
-export type NativeMissionMissionPublishedClaim = typeof NativeMissionMissionPublishedClaim.Type
-export type NativeMissionMissionPublishedClaimEncoded = typeof NativeMissionMissionPublishedClaim.Encoded
-
-export const NativeMissionPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeMissionPublicationOperationClaimFields" }))()
-export type NativeMissionPublicationOperationClaimFields = typeof NativeMissionPublicationOperationClaimFields.Type
-export type NativeMissionPublicationOperationClaimFieldsEncoded = typeof NativeMissionPublicationOperationClaimFields.Encoded
-
-export const NativeMissionPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeMissionPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeMissionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3a2d845bb014896614b9c91277f2b811fbc715598f6cbf9fde3c2c237825f541/mission/publication.operation")
-}).annotate({ identifier: "NativeMissionPublicationOperationClaim" }))()
-export type NativeMissionPublicationOperationClaim = typeof NativeMissionPublicationOperationClaim.Type
-export type NativeMissionPublicationOperationClaimEncoded = typeof NativeMissionPublicationOperationClaim.Encoded
-
-export const NativeMissionClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeMissionIntentDesiredClaim,
-  NativeMissionMissionProducedClaim,
-  NativeMissionMissionPublishedClaim,
-  NativeMissionPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeMissionClaim" }))()
-export type NativeMissionClaim = typeof NativeMissionClaim.Type
-export type NativeMissionClaimEncoded = typeof NativeMissionClaim.Encoded
-
-export const NativeMissionSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("mission"),
-  "heads": Schema.Array(NativeMissionClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeMissionSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/87805dce503e5f4cc344b2610cecbb53228aa01b2c38aea4f0826c8df630b8d7/mission")
-}).annotate({ identifier: "NativeMissionSubject" }))()
-export type NativeMissionSubject = typeof NativeMissionSubject.Type
-export type NativeMissionSubjectEncoded = typeof NativeMissionSubject.Encoded
-
-export const NativeObserverIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeObserverIntentDesiredClaimFields" }))()
-export type NativeObserverIntentDesiredClaimFields = typeof NativeObserverIntentDesiredClaimFields.Type
-export type NativeObserverIntentDesiredClaimFieldsEncoded = typeof NativeObserverIntentDesiredClaimFields.Encoded
-
-export const NativeObserverSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["observer"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeObserverSubjectRef" }))()
-export type NativeObserverSubjectRef = typeof NativeObserverSubjectRef.Type
-export type NativeObserverSubjectRefEncoded = typeof NativeObserverSubjectRef.Encoded
-
-export const NativeObserverIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeObserverIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeObserverSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/0e5065510ef3edad2084d970ce1099cc29abfb358259a030ea746c991c464973/observer/intent.desired")
-}).annotate({ identifier: "NativeObserverIntentDesiredClaim" }))()
-export type NativeObserverIntentDesiredClaim = typeof NativeObserverIntentDesiredClaim.Type
-export type NativeObserverIntentDesiredClaimEncoded = typeof NativeObserverIntentDesiredClaim.Encoded
-
-export const NativeObserverObserverObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "changed": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "locator": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "next_check_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "observation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "provider": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "resource": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeObserverObserverObservedClaimFields" }))()
-export type NativeObserverObserverObservedClaimFields = typeof NativeObserverObserverObservedClaimFields.Type
-export type NativeObserverObserverObservedClaimFieldsEncoded = typeof NativeObserverObserverObservedClaimFields.Encoded
-
-export const NativeObserverObserverObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeObserverObserverObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("observer.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeObserverSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/144518ab31dfb07942f2e97ea9c7835b9a3b323cdab0e87d743bb01457a4fe30/observer/observer.observed")
-}).annotate({ identifier: "NativeObserverObserverObservedClaim" }))()
-export type NativeObserverObserverObservedClaim = typeof NativeObserverObserverObservedClaim.Type
-export type NativeObserverObserverObservedClaimEncoded = typeof NativeObserverObserverObservedClaim.Encoded
-
-export const NativeObserverObserverRefreshRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeObserverObserverRefreshRequestedClaimFields" }))()
-export type NativeObserverObserverRefreshRequestedClaimFields = typeof NativeObserverObserverRefreshRequestedClaimFields.Type
-export type NativeObserverObserverRefreshRequestedClaimFieldsEncoded = typeof NativeObserverObserverRefreshRequestedClaimFields.Encoded
-
-export const NativeObserverObserverRefreshRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeObserverObserverRefreshRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("observer.refresh-requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeObserverSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/02b345cfe3c5381a3f410cdba7ef3eb6120ef397e7eaad3a98458b1787325d84/observer/observer.refresh-requested")
-}).annotate({ identifier: "NativeObserverObserverRefreshRequestedClaim" }))()
-export type NativeObserverObserverRefreshRequestedClaim = typeof NativeObserverObserverRefreshRequestedClaim.Type
-export type NativeObserverObserverRefreshRequestedClaimEncoded = typeof NativeObserverObserverRefreshRequestedClaim.Encoded
-
-export const NativeObserverObserverStateClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "error_code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "next_check_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "state": Schema.optionalKey(Schema.NullOr(Schema.Literals(["healthy","degraded","unreachable","stopped"])))
-}).annotate({ identifier: "NativeObserverObserverStateClaimFields" }))()
-export type NativeObserverObserverStateClaimFields = typeof NativeObserverObserverStateClaimFields.Type
-export type NativeObserverObserverStateClaimFieldsEncoded = typeof NativeObserverObserverStateClaimFields.Encoded
-
-export const NativeObserverObserverStateClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeObserverObserverStateClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("observer.state"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeObserverSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/06a12bbc441b44fc64c5b9268c45f4d2147ecf0d35087cb13ab5dd169e6779bd/observer/observer.state")
-}).annotate({ identifier: "NativeObserverObserverStateClaim" }))()
-export type NativeObserverObserverStateClaim = typeof NativeObserverObserverStateClaim.Type
-export type NativeObserverObserverStateClaimEncoded = typeof NativeObserverObserverStateClaim.Encoded
-
-export const NativeObserverOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeObserverOperationalFailureClaimFields" }))()
-export type NativeObserverOperationalFailureClaimFields = typeof NativeObserverOperationalFailureClaimFields.Type
-export type NativeObserverOperationalFailureClaimFieldsEncoded = typeof NativeObserverOperationalFailureClaimFields.Encoded
-
-export const NativeObserverOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeObserverOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeObserverSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f5ebd87967312fa35332a2919f03e937d8ceb50c1df12d6bc13d1e8a0671dbe4/observer/operational.failure")
-}).annotate({ identifier: "NativeObserverOperationalFailureClaim" }))()
-export type NativeObserverOperationalFailureClaim = typeof NativeObserverOperationalFailureClaim.Type
-export type NativeObserverOperationalFailureClaimEncoded = typeof NativeObserverOperationalFailureClaim.Encoded
-
-export const NativeObserverOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeObserverOperationalRecoveredClaimFields" }))()
-export type NativeObserverOperationalRecoveredClaimFields = typeof NativeObserverOperationalRecoveredClaimFields.Type
-export type NativeObserverOperationalRecoveredClaimFieldsEncoded = typeof NativeObserverOperationalRecoveredClaimFields.Encoded
-
-export const NativeObserverOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeObserverOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeObserverSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3d652e320d6cebc4beeea590c73d3d9e82029b7d731beda0bc889d2f58c75304/observer/operational.recovered")
-}).annotate({ identifier: "NativeObserverOperationalRecoveredClaim" }))()
-export type NativeObserverOperationalRecoveredClaim = typeof NativeObserverOperationalRecoveredClaim.Type
-export type NativeObserverOperationalRecoveredClaimEncoded = typeof NativeObserverOperationalRecoveredClaim.Encoded
-
-export const NativeObserverPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeObserverPublicationOperationClaimFields" }))()
-export type NativeObserverPublicationOperationClaimFields = typeof NativeObserverPublicationOperationClaimFields.Type
-export type NativeObserverPublicationOperationClaimFieldsEncoded = typeof NativeObserverPublicationOperationClaimFields.Encoded
-
-export const NativeObserverPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeObserverPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeObserverSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/6110a03c93f529bb7a0f4ce02f46b452885ad0edcf3de037834d33487a421bdd/observer/publication.operation")
-}).annotate({ identifier: "NativeObserverPublicationOperationClaim" }))()
-export type NativeObserverPublicationOperationClaim = typeof NativeObserverPublicationOperationClaim.Type
-export type NativeObserverPublicationOperationClaimEncoded = typeof NativeObserverPublicationOperationClaim.Encoded
-
-export const NativeObserverReconcileFaultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "scope": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["faulted","recovered"])))
-}).annotate({ identifier: "NativeObserverReconcileFaultClaimFields" }))()
-export type NativeObserverReconcileFaultClaimFields = typeof NativeObserverReconcileFaultClaimFields.Type
-export type NativeObserverReconcileFaultClaimFieldsEncoded = typeof NativeObserverReconcileFaultClaimFields.Encoded
-
-export const NativeObserverReconcileFaultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeObserverReconcileFaultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("reconcile.fault"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeObserverSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/6d8784ade564e3eb4d7e87676778939617dcdd4bfe973d0cc31fb7325d5486e4/observer/reconcile.fault")
-}).annotate({ identifier: "NativeObserverReconcileFaultClaim" }))()
-export type NativeObserverReconcileFaultClaim = typeof NativeObserverReconcileFaultClaim.Type
-export type NativeObserverReconcileFaultClaimEncoded = typeof NativeObserverReconcileFaultClaim.Encoded
-
-export const NativeObserverClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeObserverIntentDesiredClaim,
-  NativeObserverObserverObservedClaim,
-  NativeObserverObserverRefreshRequestedClaim,
-  NativeObserverObserverStateClaim,
-  NativeObserverOperationalFailureClaim,
-  NativeObserverOperationalRecoveredClaim,
-  NativeObserverPublicationOperationClaim,
-  NativeObserverReconcileFaultClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeObserverClaim" }))()
-export type NativeObserverClaim = typeof NativeObserverClaim.Type
-export type NativeObserverClaimEncoded = typeof NativeObserverClaim.Encoded
-
-export const NativeObserverSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("observer"),
-  "heads": Schema.Array(NativeObserverClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeObserverSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/4ed2e518c727b2eddfefc11000ea6c36743401dd58a1d0ac1d465cef04187cd7/observer")
-}).annotate({ identifier: "NativeObserverSubject" }))()
-export type NativeObserverSubject = typeof NativeObserverSubject.Type
-export type NativeObserverSubjectEncoded = typeof NativeObserverSubject.Encoded
-
-export const NativeOwnedSetIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeOwnedSetIntentDesiredClaimFields" }))()
-export type NativeOwnedSetIntentDesiredClaimFields = typeof NativeOwnedSetIntentDesiredClaimFields.Type
-export type NativeOwnedSetIntentDesiredClaimFieldsEncoded = typeof NativeOwnedSetIntentDesiredClaimFields.Encoded
-
-export const NativeOwnedSetSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["owned-set"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeOwnedSetSubjectRef" }))()
-export type NativeOwnedSetSubjectRef = typeof NativeOwnedSetSubjectRef.Type
-export type NativeOwnedSetSubjectRefEncoded = typeof NativeOwnedSetSubjectRef.Encoded
-
-export const NativeOwnedSetIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeOwnedSetIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeOwnedSetSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/2b1dd70a204061f8f199ec74ab8dccda65256e486f263a736839791262e91c03/owned-set/intent.desired")
-}).annotate({ identifier: "NativeOwnedSetIntentDesiredClaim" }))()
-export type NativeOwnedSetIntentDesiredClaim = typeof NativeOwnedSetIntentDesiredClaim.Type
-export type NativeOwnedSetIntentDesiredClaimEncoded = typeof NativeOwnedSetIntentDesiredClaim.Encoded
-
-export const NativeOwnedSetOwnedSetRevisedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeOwnedSetOwnedSetRevisedClaimFields" }))()
-export type NativeOwnedSetOwnedSetRevisedClaimFields = typeof NativeOwnedSetOwnedSetRevisedClaimFields.Type
-export type NativeOwnedSetOwnedSetRevisedClaimFieldsEncoded = typeof NativeOwnedSetOwnedSetRevisedClaimFields.Encoded
-
-export const NativeOwnedSetOwnedSetRevisedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeOwnedSetOwnedSetRevisedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("owned-set.revised"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeOwnedSetSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f357fcca2bcca46f9648ff6e396d521442d6ba584d25acd955202989a0193bbb/owned-set/owned-set.revised")
-}).annotate({ identifier: "NativeOwnedSetOwnedSetRevisedClaim" }))()
-export type NativeOwnedSetOwnedSetRevisedClaim = typeof NativeOwnedSetOwnedSetRevisedClaim.Type
-export type NativeOwnedSetOwnedSetRevisedClaimEncoded = typeof NativeOwnedSetOwnedSetRevisedClaim.Encoded
-
-export const NativeOwnedSetPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeOwnedSetPublicationOperationClaimFields" }))()
-export type NativeOwnedSetPublicationOperationClaimFields = typeof NativeOwnedSetPublicationOperationClaimFields.Type
-export type NativeOwnedSetPublicationOperationClaimFieldsEncoded = typeof NativeOwnedSetPublicationOperationClaimFields.Encoded
-
-export const NativeOwnedSetPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeOwnedSetPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeOwnedSetSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/6a02beb0421b9358decae29af399d8969bc131237c3534bd858cd10df499d643/owned-set/publication.operation")
-}).annotate({ identifier: "NativeOwnedSetPublicationOperationClaim" }))()
-export type NativeOwnedSetPublicationOperationClaim = typeof NativeOwnedSetPublicationOperationClaim.Type
-export type NativeOwnedSetPublicationOperationClaimEncoded = typeof NativeOwnedSetPublicationOperationClaim.Encoded
-
-export const NativeOwnedSetClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeOwnedSetIntentDesiredClaim,
-  NativeOwnedSetOwnedSetRevisedClaim,
-  NativeOwnedSetPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeOwnedSetClaim" }))()
-export type NativeOwnedSetClaim = typeof NativeOwnedSetClaim.Type
-export type NativeOwnedSetClaimEncoded = typeof NativeOwnedSetClaim.Encoded
-
-export const NativeOwnedSetSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("owned-set"),
-  "heads": Schema.Array(NativeOwnedSetClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeOwnedSetSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/4b6dbc5b5fbba42c18f7ad6d297eb55d770e27bb10e2dfbfa57a89b9522a1022/owned-set")
-}).annotate({ identifier: "NativeOwnedSetSubject" }))()
-export type NativeOwnedSetSubject = typeof NativeOwnedSetSubject.Type
-export type NativeOwnedSetSubjectEncoded = typeof NativeOwnedSetSubject.Encoded
-
-export const NativePersonIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePersonIntentDesiredClaimFields" }))()
-export type NativePersonIntentDesiredClaimFields = typeof NativePersonIntentDesiredClaimFields.Type
-export type NativePersonIntentDesiredClaimFieldsEncoded = typeof NativePersonIntentDesiredClaimFields.Encoded
-
-export const NativePersonIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePersonIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePersonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/2c5dc382cdaf22dfbfb3a64393a9752e30f0fd363b4ef7442d44ebb7a6187ee8/person/intent.desired")
-}).annotate({ identifier: "NativePersonIntentDesiredClaim" }))()
-export type NativePersonIntentDesiredClaim = typeof NativePersonIntentDesiredClaim.Type
-export type NativePersonIntentDesiredClaimEncoded = typeof NativePersonIntentDesiredClaim.Encoded
-
-export const NativePersonPrincipalKeyGrantedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "label": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "role": Schema.optionalKey(Schema.NullOr(Schema.Literals(["root","device","agent","plugin"])))
-}).annotate({ identifier: "NativePersonPrincipalKeyGrantedClaimFields" }))()
-export type NativePersonPrincipalKeyGrantedClaimFields = typeof NativePersonPrincipalKeyGrantedClaimFields.Type
-export type NativePersonPrincipalKeyGrantedClaimFieldsEncoded = typeof NativePersonPrincipalKeyGrantedClaimFields.Encoded
-
-export const NativePersonPrincipalKeyGrantedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePersonPrincipalKeyGrantedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("principal.key-granted"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePersonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/ef1bcb57a5f667e314dd90e6e46da16a3395b5f4b9db132b43504bb7eafffd07/person/principal.key-granted")
-}).annotate({ identifier: "NativePersonPrincipalKeyGrantedClaim" }))()
-export type NativePersonPrincipalKeyGrantedClaim = typeof NativePersonPrincipalKeyGrantedClaim.Type
-export type NativePersonPrincipalKeyGrantedClaimEncoded = typeof NativePersonPrincipalKeyGrantedClaim.Encoded
-
-export const NativePersonPrincipalKeyRevokedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePersonPrincipalKeyRevokedClaimFields" }))()
-export type NativePersonPrincipalKeyRevokedClaimFields = typeof NativePersonPrincipalKeyRevokedClaimFields.Type
-export type NativePersonPrincipalKeyRevokedClaimFieldsEncoded = typeof NativePersonPrincipalKeyRevokedClaimFields.Encoded
-
-export const NativePersonPrincipalKeyRevokedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePersonPrincipalKeyRevokedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("principal.key-revoked"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePersonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/29b9273fb2981f68986375d98aa657c309829f56681f2e9f7f17744bb7fe3907/person/principal.key-revoked")
-}).annotate({ identifier: "NativePersonPrincipalKeyRevokedClaim" }))()
-export type NativePersonPrincipalKeyRevokedClaim = typeof NativePersonPrincipalKeyRevokedClaim.Type
-export type NativePersonPrincipalKeyRevokedClaimEncoded = typeof NativePersonPrincipalKeyRevokedClaim.Encoded
-
-export const NativePersonPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativePersonPublicationOperationClaimFields" }))()
-export type NativePersonPublicationOperationClaimFields = typeof NativePersonPublicationOperationClaimFields.Type
-export type NativePersonPublicationOperationClaimFieldsEncoded = typeof NativePersonPublicationOperationClaimFields.Encoded
-
-export const NativePersonPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePersonPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePersonSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/35a0d8973fec0e91901a6e3a657efb40e5968d2b15864516df2bc4118579b148/person/publication.operation")
-}).annotate({ identifier: "NativePersonPublicationOperationClaim" }))()
-export type NativePersonPublicationOperationClaim = typeof NativePersonPublicationOperationClaim.Type
-export type NativePersonPublicationOperationClaimEncoded = typeof NativePersonPublicationOperationClaim.Encoded
-
-export const NativePersonClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativePersonIntentDesiredClaim,
-  NativePersonPrincipalKeyGrantedClaim,
-  NativePersonPrincipalKeyRevokedClaim,
-  NativePersonPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativePersonClaim" }))()
-export type NativePersonClaim = typeof NativePersonClaim.Type
-export type NativePersonClaimEncoded = typeof NativePersonClaim.Encoded
-
-export const NativePersonSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("person"),
-  "heads": Schema.Array(NativePersonClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativePersonSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/741efc6c701d1054f918ec73c6902272884522825eb7e5f2634f755ed1cd9cf1/person")
-}).annotate({ identifier: "NativePersonSubject" }))()
-export type NativePersonSubject = typeof NativePersonSubject.Type
-export type NativePersonSubjectEncoded = typeof NativePersonSubject.Encoded
-
-export const NativePlanningSessionIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePlanningSessionIntentDesiredClaimFields" }))()
-export type NativePlanningSessionIntentDesiredClaimFields = typeof NativePlanningSessionIntentDesiredClaimFields.Type
-export type NativePlanningSessionIntentDesiredClaimFieldsEncoded = typeof NativePlanningSessionIntentDesiredClaimFields.Encoded
-
-export const NativePlanningSessionSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["planning-session"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativePlanningSessionSubjectRef" }))()
-export type NativePlanningSessionSubjectRef = typeof NativePlanningSessionSubjectRef.Type
-export type NativePlanningSessionSubjectRefEncoded = typeof NativePlanningSessionSubjectRef.Encoded
-
-export const NativePlanningSessionIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/7a93e7f5e420ecca462e3d643b9390d9cb76db2a1a50a2527c81a490abb22709/planning-session/intent.desired")
-}).annotate({ identifier: "NativePlanningSessionIntentDesiredClaim" }))()
-export type NativePlanningSessionIntentDesiredClaim = typeof NativePlanningSessionIntentDesiredClaim.Type
-export type NativePlanningSessionIntentDesiredClaimEncoded = typeof NativePlanningSessionIntentDesiredClaim.Encoded
-
-export const NativePlanningSessionPlanningSessionApprovedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "candidate_revision": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "kdl": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "markdown": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "mission_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "requester": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "variant": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionApprovedClaimFields" }))()
-export type NativePlanningSessionPlanningSessionApprovedClaimFields = typeof NativePlanningSessionPlanningSessionApprovedClaimFields.Type
-export type NativePlanningSessionPlanningSessionApprovedClaimFieldsEncoded = typeof NativePlanningSessionPlanningSessionApprovedClaimFields.Encoded
-
-export const NativePlanningSessionPlanningSessionApprovedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPlanningSessionApprovedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("planning-session.approved"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/aab6095b7ec71222541cfb6065f67321bd43bc7eff8ef8fce820715aea2f238f/planning-session/planning-session.approved")
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionApprovedClaim" }))()
-export type NativePlanningSessionPlanningSessionApprovedClaim = typeof NativePlanningSessionPlanningSessionApprovedClaim.Type
-export type NativePlanningSessionPlanningSessionApprovedClaimEncoded = typeof NativePlanningSessionPlanningSessionApprovedClaim.Encoded
-
-export const NativePlanningSessionPlanningSessionCancelledClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "requester": Schema.optionalKey(Schema.NullOr(NativeSubjectRef))
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionCancelledClaimFields" }))()
-export type NativePlanningSessionPlanningSessionCancelledClaimFields = typeof NativePlanningSessionPlanningSessionCancelledClaimFields.Type
-export type NativePlanningSessionPlanningSessionCancelledClaimFieldsEncoded = typeof NativePlanningSessionPlanningSessionCancelledClaimFields.Encoded
-
-export const NativePlanningSessionPlanningSessionCancelledClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPlanningSessionCancelledClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("planning-session.cancelled"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/44eb992c79353176f3710adbc182df66ed78d49a4c101b8119012233c573aa92/planning-session/planning-session.cancelled")
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionCancelledClaim" }))()
-export type NativePlanningSessionPlanningSessionCancelledClaim = typeof NativePlanningSessionPlanningSessionCancelledClaim.Type
-export type NativePlanningSessionPlanningSessionCancelledClaimEncoded = typeof NativePlanningSessionPlanningSessionCancelledClaim.Encoded
-
-export const NativePlanningSessionPlanningSessionCandidateSubmittedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "candidate_revision": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "kdl": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "markdown": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "mission_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "variant": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionCandidateSubmittedClaimFields" }))()
-export type NativePlanningSessionPlanningSessionCandidateSubmittedClaimFields = typeof NativePlanningSessionPlanningSessionCandidateSubmittedClaimFields.Type
-export type NativePlanningSessionPlanningSessionCandidateSubmittedClaimFieldsEncoded = typeof NativePlanningSessionPlanningSessionCandidateSubmittedClaimFields.Encoded
-
-export const NativePlanningSessionPlanningSessionCandidateSubmittedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPlanningSessionCandidateSubmittedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("planning-session.candidate-submitted"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/67c87575b6ad95c89f589938978c20e7b78e6e53da1a75eaf317b88ba8bef329/planning-session/planning-session.candidate-submitted")
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionCandidateSubmittedClaim" }))()
-export type NativePlanningSessionPlanningSessionCandidateSubmittedClaim = typeof NativePlanningSessionPlanningSessionCandidateSubmittedClaim.Type
-export type NativePlanningSessionPlanningSessionCandidateSubmittedClaimEncoded = typeof NativePlanningSessionPlanningSessionCandidateSubmittedClaim.Encoded
-
-export const NativePlanningSessionPlanningSessionPreviewedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "candidate_revision": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "variant": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionPreviewedClaimFields" }))()
-export type NativePlanningSessionPlanningSessionPreviewedClaimFields = typeof NativePlanningSessionPlanningSessionPreviewedClaimFields.Type
-export type NativePlanningSessionPlanningSessionPreviewedClaimFieldsEncoded = typeof NativePlanningSessionPlanningSessionPreviewedClaimFields.Encoded
-
-export const NativePlanningSessionPlanningSessionPreviewedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPlanningSessionPreviewedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("planning-session.previewed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/bb319d3f0b834679d659deac44513907ae989a87706c4cb6db8cca4ed0cfbae6/planning-session/planning-session.previewed")
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionPreviewedClaim" }))()
-export type NativePlanningSessionPlanningSessionPreviewedClaim = typeof NativePlanningSessionPlanningSessionPreviewedClaim.Type
-export type NativePlanningSessionPlanningSessionPreviewedClaimEncoded = typeof NativePlanningSessionPlanningSessionPreviewedClaim.Encoded
-
-export const NativePlanningSessionPlanningSessionQuestionAnsweredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "decision_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "expected_revision": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "explanation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "requester": Schema.optionalKey(Schema.NullOr(NativeSubjectRef))
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionQuestionAnsweredClaimFields" }))()
-export type NativePlanningSessionPlanningSessionQuestionAnsweredClaimFields = typeof NativePlanningSessionPlanningSessionQuestionAnsweredClaimFields.Type
-export type NativePlanningSessionPlanningSessionQuestionAnsweredClaimFieldsEncoded = typeof NativePlanningSessionPlanningSessionQuestionAnsweredClaimFields.Encoded
-
-export const NativePlanningSessionPlanningSessionQuestionAnsweredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPlanningSessionQuestionAnsweredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("planning-session.question-answered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4dfeae7b2911c96c3e32f17a6fe1c4131acb7a3a2768cd31d3fe1703ecb802f1/planning-session/planning-session.question-answered")
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionQuestionAnsweredClaim" }))()
-export type NativePlanningSessionPlanningSessionQuestionAnsweredClaim = typeof NativePlanningSessionPlanningSessionQuestionAnsweredClaim.Type
-export type NativePlanningSessionPlanningSessionQuestionAnsweredClaimEncoded = typeof NativePlanningSessionPlanningSessionQuestionAnsweredClaim.Encoded
-
-export const NativePlanningSessionPlanningSessionQuestionRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "decision_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "decision_type": Schema.optionalKey(Schema.NullOr(Schema.Literals(["boolean","single-choice","multiple-choice","rank"]))),
-  "planner": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "question": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "requester": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionQuestionRequestedClaimFields" }))()
-export type NativePlanningSessionPlanningSessionQuestionRequestedClaimFields = typeof NativePlanningSessionPlanningSessionQuestionRequestedClaimFields.Type
-export type NativePlanningSessionPlanningSessionQuestionRequestedClaimFieldsEncoded = typeof NativePlanningSessionPlanningSessionQuestionRequestedClaimFields.Encoded
-
-export const NativePlanningSessionPlanningSessionQuestionRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPlanningSessionQuestionRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("planning-session.question-requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/06c2a65b8f5c2a7d4a896dedd49eb2cb1383e9e2a047a44d40b107c573b2efc2/planning-session/planning-session.question-requested")
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionQuestionRequestedClaim" }))()
-export type NativePlanningSessionPlanningSessionQuestionRequestedClaim = typeof NativePlanningSessionPlanningSessionQuestionRequestedClaim.Type
-export type NativePlanningSessionPlanningSessionQuestionRequestedClaimEncoded = typeof NativePlanningSessionPlanningSessionQuestionRequestedClaim.Encoded
-
-export const NativePlanningSessionPlanningSessionRevisionRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "candidate_revision": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "feedback": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "requester": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "variant": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionRevisionRequestedClaimFields" }))()
-export type NativePlanningSessionPlanningSessionRevisionRequestedClaimFields = typeof NativePlanningSessionPlanningSessionRevisionRequestedClaimFields.Type
-export type NativePlanningSessionPlanningSessionRevisionRequestedClaimFieldsEncoded = typeof NativePlanningSessionPlanningSessionRevisionRequestedClaimFields.Encoded
-
-export const NativePlanningSessionPlanningSessionRevisionRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPlanningSessionRevisionRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("planning-session.revision-requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d2b5bfddd2ae8fa43bcb440b4f2222ad402c03f3ea02c4bc0005d41dac7a7c3c/planning-session/planning-session.revision-requested")
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionRevisionRequestedClaim" }))()
-export type NativePlanningSessionPlanningSessionRevisionRequestedClaim = typeof NativePlanningSessionPlanningSessionRevisionRequestedClaim.Type
-export type NativePlanningSessionPlanningSessionRevisionRequestedClaimEncoded = typeof NativePlanningSessionPlanningSessionRevisionRequestedClaim.Encoded
-
-export const NativePlanningSessionPlanningSessionStartedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "mission": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "planner": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "request": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "requester": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "target_generation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "target_run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "workspace": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionStartedClaimFields" }))()
-export type NativePlanningSessionPlanningSessionStartedClaimFields = typeof NativePlanningSessionPlanningSessionStartedClaimFields.Type
-export type NativePlanningSessionPlanningSessionStartedClaimFieldsEncoded = typeof NativePlanningSessionPlanningSessionStartedClaimFields.Encoded
-
-export const NativePlanningSessionPlanningSessionStartedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPlanningSessionStartedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("planning-session.started"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/3d5ddf61bfe4c209cab4886cef0ae0ba989359daef60abd4943a626af4a9d7d8/planning-session/planning-session.started")
-}).annotate({ identifier: "NativePlanningSessionPlanningSessionStartedClaim" }))()
-export type NativePlanningSessionPlanningSessionStartedClaim = typeof NativePlanningSessionPlanningSessionStartedClaim.Type
-export type NativePlanningSessionPlanningSessionStartedClaimEncoded = typeof NativePlanningSessionPlanningSessionStartedClaim.Encoded
-
-export const NativePlanningSessionPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativePlanningSessionPublicationOperationClaimFields" }))()
-export type NativePlanningSessionPublicationOperationClaimFields = typeof NativePlanningSessionPublicationOperationClaimFields.Type
-export type NativePlanningSessionPublicationOperationClaimFieldsEncoded = typeof NativePlanningSessionPublicationOperationClaimFields.Encoded
-
-export const NativePlanningSessionPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePlanningSessionPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePlanningSessionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/fdc1940f69af2867c2e103bcef4a37ad214c400843d7988cf681a7f0f99da220/planning-session/publication.operation")
-}).annotate({ identifier: "NativePlanningSessionPublicationOperationClaim" }))()
-export type NativePlanningSessionPublicationOperationClaim = typeof NativePlanningSessionPublicationOperationClaim.Type
-export type NativePlanningSessionPublicationOperationClaimEncoded = typeof NativePlanningSessionPublicationOperationClaim.Encoded
-
-export const NativePlanningSessionClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativePlanningSessionIntentDesiredClaim,
-  NativePlanningSessionPlanningSessionApprovedClaim,
-  NativePlanningSessionPlanningSessionCancelledClaim,
-  NativePlanningSessionPlanningSessionCandidateSubmittedClaim,
-  NativePlanningSessionPlanningSessionPreviewedClaim,
-  NativePlanningSessionPlanningSessionQuestionAnsweredClaim,
-  NativePlanningSessionPlanningSessionQuestionRequestedClaim,
-  NativePlanningSessionPlanningSessionRevisionRequestedClaim,
-  NativePlanningSessionPlanningSessionStartedClaim,
-  NativePlanningSessionPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativePlanningSessionClaim" }))()
-export type NativePlanningSessionClaim = typeof NativePlanningSessionClaim.Type
-export type NativePlanningSessionClaimEncoded = typeof NativePlanningSessionClaim.Encoded
-
-export const NativePlanningSessionSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("planning-session"),
-  "heads": Schema.Array(NativePlanningSessionClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativePlanningSessionSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/645cf27c6b5b2cc3c1732695c2a224d0aad43bd55e31b9f7393d142e139c96ff/planning-session")
-}).annotate({ identifier: "NativePlanningSessionSubject" }))()
-export type NativePlanningSessionSubject = typeof NativePlanningSessionSubject.Type
-export type NativePlanningSessionSubjectEncoded = typeof NativePlanningSessionSubject.Encoded
-
-export const NativePtyIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePtyIntentDesiredClaimFields" }))()
-export type NativePtyIntentDesiredClaimFields = typeof NativePtyIntentDesiredClaimFields.Type
-export type NativePtyIntentDesiredClaimFieldsEncoded = typeof NativePtyIntentDesiredClaimFields.Encoded
-
-export const NativePtySubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["pty"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativePtySubjectRef" }))()
-export type NativePtySubjectRef = typeof NativePtySubjectRef.Type
-export type NativePtySubjectRefEncoded = typeof NativePtySubjectRef.Encoded
-
-export const NativePtyIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a68a2e0c70ab5c701124e1ab81841e189a2ad3c45f72298afdf3ba796a9d7b12/pty/intent.desired")
-}).annotate({ identifier: "NativePtyIntentDesiredClaim" }))()
-export type NativePtyIntentDesiredClaim = typeof NativePtyIntentDesiredClaim.Type
-export type NativePtyIntentDesiredClaimEncoded = typeof NativePtyIntentDesiredClaim.Encoded
-
-export const NativePtyOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePtyOperationalFailureClaimFields" }))()
-export type NativePtyOperationalFailureClaimFields = typeof NativePtyOperationalFailureClaimFields.Type
-export type NativePtyOperationalFailureClaimFieldsEncoded = typeof NativePtyOperationalFailureClaimFields.Encoded
-
-export const NativePtyOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/450b476ffda24b8a756405b086cc9910fdb64a43175da7bbe3962b1621b1dcd2/pty/operational.failure")
-}).annotate({ identifier: "NativePtyOperationalFailureClaim" }))()
-export type NativePtyOperationalFailureClaim = typeof NativePtyOperationalFailureClaim.Type
-export type NativePtyOperationalFailureClaimEncoded = typeof NativePtyOperationalFailureClaim.Encoded
-
-export const NativePtyOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePtyOperationalRecoveredClaimFields" }))()
-export type NativePtyOperationalRecoveredClaimFields = typeof NativePtyOperationalRecoveredClaimFields.Type
-export type NativePtyOperationalRecoveredClaimFieldsEncoded = typeof NativePtyOperationalRecoveredClaimFields.Encoded
-
-export const NativePtyOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c8a1a6757f980565ef9d86afa5faadec7c1af5644c279135dcb76e736a12c7a8/pty/operational.recovered")
-}).annotate({ identifier: "NativePtyOperationalRecoveredClaim" }))()
-export type NativePtyOperationalRecoveredClaim = typeof NativePtyOperationalRecoveredClaim.Type
-export type NativePtyOperationalRecoveredClaimEncoded = typeof NativePtyOperationalRecoveredClaim.Encoded
-
-export const NativePtyPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativePtyPublicationOperationClaimFields" }))()
-export type NativePtyPublicationOperationClaimFields = typeof NativePtyPublicationOperationClaimFields.Type
-export type NativePtyPublicationOperationClaimFieldsEncoded = typeof NativePtyPublicationOperationClaimFields.Encoded
-
-export const NativePtyPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/613436b7c58067c03297782a536ff4a253e2dccc5e8ffb900812cfd8533cfd6d/pty/publication.operation")
-}).annotate({ identifier: "NativePtyPublicationOperationClaim" }))()
-export type NativePtyPublicationOperationClaim = typeof NativePtyPublicationOperationClaim.Type
-export type NativePtyPublicationOperationClaimEncoded = typeof NativePtyPublicationOperationClaim.Encoded
-
-export const NativePtyRuntimeActionDeadlineReachedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativePtyRuntimeActionDeadlineReachedClaimFields" }))()
-export type NativePtyRuntimeActionDeadlineReachedClaimFields = typeof NativePtyRuntimeActionDeadlineReachedClaimFields.Type
-export type NativePtyRuntimeActionDeadlineReachedClaimFieldsEncoded = typeof NativePtyRuntimeActionDeadlineReachedClaimFields.Encoded
-
-export const NativePtyRuntimeActionDeadlineReachedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyRuntimeActionDeadlineReachedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.deadline-reached"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/fd03b5b696319d762614a91e49db39e3963983362724b19cdb35d3d324022e7b/pty/runtime.action.deadline-reached")
-}).annotate({ identifier: "NativePtyRuntimeActionDeadlineReachedClaim" }))()
-export type NativePtyRuntimeActionDeadlineReachedClaim = typeof NativePtyRuntimeActionDeadlineReachedClaim.Type
-export type NativePtyRuntimeActionDeadlineReachedClaimEncoded = typeof NativePtyRuntimeActionDeadlineReachedClaim.Encoded
-
-export const NativePtyRuntimeActionFailedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativePtyRuntimeActionFailedClaimFields" }))()
-export type NativePtyRuntimeActionFailedClaimFields = typeof NativePtyRuntimeActionFailedClaimFields.Type
-export type NativePtyRuntimeActionFailedClaimFieldsEncoded = typeof NativePtyRuntimeActionFailedClaimFields.Encoded
-
-export const NativePtyRuntimeActionFailedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyRuntimeActionFailedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.failed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/dd1ca8f775f13ba5345ecc336bae23387c0290cae8c6cfdc2707712ec71704db/pty/runtime.action.failed")
-}).annotate({ identifier: "NativePtyRuntimeActionFailedClaim" }))()
-export type NativePtyRuntimeActionFailedClaim = typeof NativePtyRuntimeActionFailedClaim.Type
-export type NativePtyRuntimeActionFailedClaimEncoded = typeof NativePtyRuntimeActionFailedClaim.Encoded
-
-export const NativePtyRuntimeActionRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "deadline_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativePtyRuntimeActionRequestedClaimFields" }))()
-export type NativePtyRuntimeActionRequestedClaimFields = typeof NativePtyRuntimeActionRequestedClaimFields.Type
-export type NativePtyRuntimeActionRequestedClaimFieldsEncoded = typeof NativePtyRuntimeActionRequestedClaimFields.Encoded
-
-export const NativePtyRuntimeActionRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyRuntimeActionRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/420bada887b1837acf5cb0f00d9d58cacfc20bff336321e16f7d79a3bae746b6/pty/runtime.action.requested")
-}).annotate({ identifier: "NativePtyRuntimeActionRequestedClaim" }))()
-export type NativePtyRuntimeActionRequestedClaim = typeof NativePtyRuntimeActionRequestedClaim.Type
-export type NativePtyRuntimeActionRequestedClaimEncoded = typeof NativePtyRuntimeActionRequestedClaim.Encoded
-
-export const NativePtyRuntimeActionSucceededClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "harness": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "native_session_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation_status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "signal": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativePtyRuntimeActionSucceededClaimFields" }))()
-export type NativePtyRuntimeActionSucceededClaimFields = typeof NativePtyRuntimeActionSucceededClaimFields.Type
-export type NativePtyRuntimeActionSucceededClaimFieldsEncoded = typeof NativePtyRuntimeActionSucceededClaimFields.Encoded
-
-export const NativePtyRuntimeActionSucceededClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyRuntimeActionSucceededClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.action.succeeded"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("system-local"),
-  "schema_id": Schema.Literal("subject-claim-schema/1c4d5dddb4a3b3d2d7d69db26bdeea8850b8fea3e4d8c2f10ddb143d7fca32bc/pty/runtime.action.succeeded")
-}).annotate({ identifier: "NativePtyRuntimeActionSucceededClaim" }))()
-export type NativePtyRuntimeActionSucceededClaim = typeof NativePtyRuntimeActionSucceededClaim.Type
-export type NativePtyRuntimeActionSucceededClaimEncoded = typeof NativePtyRuntimeActionSucceededClaim.Encoded
-
-export const NativePtyRuntimeObservedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "adopted": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "driver": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "exit_code": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "exit_signal": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "host": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "shutdown_timeout_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "terminal": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativePtyRuntimeObservedClaimFields" }))()
-export type NativePtyRuntimeObservedClaimFields = typeof NativePtyRuntimeObservedClaimFields.Type
-export type NativePtyRuntimeObservedClaimFieldsEncoded = typeof NativePtyRuntimeObservedClaimFields.Encoded
-
-export const NativePtyRuntimeObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyRuntimeObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/0e297949e3b1cb8f746032d264c1eb3002f801f23cac77b502ecf93a09c9ef8e/pty/runtime.observed")
-}).annotate({ identifier: "NativePtyRuntimeObservedClaim" }))()
-export type NativePtyRuntimeObservedClaim = typeof NativePtyRuntimeObservedClaim.Type
-export type NativePtyRuntimeObservedClaimEncoded = typeof NativePtyRuntimeObservedClaim.Encoded
-
-export const NativePtyRuntimeReconcileDecisionClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "decision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "gate": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "input_number": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "restart_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePtyRuntimeReconcileDecisionClaimFields" }))()
-export type NativePtyRuntimeReconcileDecisionClaimFields = typeof NativePtyRuntimeReconcileDecisionClaimFields.Type
-export type NativePtyRuntimeReconcileDecisionClaimFieldsEncoded = typeof NativePtyRuntimeReconcileDecisionClaimFields.Encoded
-
-export const NativePtyRuntimeReconcileDecisionClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyRuntimeReconcileDecisionClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.reconcile-decision"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/75fc3ddaf78bbb72e9dadf5088bb57bc155e497c862c3ce224c384236af6bd55/pty/runtime.reconcile-decision")
-}).annotate({ identifier: "NativePtyRuntimeReconcileDecisionClaim" }))()
-export type NativePtyRuntimeReconcileDecisionClaim = typeof NativePtyRuntimeReconcileDecisionClaim.Type
-export type NativePtyRuntimeReconcileDecisionClaimEncoded = typeof NativePtyRuntimeReconcileDecisionClaim.Encoded
-
-export const NativePtyRuntimeRestartWindowResetClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativePtyRuntimeRestartWindowResetClaimFields" }))()
-export type NativePtyRuntimeRestartWindowResetClaimFields = typeof NativePtyRuntimeRestartWindowResetClaimFields.Type
-export type NativePtyRuntimeRestartWindowResetClaimFieldsEncoded = typeof NativePtyRuntimeRestartWindowResetClaimFields.Encoded
-
-export const NativePtyRuntimeRestartWindowResetClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyRuntimeRestartWindowResetClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.restart-window-reset"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4717412d60d06e711d00540443c06893b13cf1a8610e4f2d6a129cd589be5d98/pty/runtime.restart-window-reset")
-}).annotate({ identifier: "NativePtyRuntimeRestartWindowResetClaim" }))()
-export type NativePtyRuntimeRestartWindowResetClaim = typeof NativePtyRuntimeRestartWindowResetClaim.Type
-export type NativePtyRuntimeRestartWindowResetClaimEncoded = typeof NativePtyRuntimeRestartWindowResetClaim.Encoded
-
-export const NativePtyTerminalInputRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "byte_count": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "intent": Schema.optionalKey(Schema.NullOr(Schema.Literals(["context-compaction"]))),
-  "mode": Schema.optionalKey(Schema.NullOr(Schema.Literals(["line","raw","key","text","binary"]))),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "sequence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativePtyTerminalInputRequestedClaimFields" }))()
-export type NativePtyTerminalInputRequestedClaimFields = typeof NativePtyTerminalInputRequestedClaimFields.Type
-export type NativePtyTerminalInputRequestedClaimFieldsEncoded = typeof NativePtyTerminalInputRequestedClaimFields.Encoded
-
-export const NativePtyTerminalInputRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyTerminalInputRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("terminal.input.requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b68683ce7fcad64b7f8f2cc954bee5b9ab0210cd15b08bdd6d477cf6a558aa6f/pty/terminal.input.requested")
-}).annotate({ identifier: "NativePtyTerminalInputRequestedClaim" }))()
-export type NativePtyTerminalInputRequestedClaim = typeof NativePtyTerminalInputRequestedClaim.Type
-export type NativePtyTerminalInputRequestedClaimEncoded = typeof NativePtyTerminalInputRequestedClaim.Encoded
-
-export const NativePtyTerminalInputResultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "result": Schema.optionalKey(Schema.NullOr(Schema.Literals(["written","failed"]))),
-  "runtime_id": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "sequence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991))))
-}).annotate({ identifier: "NativePtyTerminalInputResultClaimFields" }))()
-export type NativePtyTerminalInputResultClaimFields = typeof NativePtyTerminalInputResultClaimFields.Type
-export type NativePtyTerminalInputResultClaimFieldsEncoded = typeof NativePtyTerminalInputResultClaimFields.Encoded
-
-export const NativePtyTerminalInputResultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativePtyTerminalInputResultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("terminal.input.result"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativePtySubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/47a087c4c0813ba1ad16638d5fca18739b5907ab4b27b75c4a9f1eaa1e4a3206/pty/terminal.input.result")
-}).annotate({ identifier: "NativePtyTerminalInputResultClaim" }))()
-export type NativePtyTerminalInputResultClaim = typeof NativePtyTerminalInputResultClaim.Type
-export type NativePtyTerminalInputResultClaimEncoded = typeof NativePtyTerminalInputResultClaim.Encoded
-
-export const NativePtyClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativePtyIntentDesiredClaim,
-  NativePtyOperationalFailureClaim,
-  NativePtyOperationalRecoveredClaim,
-  NativePtyPublicationOperationClaim,
-  NativePtyRuntimeActionDeadlineReachedClaim,
-  NativePtyRuntimeActionFailedClaim,
-  NativePtyRuntimeActionRequestedClaim,
-  NativePtyRuntimeActionSucceededClaim,
-  NativePtyRuntimeObservedClaim,
-  NativePtyRuntimeReconcileDecisionClaim,
-  NativePtyRuntimeRestartWindowResetClaim,
-  NativePtyTerminalInputRequestedClaim,
-  NativePtyTerminalInputResultClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativePtyClaim" }))()
-export type NativePtyClaim = typeof NativePtyClaim.Type
-export type NativePtyClaimEncoded = typeof NativePtyClaim.Encoded
-
-export const NativePtySubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("pty"),
-  "heads": Schema.Array(NativePtyClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativePtySubjectRef,
-  "schema_id": Schema.Literal("subject-schema/3ad0a4be62ff61375dc43fd55e1ee4b0a6572623bf4d1b17c0646657642bbe0d/pty")
-}).annotate({ identifier: "NativePtySubject" }))()
-export type NativePtySubject = typeof NativePtySubject.Type
-export type NativePtySubjectEncoded = typeof NativePtySubject.Encoded
-
-export const NativeRepairIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRepairIntentDesiredClaimFields" }))()
-export type NativeRepairIntentDesiredClaimFields = typeof NativeRepairIntentDesiredClaimFields.Type
-export type NativeRepairIntentDesiredClaimFieldsEncoded = typeof NativeRepairIntentDesiredClaimFields.Encoded
-
-export const NativeRepairSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["repair"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeRepairSubjectRef" }))()
-export type NativeRepairSubjectRef = typeof NativeRepairSubjectRef.Type
-export type NativeRepairSubjectRefEncoded = typeof NativeRepairSubjectRef.Encoded
-
-export const NativeRepairIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRepairIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRepairSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/e0daf379a6f99a8fc58412fcfff70e8d376bab69585aa5a479feb0ea8922b54f/repair/intent.desired")
-}).annotate({ identifier: "NativeRepairIntentDesiredClaim" }))()
-export type NativeRepairIntentDesiredClaim = typeof NativeRepairIntentDesiredClaim.Type
-export type NativeRepairIntentDesiredClaimEncoded = typeof NativeRepairIntentDesiredClaim.Encoded
-
-export const NativeRepairPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeRepairPublicationOperationClaimFields" }))()
-export type NativeRepairPublicationOperationClaimFields = typeof NativeRepairPublicationOperationClaimFields.Type
-export type NativeRepairPublicationOperationClaimFieldsEncoded = typeof NativeRepairPublicationOperationClaimFields.Encoded
-
-export const NativeRepairPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRepairPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRepairSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/fc01c28e02925fdc1c5e1e5902789d738818c3ce05de5e33c5a1a18b9727df64/repair/publication.operation")
-}).annotate({ identifier: "NativeRepairPublicationOperationClaim" }))()
-export type NativeRepairPublicationOperationClaim = typeof NativeRepairPublicationOperationClaim.Type
-export type NativeRepairPublicationOperationClaimEncoded = typeof NativeRepairPublicationOperationClaim.Encoded
-
-export const NativeRepairRecordRepairedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "record": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "replacement": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRepairRecordRepairedClaimFields" }))()
-export type NativeRepairRecordRepairedClaimFields = typeof NativeRepairRecordRepairedClaimFields.Type
-export type NativeRepairRecordRepairedClaimFieldsEncoded = typeof NativeRepairRecordRepairedClaimFields.Encoded
-
-export const NativeRepairRecordRepairedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRepairRecordRepairedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("record.repaired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRepairSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/bde56350d59ce35fe7930301aa490e5710a80428f90db8acf96393a47c932739/repair/record.repaired")
-}).annotate({ identifier: "NativeRepairRecordRepairedClaim" }))()
-export type NativeRepairRecordRepairedClaim = typeof NativeRepairRecordRepairedClaim.Type
-export type NativeRepairRecordRepairedClaimEncoded = typeof NativeRepairRecordRepairedClaim.Encoded
-
-export const NativeRepairRepairAppliedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "item_count": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRepairRepairAppliedClaimFields" }))()
-export type NativeRepairRepairAppliedClaimFields = typeof NativeRepairRepairAppliedClaimFields.Type
-export type NativeRepairRepairAppliedClaimFieldsEncoded = typeof NativeRepairRepairAppliedClaimFields.Encoded
-
-export const NativeRepairRepairAppliedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRepairRepairAppliedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("repair.applied"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRepairSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4d34e47c475350356e7eeade371d7cb9d31172582d8f9a8a23fe00723666cfad/repair/repair.applied")
-}).annotate({ identifier: "NativeRepairRepairAppliedClaim" }))()
-export type NativeRepairRepairAppliedClaim = typeof NativeRepairRepairAppliedClaim.Type
-export type NativeRepairRepairAppliedClaimEncoded = typeof NativeRepairRepairAppliedClaim.Encoded
-
-export const NativeRepairClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeRepairIntentDesiredClaim,
-  NativeRepairPublicationOperationClaim,
-  NativeRepairRecordRepairedClaim,
-  NativeRepairRepairAppliedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeRepairClaim" }))()
-export type NativeRepairClaim = typeof NativeRepairClaim.Type
-export type NativeRepairClaimEncoded = typeof NativeRepairClaim.Encoded
-
-export const NativeRepairSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("repair"),
-  "heads": Schema.Array(NativeRepairClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeRepairSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/3da4c0b007e36729e03c7fdeae3593fa7330e9ff68d7ebd8fb77f3e9d3ad4569/repair")
-}).annotate({ identifier: "NativeRepairSubject" }))()
-export type NativeRepairSubject = typeof NativeRepairSubject.Type
-export type NativeRepairSubjectEncoded = typeof NativeRepairSubject.Encoded
-
-export const NativeResourceIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeResourceIntentDesiredClaimFields" }))()
-export type NativeResourceIntentDesiredClaimFields = typeof NativeResourceIntentDesiredClaimFields.Type
-export type NativeResourceIntentDesiredClaimFieldsEncoded = typeof NativeResourceIntentDesiredClaimFields.Encoded
-
-export const NativeResourceSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["resource"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeResourceSubjectRef" }))()
-export type NativeResourceSubjectRef = typeof NativeResourceSubjectRef.Type
-export type NativeResourceSubjectRefEncoded = typeof NativeResourceSubjectRef.Encoded
-
-export const NativeResourceIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeResourceIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeResourceSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f487ab65318bc4bd77a94f078033f96a154720a0a0ad4e75f1e976cc88d5ee3a/resource/intent.desired")
-}).annotate({ identifier: "NativeResourceIntentDesiredClaim" }))()
-export type NativeResourceIntentDesiredClaim = typeof NativeResourceIntentDesiredClaim.Type
-export type NativeResourceIntentDesiredClaimEncoded = typeof NativeResourceIntentDesiredClaim.Encoded
-
-export const NativeResourceOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeResourceOperationalFailureClaimFields" }))()
-export type NativeResourceOperationalFailureClaimFields = typeof NativeResourceOperationalFailureClaimFields.Type
-export type NativeResourceOperationalFailureClaimFieldsEncoded = typeof NativeResourceOperationalFailureClaimFields.Encoded
-
-export const NativeResourceOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeResourceOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeResourceSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/8e1b3a30fe59b832adcdfc61c3f261a68a52a2f65768e107f0455160e0a6bd63/resource/operational.failure")
-}).annotate({ identifier: "NativeResourceOperationalFailureClaim" }))()
-export type NativeResourceOperationalFailureClaim = typeof NativeResourceOperationalFailureClaim.Type
-export type NativeResourceOperationalFailureClaimEncoded = typeof NativeResourceOperationalFailureClaim.Encoded
-
-export const NativeResourceOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeResourceOperationalRecoveredClaimFields" }))()
-export type NativeResourceOperationalRecoveredClaimFields = typeof NativeResourceOperationalRecoveredClaimFields.Type
-export type NativeResourceOperationalRecoveredClaimFieldsEncoded = typeof NativeResourceOperationalRecoveredClaimFields.Encoded
-
-export const NativeResourceOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeResourceOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeResourceSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/1ac26597d6ce6e646a3405f9a67eda32781ab07e6111755e6db31c832203c419/resource/operational.recovered")
-}).annotate({ identifier: "NativeResourceOperationalRecoveredClaim" }))()
-export type NativeResourceOperationalRecoveredClaim = typeof NativeResourceOperationalRecoveredClaim.Type
-export type NativeResourceOperationalRecoveredClaimEncoded = typeof NativeResourceOperationalRecoveredClaim.Encoded
-
-export const NativeResourcePublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeResourcePublicationOperationClaimFields" }))()
-export type NativeResourcePublicationOperationClaimFields = typeof NativeResourcePublicationOperationClaimFields.Type
-export type NativeResourcePublicationOperationClaimFieldsEncoded = typeof NativeResourcePublicationOperationClaimFields.Encoded
-
-export const NativeResourcePublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeResourcePublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeResourceSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/27dcc705fa3c0cbe5dcd9a29f274a12b324e5e53d79c5daab6746cd66615f278/resource/publication.operation")
-}).annotate({ identifier: "NativeResourcePublicationOperationClaim" }))()
-export type NativeResourcePublicationOperationClaim = typeof NativeResourcePublicationOperationClaim.Type
-export type NativeResourcePublicationOperationClaimEncoded = typeof NativeResourcePublicationOperationClaim.Encoded
-
-export const NativeResourceResourceObservedClaimFields = /*#__PURE__*/ (() => Schema.Union([Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "commit": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "completed_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "conclusion": Schema.optionalKey(Schema.NullOr(Schema.String)), "external_id": Schema.optionalKey(Schema.NullOr(Schema.String)), "name": Schema.optionalKey(Schema.NullOr(Schema.String)), "provider": Schema.optionalKey(Schema.NullOr(Schema.String)), "pull_request": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "repository": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "started_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["queued","in-progress","completed"]))), "url": Schema.optionalKey(Schema.NullOr(Schema.String)) }))), "kind": Schema.Literal("ci.run"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "content_hash": Schema.optionalKey(Schema.NullOr(Schema.String)), "mode": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))), "path": Schema.optionalKey(Schema.NullOr(Schema.String)), "reason": Schema.optionalKey(Schema.NullOr(Schema.String)), "size": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))), "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["ready","missing","unreadable"]))) }))), "kind": Schema.Literal("filesystem.file"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "agent": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "harness": Schema.optionalKey(Schema.NullOr(Schema.String)), "incarnation_id": Schema.optionalKey(Schema.NullOr(Schema.String)), "modified_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["active","inactive","missing","unknown"]))) }))), "kind": Schema.Literal("harness.session-file"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "decision": Schema.optionalKey(Schema.NullOr(Schema.Literals(["approve","request-changes","comment"]))), "document": Schema.optionalKey(Schema.NullOr(Schema.String)), "reason": Schema.optionalKey(Schema.NullOr(Schema.String)), "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "submitted_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "target": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)) }))), "kind": Schema.Literal("human.review"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "author": Schema.optionalKey(Schema.NullOr(Schema.String)), "committed_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "committer": Schema.optionalKey(Schema.NullOr(Schema.String)), "message": Schema.optionalKey(Schema.NullOr(Schema.String)), "repository": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "sha": Schema.optionalKey(Schema.NullOr(Schema.String)), "state": Schema.optionalKey(Schema.NullOr(Schema.String)), "tree": Schema.optionalKey(Schema.NullOr(Schema.String)), "url": Schema.optionalKey(Schema.NullOr(Schema.String)) }))), "kind": Schema.Literal("vcs.commit"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "author": Schema.optionalKey(Schema.NullOr(Schema.String)), "comments": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))), "created_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "number": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))), "opened_by": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "opened_by_run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "repository": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "state": Schema.optionalKey(Schema.NullOr(Schema.String)), "state_reason": Schema.optionalKey(Schema.NullOr(Schema.String)), "title": Schema.optionalKey(Schema.NullOr(Schema.String)), "updated_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "url": Schema.optionalKey(Schema.NullOr(Schema.String)) }))), "kind": Schema.Literal("vcs.issue"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "author": Schema.optionalKey(Schema.NullOr(Schema.String)), "base": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "base_branch": Schema.optionalKey(Schema.NullOr(Schema.String)), "branch": Schema.optionalKey(Schema.NullOr(Schema.String)), "checks_state": Schema.optionalKey(Schema.NullOr(Schema.String)), "comments": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))), "created_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "draft": Schema.optionalKey(Schema.NullOr(Schema.Boolean)), "head": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "head_sha": Schema.optionalKey(Schema.NullOr(Schema.String)), "merged": Schema.optionalKey(Schema.NullOr(Schema.Boolean)), "number": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))), "opened_by": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "opened_by_run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "repository": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "review_decision": Schema.optionalKey(Schema.NullOr(Schema.String)), "state": Schema.optionalKey(Schema.NullOr(Schema.String)), "title": Schema.optionalKey(Schema.NullOr(Schema.String)), "updated_at": Schema.optionalKey(Schema.NullOr(Schema.String)), "url": Schema.optionalKey(Schema.NullOr(Schema.String)) }))), "kind": Schema.Literal("vcs.pull-request"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "head": Schema.optionalKey(Schema.NullOr(Schema.String)), "name": Schema.optionalKey(Schema.NullOr(Schema.String)), "ref_type": Schema.optionalKey(Schema.NullOr(Schema.Literals(["branch","tag","other"]))), "repository": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "target": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "url": Schema.optionalKey(Schema.NullOr(Schema.String)) }))), "kind": Schema.Literal("vcs.ref"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Struct({ "default_ref": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "github_http_requests_since_start": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))), "head": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)), "repository_id": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))), "state": Schema.optionalKey(Schema.NullOr(Schema.String)), "url": Schema.optionalKey(Schema.NullOr(Schema.String)), "vcs": Schema.optionalKey(Schema.NullOr(Schema.Literals(["git"]))) }))), "kind": Schema.Literal("vcs.repository"), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) }), Schema.Struct({ "facts": Schema.optionalKey(Schema.NullOr(Schema.Record(Schema.String, Schema.Never))), "kind": Schema.optionalKey(Schema.NullOr(Schema.String)), "observed_at": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))) })]).annotate({ identifier: "NativeResourceResourceObservedClaimFields" }))()
-export type NativeResourceResourceObservedClaimFields = typeof NativeResourceResourceObservedClaimFields.Type
-export type NativeResourceResourceObservedClaimFieldsEncoded = typeof NativeResourceResourceObservedClaimFields.Encoded
-
-export const NativeResourceResourceObservedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeResourceResourceObservedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("resource.observed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeResourceSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c1abf58e0dbd29a213c3b0bf33edc3bc0e57034ff4c8fb38c3e151bdcee18610/resource/resource.observed")
-}).annotate({ identifier: "NativeResourceResourceObservedClaim" }))()
-export type NativeResourceResourceObservedClaim = typeof NativeResourceResourceObservedClaim.Type
-export type NativeResourceResourceObservedClaimEncoded = typeof NativeResourceResourceObservedClaim.Encoded
-
-export const NativeResourceClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeResourceIntentDesiredClaim,
-  NativeResourceOperationalFailureClaim,
-  NativeResourceOperationalRecoveredClaim,
-  NativeResourcePublicationOperationClaim,
-  NativeResourceResourceObservedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeResourceClaim" }))()
-export type NativeResourceClaim = typeof NativeResourceClaim.Type
-export type NativeResourceClaimEncoded = typeof NativeResourceClaim.Encoded
-
-export const NativeResourceSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("resource"),
-  "heads": Schema.Array(NativeResourceClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeResourceSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/12d2a639c602e58bea4182c009eea475503671c178384718c18dfef499bfdde6/resource")
-}).annotate({ identifier: "NativeResourceSubject" }))()
-export type NativeResourceSubject = typeof NativeResourceSubject.Type
-export type NativeResourceSubjectEncoded = typeof NativeResourceSubject.Encoded
-
-export const NativeRevisionProposalIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRevisionProposalIntentDesiredClaimFields" }))()
-export type NativeRevisionProposalIntentDesiredClaimFields = typeof NativeRevisionProposalIntentDesiredClaimFields.Type
-export type NativeRevisionProposalIntentDesiredClaimFieldsEncoded = typeof NativeRevisionProposalIntentDesiredClaimFields.Encoded
-
-export const NativeRevisionProposalSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["revision-proposal"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeRevisionProposalSubjectRef" }))()
-export type NativeRevisionProposalSubjectRef = typeof NativeRevisionProposalSubjectRef.Type
-export type NativeRevisionProposalSubjectRefEncoded = typeof NativeRevisionProposalSubjectRef.Encoded
-
-export const NativeRevisionProposalIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRevisionProposalIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRevisionProposalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/e93c51222650ff6b14b60dff9cead54a2dec11c991caeb7a10b3bd446dc90633/revision-proposal/intent.desired")
-}).annotate({ identifier: "NativeRevisionProposalIntentDesiredClaim" }))()
-export type NativeRevisionProposalIntentDesiredClaim = typeof NativeRevisionProposalIntentDesiredClaim.Type
-export type NativeRevisionProposalIntentDesiredClaimEncoded = typeof NativeRevisionProposalIntentDesiredClaim.Encoded
-
-export const NativeRevisionProposalPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeRevisionProposalPublicationOperationClaimFields" }))()
-export type NativeRevisionProposalPublicationOperationClaimFields = typeof NativeRevisionProposalPublicationOperationClaimFields.Type
-export type NativeRevisionProposalPublicationOperationClaimFieldsEncoded = typeof NativeRevisionProposalPublicationOperationClaimFields.Encoded
-
-export const NativeRevisionProposalPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRevisionProposalPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRevisionProposalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/600f011220eef5a8e81834c1d4986f13dd4ecbce74b4708d3d9c27309cde6c02/revision-proposal/publication.operation")
-}).annotate({ identifier: "NativeRevisionProposalPublicationOperationClaim" }))()
-export type NativeRevisionProposalPublicationOperationClaim = typeof NativeRevisionProposalPublicationOperationClaim.Type
-export type NativeRevisionProposalPublicationOperationClaimEncoded = typeof NativeRevisionProposalPublicationOperationClaim.Encoded
-
-export const NativeRevisionProposalRevisionProposalAppliedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "successor_generation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef))
-}).annotate({ identifier: "NativeRevisionProposalRevisionProposalAppliedClaimFields" }))()
-export type NativeRevisionProposalRevisionProposalAppliedClaimFields = typeof NativeRevisionProposalRevisionProposalAppliedClaimFields.Type
-export type NativeRevisionProposalRevisionProposalAppliedClaimFieldsEncoded = typeof NativeRevisionProposalRevisionProposalAppliedClaimFields.Encoded
-
-export const NativeRevisionProposalRevisionProposalAppliedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRevisionProposalRevisionProposalAppliedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("revision-proposal.applied"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRevisionProposalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d6158771cc077e541fdfde43b08a764fbe75a939681a99dadd7197e233d4d9bf/revision-proposal/revision-proposal.applied")
-}).annotate({ identifier: "NativeRevisionProposalRevisionProposalAppliedClaim" }))()
-export type NativeRevisionProposalRevisionProposalAppliedClaim = typeof NativeRevisionProposalRevisionProposalAppliedClaim.Type
-export type NativeRevisionProposalRevisionProposalAppliedClaimEncoded = typeof NativeRevisionProposalRevisionProposalAppliedClaim.Encoded
-
-export const NativeRevisionProposalRevisionProposalApprovedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "all_approved": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef))
-}).annotate({ identifier: "NativeRevisionProposalRevisionProposalApprovedClaimFields" }))()
-export type NativeRevisionProposalRevisionProposalApprovedClaimFields = typeof NativeRevisionProposalRevisionProposalApprovedClaimFields.Type
-export type NativeRevisionProposalRevisionProposalApprovedClaimFieldsEncoded = typeof NativeRevisionProposalRevisionProposalApprovedClaimFields.Encoded
-
-export const NativeRevisionProposalRevisionProposalApprovedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRevisionProposalRevisionProposalApprovedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("revision-proposal.approved"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRevisionProposalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a3a7ae29779d57675de9a7ed5032d7b75b98ae71e303c030211414c7712feb3d/revision-proposal/revision-proposal.approved")
-}).annotate({ identifier: "NativeRevisionProposalRevisionProposalApprovedClaim" }))()
-export type NativeRevisionProposalRevisionProposalApprovedClaim = typeof NativeRevisionProposalRevisionProposalApprovedClaim.Type
-export type NativeRevisionProposalRevisionProposalApprovedClaimEncoded = typeof NativeRevisionProposalRevisionProposalApprovedClaim.Encoded
-
-export const NativeRevisionProposalRevisionProposalCancelledClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRevisionProposalRevisionProposalCancelledClaimFields" }))()
-export type NativeRevisionProposalRevisionProposalCancelledClaimFields = typeof NativeRevisionProposalRevisionProposalCancelledClaimFields.Type
-export type NativeRevisionProposalRevisionProposalCancelledClaimFieldsEncoded = typeof NativeRevisionProposalRevisionProposalCancelledClaimFields.Encoded
-
-export const NativeRevisionProposalRevisionProposalCancelledClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRevisionProposalRevisionProposalCancelledClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("revision-proposal.cancelled"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRevisionProposalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/95628a111d807f535fa959db34da1a9149a34d4a5118aa42da1610f7d9618c97/revision-proposal/revision-proposal.cancelled")
-}).annotate({ identifier: "NativeRevisionProposalRevisionProposalCancelledClaim" }))()
-export type NativeRevisionProposalRevisionProposalCancelledClaim = typeof NativeRevisionProposalRevisionProposalCancelledClaim.Type
-export type NativeRevisionProposalRevisionProposalCancelledClaimEncoded = typeof NativeRevisionProposalRevisionProposalCancelledClaim.Encoded
-
-export const NativeRevisionProposalRevisionProposalCreatedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "candidate_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "cutover": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "source_generation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRevisionProposalRevisionProposalCreatedClaimFields" }))()
-export type NativeRevisionProposalRevisionProposalCreatedClaimFields = typeof NativeRevisionProposalRevisionProposalCreatedClaimFields.Type
-export type NativeRevisionProposalRevisionProposalCreatedClaimFieldsEncoded = typeof NativeRevisionProposalRevisionProposalCreatedClaimFields.Encoded
-
-export const NativeRevisionProposalRevisionProposalCreatedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRevisionProposalRevisionProposalCreatedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("revision-proposal.created"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRevisionProposalSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/6e68bd8c35db503d3f5e9c903b9c289db6e64308c4c1e8ed27a7daf9f58027b4/revision-proposal/revision-proposal.created")
-}).annotate({ identifier: "NativeRevisionProposalRevisionProposalCreatedClaim" }))()
-export type NativeRevisionProposalRevisionProposalCreatedClaim = typeof NativeRevisionProposalRevisionProposalCreatedClaim.Type
-export type NativeRevisionProposalRevisionProposalCreatedClaimEncoded = typeof NativeRevisionProposalRevisionProposalCreatedClaim.Encoded
-
-export const NativeRevisionProposalClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeRevisionProposalIntentDesiredClaim,
-  NativeRevisionProposalPublicationOperationClaim,
-  NativeRevisionProposalRevisionProposalAppliedClaim,
-  NativeRevisionProposalRevisionProposalApprovedClaim,
-  NativeRevisionProposalRevisionProposalCancelledClaim,
-  NativeRevisionProposalRevisionProposalCreatedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeRevisionProposalClaim" }))()
-export type NativeRevisionProposalClaim = typeof NativeRevisionProposalClaim.Type
-export type NativeRevisionProposalClaimEncoded = typeof NativeRevisionProposalClaim.Encoded
-
-export const NativeRevisionProposalSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("revision-proposal"),
-  "heads": Schema.Array(NativeRevisionProposalClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeRevisionProposalSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/fe693fb9a46716bc9a8e3f3583491c684166b6649cf90a1b28c88082776ae148/revision-proposal")
-}).annotate({ identifier: "NativeRevisionProposalSubject" }))()
-export type NativeRevisionProposalSubject = typeof NativeRevisionProposalSubject.Type
-export type NativeRevisionProposalSubjectEncoded = typeof NativeRevisionProposalSubject.Encoded
-
-export const NativeRuleIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRuleIntentDesiredClaimFields" }))()
-export type NativeRuleIntentDesiredClaimFields = typeof NativeRuleIntentDesiredClaimFields.Type
-export type NativeRuleIntentDesiredClaimFieldsEncoded = typeof NativeRuleIntentDesiredClaimFields.Encoded
-
-export const NativeRuleSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["rule"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeRuleSubjectRef" }))()
-export type NativeRuleSubjectRef = typeof NativeRuleSubjectRef.Type
-export type NativeRuleSubjectRefEncoded = typeof NativeRuleSubjectRef.Encoded
-
-export const NativeRuleIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRuleIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRuleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f090c9897230d1a6c2b9d9d9090e9568bdbf60c7240a1e5c96a75e83dfa8e406/rule/intent.desired")
-}).annotate({ identifier: "NativeRuleIntentDesiredClaim" }))()
-export type NativeRuleIntentDesiredClaim = typeof NativeRuleIntentDesiredClaim.Type
-export type NativeRuleIntentDesiredClaimEncoded = typeof NativeRuleIntentDesiredClaim.Encoded
-
-export const NativeRulePublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeRulePublicationOperationClaimFields" }))()
-export type NativeRulePublicationOperationClaimFields = typeof NativeRulePublicationOperationClaimFields.Type
-export type NativeRulePublicationOperationClaimFieldsEncoded = typeof NativeRulePublicationOperationClaimFields.Encoded
-
-export const NativeRulePublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRulePublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRuleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/1897e5058ebd3ecc92da283a0a52d20052b1d12888368731abc05f3aeb4ea9d3/rule/publication.operation")
-}).annotate({ identifier: "NativeRulePublicationOperationClaim" }))()
-export type NativeRulePublicationOperationClaim = typeof NativeRulePublicationOperationClaim.Type
-export type NativeRulePublicationOperationClaimEncoded = typeof NativeRulePublicationOperationClaim.Encoded
-
-export const NativeRuleRuleAuditedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "actor": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "rule": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "target": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRuleRuleAuditedClaimFields" }))()
-export type NativeRuleRuleAuditedClaimFields = typeof NativeRuleRuleAuditedClaimFields.Type
-export type NativeRuleRuleAuditedClaimFieldsEncoded = typeof NativeRuleRuleAuditedClaimFields.Encoded
-
-export const NativeRuleRuleAuditedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRuleRuleAuditedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("rule.audited"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRuleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/2a7b1f0acbac6afdc454d06b31e48db0283d85f2c479390ee36479fa08c68697/rule/rule.audited")
-}).annotate({ identifier: "NativeRuleRuleAuditedClaim" }))()
-export type NativeRuleRuleAuditedClaim = typeof NativeRuleRuleAuditedClaim.Type
-export type NativeRuleRuleAuditedClaimEncoded = typeof NativeRuleRuleAuditedClaim.Encoded
-
-export const NativeRuleRuleSetClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "description": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "mode": Schema.optionalKey(Schema.NullOr(Schema.Literals(["off","audit","enforce"])))
-}).annotate({ identifier: "NativeRuleRuleSetClaimFields" }))()
-export type NativeRuleRuleSetClaimFields = typeof NativeRuleRuleSetClaimFields.Type
-export type NativeRuleRuleSetClaimFieldsEncoded = typeof NativeRuleRuleSetClaimFields.Encoded
-
-export const NativeRuleRuleSetClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRuleRuleSetClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("rule.set"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRuleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9cfdec82a2542b4deb37e25e875a2369d4022ec9b95daaac5c61771f57cf3c5e/rule/rule.set")
-}).annotate({ identifier: "NativeRuleRuleSetClaim" }))()
-export type NativeRuleRuleSetClaim = typeof NativeRuleRuleSetClaim.Type
-export type NativeRuleRuleSetClaimEncoded = typeof NativeRuleRuleSetClaim.Encoded
-
-export const NativeRuleClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeRuleIntentDesiredClaim,
-  NativeRulePublicationOperationClaim,
-  NativeRuleRuleAuditedClaim,
-  NativeRuleRuleSetClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeRuleClaim" }))()
-export type NativeRuleClaim = typeof NativeRuleClaim.Type
-export type NativeRuleClaimEncoded = typeof NativeRuleClaim.Encoded
-
-export const NativeRuleSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("rule"),
-  "heads": Schema.Array(NativeRuleClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeRuleSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/35a3edd961ef9f51c737caff8dccd8b711e63e89472b840244e62f290529bf20/rule")
-}).annotate({ identifier: "NativeRuleSubject" }))()
-export type NativeRuleSubject = typeof NativeRuleSubject.Type
-export type NativeRuleSubjectEncoded = typeof NativeRuleSubject.Encoded
-
-export const NativeRunGenerationIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRunGenerationIntentDesiredClaimFields" }))()
-export type NativeRunGenerationIntentDesiredClaimFields = typeof NativeRunGenerationIntentDesiredClaimFields.Type
-export type NativeRunGenerationIntentDesiredClaimFieldsEncoded = typeof NativeRunGenerationIntentDesiredClaimFields.Encoded
-
-export const NativeRunGenerationSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["run-generation"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeRunGenerationSubjectRef" }))()
-export type NativeRunGenerationSubjectRef = typeof NativeRunGenerationSubjectRef.Type
-export type NativeRunGenerationSubjectRefEncoded = typeof NativeRunGenerationSubjectRef.Encoded
-
-export const NativeRunGenerationIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRunGenerationIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRunGenerationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/e689451ee97ac0d13cef4373944ceb7a358d875dd6188639b6ddcb2a8ff8b41f/run-generation/intent.desired")
-}).annotate({ identifier: "NativeRunGenerationIntentDesiredClaim" }))()
-export type NativeRunGenerationIntentDesiredClaim = typeof NativeRunGenerationIntentDesiredClaim.Type
-export type NativeRunGenerationIntentDesiredClaimEncoded = typeof NativeRunGenerationIntentDesiredClaim.Encoded
-
-export const NativeRunGenerationPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeRunGenerationPublicationOperationClaimFields" }))()
-export type NativeRunGenerationPublicationOperationClaimFields = typeof NativeRunGenerationPublicationOperationClaimFields.Type
-export type NativeRunGenerationPublicationOperationClaimFieldsEncoded = typeof NativeRunGenerationPublicationOperationClaimFields.Encoded
-
-export const NativeRunGenerationPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRunGenerationPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRunGenerationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/62e9d0b5f4bed9eff9c0472ffd12437b7b81a1d2389a16db428ca5ac0f0e1c46/run-generation/publication.operation")
-}).annotate({ identifier: "NativeRunGenerationPublicationOperationClaim" }))()
-export type NativeRunGenerationPublicationOperationClaim = typeof NativeRunGenerationPublicationOperationClaim.Type
-export type NativeRunGenerationPublicationOperationClaimEncoded = typeof NativeRunGenerationPublicationOperationClaim.Encoded
-
-export const NativeRunGenerationRunGenerationCreatedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "predecessor": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeRunGenerationRunGenerationCreatedClaimFields" }))()
-export type NativeRunGenerationRunGenerationCreatedClaimFields = typeof NativeRunGenerationRunGenerationCreatedClaimFields.Type
-export type NativeRunGenerationRunGenerationCreatedClaimFieldsEncoded = typeof NativeRunGenerationRunGenerationCreatedClaimFields.Encoded
-
-export const NativeRunGenerationRunGenerationCreatedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRunGenerationRunGenerationCreatedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("run-generation.created"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRunGenerationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/5746e987c85219dc588815398adee52a0b3f000ced3d010e59abcf4e48741076/run-generation/run-generation.created")
-}).annotate({ identifier: "NativeRunGenerationRunGenerationCreatedClaim" }))()
-export type NativeRunGenerationRunGenerationCreatedClaim = typeof NativeRunGenerationRunGenerationCreatedClaim.Type
-export type NativeRunGenerationRunGenerationCreatedClaimEncoded = typeof NativeRunGenerationRunGenerationCreatedClaim.Encoded
-
-export const NativeRunGenerationRunGenerationStateClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "phase": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "previous_phase": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "successor": Schema.optionalKey(Schema.NullOr(NativeSubjectRef))
-}).annotate({ identifier: "NativeRunGenerationRunGenerationStateClaimFields" }))()
-export type NativeRunGenerationRunGenerationStateClaimFields = typeof NativeRunGenerationRunGenerationStateClaimFields.Type
-export type NativeRunGenerationRunGenerationStateClaimFieldsEncoded = typeof NativeRunGenerationRunGenerationStateClaimFields.Encoded
-
-export const NativeRunGenerationRunGenerationStateClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRunGenerationRunGenerationStateClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("run-generation.state"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRunGenerationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c3026b09147a55a56f948a871df1458e124058928a593938a06c69c5b9c2aa1b/run-generation/run-generation.state")
-}).annotate({ identifier: "NativeRunGenerationRunGenerationStateClaim" }))()
-export type NativeRunGenerationRunGenerationStateClaim = typeof NativeRunGenerationRunGenerationStateClaim.Type
-export type NativeRunGenerationRunGenerationStateClaimEncoded = typeof NativeRunGenerationRunGenerationStateClaim.Encoded
-
-export const NativeRunGenerationRunGenerationSupersededClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "phase": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "previous_phase": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "successor": Schema.optionalKey(Schema.NullOr(NativeSubjectRef))
-}).annotate({ identifier: "NativeRunGenerationRunGenerationSupersededClaimFields" }))()
-export type NativeRunGenerationRunGenerationSupersededClaimFields = typeof NativeRunGenerationRunGenerationSupersededClaimFields.Type
-export type NativeRunGenerationRunGenerationSupersededClaimFieldsEncoded = typeof NativeRunGenerationRunGenerationSupersededClaimFields.Encoded
-
-export const NativeRunGenerationRunGenerationSupersededClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeRunGenerationRunGenerationSupersededClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("run-generation.superseded"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeRunGenerationSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/405fc5f2a7ae7acef1fd32e4d176b10e9283d6a0de114a7d59184e57b9401c27/run-generation/run-generation.superseded")
-}).annotate({ identifier: "NativeRunGenerationRunGenerationSupersededClaim" }))()
-export type NativeRunGenerationRunGenerationSupersededClaim = typeof NativeRunGenerationRunGenerationSupersededClaim.Type
-export type NativeRunGenerationRunGenerationSupersededClaimEncoded = typeof NativeRunGenerationRunGenerationSupersededClaim.Encoded
-
-export const NativeRunGenerationClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeRunGenerationIntentDesiredClaim,
-  NativeRunGenerationPublicationOperationClaim,
-  NativeRunGenerationRunGenerationCreatedClaim,
-  NativeRunGenerationRunGenerationStateClaim,
-  NativeRunGenerationRunGenerationSupersededClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeRunGenerationClaim" }))()
-export type NativeRunGenerationClaim = typeof NativeRunGenerationClaim.Type
-export type NativeRunGenerationClaimEncoded = typeof NativeRunGenerationClaim.Encoded
-
-export const NativeRunGenerationSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("run-generation"),
-  "heads": Schema.Array(NativeRunGenerationClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeRunGenerationSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/f68cfafdb799d7b9bee90a2136b5af3dab8c5052fe9758ca756aaa1c9f7ec7c8/run-generation")
-}).annotate({ identifier: "NativeRunGenerationSubject" }))()
-export type NativeRunGenerationSubject = typeof NativeRunGenerationSubject.Type
-export type NativeRunGenerationSubjectEncoded = typeof NativeRunGenerationSubject.Encoded
-
-export const NativeScheduleIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleIntentDesiredClaimFields" }))()
-export type NativeScheduleIntentDesiredClaimFields = typeof NativeScheduleIntentDesiredClaimFields.Type
-export type NativeScheduleIntentDesiredClaimFieldsEncoded = typeof NativeScheduleIntentDesiredClaimFields.Encoded
-
-export const NativeScheduleSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["schedule"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeScheduleSubjectRef" }))()
-export type NativeScheduleSubjectRef = typeof NativeScheduleSubjectRef.Type
-export type NativeScheduleSubjectRefEncoded = typeof NativeScheduleSubjectRef.Encoded
-
-export const NativeScheduleIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/aa5cb6898249d7f9d26f6bed46e88f8555f916e80562890bbb85aabab73a42d6/schedule/intent.desired")
-}).annotate({ identifier: "NativeScheduleIntentDesiredClaim" }))()
-export type NativeScheduleIntentDesiredClaim = typeof NativeScheduleIntentDesiredClaim.Type
-export type NativeScheduleIntentDesiredClaimEncoded = typeof NativeScheduleIntentDesiredClaim.Encoded
-
-export const NativeScheduleOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleOperationalFailureClaimFields" }))()
-export type NativeScheduleOperationalFailureClaimFields = typeof NativeScheduleOperationalFailureClaimFields.Type
-export type NativeScheduleOperationalFailureClaimFieldsEncoded = typeof NativeScheduleOperationalFailureClaimFields.Encoded
-
-export const NativeScheduleOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/63e4719f12b4938e3b5857c3b1597f22697179ccb4eb5bfdc12e8840851602b2/schedule/operational.failure")
-}).annotate({ identifier: "NativeScheduleOperationalFailureClaim" }))()
-export type NativeScheduleOperationalFailureClaim = typeof NativeScheduleOperationalFailureClaim.Type
-export type NativeScheduleOperationalFailureClaimEncoded = typeof NativeScheduleOperationalFailureClaim.Encoded
-
-export const NativeScheduleOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleOperationalRecoveredClaimFields" }))()
-export type NativeScheduleOperationalRecoveredClaimFields = typeof NativeScheduleOperationalRecoveredClaimFields.Type
-export type NativeScheduleOperationalRecoveredClaimFieldsEncoded = typeof NativeScheduleOperationalRecoveredClaimFields.Encoded
-
-export const NativeScheduleOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a09795c90bd54c1ae6b1bca9413038a36bf3724ae8094bec6b568653ef9c2015/schedule/operational.recovered")
-}).annotate({ identifier: "NativeScheduleOperationalRecoveredClaim" }))()
-export type NativeScheduleOperationalRecoveredClaim = typeof NativeScheduleOperationalRecoveredClaim.Type
-export type NativeScheduleOperationalRecoveredClaimEncoded = typeof NativeScheduleOperationalRecoveredClaim.Encoded
-
-export const NativeSchedulePublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeSchedulePublicationOperationClaimFields" }))()
-export type NativeSchedulePublicationOperationClaimFields = typeof NativeSchedulePublicationOperationClaimFields.Type
-export type NativeSchedulePublicationOperationClaimFieldsEncoded = typeof NativeSchedulePublicationOperationClaimFields.Encoded
-
-export const NativeSchedulePublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSchedulePublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b19fc9f2a5759d7eba76a4a55d7dc91bf350192732d9fc243192b8aa7671e328/schedule/publication.operation")
-}).annotate({ identifier: "NativeSchedulePublicationOperationClaim" }))()
-export type NativeSchedulePublicationOperationClaim = typeof NativeSchedulePublicationOperationClaim.Type
-export type NativeSchedulePublicationOperationClaimEncoded = typeof NativeSchedulePublicationOperationClaim.Encoded
-
-export const NativeScheduleReconcileFaultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "scope": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["faulted","recovered"])))
-}).annotate({ identifier: "NativeScheduleReconcileFaultClaimFields" }))()
-export type NativeScheduleReconcileFaultClaimFields = typeof NativeScheduleReconcileFaultClaimFields.Type
-export type NativeScheduleReconcileFaultClaimFieldsEncoded = typeof NativeScheduleReconcileFaultClaimFields.Encoded
-
-export const NativeScheduleReconcileFaultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleReconcileFaultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("reconcile.fault"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/7cfde9539146ce5e095a50f5d7c28f74560f426c243152d1286fbe30fdf43544/schedule/reconcile.fault")
-}).annotate({ identifier: "NativeScheduleReconcileFaultClaim" }))()
-export type NativeScheduleReconcileFaultClaim = typeof NativeScheduleReconcileFaultClaim.Type
-export type NativeScheduleReconcileFaultClaimEncoded = typeof NativeScheduleReconcileFaultClaim.Encoded
-
-export const NativeScheduleRuntimeReconcileDecisionClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "decision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "gate": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "input_number": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reachability": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "restart_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleRuntimeReconcileDecisionClaimFields" }))()
-export type NativeScheduleRuntimeReconcileDecisionClaimFields = typeof NativeScheduleRuntimeReconcileDecisionClaimFields.Type
-export type NativeScheduleRuntimeReconcileDecisionClaimFieldsEncoded = typeof NativeScheduleRuntimeReconcileDecisionClaimFields.Encoded
-
-export const NativeScheduleRuntimeReconcileDecisionClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleRuntimeReconcileDecisionClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("runtime.reconcile-decision"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/04621b9ff88d8ec7999c03db40645d28e80491db7da471713354691b4d79f192/schedule/runtime.reconcile-decision")
-}).annotate({ identifier: "NativeScheduleRuntimeReconcileDecisionClaim" }))()
-export type NativeScheduleRuntimeReconcileDecisionClaim = typeof NativeScheduleRuntimeReconcileDecisionClaim.Type
-export type NativeScheduleRuntimeReconcileDecisionClaimEncoded = typeof NativeScheduleRuntimeReconcileDecisionClaim.Encoded
-
-export const NativeScheduleScheduleOccurrenceCancelledClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "occurrence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleScheduleOccurrenceCancelledClaimFields" }))()
-export type NativeScheduleScheduleOccurrenceCancelledClaimFields = typeof NativeScheduleScheduleOccurrenceCancelledClaimFields.Type
-export type NativeScheduleScheduleOccurrenceCancelledClaimFieldsEncoded = typeof NativeScheduleScheduleOccurrenceCancelledClaimFields.Encoded
-
-export const NativeScheduleScheduleOccurrenceCancelledClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleScheduleOccurrenceCancelledClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("schedule.occurrence-cancelled"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/a8a70808a2e05d88541f7c95a49d52daefa63dd973f2002026b8019dca3f4e46/schedule/schedule.occurrence-cancelled")
-}).annotate({ identifier: "NativeScheduleScheduleOccurrenceCancelledClaim" }))()
-export type NativeScheduleScheduleOccurrenceCancelledClaim = typeof NativeScheduleScheduleOccurrenceCancelledClaim.Type
-export type NativeScheduleScheduleOccurrenceCancelledClaimEncoded = typeof NativeScheduleScheduleOccurrenceCancelledClaim.Encoded
-
-export const NativeScheduleScheduleOccurrenceReachedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "occurrence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "scheduled": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "scheduled_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleScheduleOccurrenceReachedClaimFields" }))()
-export type NativeScheduleScheduleOccurrenceReachedClaimFields = typeof NativeScheduleScheduleOccurrenceReachedClaimFields.Type
-export type NativeScheduleScheduleOccurrenceReachedClaimFieldsEncoded = typeof NativeScheduleScheduleOccurrenceReachedClaimFields.Encoded
-
-export const NativeScheduleScheduleOccurrenceReachedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleScheduleOccurrenceReachedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("schedule.occurrence-reached"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/083dc6beb00e91f82f6954cc260b59fbe9b164078f56ad83f27944634d8e62d5/schedule/schedule.occurrence-reached")
-}).annotate({ identifier: "NativeScheduleScheduleOccurrenceReachedClaim" }))()
-export type NativeScheduleScheduleOccurrenceReachedClaim = typeof NativeScheduleScheduleOccurrenceReachedClaim.Type
-export type NativeScheduleScheduleOccurrenceReachedClaimEncoded = typeof NativeScheduleScheduleOccurrenceReachedClaim.Encoded
-
-export const NativeScheduleScheduleOccurrenceScheduledClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "occurrence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "scheduled_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleScheduleOccurrenceScheduledClaimFields" }))()
-export type NativeScheduleScheduleOccurrenceScheduledClaimFields = typeof NativeScheduleScheduleOccurrenceScheduledClaimFields.Type
-export type NativeScheduleScheduleOccurrenceScheduledClaimFieldsEncoded = typeof NativeScheduleScheduleOccurrenceScheduledClaimFields.Encoded
-
-export const NativeScheduleScheduleOccurrenceScheduledClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleScheduleOccurrenceScheduledClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("schedule.occurrence-scheduled"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/969f2c6ca5f7dad1a10718dbc289397bdcac38a31653aed80f48e75a99c419b1/schedule/schedule.occurrence-scheduled")
-}).annotate({ identifier: "NativeScheduleScheduleOccurrenceScheduledClaim" }))()
-export type NativeScheduleScheduleOccurrenceScheduledClaim = typeof NativeScheduleScheduleOccurrenceScheduledClaim.Type
-export type NativeScheduleScheduleOccurrenceScheduledClaimEncoded = typeof NativeScheduleScheduleOccurrenceScheduledClaim.Encoded
-
-export const NativeScheduleScheduleWorkFailedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleScheduleWorkFailedClaimFields" }))()
-export type NativeScheduleScheduleWorkFailedClaimFields = typeof NativeScheduleScheduleWorkFailedClaimFields.Type
-export type NativeScheduleScheduleWorkFailedClaimFieldsEncoded = typeof NativeScheduleScheduleWorkFailedClaimFields.Encoded
-
-export const NativeScheduleScheduleWorkFailedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleScheduleWorkFailedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("schedule.work-failed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f9fbdc4d6d2b81a6863634109d2c16a1701f1b45bac90164d9ebf9faa6d0029c/schedule/schedule.work-failed")
-}).annotate({ identifier: "NativeScheduleScheduleWorkFailedClaim" }))()
-export type NativeScheduleScheduleWorkFailedClaim = typeof NativeScheduleScheduleWorkFailedClaim.Type
-export type NativeScheduleScheduleWorkFailedClaimEncoded = typeof NativeScheduleScheduleWorkFailedClaim.Encoded
-
-export const NativeScheduleScheduleWorkRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "mission": Schema.optionalKey(Schema.NullOr(NativeMissionSubjectRef)),
-  "mission_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "occurrence": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "workspace": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleScheduleWorkRequestedClaimFields" }))()
-export type NativeScheduleScheduleWorkRequestedClaimFields = typeof NativeScheduleScheduleWorkRequestedClaimFields.Type
-export type NativeScheduleScheduleWorkRequestedClaimFieldsEncoded = typeof NativeScheduleScheduleWorkRequestedClaimFields.Encoded
-
-export const NativeScheduleScheduleWorkRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleScheduleWorkRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("schedule.work-requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/ba2e348de973bad4849d5733a8ef58359c5f3ea947bc5e5fe06dcfad2e87f77b/schedule/schedule.work-requested")
-}).annotate({ identifier: "NativeScheduleScheduleWorkRequestedClaim" }))()
-export type NativeScheduleScheduleWorkRequestedClaim = typeof NativeScheduleScheduleWorkRequestedClaim.Type
-export type NativeScheduleScheduleWorkRequestedClaimEncoded = typeof NativeScheduleScheduleWorkRequestedClaim.Encoded
-
-export const NativeScheduleScheduleWorkStartedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "mission_run": Schema.optionalKey(Schema.NullOr(NativeMissionRunSubjectRef)),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeScheduleScheduleWorkStartedClaimFields" }))()
-export type NativeScheduleScheduleWorkStartedClaimFields = typeof NativeScheduleScheduleWorkStartedClaimFields.Type
-export type NativeScheduleScheduleWorkStartedClaimFieldsEncoded = typeof NativeScheduleScheduleWorkStartedClaimFields.Encoded
-
-export const NativeScheduleScheduleWorkStartedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeScheduleScheduleWorkStartedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("schedule.work-started"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeScheduleSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d74027327d28e892a5be8cdd5ec4ad5c6495cb2643a29f62d4dc45de8327b7ea/schedule/schedule.work-started")
-}).annotate({ identifier: "NativeScheduleScheduleWorkStartedClaim" }))()
-export type NativeScheduleScheduleWorkStartedClaim = typeof NativeScheduleScheduleWorkStartedClaim.Type
-export type NativeScheduleScheduleWorkStartedClaimEncoded = typeof NativeScheduleScheduleWorkStartedClaim.Encoded
-
-export const NativeScheduleClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeScheduleIntentDesiredClaim,
-  NativeScheduleOperationalFailureClaim,
-  NativeScheduleOperationalRecoveredClaim,
-  NativeSchedulePublicationOperationClaim,
-  NativeScheduleReconcileFaultClaim,
-  NativeScheduleRuntimeReconcileDecisionClaim,
-  NativeScheduleScheduleOccurrenceCancelledClaim,
-  NativeScheduleScheduleOccurrenceReachedClaim,
-  NativeScheduleScheduleOccurrenceScheduledClaim,
-  NativeScheduleScheduleWorkFailedClaim,
-  NativeScheduleScheduleWorkRequestedClaim,
-  NativeScheduleScheduleWorkStartedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeScheduleClaim" }))()
-export type NativeScheduleClaim = typeof NativeScheduleClaim.Type
-export type NativeScheduleClaimEncoded = typeof NativeScheduleClaim.Encoded
-
-export const NativeScheduleSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("schedule"),
-  "heads": Schema.Array(NativeScheduleClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeScheduleSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/1c5ad19bff1b8dc509da8c80e4833066e309ecda7854367822c917cb07fa62f6/schedule")
-}).annotate({ identifier: "NativeScheduleSubject" }))()
-export type NativeScheduleSubject = typeof NativeScheduleSubject.Type
-export type NativeScheduleSubjectEncoded = typeof NativeScheduleSubject.Encoded
-
-export const NativeSekretIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSekretIntentDesiredClaimFields" }))()
-export type NativeSekretIntentDesiredClaimFields = typeof NativeSekretIntentDesiredClaimFields.Type
-export type NativeSekretIntentDesiredClaimFieldsEncoded = typeof NativeSekretIntentDesiredClaimFields.Encoded
-
-export const NativeSekretSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["sekret"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeSekretSubjectRef" }))()
-export type NativeSekretSubjectRef = typeof NativeSekretSubjectRef.Type
-export type NativeSekretSubjectRefEncoded = typeof NativeSekretSubjectRef.Encoded
-
-export const NativeSekretIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSekretIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSekretSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f177a22c667b6d34544b06961ea62437155732ba535344537fd9da78d7a970ed/sekret/intent.desired")
-}).annotate({ identifier: "NativeSekretIntentDesiredClaim" }))()
-export type NativeSekretIntentDesiredClaim = typeof NativeSekretIntentDesiredClaim.Type
-export type NativeSekretIntentDesiredClaimEncoded = typeof NativeSekretIntentDesiredClaim.Encoded
-
-export const NativeSekretPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeSekretPublicationOperationClaimFields" }))()
-export type NativeSekretPublicationOperationClaimFields = typeof NativeSekretPublicationOperationClaimFields.Type
-export type NativeSekretPublicationOperationClaimFieldsEncoded = typeof NativeSekretPublicationOperationClaimFields.Encoded
-
-export const NativeSekretPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSekretPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSekretSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/45dccd5d1bd67096ce5aa2a56d8f09050d4acbaec0fe5d92447a6f038b9b7866/sekret/publication.operation")
-}).annotate({ identifier: "NativeSekretPublicationOperationClaim" }))()
-export type NativeSekretPublicationOperationClaim = typeof NativeSekretPublicationOperationClaim.Type
-export type NativeSekretPublicationOperationClaimEncoded = typeof NativeSekretPublicationOperationClaim.Encoded
-
-export const NativeSekretClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeSekretIntentDesiredClaim,
-  NativeSekretPublicationOperationClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeSekretClaim" }))()
-export type NativeSekretClaim = typeof NativeSekretClaim.Type
-export type NativeSekretClaimEncoded = typeof NativeSekretClaim.Encoded
-
-export const NativeSekretSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("sekret"),
-  "heads": Schema.Array(NativeSekretClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeSekretSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/40d2e49fcd759d91215a1b1af0d013711aaf9529e5fc7910a9e63e8e339ed02b/sekret")
-}).annotate({ identifier: "NativeSekretSubject" }))()
-export type NativeSekretSubject = typeof NativeSekretSubject.Type
-export type NativeSekretSubjectEncoded = typeof NativeSekretSubject.Encoded
-
-export const NativeStepRunIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunIntentDesiredClaimFields" }))()
-export type NativeStepRunIntentDesiredClaimFields = typeof NativeStepRunIntentDesiredClaimFields.Type
-export type NativeStepRunIntentDesiredClaimFieldsEncoded = typeof NativeStepRunIntentDesiredClaimFields.Encoded
-
-export const NativeStepRunIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d8dea9cc58404f584245e2c90b873d07bfb270b46a4ce084bd1b90ebc42dbc11/step-run/intent.desired")
-}).annotate({ identifier: "NativeStepRunIntentDesiredClaim" }))()
-export type NativeStepRunIntentDesiredClaim = typeof NativeStepRunIntentDesiredClaim.Type
-export type NativeStepRunIntentDesiredClaimEncoded = typeof NativeStepRunIntentDesiredClaim.Encoded
-
-export const NativeStepRunMissionProducedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "mission": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "name": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "step_definition": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunMissionProducedClaimFields" }))()
-export type NativeStepRunMissionProducedClaimFields = typeof NativeStepRunMissionProducedClaimFields.Type
-export type NativeStepRunMissionProducedClaimFieldsEncoded = typeof NativeStepRunMissionProducedClaimFields.Encoded
-
-export const NativeStepRunMissionProducedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunMissionProducedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("mission.produced"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/aa9f7ba971963676c6b43c18608140b2b88db944032c9b0a65f8cab585b23bc2/step-run/mission.produced")
-}).annotate({ identifier: "NativeStepRunMissionProducedClaim" }))()
-export type NativeStepRunMissionProducedClaim = typeof NativeStepRunMissionProducedClaim.Type
-export type NativeStepRunMissionProducedClaimEncoded = typeof NativeStepRunMissionProducedClaim.Encoded
-
-export const NativeStepRunOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunOperationalFailureClaimFields" }))()
-export type NativeStepRunOperationalFailureClaimFields = typeof NativeStepRunOperationalFailureClaimFields.Type
-export type NativeStepRunOperationalFailureClaimFieldsEncoded = typeof NativeStepRunOperationalFailureClaimFields.Encoded
-
-export const NativeStepRunOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4c7794f4b4790c64ca666fe072a45d5da52544d0218d0dd5b5f9ddba8e06dc24/step-run/operational.failure")
-}).annotate({ identifier: "NativeStepRunOperationalFailureClaim" }))()
-export type NativeStepRunOperationalFailureClaim = typeof NativeStepRunOperationalFailureClaim.Type
-export type NativeStepRunOperationalFailureClaimEncoded = typeof NativeStepRunOperationalFailureClaim.Encoded
-
-export const NativeStepRunOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunOperationalRecoveredClaimFields" }))()
-export type NativeStepRunOperationalRecoveredClaimFields = typeof NativeStepRunOperationalRecoveredClaimFields.Type
-export type NativeStepRunOperationalRecoveredClaimFieldsEncoded = typeof NativeStepRunOperationalRecoveredClaimFields.Encoded
-
-export const NativeStepRunOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/edcf5251081e55531d2b796bcc44da205c852ed86533c2c02ddccd0f56385c02/step-run/operational.recovered")
-}).annotate({ identifier: "NativeStepRunOperationalRecoveredClaim" }))()
-export type NativeStepRunOperationalRecoveredClaim = typeof NativeStepRunOperationalRecoveredClaim.Type
-export type NativeStepRunOperationalRecoveredClaimEncoded = typeof NativeStepRunOperationalRecoveredClaim.Encoded
-
-export const NativeStepRunPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeStepRunPublicationOperationClaimFields" }))()
-export type NativeStepRunPublicationOperationClaimFields = typeof NativeStepRunPublicationOperationClaimFields.Type
-export type NativeStepRunPublicationOperationClaimFieldsEncoded = typeof NativeStepRunPublicationOperationClaimFields.Encoded
-
-export const NativeStepRunPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/61b846a231e579518b1df63c9bfa108b1fecff936205e85a78d7c7846e3cd6c8/step-run/publication.operation")
-}).annotate({ identifier: "NativeStepRunPublicationOperationClaim" }))()
-export type NativeStepRunPublicationOperationClaim = typeof NativeStepRunPublicationOperationClaim.Type
-export type NativeStepRunPublicationOperationClaimEncoded = typeof NativeStepRunPublicationOperationClaim.Encoded
-
-export const NativeStepRunReconcileFaultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "scope": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["faulted","recovered"])))
-}).annotate({ identifier: "NativeStepRunReconcileFaultClaimFields" }))()
-export type NativeStepRunReconcileFaultClaimFields = typeof NativeStepRunReconcileFaultClaimFields.Type
-export type NativeStepRunReconcileFaultClaimFieldsEncoded = typeof NativeStepRunReconcileFaultClaimFields.Encoded
-
-export const NativeStepRunReconcileFaultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunReconcileFaultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("reconcile.fault"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4b11933c822d6de2075d4acd4c5fa8f3f5269eac13220b385098c157ac9756dc/step-run/reconcile.fault")
-}).annotate({ identifier: "NativeStepRunReconcileFaultClaim" }))()
-export type NativeStepRunReconcileFaultClaim = typeof NativeStepRunReconcileFaultClaim.Type
-export type NativeStepRunReconcileFaultClaimEncoded = typeof NativeStepRunReconcileFaultClaim.Encoded
-
-export const NativeStepRunStepRunCarriedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "claimant": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "definition_hash": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "source_generation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "source_step_run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "worker_reported": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeStepRunStepRunCarriedClaimFields" }))()
-export type NativeStepRunStepRunCarriedClaimFields = typeof NativeStepRunStepRunCarriedClaimFields.Type
-export type NativeStepRunStepRunCarriedClaimFieldsEncoded = typeof NativeStepRunStepRunCarriedClaimFields.Encoded
-
-export const NativeStepRunStepRunCarriedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunStepRunCarriedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("step-run.carried"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/673f6498ea915a5c735e0de29face5139524eff11bfbf0a0ad1373908315a63f/step-run/step-run.carried")
-}).annotate({ identifier: "NativeStepRunStepRunCarriedClaim" }))()
-export type NativeStepRunStepRunCarriedClaim = typeof NativeStepRunStepRunCarriedClaim.Type
-export type NativeStepRunStepRunCarriedClaimEncoded = typeof NativeStepRunStepRunCarriedClaim.Encoded
-
-export const NativeStepRunStepRunRetriedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "not_before_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunStepRunRetriedClaimFields" }))()
-export type NativeStepRunStepRunRetriedClaimFields = typeof NativeStepRunStepRunRetriedClaimFields.Type
-export type NativeStepRunStepRunRetriedClaimFieldsEncoded = typeof NativeStepRunStepRunRetriedClaimFields.Encoded
-
-export const NativeStepRunStepRunRetriedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunStepRunRetriedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("step-run.retried"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/ad4adb2e46bf9a807e9d9a4d58ad9de89b8ec14c1014bdf79418e0dbb4c260b6/step-run/step-run.retried")
-}).annotate({ identifier: "NativeStepRunStepRunRetriedClaim" }))()
-export type NativeStepRunStepRunRetriedClaim = typeof NativeStepRunStepRunRetriedClaim.Type
-export type NativeStepRunStepRunRetriedClaimEncoded = typeof NativeStepRunStepRunRetriedClaim.Encoded
-
-export const NativeStepRunStepRunStateClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunStepRunStateClaimFields" }))()
-export type NativeStepRunStepRunStateClaimFields = typeof NativeStepRunStepRunStateClaimFields.Type
-export type NativeStepRunStepRunStateClaimFieldsEncoded = typeof NativeStepRunStepRunStateClaimFields.Encoded
-
-export const NativeStepRunStepRunStateClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunStepRunStateClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("step-run.state"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/53fbbcbec1886c0c57da7a2d894776fe7df033af485e3a404633156a51deedaa/step-run/step-run.state")
-}).annotate({ identifier: "NativeStepRunStepRunStateClaim" }))()
-export type NativeStepRunStepRunStateClaim = typeof NativeStepRunStepRunStateClaim.Type
-export type NativeStepRunStepRunStateClaimEncoded = typeof NativeStepRunStepRunStateClaim.Encoded
-
-export const NativeStepRunWorkClaimedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "claimant": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "extend_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "worker_reported": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeStepRunWorkClaimedClaimFields" }))()
-export type NativeStepRunWorkClaimedClaimFields = typeof NativeStepRunWorkClaimedClaimFields.Type
-export type NativeStepRunWorkClaimedClaimFieldsEncoded = typeof NativeStepRunWorkClaimedClaimFields.Encoded
-
-export const NativeStepRunWorkClaimedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkClaimedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.claimed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9c070b0ae5142b9b4689dcb159a785a884a6af40a8a7cd3f103028348d62bc1c/step-run/work.claimed")
-}).annotate({ identifier: "NativeStepRunWorkClaimedClaim" }))()
-export type NativeStepRunWorkClaimedClaim = typeof NativeStepRunWorkClaimedClaim.Type
-export type NativeStepRunWorkClaimedClaimEncoded = typeof NativeStepRunWorkClaimedClaim.Encoded
-
-export const NativeStepRunWorkExtendedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "claimant": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "extend_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "worker_reported": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeStepRunWorkExtendedClaimFields" }))()
-export type NativeStepRunWorkExtendedClaimFields = typeof NativeStepRunWorkExtendedClaimFields.Type
-export type NativeStepRunWorkExtendedClaimFieldsEncoded = typeof NativeStepRunWorkExtendedClaimFields.Encoded
-
-export const NativeStepRunWorkExtendedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkExtendedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.extended"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/114fbb70eb15cafde2ab1370d9f1c975059de96853e4f38a4a0487e68937c7c5/step-run/work.extended")
-}).annotate({ identifier: "NativeStepRunWorkExtendedClaim" }))()
-export type NativeStepRunWorkExtendedClaim = typeof NativeStepRunWorkExtendedClaim.Type
-export type NativeStepRunWorkExtendedClaimEncoded = typeof NativeStepRunWorkExtendedClaim.Encoded
-
-export const NativeStepRunWorkFailedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "claimant": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "extend_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "worker_reported": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeStepRunWorkFailedClaimFields" }))()
-export type NativeStepRunWorkFailedClaimFields = typeof NativeStepRunWorkFailedClaimFields.Type
-export type NativeStepRunWorkFailedClaimFieldsEncoded = typeof NativeStepRunWorkFailedClaimFields.Encoded
-
-export const NativeStepRunWorkFailedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkFailedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.failed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/8a3c6ea9f74cd8f4beaa9d7e21ef00cedbe976f95e62818d703f2235ba91ba9a/step-run/work.failed")
-}).annotate({ identifier: "NativeStepRunWorkFailedClaim" }))()
-export type NativeStepRunWorkFailedClaim = typeof NativeStepRunWorkFailedClaim.Type
-export type NativeStepRunWorkFailedClaimEncoded = typeof NativeStepRunWorkFailedClaim.Encoded
-
-export const NativeStepRunWorkPersonAskedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "generation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "key": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "origin_attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "origin_step": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "owner_generation": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "owner_run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "person": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "run": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "waiting_since": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunWorkPersonAskedClaimFields" }))()
-export type NativeStepRunWorkPersonAskedClaimFields = typeof NativeStepRunWorkPersonAskedClaimFields.Type
-export type NativeStepRunWorkPersonAskedClaimFieldsEncoded = typeof NativeStepRunWorkPersonAskedClaimFields.Encoded
-
-export const NativeStepRunWorkPersonAskedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkPersonAskedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.person-asked"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/cf22b60cee8a8713bb52e1b9057b1b11c766e4aa8e82766d0e11651a5d4211c1/step-run/work.person-asked")
-}).annotate({ identifier: "NativeStepRunWorkPersonAskedClaim" }))()
-export type NativeStepRunWorkPersonAskedClaim = typeof NativeStepRunWorkPersonAskedClaim.Type
-export type NativeStepRunWorkPersonAskedClaimEncoded = typeof NativeStepRunWorkPersonAskedClaim.Encoded
-
-export const NativeStepRunWorkPersonCancelledClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "key": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunWorkPersonCancelledClaimFields" }))()
-export type NativeStepRunWorkPersonCancelledClaimFields = typeof NativeStepRunWorkPersonCancelledClaimFields.Type
-export type NativeStepRunWorkPersonCancelledClaimFieldsEncoded = typeof NativeStepRunWorkPersonCancelledClaimFields.Encoded
-
-export const NativeStepRunWorkPersonCancelledClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkPersonCancelledClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.person-cancelled"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b6c34281a9c6d785b3b5e3fb22ea4677272ff72860ec31ddef9ed6ff34780214/step-run/work.person-cancelled")
-}).annotate({ identifier: "NativeStepRunWorkPersonCancelledClaim" }))()
-export type NativeStepRunWorkPersonCancelledClaim = typeof NativeStepRunWorkPersonCancelledClaim.Type
-export type NativeStepRunWorkPersonCancelledClaimEncoded = typeof NativeStepRunWorkPersonCancelledClaim.Encoded
-
-export const NativeStepRunWorkPersonDoneClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "key": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeStepRunWorkPersonDoneClaimFields" }))()
-export type NativeStepRunWorkPersonDoneClaimFields = typeof NativeStepRunWorkPersonDoneClaimFields.Type
-export type NativeStepRunWorkPersonDoneClaimFieldsEncoded = typeof NativeStepRunWorkPersonDoneClaimFields.Encoded
-
-export const NativeStepRunWorkPersonDoneClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkPersonDoneClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.person-done"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/be557e0aaa5d0af44a9935e4674c86abd5982fbd010598475d6b2ed384b97992/step-run/work.person-done")
-}).annotate({ identifier: "NativeStepRunWorkPersonDoneClaim" }))()
-export type NativeStepRunWorkPersonDoneClaim = typeof NativeStepRunWorkPersonDoneClaim.Type
-export type NativeStepRunWorkPersonDoneClaimEncoded = typeof NativeStepRunWorkPersonDoneClaim.Encoded
-
-export const NativeStepRunWorkProgressClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "claimant": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "extend_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "worker_reported": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeStepRunWorkProgressClaimFields" }))()
-export type NativeStepRunWorkProgressClaimFields = typeof NativeStepRunWorkProgressClaimFields.Type
-export type NativeStepRunWorkProgressClaimFieldsEncoded = typeof NativeStepRunWorkProgressClaimFields.Encoded
-
-export const NativeStepRunWorkProgressClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkProgressClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.progress"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9a1d42a3d50a0228a4c404b90b2c4e0304adbeb6ed5e1de09ec06b2ca8bde186/step-run/work.progress")
-}).annotate({ identifier: "NativeStepRunWorkProgressClaim" }))()
-export type NativeStepRunWorkProgressClaim = typeof NativeStepRunWorkProgressClaim.Type
-export type NativeStepRunWorkProgressClaimEncoded = typeof NativeStepRunWorkProgressClaim.Encoded
-
-export const NativeStepRunWorkReleasedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "claimant": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "extend_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "worker_reported": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeStepRunWorkReleasedClaimFields" }))()
-export type NativeStepRunWorkReleasedClaimFields = typeof NativeStepRunWorkReleasedClaimFields.Type
-export type NativeStepRunWorkReleasedClaimFieldsEncoded = typeof NativeStepRunWorkReleasedClaimFields.Encoded
-
-export const NativeStepRunWorkReleasedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkReleasedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.released"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/282db1e435de03e43b62cb56fd25c5d5c3b6629a0d232665847389245f2df6ac/step-run/work.released")
-}).annotate({ identifier: "NativeStepRunWorkReleasedClaim" }))()
-export type NativeStepRunWorkReleasedClaim = typeof NativeStepRunWorkReleasedClaim.Type
-export type NativeStepRunWorkReleasedClaimEncoded = typeof NativeStepRunWorkReleasedClaim.Encoded
-
-export const NativeStepRunWorkRenewedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "claimant": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "extend_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "worker_reported": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeStepRunWorkRenewedClaimFields" }))()
-export type NativeStepRunWorkRenewedClaimFields = typeof NativeStepRunWorkRenewedClaimFields.Type
-export type NativeStepRunWorkRenewedClaimFieldsEncoded = typeof NativeStepRunWorkRenewedClaimFields.Encoded
-
-export const NativeStepRunWorkRenewedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkRenewedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.renewed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/eb005a02920d80cb49e5215af38e0392ebb16f6f88def1d070e48b495cc74547/step-run/work.renewed")
-}).annotate({ identifier: "NativeStepRunWorkRenewedClaim" }))()
-export type NativeStepRunWorkRenewedClaim = typeof NativeStepRunWorkRenewedClaim.Type
-export type NativeStepRunWorkRenewedClaimEncoded = typeof NativeStepRunWorkRenewedClaim.Encoded
-
-export const NativeStepRunWorkSubmittedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "attempt": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_expires_at_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "claim_incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "claimant": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "extend_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "readiness_epoch": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "summary": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "worker_reported": Schema.optionalKey(Schema.NullOr(Schema.Boolean))
-}).annotate({ identifier: "NativeStepRunWorkSubmittedClaimFields" }))()
-export type NativeStepRunWorkSubmittedClaimFields = typeof NativeStepRunWorkSubmittedClaimFields.Type
-export type NativeStepRunWorkSubmittedClaimFieldsEncoded = typeof NativeStepRunWorkSubmittedClaimFields.Encoded
-
-export const NativeStepRunWorkSubmittedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeStepRunWorkSubmittedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("work.submitted"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeStepRunSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/5bb95138c417631a2f4eeccfa7aed2ed3aaadca46dd0b10e7e955380dc4cc6ae/step-run/work.submitted")
-}).annotate({ identifier: "NativeStepRunWorkSubmittedClaim" }))()
-export type NativeStepRunWorkSubmittedClaim = typeof NativeStepRunWorkSubmittedClaim.Type
-export type NativeStepRunWorkSubmittedClaimEncoded = typeof NativeStepRunWorkSubmittedClaim.Encoded
-
-export const NativeStepRunClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeStepRunIntentDesiredClaim,
-  NativeStepRunMissionProducedClaim,
-  NativeStepRunOperationalFailureClaim,
-  NativeStepRunOperationalRecoveredClaim,
-  NativeStepRunPublicationOperationClaim,
-  NativeStepRunReconcileFaultClaim,
-  NativeStepRunStepRunCarriedClaim,
-  NativeStepRunStepRunRetriedClaim,
-  NativeStepRunStepRunStateClaim,
-  NativeStepRunWorkClaimedClaim,
-  NativeStepRunWorkExtendedClaim,
-  NativeStepRunWorkFailedClaim,
-  NativeStepRunWorkPersonAskedClaim,
-  NativeStepRunWorkPersonCancelledClaim,
-  NativeStepRunWorkPersonDoneClaim,
-  NativeStepRunWorkProgressClaim,
-  NativeStepRunWorkReleasedClaim,
-  NativeStepRunWorkRenewedClaim,
-  NativeStepRunWorkSubmittedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeStepRunClaim" }))()
-export type NativeStepRunClaim = typeof NativeStepRunClaim.Type
-export type NativeStepRunClaimEncoded = typeof NativeStepRunClaim.Encoded
-
-export const NativeStepRunSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("step-run"),
-  "heads": Schema.Array(NativeStepRunClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeStepRunSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/67d4dae65f4bb1a0deb45ccadcf03361fc031221d16dadc6d2c4bd5daaf66acb/step-run")
-}).annotate({ identifier: "NativeStepRunSubject" }))()
-export type NativeStepRunSubject = typeof NativeStepRunSubject.Type
-export type NativeStepRunSubjectEncoded = typeof NativeStepRunSubject.Encoded
-
-export const NativeSubscriptionIntentDesiredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "kind": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "revision": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionIntentDesiredClaimFields" }))()
-export type NativeSubscriptionIntentDesiredClaimFields = typeof NativeSubscriptionIntentDesiredClaimFields.Type
-export type NativeSubscriptionIntentDesiredClaimFieldsEncoded = typeof NativeSubscriptionIntentDesiredClaimFields.Encoded
-
-export const NativeSubscriptionSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["subscription"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeSubscriptionSubjectRef" }))()
-export type NativeSubscriptionSubjectRef = typeof NativeSubscriptionSubjectRef.Type
-export type NativeSubscriptionSubjectRefEncoded = typeof NativeSubscriptionSubjectRef.Encoded
-
-export const NativeSubscriptionIntentDesiredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionIntentDesiredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("intent.desired"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/0589789809f0aace055ce52184fc8961e07b432fda30d7f08ae99a9952c2ba92/subscription/intent.desired")
-}).annotate({ identifier: "NativeSubscriptionIntentDesiredClaim" }))()
-export type NativeSubscriptionIntentDesiredClaim = typeof NativeSubscriptionIntentDesiredClaim.Type
-export type NativeSubscriptionIntentDesiredClaimEncoded = typeof NativeSubscriptionIntentDesiredClaim.Encoded
-
-export const NativeSubscriptionOperationalFailureClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "condition": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "incarnation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reviewer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "severity": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "source_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "title": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionOperationalFailureClaimFields" }))()
-export type NativeSubscriptionOperationalFailureClaimFields = typeof NativeSubscriptionOperationalFailureClaimFields.Type
-export type NativeSubscriptionOperationalFailureClaimFieldsEncoded = typeof NativeSubscriptionOperationalFailureClaimFields.Encoded
-
-export const NativeSubscriptionOperationalFailureClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionOperationalFailureClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.failure"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/9139f7219706376ad8ab74c7c99c86e93b4e2b5f4653b5f4cc8d2a2d4ac58480/subscription/operational.failure")
-}).annotate({ identifier: "NativeSubscriptionOperationalFailureClaim" }))()
-export type NativeSubscriptionOperationalFailureClaim = typeof NativeSubscriptionOperationalFailureClaim.Type
-export type NativeSubscriptionOperationalFailureClaimEncoded = typeof NativeSubscriptionOperationalFailureClaim.Encoded
-
-export const NativeSubscriptionOperationalRecoveredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "episode": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "failure": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionOperationalRecoveredClaimFields" }))()
-export type NativeSubscriptionOperationalRecoveredClaimFields = typeof NativeSubscriptionOperationalRecoveredClaimFields.Type
-export type NativeSubscriptionOperationalRecoveredClaimFieldsEncoded = typeof NativeSubscriptionOperationalRecoveredClaimFields.Encoded
-
-export const NativeSubscriptionOperationalRecoveredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionOperationalRecoveredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("operational.recovered"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/c85a9111c576ad4b58a47ba2350aa9688b8f94604170eca3ec8d8e9a1ae0a124/subscription/operational.recovered")
-}).annotate({ identifier: "NativeSubscriptionOperationalRecoveredClaim" }))()
-export type NativeSubscriptionOperationalRecoveredClaim = typeof NativeSubscriptionOperationalRecoveredClaim.Type
-export type NativeSubscriptionOperationalRecoveredClaimEncoded = typeof NativeSubscriptionOperationalRecoveredClaim.Encoded
-
-export const NativeSubscriptionPublicationOperationClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "action": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "operation": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["accepted"])))
-}).annotate({ identifier: "NativeSubscriptionPublicationOperationClaimFields" }))()
-export type NativeSubscriptionPublicationOperationClaimFields = typeof NativeSubscriptionPublicationOperationClaimFields.Type
-export type NativeSubscriptionPublicationOperationClaimFieldsEncoded = typeof NativeSubscriptionPublicationOperationClaimFields.Encoded
-
-export const NativeSubscriptionPublicationOperationClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionPublicationOperationClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("publication.operation"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f2c928e3879e0ea1b01eeb000588462622c983f382c6f357a1fc6ca837e3988d/subscription/publication.operation")
-}).annotate({ identifier: "NativeSubscriptionPublicationOperationClaim" }))()
-export type NativeSubscriptionPublicationOperationClaim = typeof NativeSubscriptionPublicationOperationClaim.Type
-export type NativeSubscriptionPublicationOperationClaimEncoded = typeof NativeSubscriptionPublicationOperationClaim.Encoded
-
-export const NativeSubscriptionReconcileFaultClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "scope": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "status": Schema.optionalKey(Schema.NullOr(Schema.Literals(["faulted","recovered"])))
-}).annotate({ identifier: "NativeSubscriptionReconcileFaultClaimFields" }))()
-export type NativeSubscriptionReconcileFaultClaimFields = typeof NativeSubscriptionReconcileFaultClaimFields.Type
-export type NativeSubscriptionReconcileFaultClaimFieldsEncoded = typeof NativeSubscriptionReconcileFaultClaimFields.Encoded
-
-export const NativeSubscriptionReconcileFaultClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionReconcileFaultClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("reconcile.fault"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/bb9dd43b068ef6909f04133e188755458dda47be17223d7b1dce802499aa111d/subscription/reconcile.fault")
-}).annotate({ identifier: "NativeSubscriptionReconcileFaultClaim" }))()
-export type NativeSubscriptionReconcileFaultClaim = typeof NativeSubscriptionReconcileFaultClaim.Type
-export type NativeSubscriptionReconcileFaultClaimEncoded = typeof NativeSubscriptionReconcileFaultClaim.Encoded
-
-export const NativeSubscriptionSubscriptionBatchSentClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "entries": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "message": Schema.optionalKey(Schema.NullOr(NativeMessageSubjectRef)),
-  "through": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionBatchSentClaimFields" }))()
-export type NativeSubscriptionSubscriptionBatchSentClaimFields = typeof NativeSubscriptionSubscriptionBatchSentClaimFields.Type
-export type NativeSubscriptionSubscriptionBatchSentClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionBatchSentClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionBatchSentClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionBatchSentClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.batch-sent"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/f10d9fb6a0c64bced0df506f8c766440af71b7566ee0aa1d6036ec79cc0eb330/subscription/subscription.batch-sent")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionBatchSentClaim" }))()
-export type NativeSubscriptionSubscriptionBatchSentClaim = typeof NativeSubscriptionSubscriptionBatchSentClaim.Type
-export type NativeSubscriptionSubscriptionBatchSentClaimEncoded = typeof NativeSubscriptionSubscriptionBatchSentClaim.Encoded
-
-export const NativeSubscriptionSubscriptionMissionDeferredClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "not_before_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(-9007199254740991)).check(Schema.isLessThanOrEqualTo(9007199254740991)))),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionDeferredClaimFields" }))()
-export type NativeSubscriptionSubscriptionMissionDeferredClaimFields = typeof NativeSubscriptionSubscriptionMissionDeferredClaimFields.Type
-export type NativeSubscriptionSubscriptionMissionDeferredClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionMissionDeferredClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionMissionDeferredClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionMissionDeferredClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.mission-deferred"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/59b88d8a3d97ffe838ac910aac3a5598a67a64b884613fa1e740a332b2c50940/subscription/subscription.mission-deferred")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionDeferredClaim" }))()
-export type NativeSubscriptionSubscriptionMissionDeferredClaim = typeof NativeSubscriptionSubscriptionMissionDeferredClaim.Type
-export type NativeSubscriptionSubscriptionMissionDeferredClaimEncoded = typeof NativeSubscriptionSubscriptionMissionDeferredClaim.Encoded
-
-export const NativeSubscriptionSubscriptionMissionFailedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "code": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionFailedClaimFields" }))()
-export type NativeSubscriptionSubscriptionMissionFailedClaimFields = typeof NativeSubscriptionSubscriptionMissionFailedClaimFields.Type
-export type NativeSubscriptionSubscriptionMissionFailedClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionMissionFailedClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionMissionFailedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionMissionFailedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.mission-failed"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/b0823976602ca90f0f68e89449bc009c38f615f1c2610d233f4145dc5396dc7d/subscription/subscription.mission-failed")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionFailedClaim" }))()
-export type NativeSubscriptionSubscriptionMissionFailedClaim = typeof NativeSubscriptionSubscriptionMissionFailedClaim.Type
-export type NativeSubscriptionSubscriptionMissionFailedClaimEncoded = typeof NativeSubscriptionSubscriptionMissionFailedClaim.Encoded
-
-export const NativeSubscriptionSubscriptionMissionRequestCancelledClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionRequestCancelledClaimFields" }))()
-export type NativeSubscriptionSubscriptionMissionRequestCancelledClaimFields = typeof NativeSubscriptionSubscriptionMissionRequestCancelledClaimFields.Type
-export type NativeSubscriptionSubscriptionMissionRequestCancelledClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionMissionRequestCancelledClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionMissionRequestCancelledClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionMissionRequestCancelledClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.mission-request-cancelled"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/4160d99d8e6d431dc8ec84d667b8486a4f583f4ce43c2ff2626efba93948d1dc/subscription/subscription.mission-request-cancelled")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionRequestCancelledClaim" }))()
-export type NativeSubscriptionSubscriptionMissionRequestCancelledClaim = typeof NativeSubscriptionSubscriptionMissionRequestCancelledClaim.Type
-export type NativeSubscriptionSubscriptionMissionRequestCancelledClaimEncoded = typeof NativeSubscriptionSubscriptionMissionRequestCancelledClaim.Encoded
-
-export const NativeSubscriptionSubscriptionMissionRequestReleasedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionRequestReleasedClaimFields" }))()
-export type NativeSubscriptionSubscriptionMissionRequestReleasedClaimFields = typeof NativeSubscriptionSubscriptionMissionRequestReleasedClaimFields.Type
-export type NativeSubscriptionSubscriptionMissionRequestReleasedClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionMissionRequestReleasedClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionMissionRequestReleasedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionMissionRequestReleasedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.mission-request-released"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/96eac24c355f8e51dbebef0945e8c3926eee56dd42090d512ca64b285bd9e852/subscription/subscription.mission-request-released")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionRequestReleasedClaim" }))()
-export type NativeSubscriptionSubscriptionMissionRequestReleasedClaim = typeof NativeSubscriptionSubscriptionMissionRequestReleasedClaim.Type
-export type NativeSubscriptionSubscriptionMissionRequestReleasedClaimEncoded = typeof NativeSubscriptionSubscriptionMissionRequestReleasedClaim.Encoded
-
-export const NativeAgentPersonSubjectRef = /*#__PURE__*/ (() => Schema.String.check(Schema.makeFilter((value: string) => RawSubjects.isNativeSubjectReference(value, ["agent","person"]), { expected: "a canonical registered native reference within 512 UTF-8 bytes" })).annotate({ identifier: "NativeAgentPersonSubjectRef" }))()
-export type NativeAgentPersonSubjectRef = typeof NativeAgentPersonSubjectRef.Type
-export type NativeAgentPersonSubjectRefEncoded = typeof NativeAgentPersonSubjectRef.Encoded
-
-export const NativeSubscriptionSubscriptionMissionRequestedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "discovery": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "held": Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
-  "mission": Schema.optionalKey(Schema.NullOr(NativeMissionSubjectRef)),
-  "mission_revision": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "requester": Schema.optionalKey(Schema.NullOr(NativeAgentPersonSubjectRef)),
-  "resource": Schema.optionalKey(Schema.NullOr(NativeResourceSubjectRef)),
-  "resource_input": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "workspace": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionRequestedClaimFields" }))()
-export type NativeSubscriptionSubscriptionMissionRequestedClaimFields = typeof NativeSubscriptionSubscriptionMissionRequestedClaimFields.Type
-export type NativeSubscriptionSubscriptionMissionRequestedClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionMissionRequestedClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionMissionRequestedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionMissionRequestedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.mission-requested"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/d19d36483a15c472359c4c2e2165a4eb846c09a32e5ffa91e0946639729d0530/subscription/subscription.mission-requested")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionRequestedClaim" }))()
-export type NativeSubscriptionSubscriptionMissionRequestedClaim = typeof NativeSubscriptionSubscriptionMissionRequestedClaim.Type
-export type NativeSubscriptionSubscriptionMissionRequestedClaimEncoded = typeof NativeSubscriptionSubscriptionMissionRequestedClaim.Encoded
-
-export const NativeSubscriptionSubscriptionMissionStartedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "mission_run": Schema.optionalKey(Schema.NullOr(NativeMissionRunSubjectRef)),
-  "request": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionStartedClaimFields" }))()
-export type NativeSubscriptionSubscriptionMissionStartedClaimFields = typeof NativeSubscriptionSubscriptionMissionStartedClaimFields.Type
-export type NativeSubscriptionSubscriptionMissionStartedClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionMissionStartedClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionMissionStartedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionMissionStartedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.mission-started"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/bf839b390e3141a0e5e0200cb7def19a159430260008757600be288e3f8c15f2/subscription/subscription.mission-started")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionMissionStartedClaim" }))()
-export type NativeSubscriptionSubscriptionMissionStartedClaim = typeof NativeSubscriptionSubscriptionMissionStartedClaim.Type
-export type NativeSubscriptionSubscriptionMissionStartedClaimEncoded = typeof NativeSubscriptionSubscriptionMissionStartedClaim.Encoded
-
-export const NativeSubscriptionSubscriptionStateClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "observer": Schema.optionalKey(Schema.NullOr(NativeSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.String)),
-  "state": Schema.optionalKey(Schema.NullOr(Schema.Literals(["pending","active","stopped"]))),
-  "to": Schema.optionalKey(Schema.NullOr(NativeSubjectRef))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionStateClaimFields" }))()
-export type NativeSubscriptionSubscriptionStateClaimFields = typeof NativeSubscriptionSubscriptionStateClaimFields.Type
-export type NativeSubscriptionSubscriptionStateClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionStateClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionStateClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionStateClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.state"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/8af4f3d1276d1c7f3669ba40034eba19fe0ceaac9f8d10c61a1f2bbde2f3aa4a/subscription/subscription.state")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionStateClaim" }))()
-export type NativeSubscriptionSubscriptionStateClaim = typeof NativeSubscriptionSubscriptionStateClaim.Type
-export type NativeSubscriptionSubscriptionStateClaimEncoded = typeof NativeSubscriptionSubscriptionStateClaim.Encoded
-
-export const NativeSubscriptionSubscriptionWatchEndedClaimFields = /*#__PURE__*/ (() => Schema.Struct({
-  "message": Schema.optionalKey(Schema.NullOr(NativeMessageSubjectRef)),
-  "reason": Schema.optionalKey(Schema.NullOr(Schema.Literals(["closed","merged","deadline","unwatched","seat-ended"]))),
-  "since_unix_ms": Schema.optionalKey(Schema.NullOr(Schema.String))
-}).annotate({ identifier: "NativeSubscriptionSubscriptionWatchEndedClaimFields" }))()
-export type NativeSubscriptionSubscriptionWatchEndedClaimFields = typeof NativeSubscriptionSubscriptionWatchEndedClaimFields.Type
-export type NativeSubscriptionSubscriptionWatchEndedClaimFieldsEncoded = typeof NativeSubscriptionSubscriptionWatchEndedClaimFields.Encoded
-
-export const NativeSubscriptionSubscriptionWatchEndedClaim = /*#__PURE__*/ (() => Schema.Struct({
-  "fields": NativeSubscriptionSubscriptionWatchEndedClaimFields,
-  "id": Schema.String,
-  "kind": Schema.Literal("subscription.watch-ended"),
-  "omitted_fields": Schema.Array(Schema.String),
-  "payload_availability": Schema.Literals(["available","withheld","unavailable"]),
-  "provenance": SubjectProvenance,
-  "reason": optionalKey(Schema.String),
-  "ref": NativeSubscriptionSubjectRef,
-  "retention": Schema.Literal("durable"),
-  "schema_id": Schema.Literal("subject-claim-schema/1dc33078740aa8a806537667714692fe6bb09da0ec8eab12ae71f4902bd6e7be/subscription/subscription.watch-ended")
-}).annotate({ identifier: "NativeSubscriptionSubscriptionWatchEndedClaim" }))()
-export type NativeSubscriptionSubscriptionWatchEndedClaim = typeof NativeSubscriptionSubscriptionWatchEndedClaim.Type
-export type NativeSubscriptionSubscriptionWatchEndedClaimEncoded = typeof NativeSubscriptionSubscriptionWatchEndedClaim.Encoded
-
-export const NativeSubscriptionClaim = /*#__PURE__*/ (() => Schema.Union([
-  NativeSubscriptionIntentDesiredClaim,
-  NativeSubscriptionOperationalFailureClaim,
-  NativeSubscriptionOperationalRecoveredClaim,
-  NativeSubscriptionPublicationOperationClaim,
-  NativeSubscriptionReconcileFaultClaim,
-  NativeSubscriptionSubscriptionBatchSentClaim,
-  NativeSubscriptionSubscriptionMissionDeferredClaim,
-  NativeSubscriptionSubscriptionMissionFailedClaim,
-  NativeSubscriptionSubscriptionMissionRequestCancelledClaim,
-  NativeSubscriptionSubscriptionMissionRequestReleasedClaim,
-  NativeSubscriptionSubscriptionMissionRequestedClaim,
-  NativeSubscriptionSubscriptionMissionStartedClaim,
-  NativeSubscriptionSubscriptionStateClaim,
-  NativeSubscriptionSubscriptionWatchEndedClaim
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "NativeSubscriptionClaim" }))()
-export type NativeSubscriptionClaim = typeof NativeSubscriptionClaim.Type
-export type NativeSubscriptionClaimEncoded = typeof NativeSubscriptionClaim.Encoded
-
-export const NativeSubscriptionSubject = /*#__PURE__*/ (() => Schema.Struct({
-  "family": Schema.Literal("subscription"),
-  "heads": Schema.Array(NativeSubscriptionClaim).check(Schema.isMaxLength(64)),
-  "heads_complete": Schema.Boolean,
-  "id": Schema.String,
-  "kind": Schema.Literal("subject"),
-  "local_fence": SubjectLocalFence,
-  "ref": NativeSubscriptionSubjectRef,
-  "schema_id": Schema.Literal("subject-schema/c77a2ad01777232ed1b219d72e3bf3bbb9b2f5a179fca5a550659604f68ec2e6/subscription")
-}).annotate({ identifier: "NativeSubscriptionSubject" }))()
-export type NativeSubscriptionSubject = typeof NativeSubscriptionSubject.Type
-export type NativeSubscriptionSubjectEncoded = typeof NativeSubscriptionSubject.Encoded
-
-export const SubjectProjection = /*#__PURE__*/ (() => Schema.Union([
-  NativeAccountSubject,
-  NativeAgentSubject,
-  NativeArrangementSubject,
-  NativeAttentionSubject,
-  NativeCheckpointExcusalSubject,
-  NativeCheckpointSubject,
-  NativeCustomSubject,
-  NativeDaemonSubject,
-  NativeDocSubject,
-  NativeExecSubject,
-  NativeExternalSubject,
-  NativeFileSubject,
-  NativeFleetInviteSubject,
-  NativeGateOperationSubject,
-  NativeGithubPostSubject,
-  NativeGlassSubject,
-  NativeHostSubject,
-  NativeLaneSubject,
-  NativeLoopRunSubject,
-  NativeMessageSubject,
-  NativeMissionRunSubject,
-  NativeMissionSubject,
-  NativeObserverSubject,
-  NativeOwnedSetSubject,
-  NativePersonSubject,
-  NativePlanningSessionSubject,
-  NativePtySubject,
-  NativeRepairSubject,
-  NativeResourceSubject,
-  NativeRevisionProposalSubject,
-  NativeRuleSubject,
-  NativeRunGenerationSubject,
-  NativeScheduleSubject,
-  NativeSekretSubject,
-  NativeStepRunSubject,
-  NativeSubscriptionSubject
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("family")).annotate({ identifier: "SubjectProjection" }))()
-export type SubjectProjection = typeof SubjectProjection.Type
-export type SubjectProjectionEncoded = typeof SubjectProjection.Encoded
-
-export const SubjectCollectionFrame = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "collection": Schema.Literal("subjects"), "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(SubjectProjection), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot }),
-  Schema.Struct({ "collection": Schema.Literal("subjects"), "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(SubjectProjection) })
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "SubjectCollectionFrame" }))()
-export type SubjectCollectionFrame = typeof SubjectCollectionFrame.Type
-export type SubjectCollectionFrameEncoded = typeof SubjectCollectionFrame.Encoded
-
-export const TerminalFacts = /*#__PURE__*/ (() => Schema.Struct({
-  "clients": optionalKey(Schema.Struct({ "attached": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "read_only": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) })),
-  "columns": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
-  "process": optionalKey(Schema.Struct({ "alive": Schema.Boolean, "exit_code": optionalKey(Schema.Int) })),
-  "rows": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
-  "tags": optionalKey(Schema.Record(Schema.String, Schema.String)),
-  "uptime_s": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
-}).annotate({ identifier: "TerminalFacts" }))()
-export type TerminalFacts = typeof TerminalFacts.Type
-export type TerminalFactsEncoded = typeof TerminalFacts.Encoded
-
-export const TerminalId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:terminal)/[^\\s]+$", "u"), "terminal").annotate({ identifier: "TerminalId" }))()
-export type TerminalId = typeof TerminalId.Type
-export type TerminalIdEncoded = typeof TerminalId.Encoded
-
-export const TerminalColor = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(255)),
-  Schema.String.check(Schema.isPattern(new RegExp("^#[0-9a-f]{6}$", "u")))
-], { mode: "oneOf" }).annotate({ identifier: "TerminalColor" }))()
-export type TerminalColor = typeof TerminalColor.Type
-export type TerminalColorEncoded = typeof TerminalColor.Encoded
-
-export const TerminalLink = /*#__PURE__*/ (() => Schema.Struct({
-  /** Hyperlink destination emitted by the terminal. */
-  "uri": Schema.String.check(Schema.isMinLength(1)).annotate({ description: "Hyperlink destination emitted by the terminal." })
-}).annotate({ identifier: "TerminalLink" }))()
-export type TerminalLink = typeof TerminalLink.Type
-export type TerminalLinkEncoded = typeof TerminalLink.Encoded
-
-export const TerminalRun = /*#__PURE__*/ (() => Schema.Struct({
-  "bg": optionalKey(TerminalColor),
-  "bold": optionalKey(Schema.Literal(true)),
-  /** Number of terminal display cells occupied by the run, which may differ from its text length. */
-  "cells": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Number of terminal display cells occupied by the run, which may differ from its text length." }),
-  "dim": optionalKey(Schema.Literal(true)),
-  "fg": optionalKey(TerminalColor),
-  "inverse": optionalKey(Schema.Literal(true)),
-  "italic": optionalKey(Schema.Literal(true)),
-  /** Hyperlink associated with the run. */
-  "link": optionalKey(TerminalLink),
-  /** Present when the run uses strikethrough styling. */
-  "strikethrough": optionalKey(Schema.Literal(true)).annotate({ description: "Present when the run uses strikethrough styling." }),
-  "text": Schema.String.check(Schema.isMinLength(1)),
-  "underline": optionalKey(Schema.Literal(true))
-}).annotate({ identifier: "TerminalRun" }))()
-export type TerminalRun = typeof TerminalRun.Type
-export type TerminalRunEncoded = typeof TerminalRun.Encoded
-
-export const TerminalLine = /*#__PURE__*/ (() => Schema.Struct({
-  "redacted": Schema.Boolean,
-  "row": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "runs": Schema.Array(TerminalRun),
-  "text": Schema.String,
-  "truncated": Schema.Boolean,
-  /** Whether this line continues onto the next terminal row through automatic wrapping. */
-  "wrapped": optionalKey(Schema.Boolean).annotate({ description: "Whether this line continues onto the next terminal row through automatic wrapping." })
-}).annotate({ identifier: "TerminalLine" }))()
-export type TerminalLine = typeof TerminalLine.Type
-export type TerminalLineEncoded = typeof TerminalLine.Encoded
-
-export const TerminalModes = /*#__PURE__*/ (() => Schema.Struct({
-  "alternate_screen": Schema.Boolean,
-  "application_cursor": Schema.Boolean,
-  "application_keypad": Schema.Boolean,
-  "bracketed_paste": Schema.Boolean,
-  "focus_events": Schema.Boolean,
-  /** Active Kitty keyboard protocol enhancement flags as a bitmask. */
-  "kitty_keyboard": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Active Kitty keyboard protocol enhancement flags as a bitmask." }),
-  "mouse_encoding": Schema.Literals(["default","utf8","sgr"]),
-  "mouse_tracking": Schema.Literals(["none","click","drag","motion"])
-}).annotate({ identifier: "TerminalModes" }))()
-export type TerminalModes = typeof TerminalModes.Type
-export type TerminalModesEncoded = typeof TerminalModes.Encoded
-
-export const TerminalRelay = /*#__PURE__*/ (() => Schema.Struct({
-  "capability_ttl_s": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "direct": Schema.Boolean,
-  "fence_conflicts": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "owner_host_id": Id,
-  "rtt_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "transport": Schema.Literals(["fabric","http"]),
-  "via": Id
-}).annotate({ identifier: "TerminalRelay" }))()
-export type TerminalRelay = typeof TerminalRelay.Type
-export type TerminalRelayEncoded = typeof TerminalRelay.Encoded
-
-export const TerminalScreen = /*#__PURE__*/ (() => Schema.Struct({
-  "columns": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
-  "cursor": Schema.Struct({ "blinking": Schema.Boolean, "column": Schema.Int, "row": Schema.Int, "style": Schema.Literals(["block","underline","bar"]), "visible": Schema.Boolean }),
-  "facts": optionalKey(TerminalFacts),
-  "kind": Schema.Literal("terminal-screen"),
-  "lines": Schema.Array(TerminalLine),
-  "modes": TerminalModes,
-  /** Fence for the next input or resize. */
-  "next_sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Fence for the next input or resize." }),
-  "relay": optionalKey(TerminalRelay),
-  /** Digest of the rest of the screen: equal revisions mean equal screens. */
-  "revision": Schema.String.check(Schema.isMinLength(1)).pipe(Schema.brand("st3/ScreenRevision")).annotate({ description: "Digest of the rest of the screen: equal revisions mean equal screens." }),
-  "rows": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
-  "runtime_incarnation": Schema.String,
-  "terminal_id": TerminalId,
-  "title": Schema.String,
-  "truncated": Schema.Boolean
-}).annotate({ identifier: "TerminalScreen" }))()
-export type TerminalScreen = typeof TerminalScreen.Type
-export type TerminalScreenEncoded = typeof TerminalScreen.Encoded
-
-export const ConversationContentRef = /*#__PURE__*/ (() => Schema.Struct({
-  "media_type": Schema.String,
-  "reason": optionalKey(Schema.String),
   "ref": Schema.String,
   "size": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
 }).annotate({ identifier: "ConversationContentRef" }))()
 export type ConversationContentRef = typeof ConversationContentRef.Type
 export type ConversationContentRefEncoded = typeof ConversationContentRef.Encoded
 
+export const TimelineAskAnswer = /*#__PURE__*/ (() => Schema.Struct({
+  "custom": optionalKey(Schema.String),
+  "note": optionalKey(Schema.String),
+  "question": Schema.String,
+  "selected": Schema.Array(Schema.String)
+}).annotate({ identifier: "TimelineAskAnswer" }))()
+export type TimelineAskAnswer = typeof TimelineAskAnswer.Type
+export type TimelineAskAnswerEncoded = typeof TimelineAskAnswer.Encoded
+
+export const TimelineAskQuestion = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String,
+  "multi": Schema.Boolean,
+  "options": Schema.Array(Schema.Struct({ "description": optionalKey(Schema.String), "label": Schema.String })),
+  "question": Schema.String,
+  "recommended": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "TimelineAskQuestion" }))()
+export type TimelineAskQuestion = typeof TimelineAskQuestion.Type
+export type TimelineAskQuestionEncoded = typeof TimelineAskQuestion.Encoded
+
+/** tool_call fields: questions; tool_output fields: answers. */
+export const TimelineViewAsk = /*#__PURE__*/ (() => Schema.Struct({
+  "answers": optionalKey(Schema.Array(TimelineAskAnswer)),
+  "call_id": optionalKey(Schema.String),
+  "intent": optionalKey(Schema.String),
+  "is_error": optionalKey(Schema.Boolean),
+  "questions": optionalKey(Schema.Array(TimelineAskQuestion)),
+  "tool": Schema.String,
+  "type": Schema.Literal("ask")
+}).annotate({ identifier: "TimelineViewAsk", description: "tool_call fields: questions; tool_output fields: answers." }))()
+export type TimelineViewAsk = typeof TimelineViewAsk.Type
+export type TimelineViewAskEncoded = typeof TimelineViewAsk.Encoded
+
+/** Assistant error from the native session record and its persisted retry marker; no retry state is inferred. */
+export const TimelineViewAssistantError = /*#__PURE__*/ (() => Schema.Struct({
+  "api": optionalKey(Schema.String),
+  "error_id": optionalKey(Schema.Int),
+  "is_error": Schema.Boolean,
+  "label": Schema.String,
+  "message": Schema.String,
+  "model": optionalKey(Schema.String),
+  "presentation": Schema.Literals(["full","compact-recovered","none"]),
+  "provider": optionalKey(Schema.String),
+  "retry": optionalKey(Schema.Struct({ "attempt": optionalKey(Schema.Int), "kind": optionalKey(Schema.String), "note": optionalKey(Schema.String), "recovered_at": optionalKey(Timestamp), "recovery": optionalKey(Schema.String), "status": optionalKey(Schema.String), "superseded_by": optionalKey(Schema.Struct({ "model": optionalKey(Schema.String), "provider": optionalKey(Schema.String), "response_id": optionalKey(Schema.String), "timestamp": optionalKey(Schema.Int) })) })),
+  "status": Schema.Literals(["failed","recovered","superseded"]),
+  "stop_reason": optionalKey(Schema.String),
+  "type": Schema.Literal("assistant_error")
+}).annotate({ identifier: "TimelineViewAssistantError", description: "Assistant error from the native session record and its persisted retry marker; no retry state is inferred." }))()
+export type TimelineViewAssistantError = typeof TimelineViewAssistantError.Type
+export type TimelineViewAssistantErrorEncoded = typeof TimelineViewAssistantError.Encoded
+
+/** tool_call fields: command, cwd, timeout_s, env_keys, background; tool_output fields: call_id, is_error, exit_code, wall_ms, timed_out. */
+export const TimelineViewBash = /*#__PURE__*/ (() => Schema.Struct({
+  "background": optionalKey(Schema.Boolean),
+  "call_id": optionalKey(Schema.String),
+  "command": optionalKey(Schema.String),
+  "cwd": optionalKey(Schema.String),
+  "env_keys": optionalKey(Schema.Array(Schema.String)),
+  "exit_code": optionalKey(Schema.Int),
+  /** Parsed from the OMP `i` field */
+  "intent": optionalKey(Schema.String).annotate({ description: "Parsed from the OMP `i` field" }),
+  "is_error": optionalKey(Schema.Boolean),
+  "timed_out": optionalKey(Schema.Boolean),
+  "timeout_s": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Native tool name */
+  "tool": Schema.String.annotate({ description: "Native tool name" }),
+  "type": Schema.Literal("bash"),
+  "wall_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "TimelineViewBash", description: "tool_call fields: command, cwd, timeout_s, env_keys, background; tool_output fields: call_id, is_error, exit_code, wall_ms, timed_out." }))()
+export type TimelineViewBash = typeof TimelineViewBash.Type
+export type TimelineViewBashEncoded = typeof TimelineViewBash.Encoded
+
+/** On a status block; summary is bounded with an owner continuation. */
+export const TimelineViewCompaction = /*#__PURE__*/ (() => Schema.Struct({
+  "method": optionalKey(Schema.String),
+  "short_summary": optionalKey(Schema.String),
+  "summary": optionalKey(Schema.String),
+  "tokens_after": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "tokens_before": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "type": Schema.Literal("compaction")
+}).annotate({ identifier: "TimelineViewCompaction", description: "On a status block; summary is bounded with an owner continuation." }))()
+export type TimelineViewCompaction = typeof TimelineViewCompaction.Type
+export type TimelineViewCompactionEncoded = typeof TimelineViewCompaction.Encoded
+
+/** Credential bookkeeping, with internal visibility. The hash stays in the raw record only. */
+export const TimelineViewCredentialPin = /*#__PURE__*/ (() => Schema.Struct({
+  "provider": Schema.String,
+  "type": Schema.Literal("credential_pin")
+}).annotate({ identifier: "TimelineViewCredentialPin", description: "Credential bookkeeping, with internal visibility. The hash stays in the raw record only." }))()
+export type TimelineViewCredentialPin = typeof TimelineViewCredentialPin.Type
+export type TimelineViewCredentialPinEncoded = typeof TimelineViewCredentialPin.Encoded
+
+/** tool_call fields: path (first [PATH#TAG] header), ops, input_bytes; tool_output fields: path, first_changed_line, diff. */
+export const TimelineViewEdit = /*#__PURE__*/ (() => Schema.Struct({
+  "call_id": optionalKey(Schema.String),
+  /** Unified diff as given */
+  "diff": optionalKey(Schema.String).annotate({ description: "Unified diff as given" }),
+  "first_changed_line": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "input_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "intent": optionalKey(Schema.String),
+  "is_error": optionalKey(Schema.Boolean),
+  "ops": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "path": optionalKey(Schema.String),
+  "tool": Schema.String,
+  "type": Schema.Literal("edit")
+}).annotate({ identifier: "TimelineViewEdit", description: "tool_call fields: path (first [PATH#TAG] header), ops, input_bytes; tool_output fields: path, first_changed_line, diff." }))()
+export type TimelineViewEdit = typeof TimelineViewEdit.Type
+export type TimelineViewEditEncoded = typeof TimelineViewEdit.Encoded
+
+export const TimelineViewEval = /*#__PURE__*/ (() => Schema.Struct({
+  "code": optionalKey(Schema.String),
+  "code_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "intent": optionalKey(Schema.String),
+  "language": Schema.String,
+  "reset": optionalKey(Schema.Boolean),
+  "timeout_s": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "title": optionalKey(Schema.String),
+  "tool": Schema.String,
+  "type": Schema.Literal("eval")
+}).annotate({ identifier: "TimelineViewEval" }))()
+export type TimelineViewEval = typeof TimelineViewEval.Type
+export type TimelineViewEvalEncoded = typeof TimelineViewEval.Encoded
+
+/** Any other tool: tool_call field name; tool_output fields is_error, wall_ms. */
+export const TimelineViewGeneric = /*#__PURE__*/ (() => Schema.Struct({
+  "call_id": optionalKey(Schema.String),
+  "intent": optionalKey(Schema.String),
+  "is_error": optionalKey(Schema.Boolean),
+  "name": optionalKey(Schema.String),
+  "tool": Schema.String,
+  "type": Schema.Literal("generic"),
+  "wall_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "TimelineViewGeneric", description: "Any other tool: tool_call field name; tool_output fields is_error, wall_ms." }))()
+export type TimelineViewGeneric = typeof TimelineViewGeneric.Type
+export type TimelineViewGenericEncoded = typeof TimelineViewGeneric.Encoded
+
+export const JobSummary = /*#__PURE__*/ (() => Schema.Struct({
+  "duration_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "ended_at": optionalKey(Timestamp),
+  "exit_code": optionalKey(Schema.Int),
+  "id": Schema.String,
+  "name": optionalKey(Schema.String),
+  "output_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "started_at": optionalKey(Timestamp),
+  "state": Schema.String,
+  "type": optionalKey(Schema.String)
+}).annotate({ identifier: "JobSummary" }))()
+export type JobSummary = typeof JobSummary.Type
+export type JobSummaryEncoded = typeof JobSummary.Encoded
+
+/** tool_call fields: op, name, target, message, timeout_s; tool_output fields: timed_out, jobs, state. */
+export const TimelineViewHub = /*#__PURE__*/ (() => Schema.Struct({
+  "call_id": optionalKey(Schema.String),
+  "intent": optionalKey(Schema.String),
+  "is_error": optionalKey(Schema.Boolean),
+  "jobs": optionalKey(Schema.Array(JobSummary)),
+  "message": optionalKey(Schema.String),
+  "name": optionalKey(Schema.String),
+  "op": Schema.String,
+  "state": optionalKey(Schema.String),
+  "target": optionalKey(Schema.String),
+  "timed_out": optionalKey(Schema.Boolean),
+  "timeout_s": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "tool": Schema.String,
+  "type": Schema.Literal("hub")
+}).annotate({ identifier: "TimelineViewHub", description: "tool_call fields: op, name, target, message, timeout_s; tool_output fields: timed_out, jobs, state." }))()
+export type TimelineViewHub = typeof TimelineViewHub.Type
+export type TimelineViewHubEncoded = typeof TimelineViewHub.Encoded
+
+/** Block kind `irc` from a custom_message irc:incoming record. */
+export const TimelineViewIrc = /*#__PURE__*/ (() => Schema.Struct({
+  "from": Schema.String,
+  "message": Schema.String,
+  "message_id": Schema.String,
+  "reply_to": optionalKey(Schema.String),
+  "type": Schema.Literal("irc")
+}).annotate({ identifier: "TimelineViewIrc", description: "Block kind `irc` from a custom_message irc:incoming record." }))()
+export type TimelineViewIrc = typeof TimelineViewIrc.Type
+export type TimelineViewIrcEncoded = typeof TimelineViewIrc.Encoded
+
+/** Block kind `job` from launch-completion (details.jobs) and async-result records. */
+export const TimelineViewJob = /*#__PURE__*/ (() => Schema.Struct({
+  "jobs": Schema.Array(JobSummary),
+  "type": Schema.Literal("job")
+}).annotate({ identifier: "TimelineViewJob", description: "Block kind `job` from launch-completion (details.jobs) and async-result records." }))()
+export type TimelineViewJob = typeof TimelineViewJob.Type
+export type TimelineViewJobEncoded = typeof TimelineViewJob.Encoded
+
+export const TimelineViewModelChange = /*#__PURE__*/ (() => Schema.Struct({
+  "fallback": optionalKey(Schema.Boolean),
+  "model": Schema.String,
+  "role": optionalKey(Schema.String),
+  "type": Schema.Literal("model_change")
+}).annotate({ identifier: "TimelineViewModelChange" }))()
+export type TimelineViewModelChange = typeof TimelineViewModelChange.Type
+export type TimelineViewModelChangeEncoded = typeof TimelineViewModelChange.Encoded
+
+export const TimelineViewRead = /*#__PURE__*/ (() => Schema.Struct({
+  "intent": optionalKey(Schema.String),
+  "path": Schema.String,
+  /** Suffix after `:` in the read path */
+  "range": optionalKey(Schema.String).annotate({ description: "Suffix after `:` in the read path" }),
+  "tool": Schema.String,
+  "type": Schema.Literal("read")
+}).annotate({ identifier: "TimelineViewRead" }))()
+export type TimelineViewRead = typeof TimelineViewRead.Type
+export type TimelineViewReadEncoded = typeof TimelineViewRead.Encoded
+
+export const TimelineViewResetBoundary = /*#__PURE__*/ (() => Schema.Struct({
+  "type": Schema.Literal("reset_boundary")
+}).annotate({ identifier: "TimelineViewResetBoundary" }))()
+export type TimelineViewResetBoundary = typeof TimelineViewResetBoundary.Type
+export type TimelineViewResetBoundaryEncoded = typeof TimelineViewResetBoundary.Encoded
+
+export const TimelineViewSearch = /*#__PURE__*/ (() => Schema.Struct({
+  "call_id": optionalKey(Schema.String),
+  "case": optionalKey(Schema.Boolean),
+  "engine": Schema.Literals(["grep","glob","web"]),
+  "file_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "file_limit_reached": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "gitignore": optionalKey(Schema.Boolean),
+  "hidden": optionalKey(Schema.Boolean),
+  "intent": optionalKey(Schema.String),
+  "is_error": optionalKey(Schema.Boolean),
+  "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "match_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "path": optionalKey(Schema.String),
+  "pattern": optionalKey(Schema.String),
+  "per_file_limit_reached": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "query": optionalKey(Schema.String),
+  "skip": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "tool": Schema.String,
+  "truncated": optionalKey(Schema.Boolean),
+  "type": Schema.Literal("search"),
+  "warning": optionalKey(Schema.String)
+}).annotate({ identifier: "TimelineViewSearch" }))()
+export type TimelineViewSearch = typeof TimelineViewSearch.Type
+export type TimelineViewSearchEncoded = typeof TimelineViewSearch.Encoded
+
+export const TimelineViewSessionExit = /*#__PURE__*/ (() => Schema.Struct({
+  "kind": Schema.String,
+  "reason": Schema.String,
+  "type": Schema.Literal("session_exit")
+}).annotate({ identifier: "TimelineViewSessionExit" }))()
+export type TimelineViewSessionExit = typeof TimelineViewSessionExit.Type
+export type TimelineViewSessionExitEncoded = typeof TimelineViewSessionExit.Encoded
+
+export const TimelineViewSkill = /*#__PURE__*/ (() => Schema.Struct({
+  /** Native skill arguments, any JSON */
+  "args": optionalKey(Schema.Unknown).annotate({ description: "Native skill arguments, any JSON" }),
+  "name": Schema.String,
+  "path": optionalKey(Schema.String),
+  "type": Schema.Literal("skill")
+}).annotate({ identifier: "TimelineViewSkill" }))()
+export type TimelineViewSkill = typeof TimelineViewSkill.Type
+export type TimelineViewSkillEncoded = typeof TimelineViewSkill.Encoded
+
+/** One subagent of a task tool output. name is the OMP name (id when no separate name exists), agent is the type, task is the full assignment. conversation.session_id opens the readable child transcript. */
+export const SubagentSummary = /*#__PURE__*/ (() => Schema.Struct({
+  "agent": optionalKey(Schema.String),
+  "conversation": optionalKey(Schema.Struct({ "session_id": Id })),
+  "cost_usd": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "duration_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "id": Schema.String,
+  "name": optionalKey(Schema.String),
+  "requests": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "status": Schema.String,
+  "task": optionalKey(Schema.String),
+  "tokens": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "tool_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "SubagentSummary", description: "One subagent of a task tool output. name is the OMP name (id when no separate name exists), agent is the type, task is the full assignment. conversation.session_id opens the readable child transcript." }))()
+export type SubagentSummary = typeof SubagentSummary.Type
+export type SubagentSummaryEncoded = typeof SubagentSummary.Encoded
+
+/** tool_call fields: context, tasks; tool_output fields: async, total_ms, agents. */
+export const TimelineViewTask = /*#__PURE__*/ (() => Schema.Struct({
+  "agents": optionalKey(Schema.Array(SubagentSummary)),
+  "async": optionalKey(Schema.Boolean),
+  "call_id": optionalKey(Schema.String),
+  "context": optionalKey(Schema.String),
+  "intent": optionalKey(Schema.String),
+  "is_error": optionalKey(Schema.Boolean),
+  "tasks": optionalKey(Schema.Array(Schema.Struct({ "agent": optionalKey(Schema.String), "name": optionalKey(Schema.String), "task": Schema.String }))),
+  "tool": Schema.String,
+  "total_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "type": Schema.Literal("task")
+}).annotate({ identifier: "TimelineViewTask", description: "tool_call fields: context, tasks; tool_output fields: async, total_ms, agents." }))()
+export type TimelineViewTask = typeof TimelineViewTask.Type
+export type TimelineViewTaskEncoded = typeof TimelineViewTask.Encoded
+
+export const TimelineViewThinkingLevel = /*#__PURE__*/ (() => Schema.Struct({
+  "configured": optionalKey(Schema.Boolean),
+  "level": Schema.String,
+  "type": Schema.Literal("thinking_level")
+}).annotate({ identifier: "TimelineViewThinkingLevel" }))()
+export type TimelineViewThinkingLevel = typeof TimelineViewThinkingLevel.Type
+export type TimelineViewThinkingLevelEncoded = typeof TimelineViewThinkingLevel.Encoded
+
+export const TimelineViewTitle = /*#__PURE__*/ (() => Schema.Struct({
+  "previous": optionalKey(Schema.String),
+  "source": optionalKey(Schema.String),
+  "title": Schema.String,
+  "type": Schema.Literal("title")
+}).annotate({ identifier: "TimelineViewTitle" }))()
+export type TimelineViewTitle = typeof TimelineViewTitle.Type
+export type TimelineViewTitleEncoded = typeof TimelineViewTitle.Encoded
+
+export const TimelineTodoItem = /*#__PURE__*/ (() => Schema.Struct({
+  "content": Schema.String,
+  "status": Schema.String
+}).annotate({ identifier: "TimelineTodoItem" }))()
+export type TimelineTodoItem = typeof TimelineTodoItem.Type
+export type TimelineTodoItemEncoded = typeof TimelineTodoItem.Encoded
+
+/** tool_call fields: op, items, phase, task; tool_output fields: phases. */
+export const TimelineViewTodo = /*#__PURE__*/ (() => Schema.Struct({
+  "call_id": optionalKey(Schema.String),
+  "intent": optionalKey(Schema.String),
+  "is_error": optionalKey(Schema.Boolean),
+  "items": optionalKey(Schema.Array(TimelineTodoItem)),
+  "op": optionalKey(Schema.String),
+  "phase": optionalKey(Schema.String),
+  "phases": optionalKey(Schema.Array(Schema.Struct({ "items": Schema.Array(TimelineTodoItem), "name": Schema.String }))),
+  "task": optionalKey(Schema.String),
+  "tool": Schema.String,
+  "type": Schema.Literal("todo")
+}).annotate({ identifier: "TimelineViewTodo", description: "tool_call fields: op, items, phase, task; tool_output fields: phases." }))()
+export type TimelineViewTodo = typeof TimelineViewTodo.Type
+export type TimelineViewTodoEncoded = typeof TimelineViewTodo.Encoded
+
+/** On an internal-visibility `status` block; renderers attach it to the call row and do not draw it alone. */
+export const TimelineViewToolStart = /*#__PURE__*/ (() => Schema.Struct({
+  "call_id": Schema.String,
+  "started_at": Timestamp,
+  "tool": Schema.String,
+  "type": Schema.Literal("tool_start")
+}).annotate({ identifier: "TimelineViewToolStart", description: "On an internal-visibility `status` block; renderers attach it to the call row and do not draw it alone." }))()
+export type TimelineViewToolStart = typeof TimelineViewToolStart.Type
+export type TimelineViewToolStartEncoded = typeof TimelineViewToolStart.Encoded
+
+export const TimelineViewWrite = /*#__PURE__*/ (() => Schema.Struct({
+  "bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "content": optionalKey(Schema.String),
+  "intent": optionalKey(Schema.String),
+  "line_count": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "path": Schema.String,
+  "tool": Schema.String,
+  "type": Schema.Literal("write")
+}).annotate({ identifier: "TimelineViewWrite" }))()
+export type TimelineViewWrite = typeof TimelineViewWrite.Type
+export type TimelineViewWriteEncoded = typeof TimelineViewWrite.Encoded
+
+/** Parsed typed projection of a block, discriminated by type. Known types are closed; future types keep JSON through the fallback. */
+export const TimelineView = /*#__PURE__*/ (() => Schema.Union([
+  TimelineViewBash,
+  TimelineViewEdit,
+  TimelineViewWrite,
+  TimelineViewRead,
+  TimelineViewSearch,
+  TimelineViewTodo,
+  TimelineViewAsk,
+  TimelineViewTask,
+  TimelineViewHub,
+  TimelineViewEval,
+  TimelineViewGeneric,
+  TimelineViewIrc,
+  TimelineViewJob,
+  TimelineViewSkill,
+  TimelineViewCompaction,
+  TimelineViewAssistantError,
+  TimelineViewModelChange,
+  TimelineViewThinkingLevel,
+  TimelineViewTitle,
+  TimelineViewSessionExit,
+  TimelineViewToolStart,
+  TimelineViewResetBoundary,
+  TimelineViewCredentialPin,
+  Schema.Struct({ "type": unknownCase(["bash","edit","write","read","search","todo","ask","task","hub","eval","generic","irc","job","skill","compaction","assistant_error","model_change","thinking_level","title","session_exit","tool_start","reset_boundary","credential_pin"]) })
+], { mode: "oneOf" }).annotate({ identifier: "TimelineView", description: "Parsed typed projection of a block, discriminated by type. Known types are closed; future types keep JSON through the fallback." }))()
+export type TimelineView = typeof TimelineView.Type
+export type TimelineViewEncoded = typeof TimelineView.Encoded
+
 export const TimelineBlock = /*#__PURE__*/ (() => Schema.Struct({
   "continuation": optionalKey(ConversationContentRef),
   "id": Schema.String,
-  /** text, reasoning, tool_call, tool_output, image, image_link, job, subagent, ask, status, error, document, source_record, raw_text, unknown; future kinds remain readable as JSON */
-  "kind": Schema.String.annotate({ description: "text, reasoning, tool_call, tool_output, image, image_link, job, subagent, ask, status, error, document, source_record, raw_text, unknown; future kinds remain readable as JSON" }),
-  /** Source-supplied metadata including timing (wallTimeMs, timeoutSeconds); preserve names, units, values and future fields */
-  "metadata": optionalKey(Schema.Record(Schema.String, Schema.Unknown)).annotate({ description: "Source-supplied metadata including timing (wallTimeMs, timeoutSeconds); preserve names, units, values and future fields" }),
+  /** text, reasoning, tool_call, tool_output, image, image_link, job, subagent, ask, status, error, document, source_record, raw_text, irc, unknown; future kinds remain readable as JSON */
+  "kind": Schema.String.annotate({ description: "text, reasoning, tool_call, tool_output, image, image_link, job, subagent, ask, status, error, document, source_record, raw_text, irc, unknown; future kinds remain readable as JSON" }),
+  /** Source-supplied metadata including timing (wallTimeMs, timeoutSeconds); assistant text/reasoning blocks may carry model, provider, usage {input, output, cache_read, cache_write, total, cost_usd}, context_tokens, stop_reason, ttft_ms and duration_ms; preserve names, units, values and future fields */
+  "metadata": optionalKey(Schema.Record(Schema.String, Schema.Unknown)).annotate({ description: "Source-supplied metadata including timing (wallTimeMs, timeoutSeconds); assistant text/reasoning blocks may carry model, provider, usage {input, output, cache_read, cache_write, total, cost_usd}, context_tokens, stop_reason, ttft_ms and duration_ms; preserve names, units, values and future fields" }),
   /** Native JSON; {body_ref:true} refers to the containing known fallback body without duplication */
   "payload": Schema.Unknown.annotate({ description: "Native JSON; {body_ref:true} refers to the containing known fallback body without duplication" }),
   "source_type": Schema.String,
+  /** Parsed typed projection of the block; a renderer that does not know the view type renders the block as without a view. The full native data stays in payload */
+  "view": optionalKey(TimelineView),
   /** UI hint: visible (default), internal or hidden-by-harness; never an access restriction */
   "visibility": optionalKey(Schema.String).annotate({ description: "UI hint: visible (default), internal or hidden-by-harness; never an access restriction" })
 }).annotate({ identifier: "TimelineBlock" }))()
@@ -9297,6 +2605,7 @@ export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   "attachments": optionalKey(Schema.Array(Attachment)),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
+  "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "from": optionalKey(ParticipantRef),
   "message_id": Schema.String,
   "provenance": optionalKey(MessageProvenance),
@@ -9387,7 +2696,8 @@ export const CollectionFrame = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(Resource), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot }),
   Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(Resource) }),
   Schema.Struct({ "collection": Schema.Literal("terminal"), "id": Schema.String, "kind": Schema.Literal("screen"), "snapshot": Snapshot, "value": TerminalScreen }),
-  Schema.Struct({ "collection": Schema.Literal("conversation"), "has_more": optionalKey(Schema.Boolean), "id": Schema.String, "items": Schema.Array(TimelineEntry), "kind": Schema.Literal("conversation"), "replace": Schema.Boolean, "session_id": Id }),
+  Schema.Struct({ "collection": Schema.Literal("conversation"), "has_more": optionalKey(Schema.Boolean), /** Present when conversation-blocks.v1 is negotiated and at least one header field is available */
+"header": optionalKey(ConversationHeader), "id": Schema.String, "items": Schema.Array(TimelineEntry), "kind": Schema.Literal("conversation"), "replace": Schema.Boolean, "session_id": Id }),
   Schema.Struct({ "code": optionalKey(Schema.String), "collection": optionalKey(Schema.String), "id": Schema.String, "kind": Schema.Literal("resync"), "message": optionalKey(Schema.String), "retryable": optionalKey(Schema.Boolean) }),
   Schema.Struct({ "code": optionalKey(Schema.String), "collection": optionalKey(Schema.String), "id": optionalKey(Schema.String), "kind": Schema.Literal("error"), "message": Schema.String, "retryable": optionalKey(Schema.Boolean) }),
   SubjectCollectionFrame
@@ -9396,6 +2706,8 @@ export type CollectionFrame = typeof CollectionFrame.Type
 export type CollectionFrameEncoded = typeof CollectionFrame.Encoded
 
 export const ConversationChanges = /*#__PURE__*/ (() => Schema.Struct({
+  /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
+  "header": optionalKey(ConversationHeader),
   "items": Schema.Array(TimelineEntry).check(Schema.isMaxLength(200)),
   "kind": Schema.Literal("conversation-changes"),
   "next_cursor": Cursor,
@@ -9440,6 +2752,25 @@ export const ConversationSearch = /*#__PURE__*/ (() => Schema.Struct({
 export type ConversationSearch = typeof ConversationSearch.Type
 export type ConversationSearchEncoded = typeof ConversationSearch.Encoded
 
+/** A person's current advisory note. It never assigns work, grants authority or satisfies a gate. */
+export const DirectiveNote = /*#__PURE__*/ (() => Schema.Struct({
+  "author": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "revision": Schema.String,
+  /** At most 4096 UTF-8 bytes; whitespace-only text is refused. */
+  "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(4096)).annotate({ description: "At most 4096 UTF-8 bytes; whitespace-only text is refused." }),
+  "time": Timestamp
+}).annotate({ identifier: "DirectiveNote", description: "A person's current advisory note. It never assigns work, grants authority or satisfies a gate." }))()
+export type DirectiveNote = typeof DirectiveNote.Type
+export type DirectiveNoteEncoded = typeof DirectiveNote.Encoded
+
+export const DirectiveNotes = /*#__PURE__*/ (() => Schema.Struct({
+  "notes": Schema.Array(DirectiveNote)
+}).annotate({ identifier: "DirectiveNotes" }))()
+export type DirectiveNotes = typeof DirectiveNotes.Type
+export type DirectiveNotesEncoded = typeof DirectiveNotes.Encoded
+
 export const DocumentContent = /*#__PURE__*/ (() => Schema.Struct({
   "bytes": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(255))),
   "reference": Schema.String
@@ -9448,9 +2779,12 @@ export type DocumentContent = typeof DocumentContent.Type
 export type DocumentContentEncoded = typeof DocumentContent.Encoded
 
 export const TimelineDelta = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "entry": TimelineEntry, "entry_id": Id, "operation": Schema.Literal("append"), "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)) }),
-  Schema.Struct({ "entry": TimelineEntry, "entry_id": Id, "operation": Schema.Literal("replace"), "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)) }),
-  Schema.Struct({ "entry": optionalKey(TimelineEntry), "entry_id": Id, "operation": Schema.Literal("finalize"), "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)) })
+  Schema.Struct({ "entry": TimelineEntry, "entry_id": Id, /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
+"header": optionalKey(ConversationHeader), "operation": Schema.Literal("append"), "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)) }),
+  Schema.Struct({ "entry": TimelineEntry, "entry_id": Id, /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
+"header": optionalKey(ConversationHeader), "operation": Schema.Literal("replace"), "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)) }),
+  Schema.Struct({ "entry": optionalKey(TimelineEntry), "entry_id": Id, /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
+"header": optionalKey(ConversationHeader), "operation": Schema.Literal("finalize"), "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)) })
 ], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("operation")).annotate({ identifier: "TimelineDelta" }))()
 export type TimelineDelta = typeof TimelineDelta.Type
 export type TimelineDeltaEncoded = typeof TimelineDelta.Encoded
@@ -10233,6 +3567,8 @@ export type SubjectsPage = typeof SubjectsPage.Type
 export type SubjectsPageEncoded = typeof SubjectsPage.Encoded
 
 export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
+  /** Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of */
+  "header": optionalKey(ConversationHeader),
   "items": Schema.Array(TimelineEntry),
   "kind": Schema.Literal("timeline-page"),
   "page": PageInfo,
@@ -10241,98 +3577,17 @@ export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
 export type TimelinePage = typeof TimelinePage.Type
 export type TimelinePageEncoded = typeof TimelinePage.Encoded
 
-export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
-  "account": Schema.String,
-  "account_ref": optionalKey(Schema.String),
-  "driver": Schema.String,
-  "five_hour_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
-  "five_hour_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-  "host": Schema.String,
-  /** The source named a provider identity or declared account; independent of quota freshness. Absent on older servers. */
-  "identified": optionalKey(Schema.Boolean).annotate({ description: "The source named a provider identity or declared account; independent of quota freshness. Absent on older servers." }),
-  "measured_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "measured_by": Schema.String,
-  "plan": optionalKey(Schema.String),
-  "seats": Schema.Array(Schema.String),
-  "weekly_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
-  "weekly_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
-}).annotate({ identifier: "UsageLimit" }))()
-export type UsageLimit = typeof UsageLimit.Type
-export type UsageLimitEncoded = typeof UsageLimit.Encoded
-
-export const UsagePricingRates = /*#__PURE__*/ (() => Schema.Struct({
-  "cache_read": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_1h": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_5m": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "input": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "output": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePricingRates" }))()
-export type UsagePricingRates = typeof UsagePricingRates.Type
-export type UsagePricingRatesEncoded = typeof UsagePricingRates.Encoded
-
-/** Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown. */
-export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
-  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_source": Schema.Literals(["provider_reported","computed","unpriced"]),
-  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "price_table_id": optionalKey(Schema.String),
-  "price_table_version": optionalKey(Schema.String),
-  "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
-  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
-export type UsagePricing = typeof UsagePricing.Type
-export type UsagePricingEncoded = typeof UsagePricing.Encoded
-
-export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
-  "account": optionalKey(Schema.String),
-  "agent": Id,
-  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "host": optionalKey(Schema.String),
-  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "mission_run": optionalKey(Id),
-  "model": optionalKey(Schema.String),
-  "native_session_id": optionalKey(Schema.String),
-  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "pricing": optionalKey(Schema.String),
-  "pricing_provenance": optionalKey(Schema.Array(UsagePricing)),
-  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "step": optionalKey(Id),
-  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsageRow" }))()
-export type UsageRow = typeof UsageRow.Type
-export type UsageRowEncoded = typeof UsageRow.Encoded
-
-export const UsagePeriod = /*#__PURE__*/ (() => Schema.Struct({
-  "agent_messages": optionalKey(AgentMessageEstimate),
-  "limits": optionalKey(Schema.Array(UsageLimit)),
-  "rows": Schema.Array(UsageRow),
-  "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePeriod" }))()
-export type UsagePeriod = typeof UsagePeriod.Type
-export type UsagePeriodEncoded = typeof UsagePeriod.Encoded
-
 export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SubjectProjection, SubjectsPage, SubjectClaimsPage, SubjectHistoryPage, SubjectSchemas], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
 /** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. */
-export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer." }))()
+export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 
@@ -10373,6 +3628,72 @@ export const HostRepositories = /*#__PURE__*/ (() => Schema.Struct({
 export type HostRepositories = typeof HostRepositories.Type
 export type HostRepositoriesEncoded = typeof HostRepositories.Encoded
 
+export const MessageBody = /*#__PURE__*/ (() => Schema.Struct({
+  "bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent. */
+  "complete": optionalKey(Schema.Boolean).annotate({ description: "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent." }),
+  "message": Schema.String,
+  "text": Schema.String
+}).annotate({ identifier: "MessageBody" }))()
+export type MessageBody = typeof MessageBody.Type
+export type MessageBodyEncoded = typeof MessageBody.Encoded
+
+export const ObservationAccepted = /*#__PURE__*/ (() => Schema.Struct({
+  "accepted": Schema.Literal(true)
+}).annotate({ identifier: "ObservationAccepted" }))()
+export type ObservationAccepted = typeof ObservationAccepted.Type
+export type ObservationAcceptedEncoded = typeof ObservationAccepted.Encoded
+
+export const ObservationLatency = /*#__PURE__*/ (() => Schema.Struct({
+  "buckets": Schema.Array(Schema.Tuple([Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(3670015)), Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(1000000))])).check(Schema.isMinLength(1)).check(Schema.isMaxLength(64)),
+  "carrier": Schema.Literals(["fabric","tailscale","lan"]),
+  "count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(1000000)),
+  "interval_end": Schema.String.check(Schema.isMaxLength(32)).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })),
+  "interval_start": Schema.String.check(Schema.isMaxLength(32)).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })),
+  "kind": Schema.Literal("latency"),
+  "max_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(3600000)),
+  "over_target": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(1000000)),
+  "path": optionalKey(Schema.Literals(["direct","relay"])),
+  "target": Schema.Literals(["ios-open-to-live","ios-connect","ios-message-ack","ios-conversation-open","ios-terminal-open","ios-recover"])
+}).annotate({ identifier: "ObservationLatency" }))()
+export type ObservationLatency = typeof ObservationLatency.Type
+export type ObservationLatencyEncoded = typeof ObservationLatency.Encoded
+
+export const ObservationLiveShare = /*#__PURE__*/ (() => Schema.Struct({
+  "carrier": Schema.Literals(["fabric","tailscale","lan"]),
+  "foreground_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(60000)),
+  "interval_end": Schema.String.check(Schema.isMaxLength(32)).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })),
+  "interval_start": Schema.String.check(Schema.isMaxLength(32)).check(Schema.isPattern(DATE_TIME, { expected: "an RFC 3339 date-time" })),
+  "kind": Schema.Literal("live-share"),
+  "live_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(60000)),
+  "path": optionalKey(Schema.Literals(["direct","relay"])),
+  "target": Schema.Literal("ios-live-share")
+}).annotate({ identifier: "ObservationLiveShare" }))()
+export type ObservationLiveShare = typeof ObservationLiveShare.Type
+export type ObservationLiveShareEncoded = typeof ObservationLiveShare.Encoded
+
+export const ObservationSample = /*#__PURE__*/ (() => Schema.Union([
+  ObservationLatency,
+  ObservationLiveShare
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "ObservationSample" }))()
+export type ObservationSample = typeof ObservationSample.Type
+export type ObservationSampleEncoded = typeof ObservationSample.Encoded
+
+export const ObservationReport = /*#__PURE__*/ (() => Schema.Struct({
+  "report_id": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "u"))).check(Schema.isMinLength(36)).check(Schema.isMaxLength(36)),
+  "samples": Schema.Array(ObservationSample).check(Schema.isMinLength(1)).check(Schema.isMaxLength(32))
+}).annotate({ identifier: "ObservationReport" }))()
+export type ObservationReport = typeof ObservationReport.Type
+export type ObservationReportEncoded = typeof ObservationReport.Encoded
+
+export const ObservationResponse = /*#__PURE__*/ (() => Schema.Struct({
+  "api_version": Schema.Literal("st3.client.v0"),
+  "request_id": RequestId,
+  "value": ObservationAccepted
+}).annotate({ identifier: "ObservationResponse" }))()
+export type ObservationResponse = typeof ObservationResponse.Type
+export type ObservationResponseEncoded = typeof ObservationResponse.Encoded
+
 /** Static unauthenticated pairing preflight; no envelope, presence update or graph information. */
 export const PairingAdvertisement = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
@@ -10404,7 +3725,7 @@ export type PairingCompleteEncoded = typeof PairingComplete.Encoded
 export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   /** Resource family. */
-  "kind": openEnum(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement"]).annotate({ description: "Resource family." }),
+  "kind": openEnum(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","summary","connected-client","usage"]).annotate({ description: "Resource family." }),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
