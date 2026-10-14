@@ -868,8 +868,6 @@ CREATE INDEX IF NOT EXISTS local_native_delivery_identity_v1
 ON local_native_delivery_receipts_v1(session_id, native_id, actor, origin, store_index);
 CREATE INDEX IF NOT EXISTS local_native_delivery_owner_cut_v1
 ON local_native_delivery_receipts_v1(actor, store_index);
-CREATE INDEX IF NOT EXISTS local_native_delivery_cut_v1
-ON local_native_delivery_receipts_v1(session_id, actor, origin, store_index);
 -- A changed, repaired or deleted physical claim no longer carries the original proof.
 -- No trigger reconstructs or guesses a native identity from a claim body.
 CREATE TRIGGER IF NOT EXISTS local_native_delivery_update_v1 AFTER UPDATE ON claims

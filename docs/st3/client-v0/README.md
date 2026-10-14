@@ -1929,7 +1929,9 @@ serialization; older daemons/clients keep their existing envelope workaround.
 The first producer is Claude's current verified transcript binding, explicit
 user-record id and existing consumption predicate. Queue acceptance/removal,
 ordinal-only ids, other unqualified adapters and old receipts supply no link.
-The owner retains only native session/record ids beside the newly appended read
+The lookup uses the qualified transcript's driver/native session identity; managed
+route session IDs and cursors remain separate and unchanged. The owner retains
+only native session/record ids beside the newly appended read
 receipt in the same existing writer savepoint. Claim body, signature, receipt
 operation/idempotency digest and ACK timing are unchanged. This local metadata
 is not replicated, a transcript payload or an admission authority. No history

@@ -67,7 +67,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "delivery-annotation");
         let owner = "agent/eval.worker";
-        let session_id = "session/external-0123456789abcdef01234567";
+        let native_session = "00000000-0000-0000-0000-000000000001";
+        let session_id = crate::external_sessions::external_session_id(
+            crate::external_sessions::ExternalDriver::Claude,
+            native_session,
+        );
         crate::mailbox::tests::ready(&state.store, "session-1");
         let fence = state
             .store
@@ -105,7 +109,7 @@ mod tests {
                 &input("message.read", json!({"status":"read"})),
                 &fence,
                 Some(&crate::conversation_delivery::NativeReceipt {
-                    session_id: session_id.into(),
+                    session_id: session_id.clone(),
                     message_id: "native-qualified".into(),
                 }),
             )
@@ -120,7 +124,7 @@ mod tests {
             &state,
             &snapshot,
             &session,
-            session_id,
+            &session_id,
             Some(owner),
             items.iter_mut(),
         )
@@ -131,20 +135,71 @@ mod tests {
             &state,
             &snapshot,
             &session,
-            session_id,
+            &session_id,
             Some(owner),
             items.iter_mut(),
         )
         .unwrap();
         assert_eq!(items[0]["delivers"], "message/linked");
         assert_eq!(items[0]["body"], base["body"]);
+        // Exercise the real page path: its managed route is not the native source id.
+        let route = super::super::super::managed_session_id(owner, "session-1");
+        assert_ne!(route, session_id);
+        let path = root.path().join("qualified-native.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type":"user", "uuid":"native-qualified",
+            "sessionId":native_session, "timestamp":"2026-10-14T00:00:00Z",
+            "message":{"role":"user","content":"Invented native delivery"}})
+            ),
+        )
+        .unwrap();
+        let source = crate::external_sessions::ExternalSession {
+            id: session_id.clone(),
+            revision: "fixture".into(),
+            driver: crate::external_sessions::ExternalDriver::Claude,
+            native_id: native_session.into(),
+            transcript: path,
+            codex_home: None,
+            cwd: None,
+            title: None,
+            started_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+            process: None,
+        };
+        let page = native_slice_page(
+            &state,
+            &snapshot,
+            &session,
+            &route,
+            &ClientListQuery {
+                limit: Some(10),
+                ..Default::default()
+            },
+            &source,
+        )
+        .unwrap()
+        .0;
+        let native = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["type"] == "message" && item["body"]["message_id"] == "native-qualified"
+            })
+            .unwrap();
+        assert_eq!(native["delivers"], "message/linked");
+        assert_eq!(page["session_id"], route);
+
         let mut unmatched = vec![base.clone()];
         unmatched[0]["body"]["message_id"] = json!("native-without-receipt");
         annotate(
             &state,
             &snapshot,
             &session,
-            session_id,
+            &session_id,
             Some(owner),
             unmatched.iter_mut(),
         )
@@ -155,7 +210,7 @@ mod tests {
             &state,
             &snapshot,
             &session,
-            session_id,
+            &session_id,
             Some(owner),
             duplicated.iter_mut(),
         )

@@ -99,20 +99,20 @@ impl Store {
         Ok(qualified)
     }
 
-    /// A receipt can add/remove a link on an already delivered native sequence. Use
-    /// the existing cursor-gap resync rather than mutate a finalized entry silently.
+    /// A new receipt for this owner can alter a previously delivered native turn.
+    /// Conservatively resync its native conversation, with one owner/cut index seek.
     pub(crate) fn conversation_delivery_changed(
         &self,
-        session: &str,
         owner: &str,
         after: u64,
         through: u64,
     ) -> Result<bool> {
         Ok(self.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM main.local_native_delivery_receipts_v1
-             INDEXED BY local_native_delivery_cut_v1
-             WHERE session_id=?1 AND actor=?2 AND origin=?3 AND store_index>?4 AND store_index<=?5 LIMIT 1)",
-            params![session, owner, self.origin(), after, through], |row| row.get(0),
+             INDEXED BY local_native_delivery_owner_cut_v1
+             WHERE actor=?1 AND store_index>?2 AND store_index<=?3 LIMIT 1)",
+            params![owner, after, through],
+            |row| row.get(0),
         )?)
     }
 }
@@ -223,7 +223,7 @@ mod tests {
         assert!(links(&store, store.index().unwrap()).is_empty());
         assert!(
             store
-                .conversation_delivery_changed(SESSION, OWNER, first_cut, store.index().unwrap())
+                .conversation_delivery_changed(OWNER, first_cut, store.index().unwrap())
                 .unwrap()
         );
         assert!(

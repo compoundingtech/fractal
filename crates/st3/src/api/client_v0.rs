@@ -5679,7 +5679,7 @@ fn native_timeline_page(
     query: &ClientListQuery,
     mut items: Vec<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let (order, receipt_owner) = native_timeline_order(state, snapshot, session_id)?;
+    let (order, _) = native_timeline_order(state, snapshot, session_id)?;
     let mut keyed: Vec<_> = items.drain(..)
         .map(|item| {
             let key = crate::external_sessions::timeline_key(&item, 0);
@@ -5703,7 +5703,6 @@ fn native_timeline_page(
         items,
         query,
     )?;
-    conversation_delivery::annotate(state, snapshot, session, session_id, receipt_owner.as_deref(), page.items.iter_mut())?;
     page.items.reverse();
     let mut page_value = json!({
         "kind": "timeline-page",
@@ -5948,7 +5947,8 @@ fn native_slice_page_at_generation(
     // A page never outgrows what a paired reader can take from a remote owner (its reads are
     // capped at 1 MiB): a seat with very large entries gets a shorter newest page and a cursor
     // for the rest, not a refusal that leaves its conversation unreadable.
-    conversation_delivery::annotate(state, snapshot, session, session_id, receipt_owner.as_deref(),
+    let receipt_source = crate::external_sessions::external_session_id(source.driver, &source.native_id);
+    conversation_delivery::annotate(state, snapshot, session, &receipt_source, receipt_owner.as_deref(),
         items.iter_mut().map(|(item, _)| item))?;
     has_more |= bound_page_bytes(&mut items, TIMELINE_PAGE_BYTE_BUDGET);
     let next_cursor = if has_more {
@@ -7150,7 +7150,7 @@ fn conversation_read_now_unbounded(
             .map(|managed| managed.0);
         if session.conversation_delivery_links && native_replay
             && let Some(owner) = owner.as_deref()
-            && state.store.conversation_delivery_changed(session_id, owner, store_index, snapshot.store_index)
+            && state.store.conversation_delivery_changed(owner, store_index, snapshot.store_index)
                 .map_err(ApiError::internal)?
         {
             return Err(conversation_replay_gap(session_id, "delivery-link-changed",
