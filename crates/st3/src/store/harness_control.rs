@@ -117,7 +117,7 @@ impl Store {
     }
     pub fn harness_control_desired_revision(&self, fence: &crate::mailbox::Fence) -> Result<String, St3Error> {
         let connection = self.readers.get();
-        check_mailbox_fence(&connection, fence)?;
+        check_mailbox_fence(&connection, fence, &self.origin)?;
         connection.query_row("SELECT claim_id FROM desired WHERE subject=?1 AND kind='agent'", [&fence.subject], |row| row.get(0)).map_err(internal)
     }
     pub fn harness_control_receipt(&self, operation: &str) -> Result<Option<Receipt>, St3Error> {
@@ -130,7 +130,7 @@ impl Store {
     }
     pub fn close_harness_control(&self, fence: &crate::mailbox::Fence) -> Result<(), St3Error> {
         self.connection.batched(|tx| -> Result<(), St3Error> {
-            check_mailbox_fence(tx, fence)?;
+            check_mailbox_fence(tx, fence, &self.origin)?;
             invalidate_pending(tx, &fence.subject, "native-channel-closed")?;
             if let Some(mut state) = state_tx(tx, &fence.subject)? {
                 state.input_supported = false;
@@ -221,7 +221,7 @@ impl Store {
     /// permission to replay an uncertain operation from its predecessor.
     pub fn observe_harness_control(&self, state: &NativeState, fence: &crate::mailbox::Fence) -> Result<(), St3Error> {
         self.connection.batched(|tx| -> Result<(), St3Error> {
-            check_mailbox_fence(tx, fence)?;
+            check_mailbox_fence(tx, fence, &self.origin)?;
             if state.subject != fence.subject || state.binding.incarnation_id != fence.incarnation {
                 return Err(St3Error::new("foreign-harness-control", "control state belongs to another runtime"));
             }
@@ -240,7 +240,7 @@ impl Store {
     /// Reserve before returning bytes to the driver. A second poll cannot resend them.
     pub fn take_harness_input(&self, subject: &str, fence: &crate::mailbox::Fence) -> Result<Option<InputCommand>, St3Error> {
         self.connection.batched(|tx| -> Result<Option<InputCommand>, St3Error> {
-            check_mailbox_fence(tx, fence)?;
+            check_mailbox_fence(tx, fence, &self.origin)?;
             if subject != fence.subject { return Err(St3Error::new("foreign-harness-control", "input belongs to another seat")); }
             let Some(state) = state_tx(tx, subject)? else { return Ok(None); };
             check_binding(tx, subject, &state.binding)?;
@@ -271,7 +271,7 @@ impl Store {
             return Err(St3Error::new("invalid-native-receipt", "applied input requires an exact native input event"));
         }
         self.connection.batched(|tx| -> Result<Receipt, St3Error> {
-            check_mailbox_fence(tx, fence)?;
+            check_mailbox_fence(tx, fence, &self.origin)?;
             if receipt.subject != fence.subject || receipt.binding.incarnation_id != fence.incarnation {
                 return Err(St3Error::new("foreign-harness-control", "receipt belongs to another runtime"));
             }

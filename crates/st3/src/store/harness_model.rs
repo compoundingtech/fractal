@@ -128,7 +128,7 @@ impl Store {
     /// bytes. Reopening the database cannot resend an uncertain native mutation.
     pub fn take_harness_model(&self, fence: &crate::mailbox::Fence) -> Result<Option<ModelCommand>, St3Error> {
         self.connection.batched(|tx| -> Result<Option<ModelCommand>, St3Error> {
-            check_mailbox_fence(tx, fence)?;
+            check_mailbox_fence(tx, fence, &self.origin)?;
             reconcile_runtime(tx, &fence.subject)?;
             let operation: Option<String> = tx.query_row(
                 "SELECT operation_id FROM local_harness_control_dispatch WHERE subject=?1 AND kind='set_model'", [&fence.subject], |row| row.get(0)
@@ -168,7 +168,7 @@ impl Store {
             _ => return Err(St3Error::new("invalid-native-receipt", "model settlement requires native model evidence without an atomic model/effort claim"))
         };
         self.connection.batched(|tx| -> Result<ModelReceipt, St3Error> {
-            check_mailbox_fence(tx, fence)?;
+            check_mailbox_fence(tx, fence, &self.origin)?;
             if native.subject != fence.subject || native.binding.incarnation_id != fence.incarnation {
                 return Err(St3Error::new("foreign-harness-control", "receipt belongs to another runtime"));
             }
