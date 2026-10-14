@@ -1914,6 +1914,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st slo chart",
+      "description": "Chart what is left of one objective or budget over a period, from the daemon's local history",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st slo explain",
       "description": "Explain one objective or budget in plain words",
       "tests": [

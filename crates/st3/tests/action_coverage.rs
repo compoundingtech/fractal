@@ -1740,6 +1740,7 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["slo"],
         vec!["slo", "ls"],
         vec!["slo", "explain", "cpu"],
+        vec!["slo", "chart", "cpu", "--over", "1h", "--width", "20"],
         vec!["terminals", "ls"],
         vec!["machines"],
         vec!["launch", "ls"],
