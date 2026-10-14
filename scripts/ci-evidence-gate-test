@@ -634,6 +634,21 @@ class WorkflowStructure(unittest.TestCase):
             self.assertIn("- name: evidence skip taken\n        if: steps.gate.outputs.skip == 'true'", body, name)
 
 
+    def test_a_push_to_main_gets_a_base_so_the_gate_can_verify_in_shadow_but_never_skips(self):
+        # Written out: only a pull request or a merge group may ever skip.
+        self.assertEqual(gate.SKIP_EVENTS, ('pull_request', 'merge_group'))
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        jobs = re.findall(r'^  evidence-gate-[a-z-]+:\n((?:    .*\n|\n)+)', text, re.M)
+        bases = [m for body in jobs for m in re.findall(r'^          BASE_SHA: (.*)$', body, re.M)]
+        heads = [m for body in jobs for m in re.findall(r'^          HEAD_REPOSITORY: (.*)$', body, re.M)]
+        self.assertEqual(len(bases), len(CHECKS))
+        self.assertEqual(len(heads), len(CHECKS))
+        for base in bases:  # the push fallback is the commit the push replaced, and only on push
+            self.assertIn("(github.event_name == 'push' && github.event.before)", base)
+            self.assertNotIn('workflow_dispatch', base)
+        for head in heads:
+            self.assertIn("((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository)", head)
+
     def test_every_evidence_test_script_runs_in_the_required_genie_freshness_check(self):
         listed = (ROOT / 'scripts/ci-genie-freshness').read_text()
         for path in sorted((ROOT / 'scripts').iterdir()):

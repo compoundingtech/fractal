@@ -139,9 +139,9 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
       env: {
         CHECK: check,
         REPOSITORY: '${{ github.repository }}',
-        BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}',
+        BASE_SHA: "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || (github.event_name == 'push' && github.event.before) || '' }}",
         HEAD_SHA: '${{ github.sha }}',
-        HEAD_REPOSITORY: "${{ github.event.pull_request.head.repo.full_name || (github.event_name == 'merge_group' && github.repository) || '' }}",
+        HEAD_REPOSITORY: "${{ github.event.pull_request.head.repo.full_name || ((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository) || '' }}",
         EVENT_NAME: '${{ github.event_name }}',
         PR_NUMBER: '${{ github.event.pull_request.number }}',
         RUN_ID: '${{ github.run_id }}',
