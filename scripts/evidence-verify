@@ -131,12 +131,19 @@ def load(repo, commit, tree):
     if statement is None:
         return None
     subject = statement['subject'][0]['name']
-    if git(repo, 'show', '-s', '--format=%P', commit).decode().strip() != subject:
+    # Read the parent from the raw commit: `git show` hides it in a shallow fetch, which is
+    # how a CI checkout gets the notes.
+    header = git(repo, 'cat-file', 'commit', commit).split(b'\n\n', 1)[0].decode(errors='replace')
+    parents = [line.split(' ', 1)[1] for line in header.splitlines() if line.startswith('parent ')]
+    if parents != [subject]:
         return None
+    # The signed statement already names the tree. When the subject commit is present it must
+    # agree; when it is not (shallow fetch), the signer's claim stands.
     try:
-        if git(repo, 'rev-parse', '--verify', '--end-of-options', subject + '^{tree}').decode().strip() != tree:
-            return None
+        present = git(repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', subject + '^{tree}').decode().strip()
     except Failure:
+        present = None
+    if present is not None and present != tree:
         return None
     return statement
 

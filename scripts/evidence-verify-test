@@ -225,6 +225,19 @@ class Verifier(unittest.TestCase):
         self.f.note(other_commit, self.tree, self.ci, 'machine/ci1')
         self.assertEqual(self.reason(self.tree), 'stale_tree')
 
+    def test_notes_fetched_shallow_verify_without_the_subject_commit(self):
+        # How CI gets them: a fresh checkout of the tree plus a depth-1 fetch of the notes refs.
+        record = self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        run('git', 'init', '-q', other.name)
+        run('git', '-C', other.name, 'fetch', '-q', '--depth=1', '--no-tags', 'file://' + str(self.f.repo),
+            'refs/notes/evidence/*:refs/notes/evidence/*')
+        missing = subprocess.run(['git', '-C', other.name, 'cat-file', '-e', self.commit], capture_output=True)
+        self.assertNotEqual(missing.returncode, 0, 'the subject commit must be absent for this test')
+        result = evidence_verify.verify(other.name, self.tree, 'unit', str(self.f.keys), None)
+        self.assertEqual(result['record'], record)
+
     def test_the_key_list_comes_from_the_accepted_base_so_revoking_a_key_revokes_its_notes(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1')
         (self.f.repo / '.st').mkdir()

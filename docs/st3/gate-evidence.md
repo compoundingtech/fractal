@@ -369,6 +369,11 @@ by the tree they name with one `git cat-file --batch-check`, so the cost grows w
 number of evidence refs; pack refs, or add a per-tree index, before they reach the
 thousands.
 
+The notes may be fetched shallow, as a CI checkout does: the note commit's parent is read
+from the raw commit, and when the subject commit is not in the local repository the signed
+statement's tree stands. When the subject commit is present its tree must equal the
+statement's, so a record cannot be rebound to a different tree.
+
 `--kinds nix,wrapper` limits the record kinds a check accepts. `--bind-input KEY=PATH`
 (repeatable) requires the record's input `KEY` to equal the sha256 of `PATH` as it is in
 the tree being verified, for example `flake_lock_sha256=flake.lock`, so an environment
