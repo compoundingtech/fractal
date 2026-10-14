@@ -58081,6 +58081,7 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
                         ),
                         ("total_tokens".into(), json!(100)),
                         ("cost".into(), json!(i as f64)),
+                        ("currency".into(), json!("USD")),
                         ("context_used_tokens".into(), json!(i)),
                         ("model".into(), json!("fixture-model-".repeat(320))),
                     ]),
