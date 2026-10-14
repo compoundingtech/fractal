@@ -193,8 +193,15 @@ pkgs.testers.runNixOSTest {
                 cwd="/w/smalltalk", backing="/var/cache/evidence/work"):
         call = (f"systemd-run --quiet --wait --pipe --collect --unit {unit} "
                 f"--property=User={user} --property=WorkingDirectory={cwd} "
-                f"--property=BindPaths={backing}:/w -- /bin/sh -c " + shlex.quote(command) + " 2>&1")
-        return machine.succeed(call) if succeed else machine.fail(call)
+                f"--property=BindPaths={backing}:/w -- /bin/sh -c "
+                + shlex.quote(f"({command}) </dev/null") + " 2>&1")
+        # --pipe otherwise inherits the driver's open stdin. The fake gh intentionally
+        # reads to EOF; explicit pipelines inside the group still provide their payload.
+        # Bound the call, but never mistake a timeout for an expected refusal.
+        status, output = machine.execute("timeout --kill-after=5 120 " + call)
+        assert status not in (124, 137), f"program call timed out: {output}"
+        assert (status == 0) if succeed else (status != 0), output
+        return output
     assert "run-only system service" in program(f"{st} sekrets whoami")
     with subtest("Program first command binds its authorized private checkout"):
         assert "token=set" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
@@ -207,7 +214,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("Program bind retains the verified inode across caller path replacement"):
         machine.succeed("install -d -o sekrets -m 0700 /run/st-sekrets/bind-control && mkfifo /run/st-sekrets/bind-control/resume && chown sekrets /run/st-sekrets/bind-control/resume && touch /run/st-sekrets/bind-control/pause && install -o evidence-caller -m 0600 /dev/null /var/cache/evidence/swap-output")
-        swap_command = (f"{st} sekrets --profile ada/agent-gh -- gh pr view 1 > /var/cache/evidence/swap-output 2>&1; "
+        swap_command = (f"{st} sekrets --profile ada/agent-gh -- gh pr view 1 </dev/null > /var/cache/evidence/swap-output 2>&1; "
                         "result=$?; printf '\\nexit=%s\\n' \"$result\" >> /var/cache/evidence/swap-output; exit \"$result\"")
         machine.succeed("systemd-run --quiet --no-block --unit ci-evidence-caller.service "
                         "--property=Type=oneshot --property=RemainAfterExit=yes "

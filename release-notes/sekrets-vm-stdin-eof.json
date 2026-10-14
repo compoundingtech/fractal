@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Close fixture stdin explicitly and bound program VM calls without accepting timeouts as refusals.",
+  "replay": {
+    "status": "none",
+    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+  }
+}
