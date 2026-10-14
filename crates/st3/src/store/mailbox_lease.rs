@@ -4,8 +4,28 @@ use crate::mailbox::{Authority, Fence};
 use crate::model::{LaunchSpec, MemberKind, MemberSpec};
 
 #[cfg(test)]
+type FaultReadHook = Box<dyn FnOnce(&Connection) -> Result<()>>;
+
+#[cfg(test)]
 thread_local! {
+    static BEFORE_FAULT_READER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static DURING_FAULT_READ: std::cell::RefCell<Option<FaultReadHook>> = const { std::cell::RefCell::new(None) };
     static AFTER_FAULT_ACQUISITION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static CARD_FAULT_DEADLINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Runs once, after a promotion's reader pre-check found something that may promote and
+    /// before the writer is borrowed, so a test can change the lease in that gap.
+    static AFTER_PROMOTION_PRECHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+impl Store {
+    pub(crate) fn expire_next_card_fault_read_for_test() {
+        Self::expire_card_fault_reads_for_test(1);
+    }
+
+    pub(crate) fn expire_card_fault_reads_for_test(count: usize) {
+        CARD_FAULT_DEADLINES.with(|remaining| remaining.set(count));
+    }
 }
 
 fn lease(
@@ -47,6 +67,75 @@ fn lease(
         .map_err(internal)
 }
 
+fn capture_mailbox_faults(
+    connection: &Connection, subjects: &[String], index: u64,
+) -> Result<BTreeMap<String, String>> {
+    let work = smallclaims::profile::span("mailbox_faults/work");
+    #[cfg(test)]
+    DURING_FAULT_READ.with(|hook| {
+        hook.borrow_mut().take().map_or(Ok(()), |hook| hook(connection))
+    })?;
+    let query = canonical_sql(
+        "WITH selected(subject) AS (SELECT DISTINCT value FROM json_each(?1)),
+         failures AS MATERIALIZED (
+           SELECT subject, (SELECT id FROM claims INDEXED BY claims_subject_kind_accepted_index
+             WHERE claims.subject=selected.subject AND kind='operational.failure'
+             AND +store_index<=?2
+             AND json_extract(body,'$.fields.condition')='mailbox-channel-lost'
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1) AS failure FROM selected
+         ), unresolved AS MATERIALIZED (
+           SELECT subject,failure FROM failures WHERE failure IS NOT NULL
+           AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+             WHERE claims.subject=failures.subject AND kind='operational.recovered'
+             AND store_index<=?2 AND json_extract(body,'$.fields.failure')=failures.failure)
+         )
+         SELECT unresolved.subject, fault.body,
+           (SELECT body FROM claims INDEXED BY claims_subject_kind_accepted_index
+            WHERE claims.subject=unresolved.subject AND kind='runtime.observed'
+            AND +store_index<=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1)
+         FROM unresolved JOIN claims fault ON fault.id=unresolved.failure",
+    );
+    let mut statement = connection.prepare_cached(&query)?;
+    let rows = statement.query_map(params![serde_json::to_string(subjects)?, index], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+    })?;
+    let mut faults = BTreeMap::new();
+    for row in rows {
+        smallclaims::read_budget::check()?;
+        let (subject, fault, runtime) = row?;
+        let body: Value = serde_json::from_str(&fault)?;
+        let runtime: Value = runtime.map(|body| serde_json::from_str(&body))
+            .transpose()?.unwrap_or(Value::Null);
+        let fields = runtime.get("fields").unwrap_or(&runtime);
+        // A fault's exact runtime must still be the running one at this same cut.
+        if fields["status"] == "running"
+            && fields["incarnation_id"] == body["fields"]["incarnation"]
+        {
+            faults.insert(subject, body["fields"]["reason"].as_str()
+                .unwrap_or("mailbox channel lost").into());
+        }
+    }
+    // Finish the successful work check before statement/reader cleanup. A later
+    // scheduling pause must not turn a completed read into a local work overrun.
+    smallclaims::read_budget::check()?;
+    drop(work);
+    Ok(faults)
+}
+
+/// Whether `promote_current_mailbox_ownership` has nothing to promote for this lease row: there
+/// is none, or the caller is not a bootstrap promotion and not a same-session sequence advance.
+/// Re-exec can claim a newer sequence for the surviving provider session; only that exact
+/// process and current capability may retain its lease, which the caller checks.
+fn promotion_is_noop(row: Option<&(Fence, Authority, bool)>, authority: &Authority) -> bool {
+    let Some((_, prior, _)) = row else {
+        return true;
+    };
+    let advancing_session = prior.sequence > 0
+        && authority.sequence > prior.sequence
+        && authority.session == prior.session;
+    authority.sequence == 0 || (prior.sequence != 0 && !advancing_session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +161,104 @@ mod tests {
         declare(&store);
         crate::mailbox::tests::ready(&store, "current");
         store
+    }
+
+    fn fault_capture_stall(phase: &str) {
+        let store = fixture();
+        let subjects = vec![String::from("agent/eval.worker")];
+        store.append_claim(&ClaimInput {
+            subject: subjects[0].clone(), kind: "operational.failure".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
+                "incarnation":"current", "reason":"fixture loss", "reviewer":subjects[0],
+                "title":"Mailbox lost", "severity":"error", "targets":subjects})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let cut = store.index().unwrap();
+        let expected = BTreeMap::from([(subjects[0].clone(), "fixture loss".into())]);
+        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = reached.clone();
+        let pause = move || {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(60));
+        };
+        match phase {
+            "before" => BEFORE_FAULT_READER.with(|hook| *hook.borrow_mut() = Some(Box::new(pause))),
+            "during" => DURING_FAULT_READ.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |connection| {
+                    let _: i64 = connection.query_row("SELECT 1", [], |row| row.get(0))?;
+                    pause();
+                    Ok(())
+                }));
+            }),
+            "after" => AFTER_FAULT_ACQUISITION.with(|hook| *hook.borrow_mut() = Some(Box::new(pause))),
+            _ => unreachable!(),
+        }
+        let parent = smallclaims::read_budget::ReadBudget::new("/fault-stall", std::time::Duration::from_secs(15));
+        let actual = smallclaims::read_budget::with(Some(parent), ||
+            store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)));
+        println!("fault stall phase={phase} injected={}", reached.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(reached.load(std::sync::atomic::Ordering::SeqCst), "the control must inject its stall");
+        assert_eq!(actual.unwrap(), expected, "a {phase}-work wait is not reader CPU work");
+        assert_eq!(store.index().unwrap(), cut, "a stalled read cannot write or repair its cut");
+    }
+
+    #[test]
+    fn fault_capture_wait_before_reader_does_not_spend_cpu_budget() {
+        fault_capture_stall("before");
+    }
+
+    #[test]
+    fn fault_capture_wait_during_reader_does_not_spend_cpu_budget() {
+        fault_capture_stall("during");
+    }
+
+    #[test]
+    fn fault_capture_wait_after_reader_does_not_spend_cpu_budget() {
+        fault_capture_stall("after");
+    }
+
+    #[test]
+    fn fault_capture_real_sql_overrun_still_refuses_with_live_parent() {
+        let store = fixture();
+        let subjects = vec!["agent/eval.worker".into()];
+        let cut = store.index().unwrap();
+        DURING_FAULT_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(|connection| {
+                let _: i64 = connection.query_row(
+                    "WITH RECURSIVE work(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM work WHERE n<1000000)
+                     SELECT sum(n) FROM work", [], |row| row.get(0),
+                )?;
+                Ok(())
+            }));
+        });
+        let parent = smallclaims::read_budget::ReadBudget::new("/fault-work", std::time::Duration::from_secs(15));
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let error = smallclaims::read_budget::with(Some(parent.clone()), ||
+            store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index))).unwrap_err();
+        let work = scope.finish();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert!(parent.check().is_ok(), "the local work limit must refuse before its parent");
+        assert!(work.vm_steps > 1000, "the control must execute real SQLite work");
+        assert_eq!(store.index().unwrap(), cut, "a refused read cannot return a repaired cut");
+    }
+
+    #[test]
+    fn fault_capture_stalls_still_observe_parent_cancellation_and_non_request_wall_bound() {
+        let store = fixture();
+        let subjects = vec!["agent/eval.worker".into()];
+        let cut = store.index().unwrap();
+        let parent = smallclaims::read_budget::ReadBudget::new("/fault-cancel", std::time::Duration::from_secs(15));
+        let cancel = parent.clone();
+        AFTER_FAULT_ACQUISITION.with(|hook| *hook.borrow_mut() = Some(Box::new(move || cancel.cancel())));
+        let error = smallclaims::read_budget::with(Some(parent), ||
+            store.mailbox_faults_for(&subjects, cut)).unwrap_err();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        BEFORE_FAULT_READER.with(|hook| *hook.borrow_mut() = Some(Box::new(||
+            std::thread::sleep(std::time::Duration::from_millis(60)))));
+        let error = store.mailbox_faults_for(&subjects, cut).unwrap_err();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert_eq!(store.index().unwrap(), cut);
     }
 
     #[test]
@@ -774,6 +961,235 @@ mod tests {
         assert!(store.repair_mailbox(&old, &authority(1)).is_err());
         store.check_mailbox(&current).unwrap();
     }
+
+    /// Call `promote_current_mailbox_ownership` on another thread, so a test can hold the writer
+    /// on this one. A call that needs the writer cannot finish while the test holds it.
+    fn promote_elsewhere(
+        store: &Arc<Store>,
+        fence: &Fence,
+        candidate: &Authority,
+    ) -> (
+        std::sync::mpsc::Receiver<Result<(), String>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (store, fence, candidate) = (Arc::clone(store), fence.clone(), candidate.clone());
+        let worker = std::thread::spawn(move || {
+            let result = store
+                .promote_current_mailbox_ownership(&fence, &candidate)
+                .map_err(|error| format!("{error:?}"));
+            let _ = sender.send(result);
+        });
+        (receiver, worker)
+    }
+
+    /// The result of a call that must finish while the test holds the writer. A timeout means it
+    /// waited for the writer; a disconnected channel means the worker failed, and joining it
+    /// reports why.
+    fn finished_without_the_writer(
+        case: &str,
+        receiver: &std::sync::mpsc::Receiver<Result<(), String>>,
+        worker: std::thread::JoinHandle<()>,
+    ) -> Result<(), String> {
+        let received = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        match received {
+            Ok(result) => {
+                worker.join().unwrap();
+                result
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{case}: waited for the writer")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                worker.join().expect("the worker thread failed");
+                panic!("{case}: the worker ended without a result")
+            }
+        }
+    }
+
+    /// Make the next promotion on this thread run `change` after its pre-check decided the call
+    /// may promote, and report whether that point was reached.
+    fn change_after_precheck(change: impl FnOnce() + 'static) -> Arc<std::sync::atomic::AtomicBool> {
+        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&reached);
+        AFTER_PROMOTION_PRECHECK.with(|pause| {
+            *pause.borrow_mut() = Some(Box::new(move || {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                change();
+            }));
+        });
+        reached
+    }
+
+    fn precheck_was_reached(reached: &Arc<std::sync::atomic::AtomicBool>) -> bool {
+        reached.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    // These controls cover `promote_current_mailbox_ownership` itself. They say nothing about
+    // other work an attachment request does.
+    #[test]
+    fn promotions_that_would_change_nothing_do_not_borrow_the_writer() {
+        let store = Arc::new(fixture());
+        let owner = authority(1);
+        let bound = store
+            .bind_mailbox_with_lease(&request(), Some(&owner))
+            .unwrap();
+        let no_lease = Fence::new("agent/eval.worker", "current", "title");
+        let held = store.connection.write();
+        for (case, fence, candidate) in [
+            ("same sequence, exact owner", bound.clone(), owner.clone()),
+            (
+                "sequence zero against a promoted lease",
+                bound.clone(),
+                Authority { sequence: 0, ..owner.clone() },
+            ),
+            (
+                "higher sequence from another session",
+                bound.clone(),
+                Authority { session: "different-session".into(), sequence: 2, ..owner.clone() },
+            ),
+            ("no lease row", no_lease, owner.clone()),
+        ] {
+            let (receiver, worker) = promote_elsewhere(&store, &fence, &candidate);
+            assert_eq!(finished_without_the_writer(case, &receiver, worker), Ok(()), "{case}");
+        }
+        drop(held);
+        assert_eq!(store.mailbox_lease_authority(&bound).unwrap(), Some(owner));
+    }
+
+    #[test]
+    fn a_same_session_sequence_advance_goes_on_to_the_writer_and_records() {
+        let store = Arc::new(fixture());
+        let owner = authority(1);
+        let bound = store
+            .bind_mailbox_with_lease(&request(), Some(&owner))
+            .unwrap();
+        let advanced = Authority { sequence: 2, ..owner.clone() };
+        let reached = change_after_precheck(|| {});
+        store
+            .promote_current_mailbox_ownership(&bound, &advanced)
+            .unwrap();
+        assert!(precheck_was_reached(&reached), "an advance is not a no-op");
+        assert_eq!(
+            store.mailbox_lease_authority(&bound).unwrap(),
+            Some(advanced)
+        );
+    }
+
+    #[test]
+    fn a_bootstrap_promotion_from_sequence_zero_goes_on_to_the_writer_and_records() {
+        let store = Arc::new(fixture());
+        let intent = crate::graph::parse_intent("version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; harness \"codex\" {} }", "node").unwrap();
+        store
+            .apply_internal(&intent, "codex-bootstrap-fixture")
+            .unwrap();
+        let mut bootstrap = authority(1);
+        bootstrap.provider = "codex".into();
+        bootstrap.session = "runtime:current".into();
+        bootstrap.sequence = 0;
+        let bound = store
+            .bind_mailbox_with_lease(&request(), Some(&bootstrap))
+            .unwrap();
+        let mut provider = authority(1);
+        provider.provider = "codex".into();
+        let reached = change_after_precheck(|| {});
+        store
+            .promote_current_mailbox_ownership(&bound, &provider)
+            .unwrap();
+        assert!(precheck_was_reached(&reached), "a bootstrap promotion is not a no-op");
+        assert_eq!(
+            store.mailbox_lease_authority(&bound).unwrap(),
+            Some(provider)
+        );
+    }
+
+    #[test]
+    fn a_lease_revoked_after_the_precheck_is_refused_on_the_writer() {
+        let store = Arc::new(fixture());
+        let owner = authority(1);
+        let bound = store
+            .bind_mailbox_with_lease(&request(), Some(&owner))
+            .unwrap();
+        let advanced = Authority { sequence: 2, ..owner.clone() };
+        let changing = Arc::clone(&store);
+        let reached = change_after_precheck(move || {
+            changing
+                .connection
+                .write()
+                .execute("UPDATE local_mailbox_leases SET revoked=1", [])
+                .unwrap();
+        });
+        assert!(
+            store
+                .promote_current_mailbox_ownership(&bound, &advanced)
+                .is_err()
+        );
+        assert!(precheck_was_reached(&reached), "the pre-check saw a lease that could promote");
+        // The writer's own read of the revoked row decided; custody is not advanced.
+        assert_eq!(store.mailbox_lease_authority(&bound).unwrap(), Some(owner));
+    }
+
+    #[test]
+    fn a_lease_superseded_after_the_precheck_is_not_overwritten_and_a_no_op_authorizes_nothing() {
+        let store = Arc::new(fixture());
+        let owner = authority(1);
+        let bound = store
+            .bind_mailbox_with_lease(&request(), Some(&owner))
+            .unwrap();
+        let advanced = Authority { sequence: 2, ..owner.clone() };
+        let successor = authority(3);
+        let changing = Arc::clone(&store);
+        let replaced = Arc::new(std::sync::Mutex::new(None));
+        let slot = Arc::clone(&replaced);
+        let reached = change_after_precheck(move || {
+            let replacement = changing
+                .bind_mailbox_with_lease(&request(), Some(&successor))
+                .unwrap();
+            *slot.lock().unwrap() = Some(replacement);
+        });
+        // The pre-check read the old lease and the old capability; by the time the writer reads
+        // the row it belongs to the successor, so the old fence promotes nothing.
+        store
+            .promote_current_mailbox_ownership(&bound, &advanced)
+            .unwrap();
+        assert!(precheck_was_reached(&reached));
+        let replacement = replaced.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            store.mailbox_lease_authority(&replacement).unwrap(),
+            Some(authority(3)),
+            "the old capability's promotion must not overwrite the successor's custody"
+        );
+        // A no-op pre-check result is never an authorization: the retired fence is still refused
+        // by every later check, whatever the promotion returned.
+        store
+            .promote_current_mailbox_ownership(&bound, &owner)
+            .unwrap();
+        assert!(store.check_mailbox(&bound).is_err());
+        assert!(!store.owns_mailbox_lease(&bound, &owner).unwrap());
+        store.check_mailbox(&replacement).unwrap();
+    }
+
+    #[test]
+    fn a_failed_lease_read_is_returned_without_borrowing_the_writer() {
+        let store = Arc::new(fixture());
+        let owner = authority(1);
+        let bound = store
+            .bind_mailbox_with_lease(&request(), Some(&owner))
+            .unwrap();
+        store
+            .connection
+            .write()
+            .execute(
+                "ALTER TABLE local_mailbox_leases RENAME TO local_mailbox_leases_unreadable",
+                [],
+            )
+            .unwrap();
+        let held = store.connection.write();
+        let (receiver, worker) = promote_elsewhere(&store, &bound, &owner);
+        let result = finished_without_the_writer("failed lease read", &receiver, worker);
+        assert!(result.is_err(), "{result:?}");
+        drop(held);
+    }
 }
 
 fn refused(reason: &str) -> St3Error {
@@ -1080,23 +1496,24 @@ impl Store {
         episode: &str,
     ) -> Result<Option<(String, bool)>, St3Error> {
         let connection = self.readers.get();
-        let latest: Option<String> = connection
+        connection
             .prepare_cached(&canonical_sql(
-                "SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure'
-             AND json_extract(body,'$.fields.episode')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+                "SELECT id, NOT EXISTS(
+                    SELECT 1 FROM claims AS recovery INDEXED BY claims_subject_kind_index
+                    WHERE recovery.subject=claims.subject
+                    AND recovery.kind='operational.recovered'
+                    AND json_extract(recovery.body,'$.fields.failure')=claims.id)
+                 FROM claims INDEXED BY claims_subject_kind_accepted_index
+                 WHERE subject=?1 AND kind='operational.failure'
+                 AND json_extract(body,'$.fields.episode')=?2
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             ))
             .map_err(internal)?
-            .query_row(params![fence.subject, episode], |row| row.get(0))
+            .query_row(params![fence.subject, episode], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .optional()
-            .map_err(internal)?;
-        let Some(failure) = latest else {
-            return Ok(None);
-        };
-        let recovered: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='operational.recovered'
-             AND json_extract(body,'$.fields.failure')=?2)", params![fence.subject, failure], |row| row.get(0),
-        ).map_err(internal)?;
-        Ok(Some((failure, !recovered)))
+            .map_err(internal)
     }
 
     /// The caller holds the provider ownership lock. Recheck physical/declaration and
@@ -1141,24 +1558,37 @@ impl Store {
     /// Promote physical Codex bootstrap custody, or advance a surviving process's
     /// same-session ownership after re-exec, under the caller's provider ownership lock.
     /// Both retain only the still-current capability and exact process generation.
+    ///
+    /// A reader first reads the lease row, only to skip the writer when this call can promote
+    /// nothing: no lease row, or `promotion_is_noop`. That result never authorizes anything.
+    /// It is released before the writer is borrowed, and any call that may promote reruns the
+    /// whole transaction below on the writer's current state.
     pub(crate) fn promote_current_mailbox_ownership(
         &self,
         fence: &Fence,
         authority: &Authority,
     ) -> Result<(), St3Error> {
-        let mut connection = self.connection.write();
-        let tx = connection.transaction().map_err(internal)?;
-        let Some((held, prior, revoked)) = lease(&tx, fence)? else {
-            return Ok(());
-        };
-        // Re-exec can claim a newer sequence for the surviving provider session.
-        // Only that exact process and current capability may retain its lease.
-        let advancing_session = prior.sequence > 0
-            && authority.sequence > prior.sequence
-            && authority.session == prior.session;
-        if authority.sequence == 0 || (prior.sequence != 0 && !advancing_session) {
+        let observed = lease(&self.readers.get(), fence)?;
+        if promotion_is_noop(observed.as_ref(), authority) {
             return Ok(());
         }
+        drop(observed);
+        #[cfg(test)]
+        AFTER_PROMOTION_PRECHECK.with(|pause| {
+            let pause = pause.borrow_mut().take();
+            if let Some(pause) = pause {
+                pause();
+            }
+        });
+        let mut connection = self.connection.write();
+        let tx = connection.transaction().map_err(internal)?;
+        let current = lease(&tx, fence)?;
+        if promotion_is_noop(current.as_ref(), authority) {
+            return Ok(());
+        }
+        let Some((held, prior, revoked)) = current else {
+            return Ok(());
+        };
         if held.incarnation != fence.incarnation
             || held.token != fence.token
             || held.epoch != fence.epoch
@@ -1192,6 +1622,26 @@ impl Store {
                     .then_some(owner)
             }),
         )
+    }
+
+    /// Compare replay inputs without allocating another decoded lease. This is
+    /// not report admission: runtime, custody and binding checks still run there.
+    pub(crate) fn mailbox_replay_owner_matches(
+        &self,
+        fence: &Fence,
+        owner: &Authority,
+    ) -> Result<bool, St3Error> {
+        self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_mailbox_leases
+             WHERE subject=?1 AND component=?2 AND incarnation=?3
+             AND token=?4 AND epoch=?5 AND provider=?6 AND session=?7
+             AND sequence=?8 AND pid=?9 AND process_token=CAST(?10 AS TEXT)
+             AND revoked=0)",
+            params![fence.subject, fence.component, fence.incarnation, fence.token,
+                fence.epoch, owner.provider, owner.session, owner.sequence,
+                owner.pid, owner.process_token],
+            |row| row.get(0),
+        ).map_err(internal)
     }
 
     /// A transient physical query may retry only a still-current canonical capability.
@@ -1233,71 +1683,54 @@ impl Store {
     }
 
     /// Captured public-card fault source, bounded to the selected subjects and cut.
+    /// Keep the capture on one blocking worker: its CPU budget belongs to that thread.
     pub(crate) fn mailbox_faults_for(
         &self,
         subjects: &[String],
         index: u64,
     ) -> Result<BTreeMap<String, String>> {
         if subjects.is_empty() { return Ok(BTreeMap::new()); }
-        // One captured statement, rather than up to three round trips per actor. This
-        // local query bound also applies to non-HTTP captures and never extends a parent.
+        let _capture = smallclaims::profile::span("mailbox_faults/capture");
+        // Admission and result cleanup remain within the enclosing wall deadline.
+        // Captures without a request retain their existing finite wall bound.
         let duration = std::time::Duration::from_millis(25);
-        let budget = smallclaims::read_budget::current().map_or_else(
+        #[cfg(test)]
+        let duration = CARD_FAULT_DEADLINES.with(|remaining| {
+            let count = remaining.get();
+            remaining.set(count.saturating_sub(1));
+            if count == 0 { duration } else { std::time::Duration::ZERO }
+        });
+        let budget = smallclaims::read_budget::current().unwrap_or_else(
             || smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", duration),
-            |parent| parent.child(duration),
         );
         let checked = budget.clone();
         smallclaims::read_budget::with(Some(budget), || {
             checked.check()?;
+            #[cfg(test)]
+            BEFORE_FAULT_READER.with(|pause| {
+                if let Some(pause) = pause.borrow_mut().take() { pause(); }
+            });
             let read = || -> Result<BTreeMap<String, String>> {
-            let connection = self.readers.get();
-            let query = canonical_sql(
-                "WITH selected(subject) AS (SELECT DISTINCT value FROM json_each(?1)),
-                 failures AS MATERIALIZED (
-                   SELECT subject, (SELECT id FROM claims INDEXED BY claims_subject_kind_accepted_index
-                     WHERE claims.subject=selected.subject AND kind='operational.failure'
-                     AND +store_index<=?2
-                     AND json_extract(body,'$.fields.condition')='mailbox-channel-lost'
-                     ORDER BY CANONICAL_DESC(claims) LIMIT 1) AS failure FROM selected
-                 ), unresolved AS MATERIALIZED (
-                   SELECT subject,failure FROM failures WHERE failure IS NOT NULL
-                   AND NOT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
-                     WHERE claims.subject=failures.subject AND kind='operational.recovered'
-                     AND store_index<=?2 AND json_extract(body,'$.fields.failure')=failures.failure)
-                 )
-                 SELECT unresolved.subject, fault.body,
-                   (SELECT body FROM claims INDEXED BY claims_subject_kind_accepted_index
-                    WHERE claims.subject=unresolved.subject AND kind='runtime.observed'
-                    AND +store_index<=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1)
-                 FROM unresolved JOIN claims fault ON fault.id=unresolved.failure",
-            );
-            let mut statement = connection.prepare_cached(&query)?;
-            let rows = statement.query_map(params![serde_json::to_string(subjects)?, index], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
-            })?;
-            let mut faults = BTreeMap::new();
-            for row in rows {
-                smallclaims::read_budget::check()?;
-                let (subject, fault, runtime) = row?;
-                let body: Value = serde_json::from_str(&fault)?;
-                let runtime: Value = runtime.map(|body| serde_json::from_str(&body))
-                    .transpose()?.unwrap_or(Value::Null);
-                let fields = runtime.get("fields").unwrap_or(&runtime);
-                // A fault's exact runtime must still be the running one at this same cut.
-                if fields["status"] == "running"
-                    && fields["incarnation_id"] == body["fields"]["incarnation"]
-                {
-                    faults.insert(subject, body["fields"]["reason"].as_str()
-                        .unwrap_or("mailbox channel lost").into());
-                }
-            }
-            smallclaims::read_budget::check()?;
-            Ok(faults)
+                let acquisition = smallclaims::profile::span("mailbox_faults/acquisition");
+                let connection = self.readers.get();
+                drop(acquisition);
+                let work = checked.child_work(duration)?;
+                let measured = work.clone();
+                smallclaims::read_budget::with(Some(work), || {
+                    match capture_mailbox_faults(&connection, subjects, index) {
+                        Ok(faults) => Ok(faults),
+                        Err(error) => {
+                            // SQLite can interrupt before the first row. Normalize its
+                            // error before leaving the worker's authoritative work scope.
+                            measured.check()?;
+                            Err(error)
+                        }
+                    }
+                })
             };
-            // Keep the authoritative existing snapshot; otherwise request_read acquires
-            // through try_get, which fails closed instead of waiting for a returned reader.
-            let pinned = smallclaims::sqlite::PINNED_READER.with(|slot|
-                slot.borrow().as_ref().is_some_and(|(key, _)| *key == self.readers.key()));
+            // Keep the authoritative existing snapshot; otherwise acquire cancellable
+            // admission before the fallible reader checkout.
+            let pinned = self.readers.has_pinned_reader();
             let result = if pinned { read() } else {
                 self.readers.request_read(read).and_then(|result| result)
             };
@@ -1305,8 +1738,8 @@ impl Store {
             AFTER_FAULT_ACQUISITION.with(|pause| {
                 if let Some(pause) = pause.borrow_mut().take() { pause(); }
             });
-            // Preserve the typed retryable deadline after restoring the parent scope,
-            // including SQLite interruption before the first row could be decoded.
+            // Only the enclosing request can expire after successful reader work. Also
+            // preserve its typed cancellation when admission or acquisition failed.
             checked.check()?;
             result
         })

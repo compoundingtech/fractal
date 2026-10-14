@@ -19,9 +19,21 @@ struct TransactionHooks {
 #[derive(Default)]
 pub(super) struct TransactionFinalizers {
     hooks: OnceLock<TransactionHooks>,
+    maintenance: OnceLock<TransactionCallback>,
 }
 
 impl TransactionFinalizers {
+    pub(super) fn install_maintenance(
+        &self,
+        callback: impl Fn(&Transaction<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        ensure!(
+            self.maintenance.set(Arc::new(callback)).is_ok(),
+            "runtime transaction maintenance is already installed"
+        );
+        Ok(())
+    }
+
     pub(super) fn install(
         &self,
         prepare: impl Fn(&Transaction<'_>) -> Result<()> + Send + Sync + 'static,
@@ -47,6 +59,9 @@ impl TransactionFinalizers {
     }
 
     pub(super) fn run(&self, transaction: &Transaction<'_>) -> Result<()> {
+        if let Some(maintenance) = self.maintenance.get() {
+            Self::invoke(maintenance, transaction, "maintenance")?;
+        }
         if let Some(hooks) = self.hooks.get() {
             Self::invoke(&hooks.finalize, transaction, "finalizer")?;
         }
@@ -80,6 +95,8 @@ impl TransactionFinalizers {
 pub struct WriterTransaction<'connection> {
     transaction: Transaction<'connection>,
     finalizers: Arc<TransactionFinalizers>,
+    /// Declared last, so it records after COMMIT or the rollback on drop.
+    _timer: crate::windows::Timer,
 }
 
 impl<'connection> WriterTransaction<'connection> {
@@ -90,6 +107,7 @@ impl<'connection> WriterTransaction<'connection> {
         Self {
             transaction,
             finalizers,
+            _timer: crate::windows::Timer::start(crate::windows::StoreWork::WriteTransaction),
         }
     }
 
@@ -109,6 +127,7 @@ impl<'connection> WriterTransaction<'connection> {
         self.finalizers.run(&self.transaction)?;
         check()?;
         self.transaction.commit()?;
+        crate::profile::managed_commit_succeeded();
         Ok(())
     }
 
@@ -192,6 +211,43 @@ mod tests {
             .write()
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn publication_maintenance_and_owned_adapter_share_the_commit_and_rollback() {
+        for failure in [None, Some("maintenance"), Some("adapter")] {
+            let writer = writer();
+            writer
+                .install_transaction_maintenance(move |tx| {
+                    drain(tx)?;
+                    if failure == Some("maintenance") {
+                        anyhow::bail!("maintenance refused")
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            writer
+                .install_transaction_finalizer(move |tx| {
+                    let value: String =
+                        tx.query_row("SELECT value FROM output WHERE id=1", [], |row| row.get(0))?;
+                    ensure!(value == "source", "adapter must see runtime maintenance");
+                    if failure == Some("adapter") {
+                        anyhow::bail!("adapter refused")
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert!(writer.install_transaction_maintenance(|_| Ok(())).is_err());
+            assert!(writer.install_transaction_finalizer(|_| Ok(())).is_err());
+            let mut guard = writer.write();
+            let tx = guard.transaction().unwrap();
+            free_write(&tx, 1, "source").unwrap();
+            assert_eq!(tx.commit().is_ok(), failure.is_none());
+            drop(guard);
+            assert_eq!(count(&writer, "source"), i64::from(failure.is_none()));
+            assert_eq!(count(&writer, "output"), i64::from(failure.is_none()));
+            assert_eq!(count(&writer, "delta"), 0);
+        }
     }
 
     #[test]
@@ -341,12 +397,14 @@ mod tests {
         for (id, success) in [(1, true), (2, false), (3, true)] {
             let (done, answer) = mpsc::sync_channel(1);
             writer.send(WriterJob::Batched {
+                enqueued: std::time::Instant::now(),
                 run: Box::new(move |tx| {
                     free_write(tx, id, "queued").unwrap();
                     success
                 }),
                 profile: None,
                 wait: None,
+                holder: crate::windows::holds::Holder::current(),
                 done,
             });
             answers.push(answer);
@@ -378,12 +436,14 @@ mod tests {
         for id in [1, 2] {
             let (done, answer) = mpsc::sync_channel(1);
             writer.send(WriterJob::Batched {
+                enqueued: std::time::Instant::now(),
                 run: Box::new(move |tx| {
                     free_write(tx, id, "batch").unwrap();
                     true
                 }),
                 profile: None,
                 wait: None,
+                holder: crate::windows::holds::Holder::current(),
                 done,
             });
             answers.push(answer);
@@ -613,6 +673,7 @@ mod tests {
         for (id, success) in [(1, true), (2, false), (3, true)] {
             let (done, answer) = mpsc::sync_channel(1);
             writer.send(WriterJob::Batched {
+                enqueued: std::time::Instant::now(),
                 run: Box::new(move |tx| {
                     assert_eq!(
                         tx.query_row("SELECT active FROM managed_scope", [], |r| r
@@ -625,6 +686,7 @@ mod tests {
                 }),
                 profile: None,
                 wait: None,
+                holder: crate::windows::holds::Holder::current(),
                 done,
             });
             answers.push(answer);

@@ -3,6 +3,10 @@
 //! reductions need in a few statements, and the shared folds reduce what it read.
 use super::*;
 
+#[path = "harness_health_capture.rs"]
+#[cfg(test)]
+mod health_capture;
+
 /// Subjects per statement, so that no single statement holds the reader for the whole fleet.
 const CHUNK: usize = 256;
 
@@ -167,7 +171,8 @@ impl CardReads {
              CROSS JOIN claims INDEXED BY claims_subject_kind_index
                ON claims.subject=subjects.value
              JOIN batches ON batches.id=claims.batch_id
-             WHERE {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2"
+             WHERE {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2
+               AND {UNREPAIRED_CLAIM}"
         ))?;
         // Each subject is folded as soon as its rows end, so a chunk holds one subject's
         // history at a time, as a one-subject read does.
@@ -523,9 +528,45 @@ pub(crate) struct AgentCardReads {
     activity: HashMap<String, Option<u128>>,
     suspensions: HashSet<String>,
     rollouts: HashSet<String>,
+    #[cfg(test)]
+    health: BTreeMap<String, health_capture::CardCapture>,
 }
 
 impl AgentCardReads {
+    /// Prepared input extension. Call only while `agent_card_reads` still holds
+    /// its snapshot connection, after selecting desired/runtime claims and the
+    /// harness at `self.index`. No caller is installed until native admission and
+    /// source qualification can consume these candidates honestly.
+    #[cfg(test)]
+    fn prepare_health_chunk(
+        &mut self,
+        connection: &Connection,
+        namespace: &str,
+        now_ms: u64,
+        selected: &[(&str, Option<&str>, Option<&str>)],
+    ) -> Result<()> {
+        let requests = selected.iter().map(|(subject, runtime_claim, desired_claim)| {
+            health_capture::Request {
+                subject,
+                runtime_claim: *runtime_claim,
+                desired_claim: *desired_claim,
+                harness_claim: self.harness.get(*subject).and_then(Option::as_ref)
+                    .map(|harness| harness.claim.as_str()),
+            }
+        }).collect::<Vec<_>>();
+        self.health.extend(health_capture::capture(
+            connection, namespace, self.index, now_ms, &requests,
+        )?);
+        Ok(())
+    }
+
+    /// There is no fallback reader acquisition or attempt to fill an absent input.
+    /// Candidate rows require native authority/coverage validation before reduction.
+    #[cfg(test)]
+    fn take_health(&mut self, subject: &str) -> Option<health_capture::CardCapture> {
+        self.health.remove(subject)
+    }
+
     /// [`Store::observed_harness_at`] of `subject`.
     pub(crate) fn take_harness(
         &mut self,
@@ -593,6 +634,8 @@ impl Store {
             activity: HashMap::new(),
             suspensions: HashSet::new(),
             rollouts: HashSet::new(),
+            #[cfg(test)]
+            health: BTreeMap::new(),
         };
         // A harness view needs a runtime observation naming an incarnation; then a running one,
         // or an admission refusal of that incarnation, is folded as `current_harness_fold_at`
@@ -623,15 +666,15 @@ impl Store {
         // The statements of `agent_last_activity_at`, a chunk of agents at a time.
         let mut activity = connection.prepare_cached(
             "SELECT subjects.value,
-                    (SELECT accepted_at_unix_ms FROM claims
+                    (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_actor_activity_time_index
                      WHERE actor=subjects.value AND kind IN ('work.progress','work.submitted')
-                       AND store_index<=?2 ORDER BY store_index DESC LIMIT 1),
-                    (SELECT accepted_at_unix_ms FROM claims
+                       AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),
+                    (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_from_activity_time_index
                      WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=subjects.value
-                       AND store_index<=?2 ORDER BY store_index DESC LIMIT 1),
-                    (SELECT accepted_at_unix_ms FROM claims
+                       AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),
+                    (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_to_activity_time_index
                      WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=subjects.value
-                       AND store_index<=?2 ORDER BY store_index DESC LIMIT 1)
+                       AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1)
              FROM json_each(?1) subjects",
         )?;
         let mut timeline = connection.prepare_cached(
@@ -641,11 +684,11 @@ impl Store {
                        AND json_extract(body, '$.fields.incarnation_id')=json_extract(pairs.value, '$[1]')
                        AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                        AND after_store_index<=?2 ORDER BY id DESC LIMIT 1),
-                    (SELECT accepted_at_unix_ms FROM claims
+                    (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_timeline_activity_time_index
                      WHERE subject=json_extract(pairs.value, '$[0]') AND kind='harness.timeline'
                        AND json_extract(body, '$.fields.incarnation_id')=json_extract(pairs.value, '$[1]')
                        AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
-                       AND store_index<=?2 ORDER BY store_index DESC LIMIT 1)
+                       AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1)
              FROM json_each(?1) pairs",
         )?;
         // `suspension::current` reads every suspend and resume request, at any index.

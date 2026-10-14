@@ -1,3 +1,4 @@
+import type { ConversationHeader } from './conversationView.ts';
 import type { Page, Session } from '@smalltalk/st3-client';
 
 // The gateway's discovery fields are additional properties on the generated
@@ -88,7 +89,7 @@ export type Older = {
   /** Why the last page could not be read; scrolling up tries again. */
   failed?: string;
 };
-export type Conversation<T extends Entry> = { entries: T[]; hasOlder: boolean; newestSequence: number; sessionId?: string; historyVersion: number; older: Older };
+export type Conversation<T extends Entry> = { entries: T[]; hasOlder: boolean; newestSequence: number; sessionId?: string; historyVersion: number; /** The conversation header st last sent (`conversation-blocks.v1`), register fields first. */ header?: ConversationHeader; older: Older };
 /** The session and history snapshot an older-page request started from. */
 export type OlderRequest = { sessionId: string; historyVersion: number };
 const noOlder: Older = { paged: false, start: false, loading: false };
@@ -115,12 +116,13 @@ function moreBefore(older: Older, live: boolean): boolean {
 // new authoritative history snapshot: discard those pages and start from its fresh cursor.
 export function applyConversation<T extends Entry>(
   previous: Conversation<T> | undefined,
-  frame: { replace: boolean; items: T[]; hasMore: boolean; sessionId?: string; olderCursor?: string },
+  frame: { replace: boolean; items: T[]; hasMore: boolean; sessionId?: string; olderCursor?: string; header?: ConversationHeader },
   want = 1000,
   now = Date.now(),
 ): Conversation<T> {
   const otherSession = !!frame.sessionId && !!previous?.sessionId && frame.sessionId !== previous.sessionId;
   const sessionId = frame.sessionId ?? previous?.sessionId;
+  const header = frame.header ?? (otherSession ? undefined : previous?.header);
   const reset = frame.replace || otherSession;
   const historyVersion = (previous?.historyVersion ?? 0) + (reset ? 1 : 0);
   let older: Older = reset || !previous
@@ -142,7 +144,7 @@ export function applyConversation<T extends Entry>(
     older = noOlder;
     live = true;
   }
-  return { entries, hasOlder: moreBefore(older, live), newestSequence, sessionId, historyVersion, older };
+  return { entries, hasOlder: moreBefore(older, live), newestSequence, sessionId, historyVersion, ...(header ? { header } : {}), older };
 }
 
 /** An earlier page from the current history snapshot; entries already held win. Responses from
