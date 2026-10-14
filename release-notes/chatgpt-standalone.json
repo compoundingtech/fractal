@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Standalone ChatGPT adapter: official rmcp HTTP/stdio transports, consent-at-grant reads, native owner-approved answers, and transaction-authorized low-risk messages",
+  "summary": "Standalone ChatGPT adapter and flake package: official rmcp HTTP/stdio transports, consent-at-grant reads, native owner-approved answers, and transaction-authorized low-risk messages",
   "commits": [],
   "replay": {"status": "none", "detail": "Existing assistant claim namespaces are reused; no graph replay or live migration is performed."},
   "schema": {"status": "changed", "detail": "Assistant contracts add caller-bound-allow, low-risk message/custom-reply scopes, optional recipient policy and a 30-day maximum. Rust, Swift and TypeScript clients are regenerated from schema and templates."},
