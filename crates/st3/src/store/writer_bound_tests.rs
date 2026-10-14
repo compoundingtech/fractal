@@ -93,9 +93,22 @@ fn a_late_claim_in_a_large_standing_tree_holds_the_writer_for_its_own_part() {
     controller
         .set_step_state(&children[100].steps[0].subject, "blocked", Some("blocked early"))
         .unwrap();
-    let (replayed, held) = stage("bound/standing-tree/project", || {
-        super::tests::projection_replayed(&worker, "controller", &controller)
+    let inventory = worker.replication_inventory().unwrap();
+    let (exchange, _) = stage("bound/standing-tree/export", || {
+        super::tests::exchange_from(&controller, &inventory)
     });
-    assert!(!replayed);
+    stage("bound/standing-tree/receive", || {
+        worker
+            .receive_replication_exchange("controller", &exchange.fleet_id, &exchange)
+            .unwrap()
+    });
+    stage("bound/standing-tree/admit", || worker.validate_replication_backlog().unwrap());
+    stage("bound/standing-tree/repairs", || worker.apply_replication_repairs().unwrap());
+    FULL_REPLAYS.with(|replays| replays.set(0));
+    let (projected, held) = stage("bound/standing-tree/project", || {
+        worker.project_replication_backlog().unwrap()
+    });
+    assert!(projected);
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "the late claim replayed the store");
     assert!(held > Duration::ZERO, "the projection asked for no writer hold");
 }

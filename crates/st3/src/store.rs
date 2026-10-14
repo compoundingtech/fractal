@@ -42644,7 +42644,7 @@ version 2
 
     /// Receive `source`'s new envelopes and project them, and say whether that replayed the
     /// graph from nothing.
-    pub(super) fn projection_replayed(target: &Store, relay: &str, source: &Store) -> bool {
+    fn projection_replayed(target: &Store, relay: &str, source: &Store) -> bool {
         let exchange = exchange_from(source, &target.replication_inventory().unwrap());
         target
             .receive_replication_exchange(relay, TEST_FLEET, &exchange)
