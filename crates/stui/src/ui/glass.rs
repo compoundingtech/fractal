@@ -3139,12 +3139,15 @@ impl Ui {
             requests::Place::Below => Open::Below,
         };
         if self.glasses.is_none() {
-            // The classic layout has no tabs or splits: the list selects it.
-            if let Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id)) = &pane
-                && !keep
-            {
-                let id = id.clone();
-                self.open(&id);
+            // The classic layout has no tabs or splits: the list selects it, which moves focus.
+            match &pane {
+                Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id))
+                    if !keep =>
+                {
+                    let id = id.clone();
+                    self.open(&id);
+                }
+                _ => return requests::Answer::NotShown,
             }
         } else if !keep {
             self.open_in_glass(pane, how);
@@ -3170,6 +3173,7 @@ impl Ui {
         }
         let who = from
             .map(|from| {
+
                 self.world
                     .agents
                     .items()
@@ -3179,6 +3183,8 @@ impl Ui {
                     .unwrap_or_else(|| from.rsplit('/').next().unwrap_or(from).to_owned())
             })
             .unwrap_or_else(|| "A seat".into());
+        // The name came from a file another process wrote: no control characters in the flash.
+        let who: String = who.chars().filter(|c| !c.is_control()).take(80).collect();
         self.flash(format!("{who} opened {title}"));
         requests::Answer::Opened { focused: !keep }
     }
