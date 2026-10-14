@@ -31,7 +31,7 @@ mission "dotfiles/ui-design/recovery" state="ready" {{
 "#),
         "gate-recovery-source",
     );
-    store.create_mission_run(&MissionRunRequest {
+    let parent = store.create_mission_run(&MissionRunRequest {
         mission: "dotfiles/ui-design/recovery".into(),
         revision: None,
         workspace: "/tmp".into(),
@@ -40,14 +40,17 @@ mission "dotfiles/ui-design/recovery" state="ready" {{
         inputs: BTreeMap::new(),
         idempotency_key: "gate-recovery-run".into(),
     }).unwrap();
+    let round = store.mission_run_subject_for_idempotency_key(
+        &format!("loop-round:{}:1", parent.steps[0].subject),
+    );
     let runtime = Arc::new(FakeRuntime::default());
     let reconciler = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
     );
     for _ in 0..12 {
         reconciler.reconcile_once().unwrap();
-        if let Some(gate) = store.desired_subjects().unwrap().into_iter()
-            .find(|subject| store.is_loop_gate(subject).unwrap())
+        if let Some(gate) = store.desired_subjects_for_owner_run(&round).unwrap().into_iter()
+            .find(|subject| subject.kind == "agent" && subject.subject.ends_with("/gate"))
         {
             if !launch {
                 assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
@@ -75,6 +78,17 @@ fn status(store: &Store, gate: &DesiredSubject) -> String {
 fn diagnostic(store: &Store, gate: &DesiredSubject) -> bool {
     store.claims_for(&gate.subject, Some("harness.diagnostic")).unwrap().iter()
         .any(|claim| claim.body["fields"]["code"] == "gate-runtime-missing")
+}
+
+#[test]
+fn retired_proposal_round_gate_detector_recognizes_hydrated_mission_subject() {
+    let (store, _, gate) = fixture_with_launch("never", false);
+    let owner = store.mission_run(gate.owner_run.as_deref().unwrap()).unwrap().unwrap();
+    assert!(owner.mission.starts_with("mission/__st3/"));
+    assert!(
+        store.is_loop_gate(&gate).unwrap(),
+        "the retired proposal's detector must accept a hydrated round mission subject"
+    );
 }
 
 #[test]
