@@ -5,7 +5,7 @@
 #   ST_ISOLATION_ARCHIVE    workspace archive containing the retained st2 controls and scope_cascade
 #   ST_ISOLATION_WORKSPACE  the checkout the archive was built in; the test binary's compiled-in
 #                           st2 path lies below it, so the archive is extracted at the same path.
-#                           nextest also requires the workspace manifest there.
+#                           nextest also requires each selected package's working directory.
 #   ST_ISOLATION_TIMINGS    JSON file that receives the boot and test durations
 #
 # The VM compiles nothing. KVM is required; there is no emulation fallback.
@@ -175,8 +175,13 @@ pkgs.testers.runNixOSTest {
     assert virt == "kvm", f"the VM runs under {virt}, not KVM"
 
     machine.copy_from_host(archive, "/tmp/isolation.tar.zst")
-    machine.succeed(f"mkdir -p {workspace} && chown ${user} {workspace}")
-    machine.copy_from_host(f"{workspace}/Cargo.toml", f"{workspace}/Cargo.toml")
+    # Archives carry built binaries, not package source directories. Provision the manifests
+    # and working directories for the selected root st2 and crates/st-runtime packages.
+    for manifest in ("Cargo.toml", "crates/st-runtime/Cargo.toml"):
+        path = os.path.join(workspace, manifest)
+        directory = shlex.quote(os.path.dirname(path))
+        machine.succeed(f"mkdir -p {directory} && chown ${user} {directory}")
+        machine.copy_from_host(path, path)
     # A transient service of the user's own manager: the tests start their scopes inside the
     # user's delegated cgroup subtree, as st2 does under a fleet seat.
     started = time.monotonic()

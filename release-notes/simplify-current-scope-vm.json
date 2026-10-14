@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Run current native scope controls beside the retained st2 controls in the existing isolation VM.",
+  "summary": "Run current native scope controls beside the retained st2 controls in the existing isolation VM, provisioning both selected package working directories.",
   "replay": {
     "status": "none",
     "detail": "none"
