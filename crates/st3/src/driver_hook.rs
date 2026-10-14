@@ -339,9 +339,11 @@ fn claude_observe(
     }
 }
 
-/// How long a permission hook waits for a person's answer from a client. Claude shows its own
-/// dialog meanwhile, and an answer there wins at once, so the wait only bounds the hook.
-const PROMPT_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long a permission hook waits for a person's answer from a client: exactly as long as st
+/// offers one, so an answer given from a client is never recorded after its hook has gone. Claude
+/// shows its own dialog meanwhile, and an answer there wins at once, so the wait only bounds the hook.
+const PROMPT_ANSWER_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(crate::store::CLAUDE_PROMPT_ANSWER_WAIT_MS as u64);
 const PROMPT_ANSWER_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Let a person answer a Claude permission prompt from a client. The hook waits while Claude
