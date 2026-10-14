@@ -81,11 +81,11 @@ pub fn without_eta(summary: &str) -> Option<String> {
             material.push('\n');
         }
     }
-    Some(if material.trim().is_empty() {
-        "ETA withdrawn at handoff.".into()
-    } else {
-        material
-    })
+    if material.trim().is_empty() {
+        material.clear();
+        material.push_str("ETA withdrawn at handoff.");
+    }
+    Some(material)
 }
 
 #[cfg(test)]
