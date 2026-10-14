@@ -11,8 +11,9 @@ with `agent/dotfiles/annotations`.
   _Avoid_: comment, memo, sticky, annotation (see below).
 - **Target**: The st subject that a note is attached to, for example
   `agent/<org>/<name>` or `mission/<id>`. A note has exactly one target.
-- **Author**: The `person/…` or `agent/…` actor that signed the claim that
-  created the note. The author is the claim actor; it is never a free field.
+- **Author**: The `person/…` or `agent/…` actor encoded in the note id and
+  signing its claims. Every claim actor must match this immutable author;
+  the author is never a free field.
 - **Audience**: Who the note is written for. `self` means the author's own
   reminder. `agent` means the note is also delivered as context to the agent
   that the target resolves to.

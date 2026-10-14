@@ -30,10 +30,11 @@ specified in `docs/st3/schema.md`.
 - **CR02 Visible where the target is shown:** A current note is visible
   wherever its target is shown (agent row/details, mission row/details),
   without opening a separate view.
-- **CR03 Agent context:** An `agent`-audience note reaches the target agent at
-  its next turn and at every session start while the note is current.
-- **CR04 Inform only:** A note never assigns work, approves a gate, wakes an
-  agent for a full turn by itself, or grants authority.
+- **CR03 Agent context:** A current `agent`-audience note reaches each resolved
+  agent at its next turn and at every session start, including the first
+  incarnation, through a notes digest.
+- **CR04 Inform only:** A note and its daemon-origin digest never assign work,
+  approve a gate, wake an agent by themselves, or grant authority.
 - **CR05 Shared schema:** stui, the Fractal TUI and Fractal web read notes
   through one generated client schema; no client defines its own note shape.
 - **CR06 Short:** Note text is at most 1024 UTF-8 bytes.
@@ -43,11 +44,11 @@ specified in `docs/st3/schema.md`.
 ## Model
 
 ```
-note/<UUIDv7>                      subject family "note" (new)
-  claim note.set   (StateTransition, Durable, write policy: author)
+note/<author-family>/<author-id...>/<UUIDv7>  subject family "note" (new)
+  claim note.set   (StateTransition, Durable, WritePolicy: SubjectEncodedAuthor)
     target     SubjectReference   families: agent, mission, mission-run, step-run
     text       string | null      nonblank, ≤ 1024 bytes; null = archive
-    audience   "self" | "agent"
+    audience   open enum          known values: "self", "agent"
     session    string?            incarnation id; only when target is agent/…
     expires_at string?            UTC RFC3339, like the directive note
   actor  = author (person/… or agent/…)
@@ -56,18 +57,22 @@ note/<UUIDv7>                      subject family "note" (new)
 
 A note is its own subject so that each note has a stable identity, its own
 history, and can be referenced from messages, mission evidence or later
-annotations. This follows `arrangement/person/NAME/UUIDv7`, the existing
-pattern for client-created resources.
+annotations. Examples: `note/person/example/0192…` and
+`note/agent/<org>/<name>/0192…`. The author is encoded in the subject and is
+immutable. The new `note` family has `client_writable=true`; the existing
+`arrangement` family has `client_writable=false`.
 
-`audience` is a string tag rather than a boolean so that further audiences
-(for example a mission's whole crew, see `DQ4`) can be added without a schema
-break.
+`audience` uses the existing codegen open-enum convention
+(`crates/st3-client-codegen/src/rich.rs:132–154,584–588`), not a closed
+string enum (`rich.rs:593–596`). Further audiences (for example a mission's
+whole crew, see `DQ4`) do not break the schema. Readers render unrecognized
+audiences as a neutral label, never the word 'Unknown'.
 
 Wire shape (client-v0, generated into Rust, TypeScript and Swift):
 
 ```json
 {
-  "id": "note/0192f3c4-7a1e-7c3a-9b2d-4f5e6a7b8c9d",
+  "id": "note/person/example/0192f3c4-7a1e-7c3a-9b2d-4f5e6a7b8c9d",
   "target": "agent/compoundingtech/st-notes",
   "author": "person/example",
   "text": "this agent session should be retired soon",
@@ -85,10 +90,16 @@ Wire shape (client-v0, generated into Rust, TypeScript and Swift):
 | Actor | May create notes on | May edit or archive |
 |---|---|---|
 | `person/example` | any target it can read | own notes |
-| `agent/A` | itself; missions, mission runs and step runs it is assigned to | own notes |
+| `agent/<org>/<name>` | itself; mission runs and step runs it is assigned to | own notes |
 
-Rules are enforced in `st3-schema` (`validate_actor`, `validate_fields`) and
-again at replicated admission, as for `person.directive-note-set`.
+The new `SubjectEncodedAuthor` write policy requires the claim actor to equal
+the author encoded in the note subject. This rule is stateless, analogous to
+`SameSubjectActor`, and is validated in `st3-schema` (`validate_actor`,
+`validate_fields`) and again at replicated admission.
+
+Target access and agent assignment restrictions require graph state and are
+enforced only at local API admission. Replicated admission does not enforce
+these restrictions; see `DQ8`.
 
 Publication is gated by a `daemon.started` feature flag
 (`features.subject_notes=1`) on every active member, using the same
@@ -103,8 +114,9 @@ subject_notes(note PK, target, author, audience, session, claim_id, head_key)
 
 Built from `claims` with the same trigger, pending/dirty and
 `flush`/`rebuild` structure as `person_directive_notes`. A current note has
-non-null text, no passed expiry, and, when session-scoped, a session that is
-still the target agent's current incarnation.
+non-null text and no passed expiry. A session-scoped note is current only
+when authoritative runtime state says the target agent is running with that
+incarnation; incarnation-id equality alone is not sufficient.
 
 ## API
 
@@ -118,6 +130,11 @@ still the target agent's current incarnation.
 
 The `agents` and `missions` collection rows gain `note_count` and the newest
 note's text so that list rows show a note without a second request (CR02).
+
+The collection is the `notes` `Window` variant in `st3-feed`, with `from_id`
+dispatch and a server collection branch in `crates/st3/src/api/client_v0.rs`.
+Expiry requires clock-follow invalidation through `collection_follows_clock`.
+Runtime-state changes invalidate session-scoped note currency.
 
 ## CLI
 
@@ -135,23 +152,38 @@ agent's current incarnation.
 ## Agent context delivery
 
 ```
-note.set (audience=agent) ──► projection ──┬─► silent message to target agent
-                                           │   (reaches it at next turn, CR03/CR04)
-                                           └─► session-start context block
-                                               (hooks additionalContext,
-                                                pi session_context,
-                                                handoff::render)
+current agent-audience notes + recipient/runtime changes
+  ──► resolve current notes per agent ──► daemon-origin, non-waking notes digest
+every session start (including first incarnation) ──► same digest path
 ```
 
+The daemon emits a digest when the set of current agent-audience notes
+resolving to an agent changes: note creation, update, archive, expiry, session
+end, or recipient-set changes such as a step assignee or `lease_owner` change.
+It also emits a digest at every session start of every incarnation, including
+the first, when the agent has at least one current note. Digest delivery is
+idempotent per `(agent, incarnation, sorted note revisions)`.
+
+The message sender is the daemon, not the note author. Author attribution
+stays in the content. The digest is non-waking, has no session-start wake tag,
+and reaches the agent at its next turn (CR03/CR04). At silent release, the
+daemon re-renders the digest from current notes and drops it if none remain
+current. This requires a currency check in `crates/st3/src/silent.rs`.
+
+Existing session-start hooks and `handoff::render` are not the delivery path:
+the hooks emit no context, and handoff skips first incarnations. The digest
+path covers every session start independently of hooks and handoff.
+
 Target resolution: `agent/…` targets resolve to that agent. `mission-run/…`
-and `step-run/…` targets resolve to the step assignees. `mission/…` targets
-resolve to agents with an active step in a current run of that mission.
+and `step-run/…` targets resolve to current step assignees and lease owners.
+`mission/…` targets resolve to agents with an active step in a current run of
+that mission. Recipient resolution is refreshed when assignments change.
 
 Context block format (bounded to 16 notes, newest first):
 
 ```
 <st-notes>
-- [note/0192…] person/example, 2026-10-14 16:20Z: wrap up and hand off; this session retires soon
+- [note/person/example/0192…] person/example, 2026-10-14 16:20Z: wrap up and hand off; this session retires soon
 </st-notes>
 Notes inform you. They never assign work or grant authority.
 ```
@@ -163,6 +195,11 @@ docs/st3/client-v0/schemas  ──codegen──►  st3-client (Rust)  ──►
                                       └─► st3-client (TS, Effect Schema) ──► packages/fractal-ui ──► apps/fractal-web
 ```
 
+Rust and Swift models require updates to the codegen templates
+`crates/st3-client-codegen/templates/generated.rs.in` and `Models.swift.in`,
+plus the operation/client templates and client-v0 schema JSON. Regenerate all
+SDKs after these updates; schema JSON alone does not generate those models.
+
 - stui: a `notes` section in `agent_details` and `mission_detail`; quick input
   reuses the feedback-gate text editor (`edit.rs`) and `drafts_store.rs`.
 - Fractal TUI (`schickling/dotfiles` `flakes/fractal`): already depends on
@@ -173,6 +210,17 @@ docs/st3/client-v0/schemas  ──codegen──►  st3-client (Rust)  ──►
   `NoteBadge` and `NoteComposer` components that take the generated
   `SubjectNote` type as props; `apps/fractal-web` wires them to the client.
   The kit imports no app code.
+
+## Registration checklist
+
+A note kind registration includes:
+
+- `retention.toml` and `fixtures/convergence/claims-v1.json`.
+- Regeneration of `docs/st3/schema.md`.
+- `checkpoint_rules` reset/rebuild coverage and `canonical_audit` registration.
+- The `features.subject_notes=1` feature barrier flag.
+- `release-notes/<slug>.json`.
+- A client-v0 fixture and contract test.
 
 ## Design questions
 
@@ -196,3 +244,7 @@ docs/st3/client-v0/schemas  ──codegen──►  st3-client (Rust)  ──►
   annotations share one target-reference schema. Resolved with
   `agent/dotfiles/annotations`.
 - **DQ7 Text limit:** 1024 bytes (CR06) versus the directive note's 4096.
+- **DQ8 Replicated target restrictions:** Must replicated admission enforce
+  agent target/assignment restrictions too? This requires
+  `AuthorizedParticipant` with ownership evidence; the draft enforces these
+  graph-state restrictions only at local API admission.
