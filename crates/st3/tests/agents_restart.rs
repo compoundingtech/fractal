@@ -304,8 +304,19 @@ impl Fixture {
         self.request_as(subject, key, "person/avery").await
     }
     async fn request_as(&self, subject: &str, key: &str, actor: &str) -> ClaimRecord {
-        let actual = self.store.latest_actual_value(subject).unwrap().unwrap();
-        let incarnation = actual["incarnation_id"].as_str().unwrap();
+        self.try_request_as(subject, key, actor).await.unwrap()
+    }
+    async fn try_request_as(
+        &self,
+        subject: &str,
+        key: &str,
+        actor: &str,
+    ) -> anyhow::Result<ClaimRecord> {
+        let actual = self.store.latest_actual_value(subject)?;
+        let incarnation = actual
+            .as_ref()
+            .and_then(|actual| actual["incarnation_id"].as_str())
+            .unwrap_or("");
         self.client()
             .post(
                 "/v1/agents/restart",
@@ -313,7 +324,6 @@ impl Fixture {
                     "incarnation_id": incarnation}),
             )
             .await
-            .unwrap()
     }
 }
 impl Drop for Fixture {
@@ -722,12 +732,34 @@ async fn stale_incarnation_request_does_not_stop_the_current_seat() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restart_waits_for_an_identifiable_runtime_before_stopping_it() {
+async fn restart_without_an_actual_value_returns_a_typed_refusal() {
+    let (fixture, _) = Fixture::new(false).await;
+    let error = fixture
+        .try_request_as("agent/example/missing", "missing", "person/avery")
+        .await
+        .unwrap_err();
+    assert_eq!(st3::client::api_error_code(&error), Some("missing-agent"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_refuses_an_unidentifiable_runtime_without_stopping_it() {
     let (fixture, subject) = Fixture::new(false).await;
-    fixture.request(&subject, "unidentifiable").await;
+    let request = fixture.request(&subject, "unidentifiable").await;
     fixture.runtime.observations.lock().unwrap().values_mut()
         .next().unwrap().incarnation_id = None;
     fixture.reconciler.reconcile_once().unwrap();
+    let result = restart_result(&fixture, &request);
+    assert_eq!(result.kind, "runtime.action.failed");
+    assert_eq!(result.body["evidence"][0], request.id);
+    assert!(
+        result.body["fields"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot be identified for a fenced stop")
+    );
+    for _ in 0..3 {
+        fixture.reconciler.reconcile_once().unwrap();
+    }
     assert!(fixture.runtime.stops.lock().unwrap().is_empty());
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 1);
 }

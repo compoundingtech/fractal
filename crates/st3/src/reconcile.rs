@@ -7406,7 +7406,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(observation) = observation.filter(|item| item.status == "running") {
             if observation.incarnation_id.as_deref() != Some(previous) {
                 // An unidentifiable process is not permission to issue an unfenced stop.
-                return Ok(true);
+                return self.fail_requested_restart(
+                    subject,
+                    member,
+                    &request,
+                    "the running runtime cannot be identified for a fenced stop",
+                );
             }
             // Rendering must succeed before we shut down a still-running seat.
             if let Some(error) = blocked {

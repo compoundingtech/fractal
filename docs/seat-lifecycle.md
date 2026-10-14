@@ -351,6 +351,9 @@ works for top-level and mission seats under any restart policy, fences the curre
 and waits for a new running incarnation. It resumes the current saved native conversation by
 default; `--fresh-context` deliberately starts a new conversation. Clients can inspect
 `Agent.restart_will_resume` before a restart that may lose context.
+If a running runtime cannot prove its incarnation, restart completes with a visible refusal
+instead of waiting indefinitely or issuing an unfenced stop. Correct the runtime identity
+before making a new restart request.
 
 Ordinary relaunches also continue the harness's last native session: a changed launch, a harness
 that hung up or crashed, a daemon restart, and a stop followed by a start. Claude, Codex, pi, omp
