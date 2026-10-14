@@ -63,6 +63,10 @@
               {
                 "context": "typescript-client",
                 "integration_id": 15368
+              },
+              {
+                "context": "mail-redelivery-canaries",
+                "integration_id": 15368
               }
             ]
           }
@@ -72,11 +76,11 @@
           "parameters": {
             "merge_method": "MERGE",
             "grouping_strategy": "ALLGREEN",
-            "max_entries_to_build": 5,
+            "max_entries_to_build": 3,
             "max_entries_to_merge": 5,
             "min_entries_to_merge": 1,
             "min_entries_to_merge_wait_minutes": 5,
-            "check_response_timeout_minutes": 30
+            "check_response_timeout_minutes": 60
           }
         }
       ],

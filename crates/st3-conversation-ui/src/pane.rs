@@ -129,10 +129,11 @@ impl Selection {
     }
 }
 
-/// The display columns a message's edge ("▎ ", after any indent) takes at a line's start.
+/// The display columns a message's edge ("▎ ", or "● " on the first row of mail to the person,
+/// after any indent) takes at a line's start.
 fn edge(line: &str) -> usize {
     let indent = line.len() - line.trim_start_matches(' ').len();
-    match line[indent..].strip_prefix('▎') {
+    match line[indent..].strip_prefix(['▎', '●']) {
         Some(rest) if rest.is_empty() || rest.starts_with(' ') => indent + 2,
         _ => 0,
     }
@@ -206,4 +207,27 @@ pub fn columns(line: &str, from: usize, to: usize) -> String {
         column += width;
     }
     out
+}
+
+/// Cut to `max` columns, ending in `…` when anything was dropped.
+pub fn truncate(text: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if UnicodeWidthStr::width(text) <= max {
+        return text.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut output = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        let w = character.width().unwrap_or(0);
+        if used + w + 1 > max {
+            break;
+        }
+        used += w;
+        output.push(character);
+    }
+    output.push('…');
+    output
 }

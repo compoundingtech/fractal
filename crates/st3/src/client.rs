@@ -1,6 +1,7 @@
 use std::fmt;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -48,6 +49,101 @@ pub struct Client {
     person: Option<String>,
     outage_wait: Duration,
     announce_outage_wait: bool,
+    follow_retry: Option<Arc<Mutex<FollowRetry>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    follow_test: Option<Arc<Mutex<FollowTest>>>,
+}
+
+/// A client seam for follow-loop tests with Tokio's injected clock, without a live daemon.
+#[cfg(any(test, feature = "test-support"))]
+pub enum FollowTestReply {
+    Value(serde_json::Value),
+    Delayed(serde_json::Value, Duration),
+    Timeout,
+    Disconnect,
+    ConnectError(i32),
+    Error(u16),
+    MissingRoute,
+    CursorGap { floor: u64, frontier: u64 },
+}
+
+#[cfg(any(test, feature = "test-support"))]
+struct FollowTest {
+    replies: std::collections::VecDeque<(String, FollowTestReply)>,
+    requests: Vec<(String, tokio::time::Instant)>,
+    messages: Vec<String>,
+}
+
+const FOLLOW_OUTAGE_LIMIT: Duration = Duration::from_secs(5 * 60);
+const FOLLOW_DEADLINE_PAUSE: Duration = Duration::from_secs(10);
+const FOLLOW_DEADLINE_CAP: Duration = Duration::from_secs(60);
+
+/// One viewer owns this state across every read and healthy polling iteration. In particular,
+/// a successful read does not undo the deadline backoff: timed-out server work may still run.
+struct FollowRetry {
+    interrupted_since: Option<tokio::time::Instant>,
+    unreachable_since: Option<tokio::time::Instant>,
+    connect_pause: Duration,
+    deadline_pause: Duration,
+}
+
+impl Default for FollowRetry {
+    fn default() -> Self {
+        Self {
+            interrupted_since: None,
+            unreachable_since: None,
+            connect_pause: Duration::from_millis(100),
+            deadline_pause: FOLLOW_DEADLINE_PAUSE,
+        }
+    }
+}
+
+impl FollowRetry {
+    fn failed(
+        &mut self,
+        error: &anyhow::Error,
+        attempt_started: tokio::time::Instant,
+    ) -> Result<(Duration, Option<String>)> {
+        let (pause, reason) = if let Some(outage) = daemon_unreachable(error) {
+            let since = *self.unreachable_since.get_or_insert(attempt_started);
+            let elapsed = since.elapsed();
+            if elapsed >= FOLLOW_OUTAGE_LIMIT {
+                return Err(outage.clone().after(elapsed).into());
+            }
+            let pause = jittered(self.connect_pause)
+                .min(Duration::from_secs(5))
+                .min(FOLLOW_OUTAGE_LIMIT - elapsed);
+            self.connect_pause = (self.connect_pause * 2).min(Duration::from_secs(5));
+            (pause, outage.summary())
+        } else {
+            let deadline = error.chain()
+                .find_map(|cause| cause.downcast_ref::<DaemonDeadline>())
+                .expect("a retryable follow error has a typed reason");
+            self.unreachable_since = None;
+            let pause = jittered(self.deadline_pause).min(FOLLOW_DEADLINE_CAP);
+            self.deadline_pause = (self.deadline_pause * 2).min(FOLLOW_DEADLINE_CAP);
+            (pause, deadline.summary())
+        };
+        let message = if self.interrupted_since.is_none() {
+            self.interrupted_since = Some(attempt_started);
+            Some(format!(
+                "st: follow gap: {reason}; interrupted for {:.1}s, retrying in {:.1}s",
+                attempt_started.elapsed().as_secs_f64(), pause.as_secs_f64()
+            ))
+        } else {
+            None
+        };
+        Ok((pause, message))
+    }
+
+    fn recovered(&mut self) -> Option<String> {
+        let since = self.interrupted_since.take()?;
+        self.unreachable_since = None;
+        self.connect_pause = Duration::from_millis(100);
+        Some(format!(
+            "st: follow recovered after {:.1}s", since.elapsed().as_secs_f64()
+        ))
+    }
 }
 
 /// Where a request stood when the daemon went away.
@@ -70,6 +166,9 @@ pub struct DaemonUnreachable {
     reason: String,
     phase: OutagePhase,
     waited: Option<Duration>,
+    starting: bool,
+    full_replay: bool,
+    socket_os_error: Option<i32>,
 }
 
 impl DaemonUnreachable {
@@ -79,6 +178,9 @@ impl DaemonUnreachable {
             reason: reason.into(),
             phase: OutagePhase::Connect,
             waited: None,
+            starting: false,
+            full_replay: false,
+            socket_os_error: None,
         }
     }
 
@@ -88,21 +190,50 @@ impl DaemonUnreachable {
             reason: reason.into(),
             phase: OutagePhase::Response,
             waited: None,
+            starting: false,
+            full_replay: false,
+            socket_os_error: None,
         }
     }
 
+    /// A live local startup is a connect outage, with the phase available without an API call.
+    pub fn during_startup(socket: &Path) -> Option<Self> {
+        let startup = crate::startup::read(socket)?;
+        if startup.status != "starting" {
+            return None;
+        }
+        let mut outage = Self::connect(
+            socket.display().to_string(),
+            format!("{}; the API is not ready", startup.summary()),
+        );
+        outage.starting = true;
+        outage.full_replay = startup.full_replay();
+        Some(outage)
+    }
+
     fn connect_io(endpoint: impl Into<String>, error: &std::io::Error) -> Self {
+        let endpoint = endpoint.into();
+        if !error.raw_os_error().is_some_and(st_drivers::work_claim_failure::is_socket_access_defect)
+            && let Some(outage) = Self::during_startup(Path::new(&endpoint)) {
+            return outage;
+        }
         let reason = match error.kind() {
             std::io::ErrorKind::NotFound => "its socket does not exist".to_owned(),
             std::io::ErrorKind::ConnectionRefused => "connection refused".to_owned(),
             _ => error.to_string(),
         };
-        Self::connect(endpoint, reason)
+        let mut outage = Self::connect(endpoint, reason);
+        outage.socket_os_error = error.raw_os_error();
+        outage
     }
 
     fn after(mut self, waited: Duration) -> Self {
         self.waited = Some(waited);
         self
+    }
+
+    pub fn full_replay(&self) -> bool {
+        self.full_replay
     }
 
     pub fn phase(&self) -> OutagePhase {
@@ -113,8 +244,27 @@ impl DaemonUnreachable {
         &self.endpoint
     }
 
+    pub fn socket_os_error(&self) -> Option<i32> { self.socket_os_error }
+
+    fn permission_denied(&self) -> bool {
+        matches!(self.socket_os_error, Some(libc::EPERM | libc::EACCES))
+    }
+
+    fn local_connect_defect(&self) -> bool {
+        self.socket_os_error.is_some_and(st_drivers::work_claim_failure::is_socket_access_defect)
+    }
+
     /// A short present-tense summary without advice, for callers that say what they do next.
     pub fn summary(&self) -> String {
+        if self.permission_denied() {
+            return format!("access to the st daemon Unix socket {} was denied ({}); inspect sandbox permissions and the socket path. Nothing was sent", self.endpoint, self.reason);
+        }
+        if self.local_connect_defect() {
+            return format!("connecting to the st daemon Unix socket {} failed ({}); inspect the socket path. Nothing was sent", self.endpoint, self.reason);
+        }
+        if self.starting {
+            return self.reason.clone();
+        }
         match self.phase {
             OutagePhase::Connect => format!(
                 "the st daemon at {} is not reachable ({}); it may be restarting",
@@ -158,10 +308,6 @@ pub fn daemon_unreachable(error: &anyhow::Error) -> Option<&DaemonUnreachable> {
         .find_map(|cause| cause.downcast_ref::<DaemonUnreachable>())
 }
 
-/// A PTY session accepts in its own process, so this only bounds a session that stopped
-/// accepting; it never waits for the st daemon.
-const LOCAL_TERMINAL_CONNECT: Duration = Duration::from_secs(3);
-
 #[derive(Clone, Copy)]
 struct ClientDeadlines {
     connect: Duration,
@@ -196,6 +342,9 @@ impl Client {
             person: None,
             outage_wait: Duration::ZERO,
             announce_outage_wait: false,
+            follow_retry: None,
+            #[cfg(any(test, feature = "test-support"))]
+            follow_test: None,
         }
     }
 
@@ -206,6 +355,50 @@ impl Client {
         self.outage_wait = wait;
         self.announce_outage_wait = announce;
         self
+    }
+
+    /// Give one viewer a persistent retry policy. Deadlines wait 5–15s initially, then double
+    /// up to 60s; this backoff survives successful reads. Unreachable daemons stop after 5min.
+    /// Call `follow_recovered` only after the viewer delivers a complete page or snapshot.
+    pub fn with_follow_retry(mut self) -> Self {
+        self.follow_retry
+            .get_or_insert_with(|| Arc::new(Mutex::new(FollowRetry::default())));
+        self
+    }
+
+    pub fn follow_recovered(&self) {
+        if let Some(retry) = &self.follow_retry {
+            let message = retry.lock().expect("follow retry lock").recovered();
+            if let Some(message) = message {
+                self.follow_message(&message);
+            }
+        }
+    }
+
+    fn follow_message(&self, message: &str) {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(test) = &self.follow_test {
+            test.lock().expect("follow test lock").messages.push(message.to_owned());
+        }
+        eprintln!("{message}");
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scripted_follow_test(replies: Vec<(String, FollowTestReply)>) -> Self {
+        let mut client = Self::unix("/tmp/follow-fixture.sock");
+        client.follow_test = Some(Arc::new(Mutex::new(FollowTest {
+            replies: replies.into(),
+            requests: Vec::new(),
+            messages: Vec::new(),
+        })));
+        client
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn follow_test_result(&self) -> (Vec<(String, tokio::time::Instant)>, Vec<String>) {
+        let test = self.follow_test.as_ref().expect("scripted follow client").lock().unwrap();
+        assert!(test.replies.is_empty(), "the viewer exited before consuming the script");
+        (test.requests.clone(), test.messages.clone())
     }
 
     pub fn unix(path: impl Into<PathBuf>) -> Self {
@@ -232,6 +425,21 @@ impl Client {
         );
         let mut client = Self::unix(path);
         client.person = Some(person);
+        Ok(client)
+    }
+
+    /// Name a program seat over the trusted Unix boundary. The daemon still fences
+    /// the caller to its bound harness and checks the seat's enrollment.
+    pub fn unix_agent(path: impl Into<PathBuf>, agent: impl Into<String>) -> Result<Self> {
+        let agent = agent.into();
+        anyhow::ensure!(
+            agent.starts_with("agent/") && agent.split('/').all(|part| {
+                !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            }),
+            "Unix agent authority must be one concrete `agent/<id>` subject"
+        );
+        let mut client = Self::unix(path);
+        client.person = Some(agent);
         Ok(client)
     }
 
@@ -326,13 +534,37 @@ impl Client {
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
         loop {
+            let attempt_started = tokio::time::Instant::now();
             let error = match self.request_once(method, path, &bytes).await {
-                Ok(response) => return decode_api_response(&response),
+                Ok(response) => {
+                    if let Some(retry) = &self.follow_retry {
+                        retry.lock().expect("follow retry lock").unreachable_since = None;
+                    }
+                    return decode_api_response(&response);
+                }
                 Err(error) => error,
             };
+            if daemon_unreachable(&error).is_some_and(DaemonUnreachable::local_connect_defect) {
+                return Err(error);
+            }
+            if let Some(retry) = &self.follow_retry
+                && method == "GET"
+                && daemon_did_not_answer(&error)
+            {
+                let (pause, message) = retry.lock().expect("follow retry lock")
+                    .failed(&error, attempt_started)?;
+                if let Some(message) = message {
+                    self.follow_message(&message);
+                }
+                tokio::time::sleep(pause).await;
+                continue;
+            }
             let Some(outage) = daemon_unreachable(&error) else {
                 return Err(error);
             };
+            if outage.full_replay && self.announce_outage_wait {
+                return Err(error);
+            }
             let repeatable = outage.phase() == OutagePhase::Connect || method == "GET";
             let waited = started.elapsed();
             if !repeatable || self.outage_wait.is_zero() {
@@ -355,6 +587,35 @@ impl Client {
     }
 
     async fn request_once(&self, method: &str, path: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(test) = &self.follow_test {
+            let reply = {
+                let mut test = test.lock().expect("follow test lock");
+                test.requests.push((path.to_owned(), tokio::time::Instant::now()));
+                let (expected, reply) = test.replies.pop_front().expect("unexpected follow request");
+                assert_eq!(path, expected);
+                reply
+            };
+            let deadline = request_deadline(path, self.deadlines);
+            let (value, delay) = match reply {
+                FollowTestReply::Value(value) => (value, Duration::ZERO),
+                FollowTestReply::Delayed(value, delay) => (value, delay),
+                FollowTestReply::Timeout => (serde_json::Value::Null, deadline * 2),
+                FollowTestReply::Disconnect => return Err(DaemonUnreachable::response("fixture", "no response").into()),
+                FollowTestReply::ConnectError(errno) => return Err(DaemonUnreachable::connect_io("/tmp/fixture.sock", &std::io::Error::from_raw_os_error(errno)).into()),
+                FollowTestReply::Error(status) => return Err(api_error(status, br#"{"code":"fixture-refusal","message":"fixture read refused"}"#)),
+                FollowTestReply::MissingRoute => return Err(api_error(404,b"")),
+                FollowTestReply::CursorGap {floor,frontier} => return Err(api_error(410,&serde_json::to_vec(&serde_json::json!({
+                    "code":"cursor-gap","message":"cursor expired","details":{"resume_floor":floor,"frontier":frontier,"full_resync":true}
+                })).unwrap())),
+            };
+            if !delay.is_zero() {
+                tokio::time::timeout(deadline, tokio::time::sleep(delay)).await
+                    .map_err(|_| deadline_error("fixture", "request and response", deadline))?;
+            }
+            return serde_json::to_vec(&serde_json::json!({"api_version":"st3.v1", "value":value}))
+                .map_err(Into::into);
+        }
         let deadline = request_deadline(path, self.deadlines);
         let response = match &self.endpoint {
             Endpoint::Unix(socket) => {
@@ -379,6 +640,7 @@ impl Client {
                 }
                 .header("content-type", "application/json")
                 .header("connection", "close");
+                request = st3_client::propagation::inject_http(request);
                 if let Some(person) = self.person.as_deref() {
                     request = request.header("x-st3-person", person);
                 }
@@ -502,11 +764,18 @@ impl Client {
             fence.epoch,
             urlencoding::encode(&fence.token)
         );
+        let mut request = url.into_client_request()?;
+        st3_client::propagation::inject_headers(request.headers_mut());
         let (socket, _) = tokio::time::timeout(
             self.deadlines.terminal_handshake,
-            tokio_tungstenite::client_async(url, stream),
+            tokio_tungstenite::client_async(request, stream),
         )
-        .await??;
+        .await?
+        .map_err(|error| match error {
+            tokio_tungstenite::tungstenite::Error::Http(response) =>
+                api_error(response.status().as_u16(), response.body().as_deref().unwrap_or_default()),
+            error => error.into(),
+        })?;
         Ok(socket)
     }
 
@@ -577,63 +846,8 @@ async fn attach_local_terminal_with_io(terminal: &LocalTerminal, io: ClientIo) -
     proxy_stream_with_io(&terminal.runtime_id, stream, None, io).await
 }
 
-/// Connect to the terminal's PTY socket and prove it serves the incarnation the graph selected
-/// before sending anything: the kernel names the process serving the socket, which must be the
-/// incarnation's PTY daemon, and the registry must record the incarnation's start time. A socket
-/// path proves nothing alone, since a replacement session binds the same path.
-pub(crate) async fn open_local_terminal(terminal: &LocalTerminal) -> Result<StdUnixStream> {
-    let (stream, peer) =
-        connect_pty_session(&terminal.pty_root, &terminal.runtime_id, &terminal.subject).await?;
-    let created_at = pty_core::registry::read_metadata_in(&terminal.pty_root, &terminal.runtime_id)
-        .map(|metadata| metadata.created_at)
-        .with_context(|| {
-            format!(
-                "terminal `{}` has no PTY record in {}",
-                terminal.subject,
-                terminal.pty_root.display()
-            )
-        })?;
-    let incarnation = format!("{peer}:{created_at}");
-    anyhow::ensure!(
-        incarnation == terminal.incarnation_id,
-        "terminal `{}` changed incarnation: st selected `{}`, but its PTY is `{incarnation}`",
-        terminal.subject,
-        terminal.incarnation_id
-    );
-    Ok(stream)
-}
-
-/// Connect to PTY session `runtime_id` under `pty_root`, returning the stream and the pid the
-/// kernel reports for the process serving it. Nothing is sent.
-async fn connect_pty_session(
-    pty_root: &Path,
-    runtime_id: &str,
-    subject: &str,
-) -> Result<(StdUnixStream, i32)> {
-    let socket = pty_root.join(format!("{runtime_id}.sock"));
-    let stream = tokio::time::timeout(
-        LOCAL_TERMINAL_CONNECT,
-        tokio::net::UnixStream::connect(&socket),
-    )
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "terminal `{subject}` did not accept a connection at {} within {} ms",
-            socket.display(),
-            LOCAL_TERMINAL_CONNECT.as_millis()
-        )
-    })?
-    .with_context(|| format!("connect to terminal `{subject}` at {}", socket.display()))?
-    .into_std()?;
-    stream.set_nonblocking(false)?;
-    let peer = pty_core::unix_peer::credentials(&stream).with_context(|| {
-        format!(
-            "identify the process serving terminal `{subject}` at {}",
-            socket.display()
-        )
-    })?;
-    Ok((stream, peer.pid))
-}
+use st3_terminal_direct::connect_pty_session;
+pub(crate) use st3_terminal_direct::open_local_terminal;
 
 /// Attach this terminal straight to a PTY session that only the PTY registry named, for when the
 /// st daemon cannot say which incarnation it selected. The kernel must still name the session's
@@ -700,6 +914,13 @@ pub fn is_not_found(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<ApiResponseError>()
         .is_some_and(|error| error.status == 404 || error.code == "not-found")
+}
+
+/// An unimplemented route on an older daemon, distinct from a typed subject/auth refusal.
+pub fn is_missing_route(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UnexpectedResponse>()
+        .is_some_and(|error| error.status == 404)
 }
 
 /// The HTTP status an API call failed with, including an answer without an error body.
@@ -793,6 +1014,7 @@ impl std::error::Error for UnexpectedResponse {}
 
 fn terminal_request(url: &str) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
     let mut request = url.into_client_request()?;
+    st3_client::propagation::inject_headers(request.headers_mut());
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
         "st3.terminal.v1"
@@ -945,10 +1167,17 @@ async fn unix_request(
             .map(|person| format!("X-St3-Person: {person}\r\n"))
             .unwrap_or_default();
         let mut request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{person_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{person_header}Content-Length: {}\r\nConnection: close\r\n",
             body.len()
         )
         .into_bytes();
+        st3_client::propagation::inject_current_context(|key, value| {
+            request.extend_from_slice(key.as_bytes());
+            request.extend_from_slice(b": ");
+            request.extend_from_slice(value.as_bytes());
+            request.extend_from_slice(b"\r\n");
+        });
+        request.extend_from_slice(b"\r\n");
         // A handler may answer without consuming its body. Keep small bodies in the same
         // write as their headers to avoid a separate body write racing Connection: close.
         request.extend_from_slice(body);
@@ -1024,11 +1253,20 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     {
         // A dry run copies the store and replays it twice; status reads what is sealed.
         Duration::from_secs(30 * 60)
-    } else if path.starts_with("/v1/events?") && path.contains("wait=true") {
+    } else if (path.starts_with("/v1/events?") || path.starts_with("/v1/events/page?"))
+        && path.contains("wait=true")
+    {
         deadlines.event
     } else {
         deadlines.request
     }
+}
+
+/// How long a seat's driver waits before it reconnects to the daemon or retries a call the daemon
+/// could not take. Every driver loses the daemon in the same instant when it stops, so without a
+/// random share they would all retry together and reach it in the instant it starts to listen.
+pub fn driver_retry_pause() -> Duration {
+    jittered(Duration::from_secs(1))
 }
 
 /// Half to one and a half times `pause`. Every seat and command waiting out one daemon restart
@@ -1090,14 +1328,21 @@ struct DaemonDeadline {
     deadline: Duration,
 }
 
+impl DaemonDeadline {
+    fn summary(&self) -> String {
+        format!(
+            "st API endpoint `{}` exceeded the {} limit of {} ms",
+            self.endpoint, self.phase, self.deadline.as_millis()
+        )
+    }
+}
+
 impl fmt::Display for DaemonDeadline {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "st API endpoint `{}` exceeded the {} limit of {} ms; the service may be busy or unavailable, retry the command",
-            self.endpoint,
-            self.phase,
-            self.deadline.as_millis()
+            "{}; the service may be busy or unavailable, retry the command",
+            self.summary()
         )
     }
 }
@@ -1220,6 +1465,25 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn otel_disabled_client_sends_no_trace_headers() {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let span = tracing::info_span!("without_sdk");
+            let _entered = span.enter();
+            let websocket = terminal_request("ws://localhost/v1/terminal").unwrap();
+            let http = st3_client::propagation::inject_http(
+                reqwest::Client::new().get("http://localhost/v1/health"),
+            ).build().unwrap();
+            for headers in [websocket.headers(), http.headers()] {
+                assert!(!headers.contains_key("traceparent"));
+                assert!(!headers.contains_key("tracestate"));
+            }
+            st3_client::propagation::inject_current_context(|_, _| {
+                panic!("the Unix header writer must not be called without a valid context");
+            });
+        });
+    }
     use axum::extract::ws::{Message as AxumWsMessage, WebSocketUpgrade};
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse as _;
@@ -1335,7 +1599,107 @@ mod tests {
             person: None,
             outage_wait: Duration::ZERO,
             announce_outage_wait: false,
+            follow_retry: None,
+            follow_test: None,
         }
+    }
+
+    #[test]
+    fn claim_socket_permission_denial_is_not_a_restart_outage() {
+        for errno in [libc::EPERM, libc::EACCES] {
+            let outage = DaemonUnreachable::connect_io("/tmp/st.sock", &std::io::Error::from_raw_os_error(errno));
+            assert!(outage.permission_denied());
+            assert!(outage.local_connect_defect());
+            assert_eq!(outage.socket_os_error(), Some(errno));
+            assert!(outage.summary().contains("was denied"));
+            assert!(!outage.summary().contains("restarting"));
+        }
+        let outage = DaemonUnreachable::connect_io("/tmp/st.sock", &std::io::Error::from_raw_os_error(libc::ECONNREFUSED));
+        assert!(!outage.permission_denied());
+        assert!(!outage.local_connect_defect());
+        assert_eq!(outage.phase(), OutagePhase::Connect);
+        let invalid_path = DaemonUnreachable::connect_io("/tmp/st.sock", &std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+        assert!(invalid_path.local_connect_defect());
+        assert_eq!(invalid_path.socket_os_error(), Some(libc::ENAMETOOLONG));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_socket_access_defects_skip_wait_and_follow_but_pressure_keeps_existing_wait() {
+        for errno in [libc::EPERM, libc::EACCES, libc::EINVAL, libc::ENAMETOOLONG,
+            libc::ENOTDIR, libc::ENOTSOCK, libc::ELOOP] {
+            for follow in [false, true] {
+                let mut client = Client::scripted_follow_test(vec![
+                    ("/v1/test".into(), FollowTestReply::ConnectError(errno)),
+                ]).with_outage_wait(Duration::from_secs(30), false);
+                if follow { client = client.with_follow_retry(); }
+                let started = tokio::time::Instant::now();
+                let error = client.get::<Value>("/v1/test").await.unwrap_err();
+                assert_eq!(daemon_unreachable(&error).unwrap().socket_os_error(), Some(errno));
+                assert_eq!(client.follow_test_result().0.len(), 1);
+                assert_eq!(started.elapsed(), Duration::ZERO);
+            }
+        }
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::ENOBUFS, libc::EIO,
+            libc::ENOENT, libc::ECONNREFUSED, libc::EINTR, libc::EAGAIN, libc::ETIMEDOUT] {
+            for follow in [false, true] {
+                let mut client = Client::scripted_follow_test(vec![
+                    ("/v1/test".into(), FollowTestReply::ConnectError(errno)),
+                    ("/v1/test".into(), FollowTestReply::Value(json!({"recovered": true}))),
+                ]).with_outage_wait(Duration::from_secs(30), false);
+                if follow { client = client.with_follow_retry(); }
+                let value = client.get::<Value>("/v1/test").await.unwrap();
+                assert_eq!(value, json!({"recovered": true}));
+                let (requests, _) = client.follow_test_result();
+                assert_eq!(requests.len(), 2);
+                assert!(requests[1].1 > requests[0].1, "existing backoff was skipped for errno {errno}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn claim_socket_path_defect_is_not_hidden_by_a_live_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("loop");
+        std::os::unix::fs::symlink("loop", &socket).unwrap();
+        let _startup = crate::startup::Startup::begin(&socket).unwrap();
+        let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(30), false);
+        let error = tokio::time::timeout(Duration::from_secs(1), client.get::<Value>("/v1/health"))
+            .await.expect("a local path defect was hidden by startup wait").unwrap_err();
+        let outage = daemon_unreachable(&error).unwrap();
+        assert_eq!(outage.socket_os_error(), Some(libc::ELOOP));
+        assert!(outage.local_connect_defect());
+        assert!(!outage.starting);
+        assert!(outage.summary().contains("inspect the socket path"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn interactive_startup_fails_promptly_but_drivers_keep_a_connect_outage() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("api.sock");
+        let startup = crate::startup::Startup::begin(&socket).unwrap();
+        startup.phase("full-replay/resources");
+        let interactive = Client::unix(&socket).with_outage_wait(Duration::from_secs(600), true);
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            interactive.get::<serde_json::Value>("/v1/health"),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        let outage = daemon_unreachable(&error).unwrap();
+        assert_eq!(outage.phase(), OutagePhase::Connect);
+        assert!(outage.summary().contains("daemon starting"));
+        assert!(outage.summary().contains("full-replay/resources"));
+        let error = Client::unix(&socket)
+            .get::<serde_json::Value>("/v1/health")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            daemon_unreachable(&error).unwrap().phase(),
+            OutagePhase::Connect
+        );
     }
 
     #[test]
@@ -1519,6 +1883,63 @@ mod tests {
         assert!(!message.contains("st up"), "{message}");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn follow_connect_outages_stop_after_five_minutes() {
+        let mut retry = FollowRetry::default();
+        let error = DaemonUnreachable::connect("fixture", "connection refused").into();
+        let (pause, message) = retry.failed(&error, tokio::time::Instant::now()).unwrap();
+        assert!((Duration::from_millis(50)..=Duration::from_millis(150)).contains(&pause));
+        assert!(message.unwrap().contains("follow gap"));
+        tokio::time::advance(FOLLOW_OUTAGE_LIMIT).await;
+        let error = retry.failed(&error, tokio::time::Instant::now()).unwrap_err();
+        assert!(error.to_string().contains("was not reachable for 300s"));
+    }
+
+    #[tokio::test]
+    async fn follow_reads_wait_for_a_typed_connect_outage_with_daemon_wait_zero() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("st3.sock");
+        let client = fast_client(Endpoint::Unix(socket.clone())).with_follow_retry();
+        let read = tokio::spawn(async move { client.get::<Value>("/v1/test").await });
+        // Leave the socket absent through several backoff attempts, then bring it up.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !read.is_finished(),
+            "the follow read exited during the outage"
+        );
+        let server = tokio::spawn(async move {
+            crate::api::serve_unix(&socket, test_api()).await.unwrap();
+        });
+        let value = tokio::time::timeout(Duration::from_secs(10), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, json!({"method": "get"}));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn follow_retry_does_not_repeat_a_write_that_times_out() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("st3.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let client = fast_client(Endpoint::Unix(socket)).with_follow_retry();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            client.post::<_, Value>("/v1/test", &json!({"mutation": true})),
+        )
+        .await
+        .expect("follow retry repeated a write")
+        .unwrap_err();
+        assert!(daemon_did_not_answer(&error));
+        server.abort();
+    }
+
     #[tokio::test]
     async fn an_absent_or_refusing_daemon_is_one_plain_outage() {
         let directory = tempfile::tempdir().unwrap();
@@ -1557,15 +1978,20 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("st3.sock");
         drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let startup = Arc::new(crate::startup::Startup::begin(&socket).unwrap());
+        startup.phase("open-store");
+        let serving = Arc::clone(&startup);
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(400)).await;
             let _ = std::fs::remove_file(&server_socket);
-            crate::api::serve_unix(&server_socket, test_api())
-                .await
-                .unwrap();
+            crate::api::serve_unix_with_ready(&server_socket, test_api(), move || {
+                serving.serving()
+            })
+            .await
+            .unwrap();
         });
-        let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(10), false);
+        let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(10), true);
         let post: Value = client
             .post("/v1/test", &json!({"method": "post"}))
             .await
@@ -1590,6 +2016,17 @@ mod tests {
                 .len()
                 > 8
         );
+    }
+
+    /// Drivers that lost one daemon reconnect at different times, within half to one and a half
+    /// seconds of losing it.
+    #[test]
+    fn driver_retries_are_spread_around_one_second() {
+        let pauses = (0..64).map(|_| driver_retry_pause()).collect::<Vec<_>>();
+        assert!(pauses.iter().all(|pause| {
+            (Duration::from_millis(500)..=Duration::from_millis(1500)).contains(pause)
+        }));
+        assert!(pauses.iter().collect::<std::collections::BTreeSet<_>>().len() > 8);
     }
 
     #[tokio::test]
@@ -1851,6 +2288,12 @@ mod tests {
             .unwrap();
         assert_eq!(named["person"], "person/alex");
         assert!(Client::unix_as(&socket, "person/alex\r\nx-forged: yes").is_err());
+        let agent: Value = Client::unix_agent(&socket, "agent/example/bridge")
+            .unwrap().get("/v1/person").await.unwrap();
+        assert_eq!(agent["person"], "agent/example/bridge");
+        assert!(Client::unix_agent(&socket, "person/alex").is_err());
+        assert!(Client::unix_agent(&socket, "agent/example\r\nx-forged: yes").is_err());
+        assert!(Client::unix_agent(&socket, "agent/").is_err());
         server.abort();
     }
 

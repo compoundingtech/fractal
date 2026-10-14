@@ -1,11 +1,18 @@
-import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
+import { linuxActionlintConfig } from './workspace-ci.ts'
+import { auditCaches } from './cache-audit.ts'
+import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
-// Preserve the public-content guard on all PRs and main pushes.
-export default githubWorkflow({
-  actionlint: defaultActionlintConfig,
+// Preserve the public-content guard on ready PRs and main pushes.
+export default githubWorkflow(readyPRJobs(auditCaches({
+  actionlint: linuxActionlintConfig,
   "name": "Public repository check",
+  concurrency: {
+    group: "public-repo-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
+    'cancel-in-progress': "${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}",
+  },
   "on": {
-    "pull_request": null,
+    "pull_request": { types: readyPullRequestTypes },
     "push": {
       "branches": [
         "main"
@@ -14,7 +21,7 @@ export default githubWorkflow({
   },
   "jobs": {
     "public-repo": {
-      "runs-on": "namespace-profile-linux-x86-64",
+      "runs-on": 'ubuntu-latest',
       "steps": [
         {
           "uses": "actions/checkout@v4"
@@ -30,4 +37,4 @@ export default githubWorkflow({
       ]
     }
   }
-})
+}, {"public-repo": "Runs standard-library source checks without downloads or compilation."})))

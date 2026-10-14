@@ -24,7 +24,7 @@ def dependency_findings(metadata):
     # features and target/dev/build dependencies. Traverse neutral crates too: an alias or
     # indirect workspace dependency must not let st2 back into either current product.
     packages = {package["name"]: package for package in metadata["packages"]}
-    for product in ("st3", "stui"):
+    for product in ("st3",):
         pending = [(product, [product])]
         seen = set()
         while pending:
@@ -77,7 +77,8 @@ def sqlite_findings(path):
                     # These are opaque base64, not labels. Their decoded claims are also stored
                     # in semantic tables checked below; random bytes can contain the letters st2.
                     if (name, column) in {("replica_envelopes", "payload"),
-                                          ("replica_envelope_signatures", "signature")}:
+                                          ("replica_envelope_signatures", "signature"),
+                                          ("claim_signatures", "signature")}:
                         continue
                     yield from record_findings(
                         f"SQLite record {path.name}/{name}/{column}", value, TOKEN

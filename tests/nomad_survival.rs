@@ -63,7 +63,7 @@ impl Fixture {
 
     /// An `st2` invocation with this fixture's isolated state env.
     fn st2(&self) -> Command {
-        self.st2_from(Path::new(env!("CARGO_BIN_EXE_st2")))
+        self.st2_from(Path::new(test_env!("CARGO_BIN_EXE_st2")))
     }
 
     fn st2_from(&self, binary: &Path) -> Command {
@@ -229,7 +229,7 @@ impl Fixture {
         std::fs::create_dir_all(&bin_dir).unwrap();
         let installed = bin_dir.join("st2");
         let staged = installed.with_extension("installing");
-        std::fs::copy(env!("CARGO_BIN_EXE_st2"), &staged).unwrap();
+        std::fs::copy(test_env!("CARGO_BIN_EXE_st2"), &staged).unwrap();
         std::fs::File::open(&staged).unwrap().sync_all().unwrap();
         std::fs::rename(&staged, &installed).unwrap();
         installed
@@ -239,7 +239,7 @@ impl Fixture {
     fn replace_control_plane(&self, installed: &Path) {
         let before = binary_file_identity(installed);
         let staged = installed.with_extension("next");
-        std::fs::copy(env!("CARGO_BIN_EXE_st2"), &staged).unwrap();
+        std::fs::copy(test_env!("CARGO_BIN_EXE_st2"), &staged).unwrap();
         std::fs::File::open(&staged).unwrap().sync_all().unwrap();
         std::fs::rename(&staged, installed).unwrap();
         let after = binary_file_identity(installed);
@@ -252,7 +252,7 @@ impl Fixture {
     /// Spawn the real `st2 up` supervisor loop (long interval — the immediate first pass does the
     /// spawning; the loop just gives us a live runner to kill).
     fn spawn_loop(&self) -> Child {
-        self.spawn_loop_from(Path::new(env!("CARGO_BIN_EXE_st2")))
+        self.spawn_loop_from(Path::new(test_env!("CARGO_BIN_EXE_st2")))
     }
 
     fn spawn_loop_from(&self, binary: &Path) -> Child {
@@ -281,7 +281,7 @@ impl Fixture {
 
     /// One `st2 up --once` pass; returns its stdout (where launched/adopted/torn-down is reported).
     fn up_once(&self) -> String {
-        self.up_once_from(Path::new(env!("CARGO_BIN_EXE_st2")))
+        self.up_once_from(Path::new(test_env!("CARGO_BIN_EXE_st2")))
     }
 
     fn up_once_from(&self, binary: &Path) -> String {
@@ -591,18 +591,37 @@ fn assert_managed_agent_color_contract(suffix: &str) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(poll_until(SPAWN_TIMEOUT, || {
-        ambient_snapshot.exists() && explicit_snapshot.exists()
-    }));
+    // Shell redirection creates the file before printenv writes. Wait for complete
+    // records, independently of their values, and assert the captured records.
+    let complete_snapshot = |path: &Path| {
+        let contents = std::fs::read_to_string(path).ok()?;
+        (contents.ends_with('\n') && contents.lines().count() == 1).then_some(contents)
+    };
+    let mut initial_snapshots = None;
+    let observed = poll_until(SPAWN_TIMEOUT, || {
+        let Some(ambient) = complete_snapshot(&ambient_snapshot) else {
+            return false;
+        };
+        let Some(explicit) = complete_snapshot(&explicit_snapshot) else {
+            return false;
+        };
+        initial_snapshots = Some((ambient, explicit));
+        true
+    });
+    assert!(
+        observed,
+        "initial color snapshots did not complete:\nambient: {:?}\nexplicit: {:?}",
+        std::fs::read_to_string(&ambient_snapshot),
+        std::fs::read_to_string(&explicit_snapshot)
+    );
+    let (ambient, explicit) = initial_snapshots.unwrap();
 
     assert_eq!(
-        std::fs::read_to_string(&ambient_snapshot).unwrap(),
-        "unset\n",
+        ambient, "unset\n",
         "the reconciler's capture-only NO_COLOR must not disable agent color"
     );
     assert_eq!(
-        std::fs::read_to_string(&explicit_snapshot).unwrap(),
-        "1\n",
+        explicit, "1\n",
         "an explicit Agent Spec NO_COLOR must still reach the agent"
     );
 

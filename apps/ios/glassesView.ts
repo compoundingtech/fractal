@@ -4,16 +4,16 @@ import { missionWord, wordName, wordStyle } from './missionsView';
 import { missionLabels } from './presentation';
 import type { MachineView } from './projectionCache';
 
-// Glasses on the phone, an experiment behind a setting (mission fleet/stui/glass): the person's
-// named workspaces from stui, read from st. A glass is splits, each with its own tabs, and each
-// tab one pane. The phone shows one thing at a time: Home, then each split's tabs as a list, and
-// a tab opens its pane full screen. Pane keys are stui's
+// Spaces on the phone (kept as glasses by st): the person's
+// named workspaces from stui, read from st. Each space has panes with their own tabs;
+// choosing a space lists its tabs grouped by pane. A tab opens its pane full screen.
+// Pane keys are stui's
 // (crates/stui/src/ui/pane.rs): `agent:agent/…`, `mission:mission/…`, `machine:machine/…`.
 
 /** What a pane opens on the phone. */
 export type PaneTarget = {
   key: string;
-  kind: 'agent' | 'mission' | 'machine' | 'terminal' | 'usage' | 'other';
+  kind: 'agent' | 'mission' | 'machine' | 'terminal' | 'usage' | 'resource' | 'other';
   /** The subject's id: `agent/…`, `mission/…`, `machine/…`; the key for anything else. */
   id: string;
   title: string;
@@ -92,6 +92,7 @@ export function paneTarget(key: string, lists: GlassLists, labels = missionLabel
   if (kind === 'terminal' && id.startsWith('terminal/')) {
     return { key, kind: 'terminal', id, title: 'shell', needsYou: false, gone: false };
   }
+  if (kind === 'resource' && id) return { key, kind: 'resource', id, title: id, needsYou: false, gone: false };
   if (kind === 'usage') {
     return { key, kind: 'usage', id, title: 'Usage', needsYou: false, gone: false };
   }

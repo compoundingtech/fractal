@@ -291,7 +291,6 @@ def main():
 
     print(f"# Eval run report — {date}\n")
     bullet("Eval: `seat-queue`")
-    bullet("Runtime: `st3`")
     bullet(f"Run ID: `{run}`")
     bullet(f"Seat: {harness} with `{model}`")
     bullet(f"Candidate commit: {candidate}")

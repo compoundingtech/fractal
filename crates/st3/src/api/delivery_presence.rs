@@ -56,12 +56,14 @@ struct ChannelReport {
 struct Beat {
     at: Instant,
     report: Report,
+    fence: Option<crate::mailbox::Fence>,
 }
 
 struct Presence {
     started: Instant,
     image: Option<String>,
     beats: Mutex<HashMap<String, Beat>>,
+    monitors: Mutex<HashMap<String, Beat>>,
 }
 
 fn presence() -> &'static Presence {
@@ -70,6 +72,7 @@ fn presence() -> &'static Presence {
         started: Instant::now(),
         image: st_drivers::reexec::running_identity().map(|identity| identity.token()),
         beats: Mutex::new(HashMap::new()),
+        monitors: Mutex::new(HashMap::new()),
     })
 }
 
@@ -90,19 +93,70 @@ pub(crate) fn record(recipient: &str, report: &str) {
             Beat {
                 at: Instant::now(),
                 report,
+                fence: None,
             },
         );
     }
 }
 
+/// Title updates cannot establish delivery readiness. They can report the outer driver's
+/// attachment check, including a missing plugin for which no delivery process exists.
+pub(super) fn record_fenced(fence: &crate::mailbox::Fence, raw: &str) -> bool {
+    let Ok(report) = serde_json::from_str::<Report>(raw) else {
+        return false;
+    };
+    let target = if fence.component == "delivery" {
+        if report.transport.as_deref() != Some("claude-channel")
+            && let Ok(mut monitors) = presence().monitors.lock()
+        {
+            monitors.remove(&fence.subject);
+        }
+        &presence().beats
+    } else if report.transport.as_deref() == Some("claude-channel") {
+        &presence().monitors
+    } else {
+        return false;
+    };
+    if let Ok(mut beats) = target.lock() {
+        beats.insert(
+            fence.subject.clone(),
+            Beat {
+                at: Instant::now(),
+                report,
+                fence: Some(fence.clone()),
+            },
+        );
+        return true;
+    }
+    false
+}
+
+pub(super) fn attachment(recipient: &str, incarnation: &str) -> Option<crate::mailbox::Fence> {
+    let beats = presence().beats.lock().ok()?;
+    let beat = beats.get(recipient)?;
+    let fence = beat.fence.as_ref()?;
+    (fence.incarnation == incarnation
+        && beat.at.elapsed() <= Duration::from_millis(CHANNEL_STALE_AFTER_MS)
+        && beat.report.transport.as_deref() == Some("claude-channel")
+        && beat.report.ready == Some(true)
+        && beat.report.channel.as_ref().is_some_and(|channel|
+            channel.age_ms.is_some_and(|age| age <= CHANNEL_STALE_AFTER_MS)))
+    .then(|| fence.clone())
+}
+
 /// A metadata-free poll from a Unix peer proven to be this seat's native delivery process.
 /// This proves liveness, not that an old executable matches the installed binary.
 pub(crate) fn record_legacy(recipient: &str, transport: &str, pid: u32) {
+    // A provider launched by an older driver has no title-side attachment monitor.
+    if let Ok(mut monitors) = presence().monitors.lock() {
+        monitors.remove(recipient);
+    }
     if let Ok(mut beats) = presence().beats.lock() {
         beats.insert(
             recipient.into(),
             Beat {
                 at: Instant::now(),
+                fence: None,
                 report: Report {
                     transport: Some(transport.into()),
                     pid: Some(pid),
@@ -140,12 +194,44 @@ impl Assessment {
 
 /// Assess the delivery path of a local native seat, independently of harness readiness.
 pub(crate) fn assess(recipient: &str, driver: &str) -> Assessment {
+    assess_selected(recipient, driver, None, false)
+}
+
+pub(crate) fn assess_current(recipient: &str, driver: &str, incarnation: Option<&str>) -> Assessment {
+    assess_selected(recipient, driver, incarnation, true)
+}
+
+fn assess_selected(recipient: &str, driver: &str, incarnation: Option<&str>, current: bool) -> Assessment {
     let presence = presence();
-    let beat = presence.beats.lock().ok().and_then(|beats| {
+    let eligible = |beat: &&Beat| {
+        if !current { return true; }
+        let transport = match driver {
+            "claude" => "claude-channel", "codex" => "app-server", "opencode" => "opencode-server",
+            "omp" => "omp-channel", "pi" => "pi-channel", _ => return false,
+        };
+        beat.report.transport.as_deref() == Some(transport)
+            && beat.fence.as_ref().is_none_or(|fence| incarnation.is_none_or(|incarnation| fence.incarnation == incarnation))
+    };
+    let captured = |beat: &Beat| {
+        let mut report = beat.report.clone();
+        if current && beat.fence.is_none() && report.ready != Some(false) {
+            report.legacy = true;
+        }
+        (beat.at, report)
+    };
+    let mut beat = presence.beats.lock().ok().and_then(|beats| {
         beats
             .get(recipient)
-            .map(|beat| (beat.at, beat.report.clone()))
+            .filter(eligible)
+            .map(captured)
     });
+    if driver == "claude"
+        && let Ok(monitors) = presence.monitors.lock()
+        && let Some(monitor) = monitors.get(recipient).filter(eligible)
+        && monitor.report.ready == Some(false)
+    {
+        beat = Some(captured(monitor));
+    }
     assess_beat(
         presence.started.elapsed(),
         presence.image.as_deref(),
@@ -164,13 +250,21 @@ pub(crate) fn assess(recipient: &str, driver: &str) -> Assessment {
 /// A message view may include a local poll when one exists; absent remote evidence stays absent.
 pub(crate) fn known(recipient: &str) -> Option<Assessment> {
     let transport = presence()
-        .beats
+        .monitors
         .lock()
-        .ok()?
-        .get(recipient)?
-        .report
-        .transport
-        .clone()?;
+        .ok()
+        .and_then(|beats| {
+            beats
+                .get(recipient)
+                .and_then(|beat| beat.report.transport.clone())
+        })
+        .or_else(|| {
+            presence().beats.lock().ok().and_then(|beats| {
+                beats
+                    .get(recipient)
+                    .and_then(|beat| beat.report.transport.clone())
+            })
+        })?;
     Some(assess(
         recipient,
         if transport == "claude-channel" {
@@ -303,6 +397,92 @@ mod tests {
     use super::*;
 
     const DAEMON: Option<&str> = Some("new");
+
+    #[test]
+    fn malformed_report_does_not_replace_a_beat_or_prove_recording() {
+        let recipient = "agent/malformed-report-control";
+        let mut fence = crate::mailbox::Fence::new(recipient, "current", "delivery");
+        fence.epoch = 1;
+        assert!(record_fenced(
+            &fence,
+            &json!({"transport":"omp-channel", "ready":false}).to_string()
+        ));
+        let mut malformed = fence.clone();
+        malformed.epoch = 2;
+        assert!(!record_fenced(
+            &malformed,
+            &json!({"transport":"omp-channel", "ready":true, "image":42}).to_string()
+        ));
+        let beats = presence().beats.lock().unwrap();
+        let beat = beats.get(recipient).unwrap();
+        assert_eq!(beat.report.ready, Some(false));
+        assert_eq!(beat.fence.as_ref().unwrap().epoch, 1);
+    }
+
+    #[test]
+    fn attachment_requires_current_initialized_delivery_and_not_a_title_report() {
+        let recipient = "agent/attachment-proof";
+        let mut delivery = crate::mailbox::Fence::new(recipient, "current", "delivery");
+        delivery.epoch = 1;
+        let title = crate::mailbox::Fence::new(recipient, "current", "title");
+        let ready = json!({"transport":"claude-channel", "ready":true,
+            "channel":{"pid":8,"image":"new","age_ms":0}})
+        .to_string();
+        record_fenced(&title, &ready);
+        assert!(attachment(recipient, "current").is_none());
+        record_fenced(&delivery, &ready);
+        assert_eq!(attachment(recipient, "current").unwrap().epoch, 1);
+        assert!(attachment(recipient, "previous").is_none());
+        record_fenced(
+            &delivery,
+            &json!({"transport":"claude-channel", "ready":false,
+            "channel":{"pid":8,"age_ms":0}})
+            .to_string(),
+        );
+        assert!(attachment(recipient, "current").is_none());
+        record_fenced(&delivery, &ready);
+        presence()
+            .beats
+            .lock()
+            .unwrap()
+            .get_mut(recipient)
+            .unwrap()
+            .at = Instant::now() - Duration::from_secs(11);
+        assert!(attachment(recipient, "current").is_none());
+    }
+
+    #[test]
+    fn a_missing_channel_has_visible_delivery_presence_and_legacy_polls_recover() {
+        let recipient = "agent/attachment-missing";
+        let title = crate::mailbox::Fence::new(recipient, "current", "title");
+        record_fenced(
+            &title,
+            &json!({"transport":"claude-channel", "ready":false,
+            "reason":"claude-channel-unattached: mail held"})
+            .to_string(),
+        );
+        let assessment = known(recipient).unwrap();
+        assert!(assessment.stale());
+        assert!(reason(&assessment).contains("claude-channel-unattached"));
+        record_legacy(recipient, "claude-channel", 7);
+        assert_eq!(known(recipient).unwrap().state, "legacy");
+        // A legacy poll proves transport liveness without asserting a fenced incarnation.
+        assert_eq!(assess_current(recipient, "claude", Some("current")).state, "legacy");
+        assert!(assess_current(recipient, "codex", Some("current")).state != "legacy");
+    }
+
+    #[test]
+    fn unfenced_reports_preserve_legacy_liveness_but_never_current_native_readiness() {
+        let recipient = "agent/eval.unfenced-report";
+        record(recipient, &json!({"transport":"omp-channel","pid":7,"ready":true}).to_string());
+        assert_eq!(assess_current(recipient, "omp", Some("current")).state, "legacy");
+        assert_ne!(assess_current(recipient, "codex", Some("current")).state, "legacy");
+        let old = crate::mailbox::Fence::new(recipient, "old", "delivery");
+        record_fenced(&old, &json!({"transport":"omp-channel","pid":7,"ready":true}).to_string());
+        let current = assess_current(recipient, "omp", Some("current"));
+        assert!(matches!(current.state, "unknown" | "stale"));
+        assert_eq!(current.transport, None);
+    }
 
     fn report(image: Option<&str>, channel: Option<(Option<&str>, u64)>) -> Report {
         Report {
