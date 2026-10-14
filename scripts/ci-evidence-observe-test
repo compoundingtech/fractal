@@ -101,10 +101,13 @@ if args[0] == 'run':
     print(os.environ.get('GH_RUNS', '[]'))
 elif args[1].endswith('/artifacts?per_page=100'):
     print(json.dumps({{'artifacts': [{{'name': 'ci-evidence-source-1', 'id': 9, 'expired': False}}]}}))
+elif '/jobs' in args[1]:
+    page = int(args[1].rsplit('page=', 1)[1])
+    print(os.environ.get('GH_JOBS', '{{"jobs": []}}') if page == 1 else '{{"jobs": []}}')
 elif '/attempts/' in args[1]:
     print(json.dumps({{'conclusion': os.environ.get('GH_CONCLUSION', 'success')}}))
 else:
-    print(json.dumps({{'run_attempt': 1}}))
+    print(json.dumps({{'run_attempt': 1, 'name': os.environ.get('GH_RUN_NAME', 'Workspace CI')}}))
 """)
     gh.chmod(0o755)
 
@@ -205,14 +208,14 @@ else:
     base = [sys.executable, str(SCRIPT), '--repository', 'example/repo', '--run', '7', '--attempt', '1', '--artifact', '9',
             '--observer', json.dumps([sys.executable, str(observer)]), '--verifier', str(verifier)]
     calls.write_text('')
-    done = subprocess.run([*base, '--scratch', str(tmp / 'viakeys')], cwd=checkout, capture_output=True, env=dict(ENV, VERIFIER_OK='1'))
+    done = subprocess.run([*base, '--scratch', str(tmp / 'viakeys')], cwd=checkout, capture_output=True, env=dict(ENV, VERIFIER_OK='1', PATH=f'{bin_dir}:{ENV["PATH"]}'))
     assert done.returncode == 0, done.stdout
     argv = json.loads(calls.read_text().splitlines()[0])
     assert argv[argv.index('--keys') + 1] != str(signers) and '--keys-from' not in argv
     empty = tmp / 'nokeys'
     git(tmp, 'init', '-q', str(empty))
     git(empty, 'commit', '-q', '--allow-empty', '-m', 'none')
-    done = subprocess.run([*base, '--scratch', str(tmp / 'nokeys-scratch')], cwd=empty, capture_output=True, env=dict(ENV, VERIFIER_OK='1'))
+    done = subprocess.run([*base, '--scratch', str(tmp / 'nokeys-scratch')], cwd=empty, capture_output=True, env=dict(ENV, VERIFIER_OK='1', PATH=f'{bin_dir}:{ENV["PATH"]}'))
     assert done.returncode == 1 and 'no key list' in json.loads(done.stdout)['failures'][0]
     print('passed: the key list comes from the checkout; a missing list fails full records closed')
 
@@ -243,3 +246,25 @@ else:
     ledger = [json.loads(l) for l in (state / 'observed.jsonl').read_text().splitlines()]
     assert sum(1 for e in ledger if e['run'] == 8) == 3 and not any(e['run'] == 9 for e in ledger)
     print('passed: poll observes each finished run once, skips cancelled ones, and gives up on a run after three failures')
+
+    # The evidence gate's skip contract: a check whose evidence-gate job ran `evidence skip taken` is
+    # never recorded, and no other workflow (this one included) is ever acted on.
+    def jobs(*entries):
+        return json.dumps({'jobs': [{'name': name, 'steps': [{'name': step, 'conclusion': conclusion} for step, conclusion in steps]}
+                                    for name, steps in entries]})
+
+    response_file.write_text(json.dumps(answer([(full, 'full')], pack(full))))
+    taken = jobs(('evidence-gate-linux-gate', [('Verify', 'success'), ('evidence skip taken', 'success')]),
+                 ('linux-tests', [('evidence skip taken', 'success')]))
+    done, out = execute(answer([(full, 'full')], pack(full)), scratch=tmp / 'skip-taken', remote=remote, env={'GH_JOBS': taken})
+    assert done.returncode == 0, done.stdout
+    assert out['records'] == [] and out['skip_taken'][0]['checks'] == ['linux-gate'] and out['published'] == 0
+    assert git(tmp / 'skip-taken', 'for-each-ref', 'refs/notes/evidence/') == '', 'no ref for a skipped check'
+    ran = jobs(('evidence-gate-linux-gate', [('Verify', 'success'), ('evidence skip taken', 'skipped')]))
+    done, out = execute(answer([(full, 'full')], pack(full)), scratch=tmp / 'skip-not-taken', env={'GH_JOBS': ran})
+    assert done.returncode == 0 and len(out['records']) == 1 and 'skip_taken' not in out, 'a gate that did not skip is recorded as before'
+    done, out = execute(answer([(full, 'full')], pack(full)), scratch=tmp / 'wrong-workflow', env={'GH_RUN_NAME': 'Evidence observe'})
+    assert done.returncode == 1 and 'never acting on any other workflow' in out['failures'][0]
+    done, out = execute(answer([(full, 'full')], pack(full)), scratch=tmp / 'unreadable-jobs', env={'GH_JOBS': 'not json'})
+    assert done.returncode == 1 and 'skips cannot be ruled out' in out['failures'][0], 'unreadable jobs fail closed'
+    print('passed: a check whose gate job ran "evidence skip taken" is not recorded; other workflows and unreadable jobs are refused')
