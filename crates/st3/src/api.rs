@@ -81,6 +81,7 @@ mod mailbox;
 mod mail_backlog;
 pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
+mod response_body;
 mod owned_sets;
 mod published_attention;
 pub use published_attention::start_attention_list;
@@ -1130,6 +1131,15 @@ async fn response_envelope_unbounded(
     if let Some(snapshot) = &client_snapshot {
         request.extensions_mut().insert(snapshot.clone());
     }
+    let envelope_context = response_body::Context {
+        state: state.clone(),
+        client_request,
+        observation_report,
+        request_id: request_id.clone(),
+        client_snapshot,
+        server: otel.clone(),
+        roster: request_route == "/v1/client/agents",
+    };
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
@@ -1158,6 +1168,10 @@ async fn response_envelope_unbounded(
             let handler_enqueued = Instant::now();
             let server_trace = otel.clone();
             let forwarded_handler = request_path == crate::peer::CLIENT_READ_FORWARD_PATH;
+            let handler_envelope = envelope_context.clone();
+            // The awaiting request owns body collection. Dropping it closes this
+            // channel even when its already-started handler worker is detached.
+            let (_body_owner, body_cancelled) = tokio::sync::oneshot::channel::<()>();
             let remote = served_remote.clone();
             let roster_trace = (request_route == "/v1/client/agents").then(|| server_trace.clone()).flatten();
             match crate::api::read_deadline::spawn_handler(roster_trace, move || {
@@ -1174,7 +1188,7 @@ async fn response_envelope_unbounded(
                 }
                 let _entered = crate::profile::enter(handler_profile.as_ref());
                 let handler_started = Instant::now();
-                let response =
+                let (response, handler_elapsed) =
                     crate::performance::with_cpu(Some(&cpu_kind), Some(&cpu_client), || {
                     let mut diagnostic_handler =
                         crate::relay_trace::span(crate::relay_trace::Phase::Handler);
@@ -1201,13 +1215,19 @@ async fn response_envelope_unbounded(
                     } else {
                         crate::relay_trace::Outcome::Failed
                     });
-                    response
+                    // The handler has returned its poll-scoped reader. Collect and frame
+                    // JSON on this same blocking worker, under its existing read budget;
+                    // a large response never runs a JSON codec on the async acceptor.
+                    let handler_elapsed = handler_started.elapsed();
+                    let response = runtime.block_on(handler_envelope.wrap_owned(response, body_cancelled))
+                        .unwrap_or_else(IntoResponse::into_response);
+                    (response, handler_elapsed)
                 });
                 if let Some(server) = server_trace.as_ref() {
                     server.record("st.handler.queue_ms", queue_ms);
                     server.record(
                         "st.handler.duration_ms",
-                        handler_started.elapsed().as_millis() as i64,
+                        handler_elapsed.as_millis() as i64,
                     );
                     if let Some(writer_wait) = writer_wait.as_ref() {
                         crate::otel::record_writer_wait(server, writer_wait.totals());
@@ -1222,131 +1242,17 @@ async fn response_envelope_unbounded(
             }
         }
     };
-    if response.status() == StatusCode::SWITCHING_PROTOCOLS
-        || !response
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("application/json"))
+    // Authentication errors and the small health/observation bypasses have no handler
+    // worker. Ordinary handlers already framed their response on that worker.
+    let mut response = if response.extensions().get::<response_body::Metrics>().is_some()
+        || !response_body::is_json(&response)
     {
-        record_request_latency(
-            &request_method,
-            &request_route,
-            &request_path,
-            request_query.as_deref(),
-            &caller,
-            started,
-            Served {
-                long_poll,
-                remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
-            },
-        );
-        if let Some(profile) = profile {
-            profile.finish();
-        }
-        crate::otel::record_http_request_duration(
-            request_method.as_str(),
-            &request_route,
-            client_class,
-            response.status(),
-            started.elapsed(),
-        );
-        // A 101 upgrade ends the server span here; the WebSocket stream never holds it.
-        finish_request_trace(otel, response.status());
-        return response;
-    }
-    let enveloping = Instant::now();
-    let mut diagnostic_envelope = crate::relay_trace::span(crate::relay_trace::Phase::Envelope);
-    let status = response.status();
-    let (mut parts, body) = response.into_parts();
-    // A page read inside one SQLite snapshot names that snapshot, which can be newer than the
-    // one this request was admitted at.
-    let client_snapshot = parts
-        .extensions
-        .remove::<ClientSnapshot>()
-        .or(client_snapshot);
-    let bytes = to_bytes(body, usize::MAX).await;
-    let serialize = || {
-        let raw = match bytes {
-            Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|error| {
-                json!({
-                    "code": "invalid-server-json",
-                    "message": error.to_string(),
-                })
-            }),
-            Err(error) => json!({
-                "code": "response-read-failed",
-                "message": error.to_string(),
-            }),
-        };
-        let store_index = if client_request {
-            client_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.store_index)
-                .unwrap_or_default()
-        } else {
-            // index() is an atomic load. Health must not queue behind blocking
-            // handlers just to decorate its response.
-            state.store.index().unwrap_or_default()
-        };
-        let envelope = if observation_report && status.is_success() {
-            // Local diagnostic acceptance, never a graph snapshot fence or action receipt.
-            json!({"api_version": CLIENT_API_VERSION, "request_id": request_id, "value": raw})
-        } else if client_request && status.is_success() {
-            json!({
-                "api_version": CLIENT_API_VERSION,
-                "request_id": request_id,
-                "snapshot": client_snapshot.expect("a successful client request has a snapshot"),
-                "value": raw,
-            })
-        } else if client_request {
-            client_error_envelope(status, &raw, &request_id)
-        } else if status.is_success() {
-            json!({
-                "api_version": "st3.v1",
-                "request_id": request_id,
-                "snapshot_host": state.node,
-                "store_index": store_index,
-                "value": raw,
-            })
-        } else {
-            json!({
-                "api_version": "st3.v1",
-                "request_id": request_id,
-                "snapshot_host": state.node,
-                "store_index": store_index,
-                "code": raw.get("code").and_then(Value::as_str).unwrap_or("request-failed"),
-                "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
-                "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
-            })
-        };
-        let body = serde_json::to_vec(&envelope).unwrap_or_else(|_| b"{}".to_vec());
-        (envelope, body)
-    };
-    // The agents roster's response parse, envelope and encoding are its serialization phase,
-    // attributed to the request's existing server span.
-    let (envelope, body) = match otel.as_ref().filter(|_| request_route == "/v1/client/agents") {
-        Some(server) => {
-            let _server = server.enter();
-            crate::otel::roster_scope(|| crate::otel::roster_phase("serialization", serialize))
-        }
-        None => serialize(),
-    };
-    if let Some(trace) = crate::relay_trace::current() {
-        trace.response(&request_id);
-    }
-    diagnostic_envelope.finish(if status.is_success() {
-        crate::relay_trace::Outcome::Completed
+        response
     } else {
-        crate::relay_trace::Outcome::Failed
-    });
-    if let Some(server) = otel.as_ref()
-        && let Some(items) = envelope["value"]["items"].as_array()
-    {
-        server.record("st.page.rows", items.len() as i64);
-        server.record("st.page.bytes", body.len() as i64);
-    }
-    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        envelope_context.wrap(response).await.unwrap_or_else(IntoResponse::into_response)
+    };
+    let metrics = response.extensions_mut().remove::<response_body::Metrics>();
+    let status = response.status();
     record_request_latency(
         &request_method,
         &request_route,
@@ -1368,10 +1274,12 @@ async fn response_envelope_unbounded(
     );
     finish_request_trace(otel, status);
     if let Some(profile) = profile {
-        profile.enveloped(enveloping.elapsed(), body.len());
+        if let Some(metrics) = metrics {
+            profile.enveloped(metrics.elapsed, metrics.bytes);
+        }
         profile.finish();
     }
-    Response::from_parts(parts, Body::from(body))
+    response
 }
 
 static REQUEST_LATENCY: OnceLock<Mutex<request_latency::Meter>> = OnceLock::new();
