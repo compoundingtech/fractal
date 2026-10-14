@@ -2,6 +2,7 @@ import { sidebarRow } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
+import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { retainPane, workspaceView, workspaceViewNotice, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
@@ -13,7 +14,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, ThreadHeader, ResizableSplit, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, ThreadHeader, ResizableSplit, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, type SidebarActions } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
@@ -164,6 +165,9 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
   const [diffOpen, setDiffOpen] = React.useState(false)
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
+  // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
+  const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
+  const sidebarActions = React.useMemo<SidebarActions>(() => ({ declaration: setDeclarationRef }), [])
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
@@ -237,7 +241,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                         </div>)}
                       </div> : null}
                       {filtered.map((row) => (
-                        <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={parsedSearch.query} active={current === row.ref} onOpen={() => select(row.ref)} />
+                        <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={parsedSearch.query} active={current === row.ref} actions={sidebarActions} onOpen={() => select(row.ref)} />
                       ))}
                     </nav>
                     {fleet._tag !== 'Observed' ? (
@@ -301,6 +305,8 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                   </aside>
                 </>
               ) : null}
+              {/* Always mounted: the theme portal host must exist before the sheet opens; contents render only while open. */}
+              <DeclarationDialog subject={declarationRef ?? ''} isOpen={declarationRef !== undefined} onOpenChange={(open) => { if (!open) setDeclarationRef(undefined) }} />
             </div>
           </ThreadHeaderSlotContext.Provider>
         </MonitorDetailProvider>
