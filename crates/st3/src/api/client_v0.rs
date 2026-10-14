@@ -22016,6 +22016,14 @@ mission "example/zero-run" state="ready" {
         let mut stale = sessionless_card(json!("indeterminate"));
         overlay_down(&mut stale, Some(started), Some(HEARTBEAT_MS + 1), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
         assert_eq!(stale["state"], "down");
+        // The launch report of a replacement incarnation is not a session: `agents restart` waits
+        // for `running`, not for the first line the driver writes.
+        let mut launching = sessionless_card(json!("starting"));
+        overlay_down(&mut launching, Some(started), Some(1_000), Some("starting"), started + 1_000);
+        assert_eq!(launching["state"], "desired");
+        let mut launched_long_ago = sessionless_card(json!("starting"));
+        overlay_down(&mut launched_long_ago, Some(started), Some(1_000), Some("starting"), started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(launched_long_ago["state"], "down");
         let mut ended = sessionless_card(json!("ended"));
         overlay_down(&mut ended, Some(started), Some(1_000), Some("ended"), started + 100 * LAUNCH_WINDOW_MS);
         assert_eq!(ended["state"], "down");

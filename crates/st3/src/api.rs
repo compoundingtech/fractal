@@ -2867,8 +2867,10 @@ fn overlay_down(
     if !matches!(item["state"].as_str(), Some("desired" | "starting")) {
         return;
     }
+    // A `starting` report is written at launch and proves nothing about a session; `ended` and
+    // `failed` say the harness is gone. Any other report comes from a driver that is up.
     if report_age_ms.is_some_and(|age| age <= HEARTBEAT_MS)
-        && !matches!(reported, Some("ended" | "failed"))
+        && !matches!(reported, None | Some("starting" | "ended" | "failed"))
     {
         let lapsed = report_age_ms.is_some_and(|age| age > 90_000);
         item["state"] = json!(match reported {
