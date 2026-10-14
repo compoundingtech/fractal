@@ -54,8 +54,8 @@ Decisions behind the table:
 
 | | iOS app | ChatGPT app |
 | --- | --- | --- |
-| Principal | Paired device of `person/X` | `assistant/chatgpt`, never a person, no signing chain |
-| Pairing | `st devices --as person/X pair NAME` | `st devices --as person/X pair --assistant chatgpt --scope … --disclose-to-openai --consent-evidence …` (owner only, trusted-local Unix) |
+| Principal | Paired device of `person/ada` | `assistant/chatgpt`, never a person, no signing chain |
+| Pairing | `st devices --as person/ada pair NAME` | `st devices --as person/ada pair --assistant chatgpt --scope … --disclose-to-openai --consent-evidence …` (owner only, trusted-local Unix) |
 | Completion | Phone posts code and device key | `st devices complete URL PAIRING_ID --assistant` on the adapter host |
 | Credential store | iOS Keychain | `assistant-devices.json`, mode 0600, adapter host only |
 | Lifetime | 30 days | 1 hour default, 24 hours maximum, explicit renew |
