@@ -145,7 +145,7 @@ export const TerminalDetail = React.memo(
             screen={screen}
             state={connected === false ? 'ended' : terminal.freshness !== 'live' ? 'stale' : visible ? 'live' : 'idle'}
             controls={controls}
-            {...(presentation._tag === 'ReadOnly' && raw.preparation._tag !== 'Unsupported'
+            {...(presentation._tag === 'ReadOnly'
               ? { banner: <Note variant="warning" size="sm">{presentation.reason}</Note> }
               : {})}
           >

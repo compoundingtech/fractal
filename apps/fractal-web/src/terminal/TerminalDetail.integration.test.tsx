@@ -157,6 +157,7 @@ describe('terminal detail', () => {
     expect(grid?.textContent).toContain(screen.lines.find((line) => line.text.trim() !== '')?.text.trim())
     expect(host.querySelector('[aria-label="Live"]')).not.toBeNull()
     expect(chip()?.textContent).toBe('Read-only')
+    expect(host.textContent).toContain('This gateway does not offer a live terminal stream.')
     expect(field()).toBeNull()
     expect(host.textContent).not.toContain('Enable input')
     expect(host.textContent).not.toContain('Terminal keyboard')
@@ -227,6 +228,28 @@ describe('raw terminal', () => {
     await session.emit({ _tag: 'Data', bytes: utf8.encode('\r\nline12') })
     await paint()
     expect(grid()).toContain('line12')
+  })
+
+  it('hands keyboard focus to the cursor field when the grid is tabbed to, so an IME composes from the first key', async () => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    const session = opened[0]!
+    await live(session, 'raw prompt$ ')
+    await act(async () => host.querySelector<HTMLElement>('[aria-roledescription="terminal"]')!.focus())
+    expect(document.activeElement).toBe(field())
+    expect(chip()?.textContent).toBe('Typing')
+    await act(async () => {
+      field()!.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }))
+      field()!.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '日本' }))
+    })
+    expect(session.sent).toEqual(['日本'])
+    // Ctrl-\ leaves typing and parks focus on the grid instead of bouncing back into the field.
+    await act(async () => {
+      field()!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: '\\', code: 'Backslash', ctrlKey: true }))
+    })
+    expect(document.activeElement?.getAttribute('aria-roledescription')).toBe('terminal')
+    expect(chip()?.textContent).toBe('Click to type')
   })
 
   it('drops keys while reconnecting instead of queueing them, and says so', async () => {

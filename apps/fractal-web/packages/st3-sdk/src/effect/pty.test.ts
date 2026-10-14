@@ -52,6 +52,30 @@ describe('PTY framing', () => {
   })
 })
 
+// Literal bytes from pinned pty-core protocol.rs (as_u8 and encode_*), never produced by the codec under test.
+describe('PTY wire golden bytes', () => {
+  test.each([
+    ['DATA 0', [0, 0, 0, 0, 3, 0, 128, 255], { _tag: 'Data', bytes }],
+    ['ATTACH 1', [1, 0, 0, 0, 4, 0, 24, 0, 80], { _tag: 'Attach', rows: 24, cols: 80 }],
+    ['ATTACH 1 with cell', [1, 0, 0, 0, 8, 0, 24, 0, 80, 0, 8, 0, 16], { _tag: 'Attach', rows: 24, cols: 80, cellWidth: 8, cellHeight: 16 }],
+    ['DETACH 2', [2, 0, 0, 0, 0], { _tag: 'Detach' }],
+    ['RESIZE 3', [3, 0, 0, 0, 4, 0, 30, 0, 90], { _tag: 'Resize', rows: 30, cols: 90 }],
+    ['RESIZE 3 with cell', [3, 0, 0, 0, 8, 0, 30, 0, 90, 0, 9, 0, 18], { _tag: 'Resize', rows: 30, cols: 90, cellWidth: 9, cellHeight: 18 }],
+    ['EXIT 4', [4, 0, 0, 0, 4, 255, 255, 255, 133], { _tag: 'Exit', code: -123 }],
+    ['SCREEN 5', [5, 0, 0, 0, 2, 27, 99], { _tag: 'Screen', bytes: Uint8Array.of(27, 99) }],
+    ['PEEK 6', [6, 0, 0, 0, 1, 3], { _tag: 'Peek', plain: true, full: true }],
+    ['STATUS 7', [7, 0, 0, 0, 7, 99, 108, 105, 101, 110, 116, 115], { _tag: 'Status', payload: new TextEncoder().encode('clients') }],
+    ['GEOMETRY 10', [10, 0, 0, 0, 4, 0, 24, 0, 80], { _tag: 'Geometry', rows: 24, cols: 80 }],
+    ['RESET_INPUT_MODES 11', [11, 0, 0, 0, 0], { _tag: 'ResetInputModes' }],
+  ] as const satisfies readonly (readonly [string, readonly number[], PtyFrame])[])('%s encodes and decodes the literal frame', (_name, wire, frame) => {
+    expect([...encodePtyFrame(frame)]).toEqual(wire)
+    expect(read(Uint8Array.from(wire))).toEqual([frame])
+  })
+  test.each([8, 9])('tag %i passes through opaque', tag => {
+    expect(read(Uint8Array.of(tag, 0, 0, 0, 2, 123, 125))).toEqual([{ _tag: 'Unknown', tag, payload: Uint8Array.of(123, 125) }])
+  })
+})
+
 describe('PTY state machine', () => {
   test('connects only on geometry and resets consecutive failures after live', () => {
     let state: PtyState = { _tag: 'Connecting', attempt: 1 }
@@ -70,7 +94,7 @@ describe('PTY state machine', () => {
     expect(ptyBackoffMillis(0)).toBe(500)
   })
   test.each([
-    [403, 'forbidden', 'Refused'], [401, 'unauthorized', 'Refused'], [409, 'stale-fence', 'Stale'], [404, 'not-found', 'Stale'],
+    [403, 'forbidden', 'Refused'], [401, 'unauthorized', 'Refused'], [409, 'stale-fence', 'Stale'], [404, 'not-found', 'Failed'], [404, 'not_found', 'Failed'],
   ] as const)('maps HTTP %s %s to %s', (status, code, tag) => {
     const failure = new PtyAttachFailure({ message: 'no', status, code, retryable: false })
     expect(ptyTransition({ state: { _tag: 'Connecting', attempt: 1 }, event: { _tag: 'AttachFailed', failure } })._tag).toBe(tag)
@@ -194,6 +218,34 @@ it.live('splits large input under the 64 KiB server message cap and flushes a re
     const frames = messages.flatMap(buffer => read(new Uint8Array(buffer)))
     expect(frames.every(frame => frame._tag === 'Data')).toBe(true)
     expect(concatenate(frames.map(frame => (frame._tag === 'Data' ? frame.bytes : new Uint8Array())))).toEqual(paste)
+  }).pipe(Effect.scoped)
+}))
+
+it.live('settles a 404 attachment as failed so the projected screen takes over, without retrying', () => Effect.gen(function* () {
+  const requests: string[] = []
+  const sockets: string[] = []
+  yield* Effect.gen(function* () {
+    const session = yield* openPtySession({
+      baseUrl: 'https://alpha.example',
+      target,
+      size: { rows: 24, cols: 80 },
+      onOutput: () => {},
+      fetch: async url => {
+        requests.push(String(url))
+        return Response.json({ api_version: 'st3.client.v0', error_version: 'st3.error.v0', code: 'not_found', message: 'The terminal is not running.', retryable: false }, { status: 404 })
+      },
+      socket: url => {
+        sockets.push(url)
+        throw new Error('no socket after a refused attachment')
+      },
+    })
+    yield* settle
+    const state = yield* SubscriptionRef.get(session.state)
+    expect(state).toEqual({ _tag: 'Failed', message: 'The terminal is not running.' })
+    expect(ptyFallback(state)).toEqual({ reason: 'failed', message: 'The terminal is not running.' })
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(60_000))
+    expect(requests).toHaveLength(1)
+    expect(sockets).toEqual([])
   }).pipe(Effect.scoped)
 }))
 

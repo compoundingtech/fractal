@@ -9,7 +9,7 @@ import * as SubscriptionRef from 'effect/SubscriptionRef'
 export const PTY_SUBPROTOCOL = 'st3.client.pty.v0'
 const SizeInt = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 }))
 const sizes = { rows: SizeInt, cols: SizeInt, cellWidth: Schema.optionalKey(SizeInt), cellHeight: Schema.optionalKey(SizeInt) }
-/** Frames understood by the PTY transport; unknown tags retain their bytes. */
+/** Frames of the PTY transport: tags 0-7, 10 and 11 are typed; 8/9 (ownership and lifecycle-CAS extensions, refused on this path) and unknown tags pass through opaque as `Unknown`. */
 export const PtyFrame = Schema.Union([
   Schema.TaggedStruct('Data', { bytes: Schema.Uint8Array }),
   Schema.TaggedStruct('Attach', sizes),
@@ -240,7 +240,9 @@ export const ptyTransition = ({ state, event, maxAttempts = 3 }: { readonly stat
     const { failure } = event
     if (failure.status === 401 || failure.status === 403 || failure.code === 'forbidden' || failure.code === 'unauthorized')
       return { _tag: 'Refused', message: failure.message, ...(failure.status === undefined ? {} : { status: failure.status }), ...(failure.code === undefined ? {} : { code: failure.code }) }
-    if (failure.status === 404 || failure.status === 409 || failure.code === 'stale-fence' || failure.code === 'not-found') return { _tag: 'Stale', message: failure.message }
+    if (failure.status === 409 || failure.code === 'stale-fence') return { _tag: 'Stale', message: failure.message }
+    // The terminal is not running: settle so the projected screen stays visible read-only with the reason.
+    if (failure.status === 404 || failure.code === 'not-found' || failure.code === 'not_found') return { _tag: 'Failed', message: failure.message }
     if (!failure.retryable) return { _tag: 'Failed', message: failure.message }
   }
   const attempt = state._tag === 'Live' ? 1 : state.attempt

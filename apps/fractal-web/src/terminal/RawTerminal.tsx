@@ -258,6 +258,9 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
   const field = React.useRef<HTMLTextAreaElement | null>(null)
   const probe = React.useRef<HTMLSpanElement | null>(null)
   const wheel = React.useRef(0)
+  // Focus handoff guards: a pointer press keeps drag-selection on the grid; Ctrl-\ parks focus there.
+  const pointerDown = React.useRef(false)
+  const leaving = React.useRef(false)
   const [composing, setComposing] = React.useState(false)
   const [notice, setNotice] = React.useState<string | undefined>(undefined)
   // A large paste waits here, already encoded for the modes it was pasted under.
@@ -353,10 +356,24 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
       ref={measureRef}
       data-terminal-input={live ? 'live' : 'paused'}
       {...stylex.props(styles.surface)}
+      onFocus={(event) => {
+        // Keyboard-first typing: a grid focused while live hands focus to the cursor field at once,
+        // so an IME's first keydown already composes in an editable element.
+        if (leaving.current) {
+          leaving.current = false
+          return
+        }
+        if (!live || pointerDown.current || event.target === field.current) return
+        if (event.target.getAttribute('aria-roledescription') === 'terminal') field.current?.focus({ preventScroll: true })
+      }}
+      onMouseDown={() => {
+        pointerDown.current = true
+      }}
       onKeyDown={(event) => {
         const route = keyRoute(event)
         if (route === 'leave') {
           event.preventDefault()
+          leaving.current = true
           surface.current?.querySelector<HTMLElement>('[aria-roledescription="terminal"]')?.focus()
           return
         }
@@ -376,6 +393,7 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
         admit(admitPaste({ encoder, text: event.clipboardData.getData('text/plain'), modes: terminal.modes() }))
       }}
       onMouseUp={() => {
+        pointerDown.current = false
         // A drag leaves a selection to copy; a plain click starts typing at the cursor.
         if (!selectionInside(surface.current)) field.current?.focus({ preventScroll: true })
       }}
