@@ -13,7 +13,7 @@ import * as stylex from '@stylexjs/stylex'
 import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { SidebarAgentRow, ThreadHeader, ResizableSplit, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, ThreadHeader, ResizableSplit, assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme, InlineMarkdown, InlineCode } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
@@ -289,7 +289,10 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                   <ResizableSplit id="live-tool-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Tool detail panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setOpenedTool(undefined)} onReset={() => setPanelFraction(380 / viewport)} />
                   <aside aria-label="Tool detail" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}>
                     <header {...stylex.props(styles.toolDetailHeader)}>
-                      <strong {...stylex.props(styles.toolDetailTitle)}>{openedTool.title}{openedTool.argsSummary === undefined ? '' : ` ${openedTool.argsSummary}`}</strong>
+                      <strong {...stylex.props(styles.toolDetailTitle)}>
+                        <InlineMarkdown text={openedTool.title} />
+                        {openedTool.argsSummary === undefined ? null : <> <InlineCode>{openedTool.argsSummary}</InlineCode></>}
+                      </strong>
                       <Aria.Button aria-label="Close tool detail" onPress={() => setOpenedTool(undefined)} {...stylex.props(styles.iconButton)}>×</Aria.Button>
                     </header>
                     <pre {...stylex.props(styles.toolDetailOutput)}>{openedTool.detail ?? (openedTool.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
