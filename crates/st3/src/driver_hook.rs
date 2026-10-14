@@ -339,9 +339,11 @@ fn claude_observe(
     }
 }
 
-/// How long a permission hook waits for a person's answer from a client. Claude shows its own
-/// dialog meanwhile, and an answer there wins at once, so the wait only bounds the hook.
-const PROMPT_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long a permission hook waits for a person's answer from a client: exactly as long as st
+/// offers one, so an answer given from a client is never recorded after its hook has gone. Claude
+/// shows its own dialog meanwhile, and an answer there wins at once, so the wait only bounds the hook.
+const PROMPT_ANSWER_WAIT: std::time::Duration =
+    std::time::Duration::from_millis(crate::store::CLAUDE_PROMPT_ANSWER_WAIT_MS as u64);
 const PROMPT_ANSWER_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Let a person answer a Claude permission prompt from a client. The hook waits while Claude
@@ -464,9 +466,18 @@ fn question_labels(
 /// Claude's `PermissionRequest` hook output for a person's answer to the prompt `payload` opened.
 /// A question's answer is its choices, which Claude takes as the tool's `answers` beside the
 /// questions it asked; a question refused is declined.
+///
+/// A plan is refused through the hook, and Claude keeps planning with that as feedback; it is
+/// approved with the dialog's own keys, since a hook's allow does not approve a plan (measured on
+/// Claude Code 2.1.296), so an approval prints nothing here.
 fn permission_decision(answer: &str, payload: &Value) -> Option<String> {
-    let question = payload.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion");
+    let tool = payload.get("tool_name").and_then(Value::as_str);
+    let question = tool == Some("AskUserQuestion");
     let decision = match answer {
+        "deny" if tool == Some("ExitPlanMode") => serde_json::json!({
+            "behavior": "deny",
+            "message": "The person did not approve this plan from st. Keep planning, and ask them what to change if it is not clear."}),
+        _ if tool == Some("ExitPlanMode") => return None,
         "deny" if question => serde_json::json!({
             "behavior": "deny", "message": "The person declined to answer this from st."}),
         "deny" => serde_json::json!({"behavior": "deny", "message": "The person denied this from st."}),
@@ -939,6 +950,20 @@ mod tests {
         assert!(super::permission_decision(r#"{"2":[0]}"#, &asked).is_none());
         // Every question of the call is answered, or none is: never a partial answer.
         assert!(super::permission_decision(r#"{"0":[1]}"#, &asked).is_none());
+    }
+
+    /// A plan is refused through the hook, which Claude reads as feedback and keeps planning; an
+    /// approval prints nothing, because the reconciler presses the dialog's own keys (a hook's
+    /// allow does not approve a plan on Claude Code 2.1.296).
+    #[test]
+    fn a_plan_is_refused_through_the_hook_and_approved_with_its_keys() {
+        let plan = serde_json::json!({"tool_name": "ExitPlanMode",
+            "tool_input": {"plan": "1. Create hello.txt"}});
+        let refused: Value =
+            serde_json::from_str(&super::permission_decision("deny", &plan).unwrap()).unwrap();
+        assert_eq!(refused["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        assert!(super::permission_decision("approve", &plan).is_none());
+        assert!(super::permission_decision("allow", &plan).is_none());
     }
 
     #[test]

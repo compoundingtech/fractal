@@ -92,6 +92,13 @@ mod client_observations;
 mod terminal_view;
 mod work_response;
 mod published_lists;
+#[cfg(target_os = "linux")]
+mod tile_endpoint;
+#[cfg(target_os = "linux")]
+pub use tile_endpoint::{
+    SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
+    spawn_from as spawn_tile_endpoints_from,
+};
 pub use published_lists::start_published_lists;
 mod changes;
 
@@ -387,7 +394,10 @@ pub(crate) struct ApiError {
 impl ApiError {
     fn bad(error: St3Error) -> Self {
         let status = match error.code {
-            "stale-subject"
+            "recipient-retired"
+            | "lifecycle-unavailable"
+            | "retirement-upgrade-required"
+            | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -461,11 +471,12 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({ "code": self.code, "message": self.message, "details": self.details })),
-        )
-            .into_response()
+        let mut body =
+            json!({ "code": self.code, "message": self.message, "details": self.details });
+        if let Some(applied) = body["details"].get("applied").cloned() {
+            body["applied"] = applied;
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -1586,7 +1597,7 @@ fn client_host_id(node: &str) -> String {
 }
 
 fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
-    json!({
+    let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
         "error_version": "st3.client.error.v0",
         "request_id": request_id,
@@ -1594,7 +1605,11 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
         "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
         "retryable": client_error_retryable(status, raw.get("code").and_then(Value::as_str)),
         "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
-    })
+    });
+    if let Some(applied) = raw.get("applied") {
+        envelope["applied"] = applied.clone();
+    }
+    envelope
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
@@ -1638,7 +1653,10 @@ fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
 
 fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
-        "not-found"
+        "recipient-retired"
+        | "lifecycle-unavailable"
+        | "retirement-upgrade-required"
+        | "not-found"
         | "forbidden"
         | "attention-migrated"
         | "unsupported-capability"
@@ -2722,6 +2740,11 @@ fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Re
 }
 
 /// Live presentation of already folded cards: freshness, delivery presence and subagents.
+/// The card's `reason` while rival hosts both claim a seat's runtime. A sentence, not a code:
+/// clients may print it as it is.
+pub(crate) const AUTHORITY_INDETERMINATE_REASON: &str =
+    "st cannot tell which host runs this agent; its processes may be running";
+
 fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
@@ -3229,6 +3252,13 @@ fn client_agent_cards_presented(
                 .transpose()?.flatten();
             let moving = handoff.as_ref().is_some_and(|h| h.phase != "running");
             let state = if member_fault.is_some() { "failed" } else if mailbox_fault.is_some() || moving { "waiting" } else { state };
+            // A session is observed but st cannot tell which host owns it (rival origins claim
+            // the runtime): the seat is neither running nor stopped as far as st can say.
+            let authority_unknown = member_fault.is_none()
+                && mailbox_fault.is_none()
+                && !moving
+                && subject.reachability == "indeterminate"
+                && matches!(observed, Some("running" | "ready" | "working" | "idle"));
             let suspension = if card_reads.may_have_suspension(&subject.subject) {
                 crate::suspension::current(store, &subject.subject)?
             } else {
@@ -3240,6 +3270,9 @@ fn client_agent_cards_presented(
                 Some("snapshotting" | "fencing-source" | "transferring" | "restoring") if state == "stopped" => "suspended",
                 _ => state,
             };
+            let state = if subject.desired.as_ref().is_some_and(|desired| desired.get("retirement").is_some()) {
+                "retired"
+            } else { state };
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
@@ -3304,7 +3337,8 @@ fn client_agent_cards_presented(
                 "_launch_since_ms": launch_since_ms.map(|ms| ms as u64),
                 "blocked_on": subject.harness.as_ref().and_then(|harness| harness.blocked_on.as_deref()),
                 "ask": subject.harness.as_ref().and_then(|harness| harness.ask.as_deref()),
-                "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref()),
+                "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref())
+                    .or_else(|| authority_unknown.then_some(AUTHORITY_INDETERMINATE_REASON)),
                 // What the seat is doing that is neither work nor a wait on anyone: a status,
                 // never an alert.
                 "activity": subject
@@ -11374,6 +11408,9 @@ struct AgentRestartRequest {
     subject: String,
     actor: String,
     idempotency_key: String,
+    /// Restart without first asking the seat for its handoff.
+    #[serde(default)]
+    now: bool,
 }
 
 async fn restart_agent(
@@ -11486,7 +11523,15 @@ async fn restart_agent(
                     Value::String(member.runtime_id.clone()),
                 ),
                 ("incarnation_id".into(), Value::String(incarnation.into())),
-            ]),
+            ])
+            .into_iter()
+            .chain(request.now.then(|| {
+                (
+                    "operation".to_owned(),
+                    Value::String(crate::handoff::RESTART_NOW_OPERATION.into()),
+                )
+            }))
+            .collect(),
             evidence: vec![token],
             expected_subject: None,
             idempotency_key: Some(key),
