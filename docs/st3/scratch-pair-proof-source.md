@@ -80,7 +80,7 @@ missing receipt or failed operator cleanup stays a failed/incomplete proof.
 
 ## Authored controls and qualification plan
 
-`scripts/st3-scratch-pair-proof-test` contains unrun controls for same-count wrong content,
+`scripts/st3-scratch-pair-proof-test` contains unrun controls for exact admitted binding identity/body/owner/time, same-count wrong content,
 duplicate documents, differing binding/timestamps, differing admitted input, unsafe mounts
 and overbudget history refusing before document body copies. Python AST parsing and
 diff-check are the only local validations. Tests and fixture have not run.
