@@ -51,9 +51,24 @@ With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lock
 | `dev` (default) | Smalltalk Dev, amber DEV-badged icon | `com.compoundingtech.smalltalk.starter` | Debug with Metro, simulator and device smoke tests |
 | `daily` | Smalltalk, ordinary icon | `com.compoundingtech.smalltalk` | Release build used every day on a phone |
 
-The two apps coexist on one phone and keep separate Keychain profiles, so each is paired on its own. Any other value fails the configuration. Changing variants requires a clean prebuild, and the same `APP_VARIANT` must stay exported for the Xcode build that embeds the bundle. The EAS simulator profile selects dev; preview selects daily. Regenerate the DEV icon with `swift scripts/generate-dev-icon.swift assets/icon.png assets/icon-dev.png`.
+The two apps coexist on one phone and keep separate Keychain profiles, so each is paired on its own. Any other value fails the configuration. Changing variants requires a clean prebuild, and the same `APP_VARIANT` must stay exported for the Xcode build that embeds the bundle. The EAS simulator profile selects dev; preview selects daily.
+
+The DEV icon generator requires macOS (CoreGraphics, ImageIO and CoreText). Run `swift scripts/generate-dev-icon.swift assets/icon.png assets/icon-dev.png` from this directory. It makes its output read-only (0444); when regenerating, the script itself restores write permission (0644) before overwriting it, so no manual `chmod` is needed. To edit the generated PNG with another tool, first run `chmod u+w assets/icon-dev.png`.
 
 For an offline device build of the daily app, export `APP_VARIANT=daily` for every step, run `pnpm exec expo prebuild --platform ios --clean --no-install`, install pods, run `pnpm run export:ios`, and build Release with local Apple Development signing and provisioning for that device. Keep `APP_VARIANT=daily` exported for the Xcode build that embeds the bundle. The Release bundle is embedded and runs without Metro. No Expo account, EAS service, App Store, or Shareup signing is part of this path.
+
+Before exporting or building the daily app, run this guard from this directory in the same shell as the build. It rejects a missing daily environment and a stale dev native project rather than silently building the wrong identity:
+
+```sh
+test "${APP_VARIANT-}" = daily &&
+  xcodebuild -project ios/smalltalk.xcodeproj -target smalltalk -configuration Release -showBuildSettings |
+  grep -Eq '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER = com[.]compoundingtech[.]smalltalk[[:space:]]*$' ||
+  { echo "Daily identity mismatch: export APP_VARIANT=daily, clean prebuild, and reinstall pods before building." >&2; exit 1; }
+```
+
+The private-range and `.local` HTTP ATS exceptions intentionally apply to the daily Release app too: its paired gateway can be reached over encrypted Tailscale or a trusted LAN, not only public HTTPS. This does not make LAN HTTP encrypted; the credential/data exposure warning and gateway URL restrictions described above still apply. Prefer HTTPS on an untrusted LAN.
+
+Daily uses the `com.compoundingtech.smalltalk` URL scheme, separate from the dev starter scheme. It does not accept the starter-scheme pairing or `fabric-proof` links; those remain Debug-only development/proof tools, not a daily provisioning path. Pair the daily app through its form as described under Connect.
 
 The Debug app accepts a short-lived pairing deep link for headless simulator checks: `com.compoundingtech.smalltalk.starter://pair?gateway=...&id=...&code=...`. The link opens the pairing form with the code prefilled; it does not submit the code until a separately supplied fingerprint or explicit unpinned override is chosen. The handler is disabled in Release. Treat the link as a temporary credential and do not commit or log its populated form.
 
