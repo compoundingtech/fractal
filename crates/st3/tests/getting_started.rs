@@ -81,7 +81,7 @@ impl Newcomer {
     }
 
     fn command(root: &Path) -> Command {
-        let mut command = st3::test_support::command(env!("CARGO_BIN_EXE_st3-fixture"));
+        let mut command = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
         command
             .env_clear()
             .env("PATH", Self::path(root))
@@ -151,13 +151,13 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
         &[
             "conversations",
             "send",
-            "person/ada",
+            "agent/garden/worker",
             "--from",
             "person/ada",
             "--body",
             "hello",
         ],
-        &["conversations", "ls", "person/ada"],
+        &["conversations", "ls", "agent/garden/worker"],
     ] {
         let output = newcomer
             .try_run(args)

@@ -322,87 +322,6 @@ fn trimmed_untrimmed_and_full_inventory_nodes_keep_replicating() {
     }
 }
 
-/// A heal between a node that trimmed and one that did not never fetches back what the
-/// checkpoint dropped, even when the peer offers it.
-#[test]
-fn a_heal_never_fetches_back_what_a_checkpoint_dropped() {
-    use smallclaims::replication::{
-        ReplicationHealAnswer, ReplicationHealQuery, ReplicationHealStep,
-    };
-
-    let (alder, plan) = store_with_drops("alder");
-    let birch = Store::open_memory("birch").unwrap();
-    birch.bind_fleet(FLEET).unwrap();
-    while sync(&alder, "alder", &birch, false).received != 0 {}
-    trim(&alder, &plan);
-    let dropped = dropped_keys(&plan);
-
-    // As if the graphs differed for another reason, alder narrows to the claims it lacks,
-    // which are only the ones its checkpoint dropped.
-    let mut query = ReplicationHealQuery::Ranges;
-    let mut report = None;
-    for _ in 0..16 {
-        let mut answer = birch.heal_answer("alder", &query).unwrap();
-        if let ReplicationHealAnswer::Ranges {
-            graph_digest,
-            projection_digests,
-            ..
-        } = &mut answer
-        {
-            projection_digests.clear();
-            *graph_digest = "another graph".into();
-        }
-        match alder.heal_next("birch", answer).unwrap() {
-            ReplicationHealStep::Ask { query: next } => query = next,
-            ReplicationHealStep::Done { report: done } => {
-                report = Some(done);
-                break;
-            }
-        }
-        if let ReplicationHealQuery::Swap { want, .. } = &query {
-            assert!(identity_keys(want).is_disjoint(&dropped), "{want:?}");
-        }
-    }
-    let report = report.expect("the heal ended");
-    assert!(report.subjects > 0, "{report:?}");
-    assert_eq!(report.refetched, 0);
-    assert!(
-        report
-            .unresolved
-            .as_deref()
-            .is_some_and(|reason| reason.contains("a checkpoint dropped here")),
-        "{report:?}"
-    );
-
-    // Offered the dropped envelopes anyway, alder stores none of them.
-    let offered = birch
-        .replica_envelopes(
-            plan.envelopes
-                .iter()
-                .map(|envelope| ReplicaEnvelopeId {
-                    writer: envelope.writer.clone(),
-                    sequence: envelope.sequence,
-                    hash: envelope.envelope_hash.clone(),
-                })
-                .collect(),
-        )
-        .unwrap();
-    assert_eq!(offered.len(), plan.envelopes.len());
-    alder
-        .heal_answer(
-            "birch",
-            &ReplicationHealQuery::Swap {
-                push: offered,
-                want: Vec::new(),
-            },
-        )
-        .unwrap();
-    assert!(held(&alder).is_disjoint(&dropped));
-    for claim in &plan.claims {
-        assert!(alder.claim_by_id(&claim.id).unwrap().is_none());
-    }
-}
-
 #[test]
 fn the_inventory_follows_deletions_and_later_envelopes() {
     let (store, plan) = store_with_drops("alder");
@@ -897,4 +816,152 @@ fn a_trim_never_makes_a_write_wait_long() {
         longest < std::time::Duration::from_millis(500),
         "a write waited {longest:?} for the trim"
     );
+}
+
+/// As `store_with_drops`, on a node that signs its claims, so each has a signature and verdict.
+fn signed_store_with_drops(origin: &str) -> (Store, DropPlan) {
+    let store = Store::open_memory(origin).unwrap();
+    store
+        .set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0))
+        .unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    write_diagnostics(&store, "daemon/alder", 5);
+    let plan = plan_drops(&store.checkpoint_sealed_set(now_ms() + 1_000).unwrap());
+    assert!(plan.envelopes.len() >= 3, "{plan:?}");
+    (store, plan)
+}
+
+/// The signature and verdict rows the store holds for `ids`.
+fn signature_and_verdict_rows(store: &Store, ids: &[String]) -> usize {
+    let connection = store.readers.get();
+    ids.iter()
+        .map(|id| {
+            [
+                "claim_signatures",
+                "claim_verdicts",
+                "claim_verdict_links",
+                "claim_verdict_queue",
+                "claim_verdict_fresh",
+            ]
+            .iter()
+            .map(|table| {
+                connection
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE claim_id=?1"),
+                        [id],
+                        |row| row.get::<_, usize>(0),
+                    )
+                    .unwrap()
+            })
+            .sum::<usize>()
+        })
+        .sum()
+}
+
+/// The claims a trim of `dropped` keeps.
+fn kept_ids(store: &Store, dropped: &[String]) -> Vec<String> {
+    let all: Vec<String> = store
+        .readers
+        .get()
+        .prepare("SELECT id FROM claims ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    all.into_iter().filter(|id| !dropped.contains(id)).collect()
+}
+
+#[test]
+fn a_trim_forgets_the_signatures_and_verdicts_of_what_it_drops() {
+    let (store, plan) = signed_store_with_drops("alder");
+    store.judge_claims(true).unwrap();
+    let dropped = plan.claims.iter().map(|claim| claim.id.clone()).collect::<Vec<_>>();
+    let kept = kept_ids(&store, &dropped);
+    assert!(signature_and_verdict_rows(&store, &dropped) >= 2 * dropped.len(), "signed and judged");
+    let kept_rows = signature_and_verdict_rows(&store, &kept);
+    let before = authority(&store);
+    let graph = smallclaims::store::graph_digest(&store.readers.get()).unwrap();
+
+    trim(&store, &plan);
+    assert_eq!(signature_and_verdict_rows(&store, &dropped), 0);
+    assert_eq!(signature_and_verdict_rows(&store, &kept), kept_rows);
+    assert_eq!(authority(&store), before);
+    assert_eq!(smallclaims::store::graph_digest(&store.readers.get()).unwrap(), graph);
+    assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+    assert_eq!(store.sweep_trimmed_claim_rows().unwrap(), 0, "nothing was left behind");
+}
+
+#[test]
+fn the_sweep_forgets_what_an_older_trim_left_behind_once() {
+    let (store, plan) = signed_store_with_drops("alder");
+    store.judge_claims(true).unwrap();
+    let dropped = plan.claims.iter().map(|claim| claim.id.clone()).collect::<Vec<_>>();
+    let kept = kept_ids(&store, &dropped);
+    let kept_rows = signature_and_verdict_rows(&store, &kept);
+    let left = signature_and_verdict_rows(&store, &dropped);
+    assert!(left >= 2 * dropped.len(), "signed and judged");
+    // An older build's trim deleted the claims but not these rows.
+    let saved = ["claim_signatures", "claim_verdicts", "claim_verdict_links"].map(|table| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(&format!("SELECT * FROM {table}")).unwrap();
+        let columns = statement.column_count();
+        let rows = statement
+            .query_map([], |row| {
+                (0..columns).map(|index| row.get::<_, rusqlite::types::Value>(index)).collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (table, columns, rows)
+    });
+    trim(&store, &plan);
+    {
+        let connection = store.connection.write();
+        for (table, columns, rows) in &saved {
+            let marks = vec!["?"; *columns].join(",");
+            for row in rows {
+                connection
+                    .execute(
+                        &format!("INSERT OR IGNORE INTO {table} VALUES ({marks})"),
+                        rusqlite::params_from_iter(row.iter()),
+                    )
+                    .unwrap();
+            }
+        }
+        connection
+            .execute("DELETE FROM meta WHERE key=?1", [smallclaims::store::checkpoint_trim::TRIMMED_CLAIM_ROWS_SWEPT])
+            .unwrap();
+    }
+    assert_eq!(signature_and_verdict_rows(&store, &dropped), left);
+    let before = authority(&store);
+    let graph = smallclaims::store::graph_digest(&store.readers.get()).unwrap();
+
+    assert_eq!(store.sweep_trimmed_claim_rows().unwrap(), left);
+    assert_eq!(signature_and_verdict_rows(&store, &dropped), 0);
+    assert_eq!(signature_and_verdict_rows(&store, &kept), kept_rows);
+    assert_eq!(authority(&store), before);
+    assert_eq!(smallclaims::store::graph_digest(&store.readers.get()).unwrap(), graph);
+    assert!(store.recheck_claim_verdicts().unwrap().is_empty());
+    let connection = store.readers.get();
+    assert_eq!(
+        smallclaims::store::fleet_meta(&connection, smallclaims::store::checkpoint_trim::TRIMMED_CLAIM_ROWS_SWEPT).unwrap().as_deref(),
+        Some("done")
+    );
+    drop(connection);
+    assert_eq!(store.sweep_trimmed_claim_rows().unwrap(), 0, "a later pass reads one row");
+}
+
+#[test]
+fn trimmed_and_untrimmed_nodes_still_agree_after_the_sweep() {
+    let (alder, plan) = signed_store_with_drops("alder");
+    let birch = Store::open_memory("birch").unwrap();
+    birch.bind_fleet(FLEET).unwrap();
+    sync(&alder, "alder", &birch, true);
+    trim(&alder, &plan);
+    alder.sweep_trimmed_claim_rows().unwrap();
+    assert_eq!(authority(&alder), authority(&birch));
+    sync(&birch, "birch", &alder, true);
+    sync(&alder, "alder", &birch, true);
+    assert_eq!(authority(&alder), authority(&birch));
 }

@@ -54,6 +54,19 @@ fn presence() -> &'static Mutex<Presence> {
     PRESENCE.get_or_init(Mutex::default)
 }
 
+fn changes() -> &'static tokio::sync::broadcast::Sender<String> {
+    static CHANGES: OnceLock<tokio::sync::broadcast::Sender<String>> = OnceLock::new();
+    CHANGES.get_or_init(|| tokio::sync::broadcast::channel(64).0)
+}
+
+pub(super) fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
+    changes().subscribe()
+}
+
+fn changed(member: &str) {
+    let _ = changes().send(member.to_owned());
+}
+
 /// The client's own name for itself, bounded and printable, or none.
 pub(super) fn client_name(headers: &HeaderMap) -> Option<String> {
     let name = headers.get(CLIENT_HEADER)?.to_str().ok()?.trim();
@@ -112,6 +125,7 @@ pub(super) fn note_request(
         last_ms: now_ms,
     });
     seen.last_ms = now_ms;
+    changed(member);
 }
 
 /// An open stream, listed until it is dropped.
@@ -139,6 +153,7 @@ pub(super) fn open_stream(
             follows: BTreeMap::new(),
         },
     );
+    changed(member);
     StreamGuard(id)
 }
 
@@ -147,26 +162,40 @@ impl StreamGuard {
     pub(super) fn follow(&self, id: &str, what: String) {
         if let Ok(mut presence) = presence().lock()
             && let Some(stream) = presence.streams.get_mut(&self.0)
+            && stream.follows.get(id) != Some(&what)
         {
             stream.follows.insert(id.to_owned(), what);
+            changed(&stream.key.member);
         }
     }
 
     pub(super) fn unfollow(&self, id: &str) {
         if let Ok(mut presence) = presence().lock()
             && let Some(stream) = presence.streams.get_mut(&self.0)
+            && stream.follows.remove(id).is_some()
         {
-            stream.follows.remove(id);
+            changed(&stream.key.member);
         }
     }
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        if let Ok(mut presence) = presence().lock() {
-            presence.streams.remove(&self.0);
+        if let Ok(mut presence) = presence().lock()
+            && let Some(stream) = presence.streams.remove(&self.0)
+        {
+            changed(&stream.key.member);
         }
     }
+}
+
+/// Capture expiry from the delivered rows: another reader may prune the shared source first.
+pub(super) fn next_expiry(rows: &[Value]) -> Option<u128> {
+    rows.iter().filter(|row| row["connected"] == false)
+        .filter_map(|row| row["last_seen"].as_str())
+        .filter_map(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| (at.timestamp_millis().max(0) as u128).saturating_add(SEEN_FOR_MS))
+        .min()
 }
 
 /// The clients connected to `member` now and those seen in the last few minutes, newest first:

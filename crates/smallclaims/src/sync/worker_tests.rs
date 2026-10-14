@@ -18,22 +18,19 @@ use crate::store::{CheckpointAction, CheckpointManifestNeed};
 use crate::store::{Runtime as _, Store};
 use crate::sync::Local;
 
-/// A store on the plain runtime that heals without waiting, as the tests of smalltalk's stores do.
+/// A store on the plain runtime.
 fn plain_memory(origin: &str) -> anyhow::Result<Store> {
-    let mut store = Store::open_memory(origin, Arc::new(Plain))?;
-    store.heal_replay_backoff_ms = 0;
-    Ok(store)
+    Store::open_memory(origin, Arc::new(Plain))
 }
 
 fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
-    let mut store = Store::open(path, origin, Arc::new(Plain))?;
-    store.heal_replay_backoff_ms = 0;
-    Ok(store)
+    Store::open(path, origin, Arc::new(Plain))
 }
 
 /// Different checkpoint lineages leave payloadless ranges that can never settle through
 /// envelope transport. Both live writers already have a shared range, so a summary alone
-/// cannot prove either of their later gaps.
+/// cannot prove either of their later gaps. The live ranges are listed ahead of the payloadless
+/// ones, so one compact round settles them, and no request ever lists a whole inventory.
 #[tokio::test]
 async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
     let root = tempfile::tempdir().unwrap();
@@ -115,10 +112,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
                 };
                 let query: ReplicationExchange = serde_json::from_slice(&decoded).unwrap();
                 assert!(query.envelopes.len() <= crate::store::REPLICATION_PAGE_LIMIT as usize);
-                assert!(
-                    !query.inventory.digest.is_empty(),
-                    "a full-inventory request keeps its digest"
-                );
+                assert!(!query.inventory.digest.is_empty(), "a request keeps its digest");
                 observed.lock().unwrap().push((
                     query.inventory.buckets.is_empty(),
                     query.inventory.envelopes.len(),
@@ -143,18 +137,18 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
     .await
     .unwrap();
     assert!(
-        result.0,
+        result,
         "a divergent compact exchange must reach live ranges beyond the tombstones"
     );
     {
         let requests = requests.lock().unwrap();
         assert!(
-            requests.len() <= 4,
-            "one compact round plus at most one full round, never an unbounded retry"
+            requests.len() <= 2,
+            "one compact round, never a full-inventory round or an unbounded retry"
         );
         assert!(
-            requests.contains(&(true, 0, 0)),
-            "a bare digest cannot prove an empty inventory"
+            requests.iter().all(|(bare, listed, _)| !bare && *listed <= 512),
+            "every request carries range digests and a bounded listing: {requests:?}"
         );
     }
     for store in [&left, &right] {
@@ -194,8 +188,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
             &fleet_context
         )
         .await
-        .unwrap()
-        .0,
+        .unwrap(),
         "tombstone-only divergence must let the worker rest"
     );
     note(&left, "published-after-quiet-comparison");
@@ -210,7 +203,6 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         )
         .await
         .unwrap()
-        .0
     );
     assert!(
         right
@@ -658,8 +650,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(pushed, "the peer stored what this node pushed");
     assert!(
         target
@@ -688,8 +679,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(pulled, "this node stored what the peer sent");
     assert!(
         source
@@ -717,8 +707,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(
         !moved,
         "converged nodes store nothing, so the worker may rest"
@@ -883,6 +872,73 @@ fn member_context(
     legacy: bool,
 ) -> FleetContext {
     FleetContext::member(store, own, bootstrap, config_peers, legacy)
+}
+
+#[test]
+fn a_stale_worker_refusal_does_not_remove_a_new_local_member_key() {
+    let root = tempfile::tempdir().unwrap();
+    let state_dir = root.path();
+    let file = FleetFile {
+        fleet_id: "3b241101-e2bb-4255-8caf-4136c566a962".into(),
+        node: Some("birch".into()),
+        ..FleetFile::default()
+    };
+    file.save(state_dir).unwrap();
+    let current = MemberKey::load_or_create(&file.node_key_path(state_dir)).unwrap();
+    let old = MemberKey::generate().unwrap().0;
+    let store = plain_memory("birch").unwrap();
+    let mut worker = FleetContext::member(&store, &old, &[], &[], false);
+    worker.state_dir = Some(state_dir.to_path_buf());
+    worker.mark_removed(
+        "alder",
+        &RemovedFromFleet {
+            code: "member-left".into(),
+            message: "the previous birch incarnation left".into(),
+        },
+    );
+    assert!(worker.is_removed(), "the old worker still stops syncing");
+    assert_eq!(FleetFile::load(state_dir).unwrap().unwrap(), file);
+    assert!(!crate::fleet::RemovalNotice::path(state_dir).exists());
+    assert_eq!(
+        MemberKey::load(&file.node_key_path(state_dir))
+            .unwrap()
+            .public(),
+        current.public()
+    );
+}
+
+#[test]
+fn a_current_worker_refusal_keeps_its_notice_and_settings_durable() {
+    let root = tempfile::tempdir().unwrap();
+    let state_dir = root.path();
+    let file = FleetFile {
+        fleet_id: "3b241101-e2bb-4255-8caf-4136c566a962".into(),
+        ..FleetFile::default()
+    };
+    file.save(state_dir).unwrap();
+    let own = MemberKey::load_or_create(&file.node_key_path(state_dir)).unwrap();
+    let store = plain_memory("birch").unwrap();
+    let mut worker = FleetContext::member(&store, &own, &[], &[], false);
+    worker.state_dir = Some(state_dir.to_path_buf());
+    worker.mark_removed(
+        "alder",
+        &RemovedFromFleet {
+            code: "member-left".into(),
+            message: "birch left the fleet".into(),
+        },
+    );
+    let notice = crate::fleet::RemovalNotice::load(state_dir).unwrap();
+    assert_eq!(notice.reported_by, "alder");
+    assert_eq!(notice.code, "member-left");
+    assert_eq!(notice.message, "birch left the fleet");
+    assert!(notice.learned_at_unix_ms > 0);
+    assert!(
+        FleetFile::load(state_dir)
+            .unwrap()
+            .unwrap()
+            .removed
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1256,7 +1312,7 @@ mod retry_tests {
         let grant = root.path().join("grant");
         let program = root.path().join("fabric");
         std::fs::write(&program, format!(
-            "#!/bin/sh\nif test -f '{}'; then cat '{}'; exit 0; fi\necho \"$2\" >> '{}'\necho 'peer not permitted for service st3-peer-v1' >&2\nexit 1\n",
+            "#!/bin/sh\nif test -f '{}'; then printf '{{\"address\":\"%s\"}}\\n' \"$(cat '{}')\"; exit 0; fi\necho \"$2\" >> '{}'\necho '{{\"error\":{{\"code\":\"peer_not_permitted_for_service\",\"class\":\"refusal\",\"message\":\"peer not permitted for service st3-peer-v1\",\"peer\":null,\"service\":\"st3-peer-v1\"}}}}'\nexit 77\n",
             grant.display(), grant.display(), log.display()
         )).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1728,6 +1784,40 @@ mod retry_tests {
             // reach the stable servers. Both queues drain despite server hour-long backoff.
             outbound = vec![start(2, 0), start(2, 1)];
             converge(&stores).await;
+            // The stores agreeing does not mean each server's last answer to the traveller
+            // carried its final inventory: a server that relays the traveller's own claims from
+            // the other server after answering has a changed inventory, which asks its worker to
+            // push to the traveller one coalescing interval later. That push is the policy for
+            // new local envelopes, not a redundant connection. Wake the traveller so both servers
+            // answer once more with the settled inventory, and measure only after they have.
+            wakes[2].send_modify(|generation| *generation += 1);
+            let settled_by = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut settled = true;
+                for index in 0..2 {
+                    let current = Local(stores[index].clone())
+                        .export(fleet_id, &ReplicationInventory::default(), true, &[])
+                        .await
+                        .unwrap()
+                        .exchange
+                        .authority_digest;
+                    let answered = contexts[index]
+                        .inbound_authority
+                        .read()
+                        .unwrap()
+                        .get("traveller")
+                        .cloned();
+                    settled &= answered.as_deref() == Some(current.as_str());
+                }
+                if settled {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < settled_by,
+                    "the servers did not answer the traveller with their settled inventory within ten seconds"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             let before = attempts.load(Ordering::Relaxed);
             tokio::time::sleep(Duration::from_secs(2)).await;
             assert_eq!(
@@ -1950,21 +2040,6 @@ impl Backend for SlowExport {
         self.receives
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(result)
-    }
-    async fn heal_answer(
-        &self,
-        peer: &str,
-        fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> Result<ReplicationHealAnswer> {
-        self.local.heal_answer(peer, fleet_id, query).await
-    }
-    async fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> Result<ReplicationHealStep> {
-        self.local.heal_next(peer, answer).await
     }
     async fn checkpoint_manifest(
         &self,
@@ -2272,7 +2347,7 @@ async fn worker_phase_status_is_local_and_reports_retry_deadline() {
     let store = Arc::new(plain_memory("birch").unwrap());
     let index = store.index().unwrap();
     let attempt = crate::store::now_ms();
-    for phase in ["exchange", "heal", "backoff", "idle"] {
+    for phase in ["exchange", "backoff", "idle"] {
         let retry = (phase == "backoff").then_some(Duration::from_secs(30));
         record_worker(&Local(store.clone()), "cedar", phase, attempt, retry).await;
         let status = store

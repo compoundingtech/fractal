@@ -69,8 +69,29 @@ const PERSON: &str = "person/operator";
 
 /// The seeds CI runs. Every failing seed found by hand is added here.
 const SEEDS: &[u64] = &[
-    1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
+    1, 2, 3, 5, 8, 13, 17, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
 ];
+
+/// Both revisions draw the same kinds and fields. Native admission still uses each
+/// revision's registry; the snapshot includes kinds a revision may refuse.
+fn corpus() -> &'static BTreeMap<String, st3_schema::ClaimSpec> {
+    static CORPUS: std::sync::LazyLock<BTreeMap<String, st3_schema::ClaimSpec>> =
+        std::sync::LazyLock::new(|| {
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v1.json"))
+                .expect("versioned convergence input schema")
+        });
+    &CORPUS
+}
+
+#[test]
+fn the_corpus_includes_every_registry_kind() {
+    for kind in st3_schema::registry().claims.keys() {
+        assert!(
+            corpus().contains_key(kind),
+            "add {kind} to a versioned corpus"
+        );
+    }
+}
 
 /// Kinds a checkpoint rule may drop. Every other kind is kept on every node.
 const RULE_KINDS: &[&str] = &[
@@ -760,9 +781,7 @@ impl World {
     /// A claim of any kind in the registry, with fields drawn from its schema. The store refuses
     /// many of them, as it would any client; the suite counts what it accepted.
     fn any_claim(&mut self, index: usize) -> Option<ClaimInput> {
-        let registry = st3_schema::registry();
-        let kinds = registry
-            .claims
+        let kinds = corpus()
             .values()
             // Checkpoint claims come from checkpoint work. A planning preview without its
             // optional candidate revision stops the store's projection, so a restart fails;
@@ -1419,6 +1438,10 @@ struct Outcome {
 }
 
 fn run(seed: u64, sabotage: Sabotage) -> Outcome {
+    let _identity = smallclaims::store::checkpoint_test_identity(
+        "seeded-convergence-v1",
+        "seeded-convergence-executable-v1",
+    );
     let mut world = World::new(seed, sabotage);
     let steps = 300 + world.rng.below(300);
     world.run_schedule(steps);
@@ -1440,8 +1463,19 @@ fn run(seed: u64, sabotage: Sabotage) -> Outcome {
             status.graph_digest
         ));
     }
+    let failure = (!world.failures.is_empty()).then(|| world.report());
+    if let Some(report) = &failure
+        && std::env::var_os("CONVERGENCE_SAVE_FAILURE").is_some()
+    {
+        let root = std::mem::replace(&mut world.root, tempfile::tempdir().unwrap()).keep();
+        std::fs::write(root.join("failure.txt"), report).unwrap();
+        eprintln!(
+            "convergence failure fixture: {} (seed {seed}, sabotage {sabotage:?})",
+            root.display()
+        );
+    }
     Outcome {
-        failure: (!world.failures.is_empty()).then(|| world.report()),
+        failure,
         written: world.written,
         trimmed,
         sabotaged: world.sabotaged,
@@ -1550,6 +1584,7 @@ fn a_seed_runs_the_same_every_time() {
             .map(|run| run.join().unwrap())
     });
     assert_eq!(first.failure, None);
+    assert_eq!(second.failure, None);
     let differs = first
         .fingerprint
         .iter()
@@ -1572,6 +1607,77 @@ fn one_seed() {
         .parse()
         .unwrap();
     run_seeds([seed]);
+}
+
+/// A reproducible wide audit, separate from the small CI corpus. Every seed writes an
+/// outcome even when another fails; the gate fails after collecting the whole sweep.
+#[test]
+#[ignore = "fixed wide audit; set CONVERGENCE_REPORT_DIR and CONVERGENCE_RUNS"]
+fn fixed_sweep() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let first: u64 = std::env::var("CONVERGENCE_START")
+        .unwrap_or_else(|_| "1".into())
+        .parse()
+        .unwrap();
+    let count: u64 = std::env::var("CONVERGENCE_RUNS")
+        .unwrap_or_else(|_| "500".into())
+        .parse()
+        .unwrap();
+    let workers: usize = std::env::var("CONVERGENCE_WORKERS")
+        .unwrap_or_else(|_| "4".into())
+        .parse()
+        .unwrap();
+    assert!(count > 0 && workers > 0);
+    let directory =
+        PathBuf::from(std::env::var("CONVERGENCE_REPORT_DIR").expect("audit output directory"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let end = first.checked_add(count).unwrap();
+    let priority = [1, 5, 377];
+    let seeds = priority
+        .into_iter()
+        .filter(|seed| (first..end).contains(seed))
+        .chain((first..end).filter(|seed| !priority.contains(seed)))
+        .collect::<Vec<_>>();
+    let next = AtomicUsize::new(0);
+    let failures = std::thread::scope(|scope| {
+        let threads = (0..workers).map(|_| scope.spawn(|| {
+            let mut failures = Vec::new();
+            while let Some(&seed) = seeds.get(next.fetch_add(1, Ordering::Relaxed)) {
+                let output = directory.join(format!("seed-{seed}.json"));
+                if output.exists() {
+                    // Resume completed work without selecting only successful outcomes.
+                    let previous: Value = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+                    assert_eq!(previous["seed"], seed);
+                    if !previous["failure"].is_null() { failures.push(seed); }
+                    eprintln!("fixed sweep seed {seed}: retained prior outcome");
+                    continue;
+                }
+                let outcome = run(seed, Sabotage::None);
+                let report = json!({"seed":seed, "failure":outcome.failure, "trimmed":outcome.trimmed,
+                    "written":outcome.written, "fingerprint":outcome.fingerprint});
+                let temporary = directory.join(format!("seed-{seed}.incomplete"));
+                std::fs::write(&temporary, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+                std::fs::rename(temporary, output).unwrap();
+                if outcome.failure.is_some() { failures.push(seed); }
+                eprintln!("fixed sweep seed {seed}: {}", if outcome.failure.is_none() {"pass"} else {"FAIL"});
+            }
+            failures
+        })).collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    std::fs::write(
+        directory.join("summary.json"),
+        serde_json::to_vec_pretty(&json!({
+            "first":first, "count":count, "failures":failures,
+            "identity":"seeded-convergence-v1", "corpus":"claims-v1.json"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(failures.is_empty(), "failing seeds: {failures:?}");
 }
 
 #[test]

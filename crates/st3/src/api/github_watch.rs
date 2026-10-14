@@ -1,14 +1,15 @@
 //! `st gh`: a seat's watches on GitHub issues and pull requests.
 
+use crate::github_http::GithubAuth;
 use super::*;
 use crate::github_watch::ThreadRef;
 
-/// Watch one thread as one seat, until an optional deadline.
+/// Watch one thread as one seat, for fourteen days unless a deadline or `none` is named.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WatchRequest {
     pub actor: String,
     pub thread: String,
-    /// A duration such as `2h`, or an RFC 3339 time.
+    /// A duration such as `2h`, an RFC 3339 time, or `none`; omitted defaults to fourteen days.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
 }
@@ -57,32 +58,41 @@ fn bad(code: &'static str, message: impl Into<String>) -> ApiError {
     ApiError::bad(St3Error::new(code, message.into()))
 }
 
-/// A deadline from now: a duration such as `90m` or `2h`, or an RFC 3339 time.
+const DEFAULT_WATCH_DURATION_MS: u128 = 14 * 24 * 60 * 60 * 1_000;
+
+/// GitHub alias policy only; existing declarations retain their stored deadline.
 fn deadline(until: Option<&str>) -> Result<Option<u128>, ApiError> {
-    let Some(until) = until.map(str::trim).filter(|until| !until.is_empty()) else {
-        return Ok(None);
+    deadline_at(until, smallclaims::store::now_ms())
+}
+
+fn deadline_at(until: Option<&str>, now: u128) -> Result<Option<u128>, ApiError> {
+    let Some(until) = until.map(str::trim) else {
+        return Ok(Some(now.saturating_add(DEFAULT_WATCH_DURATION_MS)));
     };
+    if until == "none" {
+        return Ok(None);
+    }
     if let Some(at) = crate::github_watch::parse_rfc3339_ms(until) {
         return Ok(Some(at));
     }
     let duration = crate::graph::parse_duration(until, true).map_err(|_| {
         bad(
             "invalid-watch-deadline",
-            format!("`{until}` is neither a duration such as 2h nor an RFC 3339 time"),
+            format!("`{until}` is neither a duration such as 2h, an RFC 3339 time, nor none"),
         )
     })?;
     Ok(Some(
-        smallclaims::store::now_ms().saturating_add(u128::from(duration)),
+        now.saturating_add(u128::from(duration)),
     ))
 }
 
 /// What GitHub says of a thread now: its title, link and state. A thread that does not exist,
 /// or that this daemon's token cannot read, cannot be watched.
 async fn read_thread(thread: &ThreadRef) -> Result<Value, ApiError> {
-    let token = crate::resource::github_token().await.map_err(|_| {
+    let token = crate::resource::github_auth().await.map_err(|error| {
         bad(
             "github-unauthenticated",
-            crate::resource::GITHUB_AUTH_REMEDY,
+            error.to_string(),
         )
     })?;
     read_thread_at(&crate::resource::github_api_base(), &token, thread).await
@@ -90,19 +100,18 @@ async fn read_thread(thread: &ThreadRef) -> Result<Value, ApiError> {
 
 async fn read_thread_at(
     api_base: &str,
-    token: &str,
+    token: &GithubAuth,
     thread: &ThreadRef,
 ) -> Result<Value, ApiError> {
-    let response = crate::resource::github_api_client()
+    let request = crate::resource::github_api_client()
         .get(format!(
             "{api_base}/repos/{}/issues/{}",
             thread.locator(),
             thread.number
         ))
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .bearer_auth(token)
-        .send()
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    let response = crate::github_http::send(request, token)
         .await
         .map_err(|error| {
             bad(
@@ -215,14 +224,13 @@ fn posted(kind: &'static str, answer: &Value) -> Result<Posted, ApiError> {
 
 async fn github_send(
     request: reqwest::RequestBuilder,
-    token: &str,
+    token: &GithubAuth,
     what: &str,
 ) -> Result<Value, ApiError> {
-    let response = request
+    let request = request
         .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .bearer_auth(token)
-        .send()
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    let response = crate::github_http::send(request, token)
         .await
         .map_err(|error| {
             bad(
@@ -252,7 +260,7 @@ async fn github_send(
 /// Post a comment, or a review of a pull request, and return what GitHub created.
 async fn post_at(
     api_base: &str,
-    token: &str,
+    token: &GithubAuth,
     thread: &ThreadRef,
     body: &str,
     review: Option<&str>,
@@ -322,7 +330,7 @@ fn object_of(url: &str) -> Result<(ThreadRef, &'static str, u64), ApiError> {
 /// Read a comment or review by its ID, and the login this daemon's token posts as.
 async fn read_object_at(
     api_base: &str,
-    token: &str,
+    token: &GithubAuth,
     thread: &ThreadRef,
     kind: &'static str,
     id: u64,
@@ -361,10 +369,10 @@ pub(super) async fn comment(
     if request.body.trim().is_empty() {
         return Err(bad("empty-github-comment", "the comment has no text"));
     }
-    let token = crate::resource::github_token().await.map_err(|_| {
+    let token = crate::resource::github_auth().await.map_err(|error| {
         bad(
             "github-unauthenticated",
-            crate::resource::GITHUB_AUTH_REMEDY,
+            error.to_string(),
         )
     })?;
     // The seat's wakes on this thread wait until st knows the new comment's ID.
@@ -416,10 +424,10 @@ pub(super) async fn own(
         ));
     }
     let (thread, kind, id) = object_of(&request.url)?;
-    let token = crate::resource::github_token().await.map_err(|_| {
+    let token = crate::resource::github_auth().await.map_err(|error| {
         bad(
             "github-unauthenticated",
-            crate::resource::GITHUB_AUTH_REMEDY,
+            error.to_string(),
         )
     })?;
     let (object, login) = read_object_at(
@@ -500,6 +508,82 @@ pub(super) async fn watches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_deadline_alias_distinguishes_omitted_finite_and_none() {
+        let now = 1_800_000_000_000u128;
+        for (input, expected) in [
+            (None, Some(now + 14 * 86_400_000)),
+            (Some("4h"), Some(now + 4 * 3_600_000)),
+            (Some("none"), None),
+            (Some("  none  "), None),
+            (Some("2027-01-15T08:00:00.000Z"), Some(1_800_000_000_000)),
+        ] {
+            let request: WatchRequest = serde_json::from_value(json!({
+                "actor":"agent/deadline", "thread":"acme/garden#12", "until":input
+            }))
+            .unwrap();
+            assert_eq!(
+                deadline_at(request.until.as_deref(), now).unwrap(),
+                expected
+            );
+        }
+        let omitted: WatchRequest = serde_json::from_value(json!({
+            "actor":"agent/deadline", "thread":"acme/garden#12"
+        }))
+        .unwrap();
+        assert_eq!(
+            deadline_at(omitted.until.as_deref(), now).unwrap(),
+            Some(now + 14 * 86_400_000)
+        );
+        for invalid in ["", "  ", "never", "0h"] {
+            assert_eq!(
+                deadline_at(Some(invalid), now).unwrap_err().code,
+                "invalid-watch-deadline"
+            );
+        }
+    }
+
+    #[test]
+    fn watch_deadline_alias_and_legacy_lifetimes_survive_store_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("watches.sqlite3");
+        let thread = ThreadRef::parse("acme/garden#12").unwrap();
+        let now = smallclaims::store::now_ms();
+        let mut expected = Vec::new();
+        {
+            let store = Store::open(&path, "deadline-fixture").unwrap();
+            for (agent, input) in [
+                ("agent/deadline/default", None),
+                ("agent/deadline/finite", Some("4h")),
+                ("agent/deadline/none", Some("none")),
+            ] {
+                let until = deadline_at(input, now).unwrap();
+                let view = store.declare_watch(&thread, agent, until).unwrap();
+                assert_eq!(view["state"], "active");
+                assert_eq!(
+                    view["until"]
+                        .as_str()
+                        .and_then(crate::github_watch::parse_rfc3339_ms),
+                    until
+                );
+                expected.push((agent, view["until"].clone()));
+            }
+            // Existing indefinite declarations do not acquire the new alias default
+            // merely because the store upgrades or reopens.
+            let legacy = "agent/deadline/legacy";
+            let view = store.declare_watch(&thread, legacy, None).unwrap();
+            assert!(view["until"].is_null());
+            expected.push((legacy, Value::Null));
+        }
+        let reopened = Store::open(&path, "deadline-fixture").unwrap();
+        for (agent, until) in expected {
+            let watches = reopened.watches(Some(agent)).unwrap();
+            assert_eq!(watches.len(), 1);
+            assert_eq!(watches[0]["state"], "active");
+            assert_eq!(watches[0]["until"], until);
+        }
+    }
 
     async fn request(app: Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
         let response = app
@@ -592,7 +676,7 @@ mod tests {
         let thread = ThreadRef::parse("acme/garden#12").unwrap();
         let comment = post_at(
             &github,
-            "orchid-token",
+            &GithubAuth::test("orchid-token"),
             &thread,
             "The seed list is ready.",
             None,
@@ -603,7 +687,7 @@ mod tests {
         assert_eq!(comment.login, "fleet-login");
         let review = post_at(
             &github,
-            "orchid-token",
+            &GithubAuth::test("orchid-token"),
             &thread,
             "Two fixes.",
             Some("request-changes"),
@@ -612,7 +696,7 @@ mod tests {
         .unwrap();
         assert_eq!((review.kind, review.id), ("review", 7001));
         assert_eq!(
-            post_at(&github, "orchid-token", &thread, "x", Some("maybe"))
+            post_at(&github, &GithubAuth::test("orchid-token"), &thread, "x", Some("maybe"))
                 .await
                 .unwrap_err()
                 .code,
@@ -621,7 +705,7 @@ mod tests {
 
         let (thread, kind, id) =
             object_of("https://github.com/acme/garden/issues/12#issuecomment-502").unwrap();
-        let (object, login) = read_object_at(&github, "orchid-token", &thread, kind, id)
+        let (object, login) = read_object_at(&github, &GithubAuth::test("orchid-token"), &thread, kind, id)
             .await
             .unwrap();
         assert_eq!(
@@ -630,7 +714,7 @@ mod tests {
         );
         let (thread, kind, id) =
             object_of("https://github.com/acme/garden/issues/12#issuecomment-503").unwrap();
-        let (object, login) = read_object_at(&github, "orchid-token", &thread, kind, id)
+        let (object, login) = read_object_at(&github, &GithubAuth::test("orchid-token"), &thread, kind, id)
             .await
             .unwrap();
         assert!(object.login.eq_ignore_ascii_case(&login));
@@ -652,12 +736,12 @@ mod tests {
     async fn only_an_open_thread_that_github_shows_can_be_watched() {
         let github = fake_github().await;
         let open = ThreadRef::parse("acme/garden#12").unwrap();
-        let answer = read_thread_at(&github, "orchid-token", &open)
+        let answer = read_thread_at(&github, &GithubAuth::test("orchid-token"), &open)
             .await
             .unwrap();
         assert!(watchable(&open, &answer).is_ok());
         let closed = ThreadRef::parse("acme/garden#14").unwrap();
-        let answer = read_thread_at(&github, "orchid-token", &closed)
+        let answer = read_thread_at(&github, &GithubAuth::test("orchid-token"), &closed)
             .await
             .unwrap();
         assert_eq!(
@@ -666,7 +750,7 @@ mod tests {
         );
         let missing = ThreadRef::parse("acme/garden#99").unwrap();
         assert_eq!(
-            read_thread_at(&github, "orchid-token", &missing)
+            read_thread_at(&github, &GithubAuth::test("orchid-token"), &missing)
                 .await
                 .unwrap_err()
                 .code,

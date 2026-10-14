@@ -2,7 +2,15 @@
 
 Connect once to `GET /v1/client/collections/stream` with WebSocket subprotocol
 `st3.client.collections.v0`. The same Unix or paired client credentials used by
-the rest of client v0 apply. One connection accepts up to eight subscriptions.
+the rest of client v0 apply. One connection accepts up to sixteen subscriptions.
+The optional `collections` capability version 1 advertises this bound; older
+daemons omit it and accept eight. Clients reserve their existing conversation
+and terminal slots before adding optional windows on older daemons.
+
+The server sends a WebSocket protocol ping every eight seconds and answers client
+pings with the same payload. These frames do not read collection windows. A send
+that cannot complete within eight seconds closes the socket; reconnect and apply
+the new authoritative snapshot.
 
 Send one JSON command per subscription:
 
@@ -10,7 +18,7 @@ Send one JSON command per subscription:
 {"kind":"subscribe","id":"missions-tab","collection":"missions","limit":50}
 ```
 
-Collections are `missions`, `attention`, `agents`, `work`, `glasses`, and `arrangements`,
+Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
 `person` to attention, and `status` to agents. For `arrangements`, `person: "person/NAME"`
 is required: agents explicitly select a fleet person's collection, never an inferred
@@ -56,7 +64,10 @@ path, title, first goal, and state, and the `subagents` its harness runs now.
 A work row names its `mission_id`.
 
 Each window is read inside one SQLite snapshot, and its fence names that
-snapshot's store index, so rows always match their fence. Commits that land
+snapshot's store index, so rows always match their fence. Agents, missions and
+work windows serve lists a background refresher keeps published: their fence
+names the published list's own cut and `published_at` (see the client README's
+freshness sections). Commits that land
 while a window is read neither tear it nor delay it; they arrive in the next
 `changes` frame.
 
@@ -65,16 +76,23 @@ subscription commands or ready conversation and terminal frames from being
 handled. Each subscription still delivers its snapshot before its changes.
 Replacing or removing a subscription discards its pending collection result;
 changes observed during a read schedule another read of that window.
-Each socket permits at most eight physical collection reads, including store
+Each socket permits at most sixteen physical collection reads, including store
 work still finishing after cancellation. Replacements wait for a read slot
 without blocking command admission or unrelated ready frames.
 
 An `error` frame reports a permanent refusal and ends that subscription. A
 `resync` frame with `retryable: true` reports a temporary read failure; the server
 keeps the subscription and retries after its reread interval, including when the
-first snapshot failed. A followed conversation's `resync` also carries the failure's
-`code` and `message`, such as `remote-unavailable` while the owner's host cannot be
-reached, so a client still showing its last copy can say that copy is stale. Clients may resubscribe with the same ID to request a
+first snapshot failed. Once admitted, an opening remote conversation subscription
+may start retries for `remote-unavailable` during the three seconds after its first
+failed opening read, with 250 ms between attempts. This bounds when retries start,
+not when outage diagnostics arrive. An in-flight retry keeps the normal peer RPC
+deadline: a stalled retry can wait about 15 seconds before reporting `resync`, even
+after the retry-start window has closed. A slow successful page is not canceled by
+that window. A persistent outage still reports `resync`; other refusals and
+established conversations do not use this grace.
+A followed conversation's `resync` also carries the failure's `code` and `message`,
+so a client still showing its last copy can say that copy is stale. Clients may resubscribe with the same ID to request a
 fresh snapshot. If the socket closes, including during a daemon
 restart, open a new socket and subscribe again; the new snapshot is authoritative.
 Each socket subscribes to store changes before taking its first snapshot, so a
@@ -118,8 +136,9 @@ joined in. The first `conversation` frame carries `id`, `collection` (`conversat
 carry `replace: false` and the entries that changed since; an entry revised in place arrives
 again with its new revision. When too much changed for one frame, or a change can no longer be
 replayed, the newest page arrives again with `replace: true`. An `error` frame ends that
-subscription only, for example while the owning host is unreachable. After a dropped socket,
-subscribe again on the new one.
+subscription only, for example when a session is absent or access is forbidden.
+When an owner read fails, retryable `resync` retains the admitted subscription.
+After a dropped socket, subscribe again on the new one.
 
 `has_more` describes history before the replacement window, not whether a delta has more
 changes. Delta frames omit it: absence means preserve the last known availability, never
@@ -131,3 +150,104 @@ the session's start is reached, later live deltas do not reopen older-history pa
 
 `st missions ls --watch`, `st attention ls --watch`, `st agents ls --watch`,
 and `st work ls --watch` consume this same transport.
+
+## Summary
+
+A daemon that advertises the `summary` capability version 1 accepts
+`{"kind":"subscribe","id":"top-bar","collection":"summary","limit":1}`.
+A person session uses its own authority; an agent may select `person` using the
+same access rules as attention. This is one row, `summary/current`, with
+`kind: "summary"`, `person_id`, `alerts`, `needs_you`, `working_agents`, `active_missions`,
+and `machines: {connected, indirect, offline}`. Normal snapshot/changes/order
+frames apply, with `has_more: false`. There is no new HTTP list or get route.
+
+These are complete current source counts, independent of any list's page size.
+`alerts` counts open alerts: items that block or wait on the person (human
+gates, launch/revision approvals, person asks, agent and custom requests, harness
+prompts and logins, and broken gates the person published). Updates, messages and
+agents' faults are not alerts. `needs_you` carries the same count for older clients; a daemon that
+predates alerts omits `alerts` and also counted unread updates in `needs_you`. Local snoozes and closed rows remain
+client-owned. `working_agents` uses running/working presentation, excluding
+faults and stale delivery. `active_missions` uses the shared mission words
+working, queued, decision, stalled, unstaffed and unclaimed, excluding system
+missions. Human gates use the selected person's unresolved attention membership.
+Machines use direct/gateway connectivity, otherwise the newest transport or
+agent activity strictly less than five minutes old, otherwise offline.
+
+Native counts use the existing authorized snapshot and collection clock. Lean
+mission inputs reuse the shared mission word calculation, omit card history and
+provenance, and are shared across activity updates. Cached inputs expire at lease, future-request
+and recent-outcome boundaries and reject backward clock reuse. Agent cards reuse the native
+keyed roster cache; live delivery overlays are checked on every read. Authority
+is revalidated before counting, including private person selection. Read failures
+send the existing `resync`/`error` frames, never inferred zero counts. Clients keep compatibility
+behavior on older daemons.
+A daemon serves these counts from published rows. What no person changes (missions,
+working agents, machines) is computed once for every selection, at one cut, and again
+when the cut, the roster or the 30-second clock period changes. The machines they count
+are read again only when a claim about a host, or a run or generation that owns runtimes,
+arrives, when a runtime with new claims (other than its harness reports) starts on, stops
+on or moves to another host so that the set of runtime hosts changes, when operations
+conflict or fleet membership changes, and each clock period, when peers' replication
+successes are read again. Each selection counts
+its alerts from the published attention rows, the same rows its
+attention window shows. The row carries the shared counts' cut. A window that opens a
+new selection is served at once. Before the first publication, the window gets a
+retryable `summary-not-ready` resync. The shared counts read the complete agents roster,
+so as a daemon starts they are published as soon as that roster is.
+Equal count membership produces no upsert, including agent progress/usage
+updates and another person's attention changes. Core list/filter/get behavior
+is unchanged. Summary freshness is carried by its snapshot fence; equal counts
+retain their prior row timestamp so an unchanged count emits no delta.
+
+## Screen inventories
+
+Optional capability `inventory-collections` version 1 advertises six additional
+collections: `clients`, `usage`, `machines`, `devices`, `sessions`, and `terminals`.
+Older daemons omit it; clients keep their existing HTTP reads for that member and
+say that the member is read, not followed. These subscriptions use the existing
+v0 `snapshot` then `changes` frames, including removals, complete order and fences.
+Each subscription consumes one of the
+sixteen slots, including the terminals **list**, which is separate from a selected
+`terminal` screen.
+
+All six require `read.projections`, as their HTTP reads do. Devices select the
+session's authenticated person, or an explicitly authorized `person`, using the
+same rules as `GET /v1/client/devices`. Only active devices are included. Sessions
+contain native sessions (`native_only=true`), with managed sessions excluded.
+Machines and terminals contain the same current rows as their HTTP lists. These
+inventories accept a `limit` of 1–200 (default 50). History remains on HTTP. Devices
+accept `person`; the other five accept no person, actor, subject or status filter.
+
+Clients use `kind: "connected-client"` resources with the HTTP connection fields
+and a stable ID derived from member, actor, reported client name and route.
+Connect, disconnect, followed-window changes and requests wake the collection;
+recent request-only rows leave at their five-minute expiry. Opening a stream does
+not require a graph write. Reconnect always returns a fresh snapshot of presence.
+
+Usage has one `usage/current` resource with `kind: "usage"` and `value: UsagePeriod`:
+rows, account limits and agent-message estimates come from the same read as
+`usage.period`, inside the frame's SQLite snapshot. `limit` bounds its nested
+usage rows, ranked as on HTTP; `has_more` means more usage rows exist. Limits and
+message estimates describe the whole period. Send millisecond boundaries:
+
+```json
+{"kind":"subscribe","id":"usage-tab","collection":"usage","since_ms":1791763200000,"until_ms":1791849600000,"limit":200}
+```
+
+An omitted `until_ms` follows new usage through the current read time; an omitted
+`since_ms` starts 24 hours before that end. An explicit end remains fixed across
+changes and reconnects. New usage, limit readings and message sends wake this
+collection; an idle report has no periodic reread. Paired inventory authority expires at its grant deadline, without periodic list
+reads. Native sessions also follow
+transcript filesystem events and, on Linux, observed process exits. Device expiry
+and recent-client expiry schedule their actual deadlines rather than polling.
+
+Keep `clients` open only in Fleet, `usage` only in Usage, `devices` and `sessions`
+only where their lists show, and `terminals` only where the terminal chooser/list
+shows. `machines` stays open while the sidebar is visible (including Fleet).
+Existing always-held attention, missions, agents, work, glasses, arrangements and
+summary windows retain their client policy. Conversation and terminal-screen slots
+are reserved before optional list windows. Leaving a screen unsubscribes its
+inventory after the client's existing grace period. Pull to refresh replaces the
+subscription with the same ID to obtain a fresh authoritative snapshot.
