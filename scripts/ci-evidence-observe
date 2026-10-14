@@ -184,6 +184,7 @@ def push_token():
 
 OBSERVED_WORKFLOW = 'Workspace CI'
 SKIP_STEP = 'evidence skip taken'
+COVERED_STEP = 'evidence covered by a trusted note'
 
 
 def run_info(repository, run_id):
@@ -218,9 +219,13 @@ def skip_taken_checks(repository, run_id, attempt):
             raise Failure(f'cannot read the jobs of run {run_id} attempt {attempt}, so skips cannot be ruled out')
         for job in jobs:
             name = job.get('name', '')
-            if name.startswith('evidence-gate-') and any(
-                    step.get('name') == SKIP_STEP and step.get('conclusion') == 'success' for step in job.get('steps', [])):
+            ran = {step.get('name') for step in job.get('steps', []) if step.get('conclusion') == 'success'}
+            # Two independent signals. The gate job's marker, and the check's own job, which ran the
+            # `covered` step only when it skipped its work. Either one is enough.
+            if name.startswith('evidence-gate-') and SKIP_STEP in ran:
                 skipped.add(name[len('evidence-gate-'):])
+            if COVERED_STEP in ran:
+                skipped.add(name)
         if len(jobs) < 100:
             return skipped
         page += 1
