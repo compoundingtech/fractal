@@ -453,6 +453,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st agents handoff ready",
+      "description": "Say this seat's handoff is current so a waiting restart can go ahead",
+      "tests": [
+        "crates/st3/tests/agents_restart.rs::ready_acknowledges_a_handoff_that_is_already_current"
+      ],
+      "verification": "real CLI over a private Unix socket; the restart waits, then stops the seat"
+    },
+    {
       "command": "st agents handoff show",
       "description": "Print a seat's latest handoff document",
       "tests": [
