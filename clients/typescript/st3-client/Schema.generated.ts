@@ -2271,8 +2271,8 @@ export const TimelineViewAssistantError = /*#__PURE__*/ (() => Schema.Struct({
   "label": Schema.String,
   "message": Schema.String,
   "model": optionalKey(Schema.String),
-  /** Exact native assistant stop and retry diagnostics, without presentation coercion. */
-  "native": optionalKey(Schema.StructWithRest(Schema.Struct({ "errorId": optionalKey(Schema.Unknown), "errorMessage": optionalKey(Schema.Unknown), "errorStatus": optionalKey(Schema.Unknown), "retryRecovery": optionalKey(Schema.Unknown), "stopReason": optionalKey(Schema.Unknown) }), [Schema.Record(Schema.String, Schema.Unknown)])).annotate({ description: "Exact native assistant stop and retry diagnostics, without presentation coercion." }),
+  /** Exact native assistant stopReason, errorMessage, errorStatus, errorId and retryRecovery diagnostics, including arbitrary structured/null and future values. */
+  "native": optionalKey(Schema.Record(Schema.String, Schema.Unknown)).annotate({ description: "Exact native assistant stopReason, errorMessage, errorStatus, errorId and retryRecovery diagnostics, including arbitrary structured/null and future values." }),
   "presentation": Schema.Literals(["full","compact-recovered","none"]),
   "provider": optionalKey(Schema.String),
   "retry": optionalKey(Schema.Struct({ "attempt": optionalKey(Schema.Int), "kind": optionalKey(Schema.String), "note": optionalKey(Schema.String), "recovered_at": optionalKey(Timestamp), "recovery": optionalKey(Schema.String), "status": optionalKey(Schema.String), "superseded_by": optionalKey(Schema.Struct({ "model": optionalKey(Schema.String), "provider": optionalKey(Schema.String), "response_id": optionalKey(Schema.String), "timestamp": optionalKey(Schema.Int) })) })),
