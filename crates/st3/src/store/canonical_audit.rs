@@ -33,7 +33,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
 
 #[test]
 fn every_persistent_table_has_a_projection_scope() {
-    // Explicit local/storage exceptions from docs/st3/canonical-projections-audit.md. New
+    // Explicit local/storage exceptions from docs/st3/data-authority.md. New
     // tables must be classified; shared tables automatically join the row/digest comparison.
     let exceptions = [
         "meta",
@@ -66,6 +66,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_idle_messages",
         "coordination_sends",
         "local_coordination_backfill",
+        "stop_deferral_claims",
+        "local_stop_deferral_backfill",
         "local_publication_claims",
         "local_publication_starts",
         "local_publication_pending",

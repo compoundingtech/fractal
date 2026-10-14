@@ -3,6 +3,9 @@
 
 export const API_VERSION = 'st3.client.v0' as const;
 
+/** Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043). */
+export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" as const;
+
 export type ActionCommon = {
   api_version: "st3.client.v0";
   fence: Fence;

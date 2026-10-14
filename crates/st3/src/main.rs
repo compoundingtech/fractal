@@ -61,6 +61,7 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod change_cli;
 mod directive_note;
 mod completion;
 mod doctor_cli;
@@ -121,8 +122,11 @@ enum Command {
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
     #[command(version = st_drivers::version::display_version())]
     Ui(stui::Args),
+    /// Inspect Git-backed changes and their separate ref/index/evidence freshness.
+    Changes(change_cli::ChangesArgs),
     /// Validate and publish KDL files containing seats, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
+    /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
     /// Inspect owned sets and their source publication receipts.
     Sets {
@@ -137,6 +141,9 @@ enum Command {
     Note(directive_note::NoteArgs),
     /// Show token spend over a period, with the largest spenders first.
     Usage(UsageArgs),
+    /// List every objective and budget with its target, current value and what is left, and
+    /// explain one in plain words.
+    Slo(SloArgs),
     /// Inspect and control missions.
     ///
     /// A mission records an authorized goal, its plan, owners, verification and result.
@@ -359,6 +366,11 @@ enum FleetCommand {
     Migrate(FleetMigrateArgs),
     /// Switch this member between listening and dial-out.
     Mode(FleetModeArgs),
+    /// Add or remove Fabric on this member without rejoining.
+    Transports {
+        #[command(subcommand)]
+        command: FleetTransportsCommand,
+    },
     /// Show this node, the fleet's members, and open invites.
     Status,
     /// Wait for this node's first sync to end, then check that it projects the same graph as
@@ -922,6 +934,7 @@ async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool
         FleetCommand::Remove(args) => run_fleet_remove(&client, &config, args).await,
         FleetCommand::Migrate(args) => run_fleet_migrate(&client, &config, args).await,
         FleetCommand::Mode(args) => {
+            let lock = lock_fleet_settings(&config.state_dir).await?;
             let mut file = st3::config::FleetFile::load(&config.state_dir)?
                 .context("this machine is not a fleet member")?;
             file.mode = match args.mode.as_str() {
@@ -937,16 +950,16 @@ async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool
                 }),
             };
             file.save(&config.state_dir)?;
+            drop(lock);
             println!(
                 "This member is now {}; it announces the change when its replication worker starts.",
                 file.mode.as_str()
             );
-            if !args.no_service && services_installed() {
-                st3::service::install(Config::load_with_fleet(None)?)?;
-            } else {
-                println!("Restart st3 replication-worker for the change to take effect.");
-            }
+            refresh_fleet_worker(args.no_service)?;
             Ok(())
+        }
+        FleetCommand::Transports { command } => {
+            run_fleet_transports(&client, &config, command).await
         }
         FleetCommand::Leave(args) => {
             let person = fleet_person(args.actor.clone(), &config)?;
@@ -994,6 +1007,10 @@ async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool
                 status.fleet_id.as_deref().unwrap_or("none"),
                 status.node
             );
+            println!("TRANSPORTS  {}", status.transports.join(","));
+            if let Some(protocol) = &status.fabric_protocol {
+                println!("FABRIC-PROTOCOL  {protocol}");
+            }
             if let Some(removed) = &status.removed {
                 println!("REMOVED  {}", removed.describe(status.fleet_id.as_deref()));
             }
@@ -1313,6 +1330,21 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
     Ok(())
 }
 
+/// What an instance's uninstall removes from its directory: every entry except the one that holds
+/// the work root. The work root can lie inside the instance but holds the person's work, so
+/// everything else goes and it stays.
+fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
+    fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| !work.starts_with(path))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn directory_is_empty(path: &Path) -> bool {
     fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
@@ -1382,18 +1414,8 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
             root.display(),
             paths.iter().filter(|path| !path.starts_with(&root)).collect::<Vec<_>>()
         );
-        // The work root can lie inside the instance but holds the person's work: everything
-        // else in the instance goes and the work root stays.
         let work = work_root.clone().unwrap_or_else(|| instance.work_dir());
-        paths = fs::read_dir(&root)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| !work.starts_with(path))
-                    .collect()
-            })
-            .unwrap_or_default();
+        paths = instance_removals(&root, &work);
     }
     paths.sort();
     paths.dedup();
@@ -1456,7 +1478,18 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     } else if client.get::<Value>("/v1/health").await.is_ok()
         || st3::startup::read(&config.socket).is_some()
     {
-        anyhow::bail!("stop st3 up and st3 replication-worker, then run st uninstall --yes again");
+        // Setup starts an instance's daemon without a service when the person declines one, so
+        // nothing else would stop it. Only the process that answers on the instance's own socket
+        // is stopped; the default install's daemon is still left for its owner to stop.
+        let stopped = instance.is_some() && {
+            st3::service::stop_owned_runtimes(&config)?;
+            st3::service::stop_daemon_at(&config.socket, std::time::Duration::from_secs(20))?
+        };
+        anyhow::ensure!(
+            stopped,
+            "stop st3 up and st3 replication-worker, then run st uninstall --yes again"
+        );
+        println!("stopped\tthe daemon this instance started without a service");
     }
     if instance.is_none()
         && let Err(error) = st_drivers::claude_channel::remove_st3_channel(true)
@@ -1525,6 +1558,243 @@ struct FleetModeArgs {
     port: Option<u16>,
     #[arg(long)]
     no_service: bool,
+}
+
+#[derive(Subcommand)]
+enum FleetTransportsCommand {
+    /// Expose Fabric, then announce it. Requires a listening member with a port.
+    Add {
+        #[arg(value_parser = ["fabric"])]
+        transport: String,
+        /// Use this protocol instead of the saved protocol or st3/fleet/FLEET_ID.
+        #[arg(long)]
+        fabric_protocol: Option<String>,
+        /// Leave the replication worker restart to the operator.
+        #[arg(long)]
+        no_service: bool,
+    },
+    /// Withdraw Fabric's endpoint, then unexpose it. Keep at least one usable transport.
+    Remove {
+        #[arg(value_parser = ["fabric"])]
+        transport: String,
+        /// Leave the replication worker restart to the operator.
+        #[arg(long)]
+        no_service: bool,
+    },
+}
+
+async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::File> {
+    let state_dir = state_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || st3::config::FleetFile::lock_settings(&state_dir)).await?
+}
+
+async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
+    let view: st3::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let member = view
+        .members
+        .iter()
+        .find(|member| member.name == node)
+        .context("this node has no fleet membership yet; wait for its first sync")?;
+    anyhow::ensure!(
+        member.state == "current",
+        "this node is not a current fleet member"
+    );
+    Ok(member.endpoints.clone())
+}
+
+/// Transport changes use mode's atomic settings write and service refresh. They also
+/// publish immediately, so removal is announced before unexposure. The caller holds the
+/// settings lock until publication and unexposure end.
+async fn save_and_publish_fleet_settings(
+    client: &Client,
+    config: &Config,
+    file: &st3::config::FleetFile,
+    mut endpoints: Vec<Value>,
+) -> Result<()> {
+    if file.mode == st3::config::FleetMode::DialOut {
+        endpoints.clear();
+    } else {
+        endpoints.retain(|endpoint| match endpoint["transport"].as_str() {
+            Some("fabric") => file.transports.iter().any(|name| name == "fabric"),
+            Some(name @ ("loopback" | "tailscale")) => {
+                (file.transports.iter().any(|transport| transport == name)
+                    || (name == "loopback" && file.advertise_loopback))
+                    && endpoint["address"]
+                        .as_str()
+                        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+                        .is_some_and(|address| Some(address.port()) == file.port)
+            }
+            _ => false,
+        });
+    }
+    file.save(&config.state_dir)?;
+    let _: Value = client
+        .post(
+            "/v1/internal/fleet/endpoints",
+            &st3::api::FleetEndpointsRequest {
+                mode: file.mode.as_str().into(),
+                endpoints,
+            },
+        )
+        .await
+        .context("fleet.toml saved; endpoint publication did not complete; restart the replication worker to announce the saved settings")?;
+    Ok(())
+}
+
+fn refresh_fleet_worker(no_service: bool) -> Result<()> {
+    if !no_service && services_installed() {
+        st3::service::install(Config::load_with_fleet(None)?)?;
+    } else {
+        println!("Restart st3 replication-worker for the change to take effect.");
+        println!(
+            "The old worker no longer publishes endpoints after its settings change; restart it to resume publication."
+        );
+    }
+    Ok(())
+}
+
+async fn run_fleet_transports(
+    client: &Client,
+    config: &Config,
+    command: FleetTransportsCommand,
+) -> Result<()> {
+    use st3::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
+    let lock = lock_fleet_settings(&config.state_dir).await?;
+    let mut file = st3::config::FleetFile::load(&config.state_dir)?
+        .context("this machine is not a fleet member")?;
+    anyhow::ensure!(
+        file.removed.is_none(),
+        "this member was removed from its fleet"
+    );
+    let transport = match &command {
+        FleetTransportsCommand::Add { transport, .. }
+        | FleetTransportsCommand::Remove { transport, .. } => transport,
+    };
+    let enabled = file
+        .transports
+        .iter()
+        .any(|configured| configured == transport);
+    // A repeated add never reconfigures an existing exposure, even with a different flag.
+    if matches!(&command, FleetTransportsCommand::Add { .. }) && enabled {
+        println!("Fabric is already enabled; remove it before changing its protocol.");
+        return Ok(());
+    }
+    if matches!(&command, FleetTransportsCommand::Remove { .. }) {
+        anyhow::ensure!(enabled, "Fabric is not configured on this member");
+        anyhow::ensure!(
+            file.transports
+                .iter()
+                .any(|configured| configured != transport),
+            "cannot remove this member's last transport"
+        );
+    }
+    let mut endpoints = member_endpoints(client, &config.node).await?;
+    let protocol = file
+        .fabric_protocol
+        .clone()
+        .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
+    let no_service = match command {
+        FleetTransportsCommand::Add {
+            fabric_protocol,
+            no_service,
+            ..
+        } => {
+            anyhow::ensure!(
+                file.mode == st3::config::FleetMode::Listening,
+                "adding Fabric requires a listening member; run st fleet mode listening first"
+            );
+            let port = file
+                .port
+                .context("adding Fabric requires this member's configured replication port")?;
+            anyhow::ensure!(
+                port != 0,
+                "adding Fabric requires a fixed nonzero replication port; run st fleet mode listening --port PORT first"
+            );
+            let protocol = fabric_protocol.unwrap_or(protocol);
+            anyhow::ensure!(
+                !protocol.trim().is_empty(),
+                "Fabric protocol must not be empty"
+            );
+            let fabric = Fabric::new(
+                resolve_tool(file.fabric.as_deref(), "fabric")
+                    .context("this machine cannot use Fabric: fabric is not installed")?,
+            );
+            let node = fabric
+                .id()
+                .await
+                .context("this machine cannot use Fabric")?;
+            fabric
+                .expose(&protocol, &format!("127.0.0.1:{port}"))
+                .await
+                .context("Fabric exposure failed; fleet settings and endpoints are unchanged")?;
+            file.transports.push("fabric".into());
+            file.fabric_protocol = Some(protocol.clone());
+            endpoints.retain(|endpoint| endpoint["transport"] != "fabric");
+            endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));
+            // A lost publication response can follow a committed claim. Keep the exposure
+            // reachable and report the incomplete operation rather than undoing that route.
+            save_and_publish_fleet_settings(client, config, &file, endpoints)
+                .await
+                .with_context(|| format!("Fabric remains exposed as {protocol}"))?;
+            println!("Fabric enabled with protocol {protocol}.");
+            no_service
+        }
+        FleetTransportsCommand::Remove { no_service, .. } => {
+            // A configured but unavailable carrier cannot provide the promised rollback.
+            let local = st3::fleet::transport::local_addresses();
+            anyhow::ensure!(
+                (file.mode == st3::config::FleetMode::DialOut
+                    && file
+                        .transports
+                        .iter()
+                        .any(|transport| match transport.as_str() {
+                            "loopback" => local.iter().any(std::net::IpAddr::is_loopback),
+                            "tailscale" =>
+                                local.iter().any(st3::fleet::transport::is_tailnet_address)
+                                    && resolve_tool(file.tailscale.as_deref(), "tailscale")
+                                        .is_some(),
+                            _ => false,
+                        }))
+                    || endpoints.iter().any(|endpoint| {
+                        let Some(transport) = endpoint["transport"].as_str() else {
+                            return false;
+                        };
+                        transport != "fabric"
+                            && file.transports.iter().any(|name| name == transport)
+                            && endpoint["address"]
+                                .as_str()
+                                .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+                                .is_some_and(|address| {
+                                    local.contains(&address.ip())
+                                        && Some(address.port()) == file.port
+                                })
+                    }),
+                "cannot remove Fabric: no remaining configured transport is usable on this machine"
+            );
+            file.transports.retain(|transport| transport != "fabric");
+            // Retain the existing protocol setting so a later add can restore it.
+            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            let result = match resolve_tool(file.fabric.as_deref(), "fabric") {
+                Some(program) => Fabric::new(program).unexpose(&protocol).await,
+                None => Err(anyhow::anyhow!("fabric is not installed")),
+            };
+            drop(lock);
+            // Refresh even when cleanup fails: no worker may keep using the removed carrier.
+            refresh_fleet_worker(no_service)?;
+            if let Err(error) = result {
+                println!(
+                    "Fabric endpoint removed; unexposure still needs cleanup: {error:#}. When Fabric is available, run fabric unexpose {protocol}"
+                );
+            }
+            println!(
+                "Fabric removed; remaining transports: {}.",
+                file.transports.join(",")
+            );
+            return Ok(());
+        }
+    };
+    drop(lock);
+    refresh_fleet_worker(no_service)
 }
 
 #[derive(Args)]
@@ -1852,12 +2122,14 @@ enum MissionViewCommand {
     /// A final step assigned to the author, depending on the last real step, reaches the
     /// author once when work is done. Review gates mark decisions only a person can make.
     /// Preview with --dry-run before publication; it runs no exec gates unless --check is set.
-    /// Actual publication normally runs gates once and refuses broken answers, allowing valid
-    /// "not yet" answers. See st skill for goals, evidence, review and feedback loops.
+    /// Actual publication checks mission and step scripts and refuses broken answers, allowing
+    /// valid "not yet" answers. Loop until scripts are not checked; they run after each round.
+    /// See st skill for goals, evidence, review and feedback loops.
     Publish(MissionPublishArgs),
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
-    /// Run each exec gate in a mission file once, now, the way a run would, and report its
-    /// answer: pass (exit 0), not yet (exit 1), broken (anything else), or unchecked.
+    /// Check mission and step exec gates once and report pass (exit 0), not yet (exit 1),
+    /// broken (anything else), or unchecked. Loop until scripts are not checked;
+    /// they run after each round.
     Check(MissionCheckArgs),
     /// Start one run from the current ready mission revision.
     ///
@@ -1922,7 +2194,7 @@ struct MissionPublishArgs {
     /// KDL file to publish; use `-` to read standard input.
     file: PathBuf,
     /// Print the resolved publication preview without applying or running exec gates.
-    /// Add --check to run the gates during the preview.
+    /// Add --check to run mission and step gates during the preview; until scripts run after rounds.
     #[arg(long, visible_alias = "preview")]
     dry_run: bool,
     /// Preview against this exact store index.
@@ -1932,13 +2204,13 @@ struct MissionPublishArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
-    /// The workspace a run would use, where publish first checks each exec gate.
+    /// The workspace a run would use, where publish checks mission and step exec gates.
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
-    /// Publish without first running each exec gate once to refuse a broken one.
+    /// Publish without checking mission and step exec gates for broken commands.
     #[arg(long)]
     no_gate_check: bool,
-    /// Run exec gates even during a dry run.
+    /// Check mission and step exec gates during a dry run. Until scripts run after each round.
     #[arg(long, visible_alias = "check-gates", conflicts_with = "no_gate_check")]
     check: bool,
     /// Mission input values for exec gate checks.
@@ -2313,11 +2585,17 @@ enum PtyCommand {
     Attach(PtyAttachArgs),
     /// Let fleet peers attach this host's terminals PTY to PTY over Fabric.
     ///
-    /// Fabric keeps the exposure in its own configuration and runs `st terminals serve-fabric`
-    /// for each tunnel, so an attach works while st's daemon is busy or down. Each peer also needs
-    /// a grant for the printed protocol in this machine's Fabric `peers.toml`.
+    /// Fabric keeps the exposure in its own configuration and forwards each tunnel to the st
+    /// daemon's terminal socket, which serves it on its own thread, so a busy daemon does not
+    /// delay an attach. While the daemon is stopped or restarting, as during every deploy, it
+    /// refuses new tunnels and its live remote attaches drop; `st terminals attach` reconnects
+    /// once it is back. `--exec` instead has Fabric run `st terminals serve-fabric` for each
+    /// tunnel, which works without the daemon at the cost of a process and pipes per attach.
+    /// Each peer also needs a grant for the printed protocol in this machine's Fabric
+    /// `peers.toml`.
     ExposeFabric(PtyExposeFabricArgs),
-    /// Serve one Fabric tunnel to a PTY session on stdin and stdout. Fabric runs this.
+    /// Serve one Fabric tunnel to a PTY session on stdin and stdout, as `expose-fabric --exec`
+    /// has Fabric run it.
     #[command(hide = true)]
     ServeFabric(PtyServeFabricArgs),
     /// Read one terminal's current screen without taking control.
@@ -2428,9 +2706,13 @@ struct PtyAttachArgs {
 
 #[derive(Args)]
 struct PtyExposeFabricArgs {
-    /// The st executable Fabric runs for each tunnel; defaults to this one. Name a stable path,
-    /// since Fabric keeps it after this build is replaced.
+    /// Have Fabric run `st terminals serve-fabric` for each tunnel instead of forwarding it to the
+    /// daemon's terminal socket, so attaches keep working while the daemon is down.
     #[arg(long)]
+    exec: bool,
+    /// With `--exec`, the st executable Fabric runs; defaults to this one. Name a stable path,
+    /// since Fabric keeps it after this build is replaced.
+    #[arg(long, requires = "exec")]
     st: Option<PathBuf>,
 }
 
@@ -2569,6 +2851,35 @@ struct UsageArgs {
     /// Show only this grouping; the default shows them all.
     #[arg(long, value_enum)]
     by: Option<UsageBy>,
+}
+
+#[derive(Args)]
+struct SloArgs {
+    #[command(subcommand)]
+    command: Option<SloCommand>,
+}
+
+#[derive(Subcommand)]
+enum SloCommand {
+    /// List every objective and budget: target, current value, window and what is left.
+    Ls,
+    /// Explain one objective or budget in plain words.
+    Explain {
+        /// An id from `st slo ls`, or the start of one.
+        id: String,
+    },
+    /// Chart what is left of one objective or budget over a period, from the daemon's local
+    /// history (a reading a minute, kept seven days).
+    Chart {
+        /// An id from `st slo ls`, or the start of one.
+        id: String,
+        /// The period ending now: a number then m, h or d, such as 90m, 24h or 7d.
+        #[arg(long, default_value = "24h")]
+        over: String,
+        /// Columns of chart; the default fits the terminal.
+        #[arg(long)]
+        width: Option<usize>,
+    },
 }
 
 #[derive(Args)]
@@ -2954,11 +3265,13 @@ enum CheckpointCommand {
 
 #[derive(Subcommand)]
 enum BlobCommand {
-    /// Keep one PNG, JPEG, GIF or WebP image (at most 10 MiB) on this member and print its
-    /// reference. Name it in `conversations send --attach`, or pass the file there directly.
+    /// Keep one image on this member and print its reference. Name it in `conversations send
+    /// --attach`, or pass the file there directly. Without `--media-type` the file is prepared as
+    /// `--attach` prepares it: an SVG or BMP becomes a PNG, and an image over 10 MiB is scaled.
     Put {
         file: PathBuf,
-        /// The image type; by default the file's own bytes decide.
+        /// Upload the bytes exactly, as this type (PNG, JPEG, GIF or WebP); by default the file's own
+        /// bytes decide.
         #[arg(long)]
         media_type: Option<String>,
         /// Who uploads; defaults to ST_AGENT, then the configured person.
@@ -2980,6 +3293,29 @@ enum BlobCommand {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
         #[arg(long = "as")]
         actor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+#[command(after_help = "A seat keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
+st restarts a seat for an account or model change, a declaration change, or an operator's or agent's \
+request; every session that starts after a restart is given the handoff and the live state of the \
+seat's work as its first message. Write what the graph does not hold: what you were in the middle of, \
+the branches and pull requests you own, what you wait on, what to do next, and anything running \
+that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.")]
+enum HandoffCommand {
+    /// Replace this seat's handoff with FILE, or with standard input when FILE is `-` or absent.
+    Write {
+        file: Option<PathBuf>,
+        /// The seat whose handoff to write; only that seat may write it.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
+    },
+    /// Print a seat's latest handoff (this seat's by default).
+    Show {
+        /// The seat to read, such as agent/garden/worker.
+        #[arg(value_parser = parse_actor_subject)]
+        agent: Option<String>,
     },
 }
 
@@ -3108,6 +3444,11 @@ enum AgentsCommand {
     },
     /// Print one seat's declared workspace directory on its owning host, even when stopped.
     Workspace { subject: String },
+    /// Write or read the handoff a seat leaves for the session that follows it.
+    Handoff {
+        #[command(subcommand)]
+        command: HandoffCommand,
+    },
     /// Declare one new agent seat, start its harness, and wait until it is ready.
     ///
     /// The declaration is the one a person writes by hand, with the harness defaults of the
@@ -3372,7 +3713,8 @@ struct ApplyArgs {
     /// Print the resolved preview without publishing or running exec gates (unless --check).
     #[arg(long, visible_alias = "preview")]
     dry_run: bool,
-    /// Run exec gates even during a dry run, as `st missions check` does.
+    /// Check mission and step exec gates during a dry run, as `st missions check` does.
+    /// Loop until scripts are not checked; they run after each round.
     #[arg(long, visible_alias = "check-gates", conflicts_with = "no_gate_check")]
     check: bool,
     /// The workspace a run would use, for exec gate checks.
@@ -3381,7 +3723,7 @@ struct ApplyArgs {
     /// Mission input values for exec gate checks.
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
-    /// Publish without checking exec gates for broken commands.
+    /// Publish without checking mission and step exec gates for broken commands.
     #[arg(long)]
     no_gate_check: bool,
     /// Preview against this exact store index (plain files only).
@@ -4518,9 +4860,12 @@ struct MessageSendArgs {
     #[arg(long = "from", alias = "as")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     from: String,
-    /// Attach an image (PNG, JPEG, GIF or WebP, at most 10 MiB, up to 4). It is uploaded to this
-    /// member and fetched by the machine that reads or delivers the message.
-    #[arg(long = "attach", value_name = "FILE")]
+    #[arg(
+        long = "attach",
+        value_name = "FILE",
+        help = st3::attach_image::HELP,
+        long_help = st3::attach_image::LONG_HELP
+    )]
     attach: Vec<PathBuf>,
     #[command(flatten)]
     wake: MessageWakeArgs,
@@ -4602,8 +4947,12 @@ struct MessageReplyArgs {
     #[arg(long = "from", alias = "as")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     from: String,
-    /// Attach an image (PNG, JPEG, GIF or WebP, at most 10 MiB, up to 4).
-    #[arg(long = "attach", value_name = "FILE")]
+    #[arg(
+        long = "attach",
+        value_name = "FILE",
+        help = st3::attach_image::HELP,
+        long_help = st3::attach_image::LONG_HELP
+    )]
     attach: Vec<PathBuf>,
     #[command(flatten)]
     wake: MessageWakeArgs,
@@ -5547,6 +5896,7 @@ async fn run(cli: Cli) -> Result<()> {
             directive_note::run(&endpoint, config.person.as_deref(), args, cli.json).await
         }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
+        Command::Slo(args) => run_slo(&immediate, args, cli.json).await,
         Command::Launch { command } => {
             run_launch(&client, &endpoint, command, &config.planner, cli.json).await
         }
@@ -5583,6 +5933,35 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Clients => run_clients(&endpoint, cli.json).await,
         Command::Work { command } => run_work(&client, &endpoint, command, cli.json).await,
+        Command::Changes(arguments) => {
+            let client = if matches!(
+                &arguments.command,
+                change_cli::ChangesCommand::List { .. } | change_cli::ChangesCommand::Show { .. }
+            ) {
+                client
+            } else {
+                let actor = match std::env::var("ST_AGENT")
+                    .ok()
+                    .filter(|agent| agent.starts_with("agent/"))
+                {
+                    Some(agent) => agent,
+                    None => parse_person_subject(config.person.as_deref().context(
+                        "Git change sync needs a configured person or the current agent seat",
+                    )?)
+                    .map_err(anyhow::Error::msg)?,
+                };
+                let Endpoint::Unix(socket) = &endpoint else {
+                    anyhow::bail!("Git change control commands require the trusted local Unix socket");
+                };
+                let named = if actor.starts_with("agent/") {
+                    Client::unix_agent(socket, actor)?
+                } else {
+                    Client::unix_as(socket, actor)?
+                };
+                named.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+            };
+            change_cli::run(&client, arguments, cli.json).await
+        }
         Command::Gh { command } => run_gh(&client, command, cli.json).await,
         Command::Lanes { command } => {
             run_lanes(&client, config.person.as_deref(), command, cli.json).await
@@ -6431,6 +6810,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         st3::otel::Unit::Daemon,
         Some(if state_identity.is_ok() { &config.node } else { &configured_node }),
     );
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    st3::malloc_trim::spawn()?;
     let startup_telemetry =
         st3::startup_telemetry::StartupTelemetry::begin_at(identity_started, startup_started);
     startup_telemetry.node_identity(
@@ -6584,6 +6965,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.state_dir.clone(),
         st3::sekrets::client::socket_path(),
     );
+    store.install_git_change_registry(Arc::new(st3::changes::service::Registry::new(&config.changes, &config.node)?))?;
     let state = AppState {
         owning_person: config.person.clone(),
         store: store.clone(),
@@ -6611,7 +6993,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_access_mode(config.active_access_mode()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_access_mode(config.active_access_mode()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup.phase("start-services");
@@ -6626,12 +7008,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(convert_envelope_payloads(store.clone()));
     tokio::spawn(migrate_event_payloads(store.clone()));
     tokio::spawn(catch_up_coordination_counts(store.clone()));
+    tokio::spawn(copy_stop_deferral_history(store.clone()));
     spawn_response_expiry(store.clone());
     tokio::spawn(trim_local_observations(
         store.clone(),
         config.observations.clone(),
     ));
     tokio::spawn(catch_up_account_limits(store.clone(), notify.clone()));
+    {
+        let store = store.clone();
+        tokio::spawn(st3::slo_history::run(
+            st3::slo_history::dir(&config.state_dir),
+            move || st3::api::slo_rows(&store),
+        ));
+    }
     tokio::spawn(st3::recorder_receipts::run(
         store.clone(),
         st3::recorder::receipt_path(&config.state_dir),
@@ -6702,6 +7092,28 @@ async fn run_up(args: UpArgs) -> Result<()> {
     st3::api::start_published_lists(&state);
     startup.phase("bind-listeners");
     startup_telemetry.phase("bind-listeners");
+    // Fabric forwards each terminal tunnel to this socket once `st terminals expose-fabric` names
+    // it. Without it the daemon still serves everything else, and attaches use the gateway.
+    let terminal_socket = st3::config::terminal_socket(&config.state_dir);
+    let _terminal_socket = match std::path::absolute(&state.pty_root)
+        .map_err(anyhow::Error::from)
+        .and_then(|pty_root| st3::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root))
+    {
+        Ok(service) => {
+            eprintln!(
+                "st: Fabric terminal socket listening at {}",
+                terminal_socket.display()
+            );
+            Some(service)
+        }
+        Err(error) => {
+            eprintln!(
+                "st: Fabric terminal socket {} is unavailable, so attaches from other hosts use the client gateway: {error:#}",
+                terminal_socket.display()
+            );
+            None
+        }
+    };
     let bound = std::sync::atomic::AtomicUsize::new(0);
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
@@ -7432,7 +7844,7 @@ async fn publish_mission_intent(
     print_value(&value, json_output)
 }
 
-/// Run each exec gate once before a publication and refuse it when one is broken.
+/// Check mission and step exec gates before publication, listing loop until scripts as unchecked.
 async fn check_before_publish(
     client: &Client,
     intent: &IntentInput,
@@ -7519,8 +7931,8 @@ async fn check_mission_file(
     Ok(())
 }
 
-/// Run each exec gate of `intent` once on the daemon and wait for every answer, handing each one
-/// to `report` as it arrives. `None` when the daemon predates gate checks.
+/// Check the exec gates of `intent` on the daemon and wait for every answer, including deferred
+/// loop until scripts, handing each one to `report` as it arrives. `None` for older daemons.
 async fn run_gate_check(
     client: &Client,
     intent: &IntentInput,
@@ -8872,34 +9284,45 @@ fn configured_fabric() -> Result<(Option<st3::fleet::transport::Fabric>, Option<
     Ok((fabric, config.fleet_id))
 }
 
-/// `st terminals expose-fabric`: have this machine's Fabric serve the fleet's PTY sessions.
+/// `st terminals expose-fabric`: have this machine's Fabric forward the fleet's PTY protocol to
+/// the st daemon's terminal socket, or with `--exec` run `st terminals serve-fabric` for each
+/// tunnel.
 async fn expose_fabric(config: &Config, args: PtyExposeFabricArgs) -> Result<()> {
     let (fabric, fleet_id) = configured_fabric()?;
     let fleet_id =
         fleet_id.context("this machine is in no fleet, so no peer can attach its terminals")?;
     let fabric = fabric.context("`fabric` is not on PATH")?;
-    let st = match args.st {
-        Some(st) => std::path::absolute(st)?,
-        None => std::env::current_exe().context("find this st executable")?,
-    };
-    let pty_root = std::path::absolute(
-        config
-            .pty_root
-            .clone()
-            .unwrap_or_else(|| config.state_dir.join("pty")),
-    )?;
     let protocol = st3::terminal_fabric::protocol(&fleet_id);
-    let (st, pty_root) = (st.display().to_string(), pty_root.display().to_string());
-    let argv = [
-        st.as_str(),
-        "terminals",
-        "serve-fabric",
-        "--stdio",
-        "--pty-root",
-        pty_root.as_str(),
-    ];
-    fabric.expose_exec(&protocol, &argv).await?;
-    println!("Fabric serves the PTY sessions under {pty_root} as `{protocol}`, with `{st}`.");
+    if args.exec {
+        let st = match args.st {
+            Some(st) => std::path::absolute(st)?,
+            None => std::env::current_exe().context("find this st executable")?,
+        };
+        let pty_root = std::path::absolute(
+            config
+                .pty_root
+                .clone()
+                .unwrap_or_else(|| config.state_dir.join("pty")),
+        )?;
+        let (st, pty_root) = (st.display().to_string(), pty_root.display().to_string());
+        let argv = [
+            st.as_str(),
+            "terminals",
+            "serve-fabric",
+            "--stdio",
+            "--pty-root",
+            pty_root.as_str(),
+        ];
+        fabric.expose_exec(&protocol, &argv).await?;
+        println!("Fabric serves the PTY sessions under {pty_root} as `{protocol}`, with `{st}`.");
+    } else {
+        let socket = std::path::absolute(st3::config::terminal_socket(&config.state_dir))?;
+        fabric.expose_socket(&protocol, &socket).await?;
+        println!(
+            "Fabric forwards `{protocol}` to the st daemon's terminal socket {}.",
+            socket.display()
+        );
+    }
     println!(
         "Add `{protocol}` to the `allow` list of each peer in this machine's Fabric peers.toml, then run `fabric reload-peers`."
     );
@@ -10482,6 +10905,210 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
     }
     print!("{}", render_usage_report(&report, args.hours, args.by));
     Ok(())
+}
+
+async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()> {
+    let report: Value = client.get("/v1/slo").await?;
+    let rows = report["rows"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    match args.command.unwrap_or(SloCommand::Ls) {
+        SloCommand::Ls => {
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", render_slo_list(rows));
+            }
+        }
+        SloCommand::Chart { id, over, width } => {
+            let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
+            let period_ms = parse_slo_period(&over)?;
+            let until = current_unix_ms()? as u64;
+            let since = until.saturating_sub(period_ms);
+            let columns = width.unwrap_or_else(|| terminal_columns().unwrap_or(80).saturating_sub(7)).clamp(10, 400);
+            let history: Value = client
+                .get(&format!(
+                    "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
+                    row["id"].as_str().unwrap_or_default().replace('/', "%2F"),
+                ))
+                .await?;
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&history)?);
+            } else {
+                print!("{}", render_slo_chart(row, &history, &over));
+            }
+        }
+        SloCommand::Explain { id } => {
+            let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(row)?);
+            } else {
+                print!("{}", render_slo_explanation(row));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_slo_list(rows: &[Value]) -> String {
+    use std::fmt::Write as _;
+
+    let text = |row: &Value, field: &str| row[field].as_str().unwrap_or_default().to_owned();
+    let left = |row: &Value| {
+        row["remaining_percent"]
+            .as_f64()
+            .map_or_else(|| "-".to_owned(), |left| format!("{left:.0}%"))
+    };
+    let mut output = String::new();
+    for (kind, heading) in [
+        ("objective", "OBJECTIVES  a target with windows and an error budget"),
+        ("budget", "BUDGETS  an allowance that resets"),
+    ] {
+        let group = rows.iter().filter(|row| row["kind"] == kind).collect::<Vec<_>>();
+        if group.is_empty() {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        let _ = writeln!(output, "{heading} · {}", group.len());
+        let table = group
+            .iter()
+            .map(|row| {
+                [
+                    text(row, "status"),
+                    text(row, "id"),
+                    text(row, "target"),
+                    text(row, "current"),
+                    text(row, "window"),
+                    left(row),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT"].map(str::to_owned);
+        let widths: Vec<usize> = (0..6)
+            .map(|column| {
+                std::iter::once(&header)
+                    .chain(&table)
+                    .map(|line| line[column].chars().count())
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        for line in std::iter::once(&header).chain(&table) {
+            let cells = line
+                .iter()
+                .zip(&widths)
+                .map(|(cell, width)| format!("{cell:<width$}"))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let _ = writeln!(output, "{}", cells.trim_end());
+        }
+    }
+    if output.is_empty() {
+        output.push_str("No objectives or budgets.\n");
+    }
+    output
+}
+
+/// A period such as `90m`, `24h` or `7d`, in milliseconds. The daemon keeps seven days.
+fn parse_slo_period(text: &str) -> Result<u64> {
+    let split = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: u64 = number
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--over takes a number then m, h or d, such as 24h; got {text:?}"))?;
+    let unit_ms = match unit {
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => anyhow::bail!("--over takes a number then m, h or d, such as 24h; got {text:?}"),
+    };
+    let period = number.saturating_mul(unit_ms);
+    anyhow::ensure!(period >= 60_000, "--over must be at least a minute");
+    anyhow::ensure!(period <= 7 * 86_400_000, "the history keeps seven days; --over can be at most 7d");
+    Ok(period)
+}
+
+/// What is left of one row over a period: columns of equal time, each as tall as its lowest
+/// reading, from 0% at the bottom to 100% at the top. A column with no reading is a dot.
+fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
+    use std::fmt::Write as _;
+
+    const HEIGHT: usize = 8;
+    const LEVELS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let steps = history["steps"]
+        .as_array()
+        .map(|steps| steps.iter().map(Value::as_f64).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let id = row["id"].as_str().unwrap_or_default();
+    let what = if row["kind"] == "budget" { "allowance left" } else { "error budget left" };
+    let mut output = String::new();
+    let _ = writeln!(output, "{id} · {what} · last {over}");
+    let readings = history["samples"].as_u64().unwrap_or(0);
+    if readings == 0 {
+        let _ = writeln!(
+            output,
+            "No readings in this period. The daemon records one a minute from when it starts, and keeps seven days."
+        );
+        return output;
+    }
+    let known = steps.iter().flatten().copied().collect::<Vec<_>>();
+    for line in 0..HEIGHT {
+        let label = match line {
+            0 => "100%",
+            l if l == HEIGHT / 2 => " 50%",
+            l if l == HEIGHT - 1 => "  0%",
+            _ => "    ",
+        };
+        let cells = steps
+            .iter()
+            .map(|step| match step {
+                Some(percent) => {
+                    let eighths = (percent.clamp(0.0, 100.0) / 100.0 * (HEIGHT * 8) as f64).round() as usize;
+                    // Even a spent budget shows its reading as the lowest sliver, never a gap.
+                    let eighths = if line == HEIGHT - 1 { eighths.max(1) } else { eighths };
+                    LEVELS[eighths.saturating_sub((HEIGHT - 1 - line) * 8).min(8)]
+                }
+                None if line == HEIGHT - 1 => '·',
+                None => ' ',
+            })
+            .collect::<String>();
+        let _ = writeln!(output, "{label} │{cells}");
+    }
+    let _ = writeln!(output, "     └{}", "─".repeat(steps.len()));
+    let time = |value: &Value| {
+        value
+            .as_u64()
+            .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+            .map_or_else(|| "?".to_owned(), |at| at.format("%m-%d %H:%M").to_string())
+    };
+    let (from, to) = (time(&history["since_ms"]), time(&history["until_ms"]));
+    let gap = (steps.len() + 1).saturating_sub(from.chars().count() + to.chars().count() + 4).max(1);
+    let _ = writeln!(output, "      {from} UTC{}{to}", " ".repeat(gap));
+    let low = known.iter().copied().fold(f64::INFINITY, f64::min);
+    let now = steps.iter().rev().flatten().next().copied().unwrap_or_default();
+    let _ = writeln!(output, "LOW {low:.0}% · LATEST {now:.0}% · {readings} readings · a column is its lowest reading");
+    output
+}
+
+fn render_slo_explanation(row: &Value) -> String {
+    use std::fmt::Write as _;
+
+    let text = |field: &str| row[field].as_str().unwrap_or_default();
+    let mut output = String::new();
+    let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
+    let _ = writeln!(output, "TARGET   {}", text("target"));
+    let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
+    if let Some(left) = row["remaining_percent"].as_f64() {
+        let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
+    }
+    if let Some(at) = row["resets_at_unix_ms"]
+        .as_u64()
+        .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+    {
+        let _ = writeln!(output, "RESETS   {}", at.format("%Y-%m-%d %H:%M UTC"));
+    }
+    let _ = writeln!(output, "\n{}", text("explain"));
+    output
 }
 
 /// A limits row's account: the declared name beside the provider's label, or the label alone.
@@ -12945,17 +13572,33 @@ async fn upload_attachment(
         "{} is not a regular file",
         file.display()
     );
+    // A named type uploads the bytes exactly; otherwise an SVG, a BMP or an image over the limit
+    // is converted or scaled first, so read up to what scaling can still bring under it.
+    let largest = if media_type.is_some() {
+        st3::blobs::MAX_BLOB_BYTES as u64
+    } else {
+        st3::attach_image::MAX_INPUT_BYTES
+    };
     anyhow::ensure!(
-        metadata.len() <= st3::blobs::MAX_BLOB_BYTES as u64,
+        metadata.len() <= largest,
         "{} is larger than the {} MiB an attachment may be",
         file.display(),
-        st3::blobs::MAX_BLOB_BYTES / (1024 * 1024)
+        largest / (1024 * 1024)
     );
     let bytes = fs::read(file).with_context(|| format!("read attachment {}", file.display()))?;
-    let media_type = media_type
-        .map(str::to_owned)
-        .or_else(|| st3::blobs::sniff_media_type(&bytes).map(str::to_owned))
-        .with_context(|| format!("{} is not a PNG, JPEG, GIF or WebP image", file.display()))?;
+    let file_name = file
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let (bytes, media_type, name) = match media_type {
+        Some(media_type) => (bytes, media_type.to_owned(), file_name),
+        None => {
+            let prepared = st3::attach_image::prepare(file, bytes)?;
+            if let Some(note) = &prepared.note {
+                eprintln!("{note}");
+            }
+            (prepared.bytes, prepared.media_type.to_owned(), prepared.name)
+        }
+    };
     let uploaded = generated_client(endpoint, Some(actor))?
         .upload_blob(bytes, &media_type)
         .await
@@ -12964,9 +13607,7 @@ async fn upload_attachment(
     Ok(st3::model::AttachmentInput {
         blob: uploaded.blob,
         media_type: uploaded.media_type,
-        name: file
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned()),
+        name,
     })
 }
 
@@ -13162,6 +13803,100 @@ fn render_document(bytes: &[u8], width: usize) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+async fn run_handoff(
+    client: &Client,
+    configured_person: Option<&str>,
+    command: HandoffCommand,
+    json_output: bool,
+) -> Result<()> {
+    use std::io::Read as _;
+    let document = |agent: &str| {
+        st3::handoff::document_name(agent)
+            .with_context(|| format!("`{agent}` is not an agent; only a seat has a handoff"))
+    };
+    match command {
+        HandoffCommand::Write { file, actor } => {
+            let agent = configured_actor(actor.as_deref(), configured_person, "handoff write")?;
+            let name = document(&agent)?;
+            let bytes = match file.as_deref() {
+                Some(path) if path != Path::new("-") => {
+                    fs::read(path).with_context(|| format!("read handoff {}", path.display()))?
+                }
+                _ => {
+                    let mut bytes = Vec::new();
+                    std::io::stdin().read_to_end(&mut bytes)?;
+                    bytes
+                }
+            };
+            anyhow::ensure!(
+                !String::from_utf8_lossy(&bytes).trim().is_empty(),
+                "a handoff cannot be empty"
+            );
+            let hash = hex::encode(Sha256::digest(&bytes));
+            let versions: DocumentListResponse = client
+                .get(&format!("/v1/documents?name={}", urlencoding::encode(&name)))
+                .await?;
+            let selected = versions.items.iter().find(|version| version.latest);
+            let response: DocumentVersion = client
+                .post(
+                    "/v1/documents",
+                    &DocumentPutRequest {
+                        idempotency_key: format!("document:{name}:{hash}"),
+                        name,
+                        bytes,
+                        expected_document: selected.map(|version| version.binding_claim_id.clone()),
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&response, true)
+            } else {
+                println!("{}@{}", response.name, response.hash);
+                Ok(())
+            }
+        }
+        HandoffCommand::Show { agent } => {
+            let agent = configured_actor(agent.as_deref(), configured_person, "handoff show")?;
+            let name = document(&agent)?;
+            let versions: DocumentListResponse = client
+                .get(&format!(
+                    "/v1/documents?name={}&limit=1",
+                    urlencoding::encode(&name)
+                ))
+                .await?;
+            let Some(selected) = versions.items.into_iter().find(|version| version.latest) else {
+                anyhow::bail!("{agent} has written no handoff");
+            };
+            let response: Value = client
+                .get(&format!(
+                    "/v1/documents/content?reference={}",
+                    urlencoding::encode(&format!("{}@{}", selected.name, selected.hash))
+                ))
+                .await?;
+            let bytes = serde_json::from_value::<Vec<u8>>(
+                response
+                    .get("bytes")
+                    .cloned()
+                    .context("document response lacks bytes")?,
+            )?;
+            if json_output {
+                print_value(
+                    &json!({
+                        "agent": agent,
+                        "document": selected,
+                        "text": String::from_utf8_lossy(&bytes),
+                    }),
+                    true,
+                )
+            } else {
+                use std::io::Write as _;
+                cli_output::stdout().write_all(&bytes)?;
+                Ok(())
+            }
+        }
+    }
 }
 
 async fn run_doc(client: &Client, command: DocCommand, json_output: bool) -> Result<()> {
@@ -13624,6 +14359,9 @@ async fn run_agents(
                 println!("{}\t{}", repository.path, repository.agent_ids.join(", "));
             }
             Ok(())
+        }
+        AgentsCommand::Handoff { command } => {
+            run_handoff(&cli_client(endpoint), configured_person, command, json_output).await
         }
         AgentsCommand::Workspace { subject } => {
             let response = generated_client(endpoint, None)?
@@ -14647,6 +15385,7 @@ async fn run_agent_inspection(
         }
         AgentsCommand::New(_)
         | AgentsCommand::Workspace { .. }
+        | AgentsCommand::Handoff { .. }
         | AgentsCommand::Repos { .. }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         | AgentsCommand::Apply(_)
@@ -17353,6 +18092,8 @@ async fn wait_for_agent_incarnation_from(
                     outage_logged = true;
                 }
                 deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                tokio::time::sleep(st3::client::driver_retry_pause()).await;
+                continue;
             }
             Err(error) => return Err(error),
         }
@@ -23450,7 +24191,7 @@ where
             Ok(value) => return Ok(value),
             Err(error) => tolerate_driver_api_outage(subject, error, &mut last_warning)?,
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(st3::client::driver_retry_pause()).await;
     }
 }
 
@@ -25859,6 +26600,29 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
     }
 }
 
+/// One paced scan of the claims that predate the stop-deferral trigger, read on a reader
+/// connection. Until it commits, retained-stop reads look those claims up directly.
+async fn copy_stop_deferral_history(store: Arc<Store>) {
+    loop {
+        let scan_store = store.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            st3::profile::task("task stop-deferral-history", || {
+                scan_store.backfill_stop_deferral_history(|| {
+                    std::thread::sleep(Duration::from_millis(10))
+                })
+            })
+        })
+        .await;
+        match result {
+            Ok(Ok(_)) => return,
+            error => {
+                eprintln!("st3: stop-deferral history copy failed: {error:?}");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
 /// Commit notifications drive exact-delta maintenance after the API has bound.
 /// Each bootstrap page yields the FIFO writer; malformed source stops the job and
 /// leaves a durable incomplete state for doctor, rather than retrying a local defect.
@@ -26427,7 +27191,15 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
 /// it runs on a blocking thread, and a copy left by a crash is removed first.
 async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointContext) {
     const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10 * 60);
-    let _ = std::fs::remove_dir_all(&context.scratch);
+    // A proof copy is only ever useful to the proof that made it. A staged capture is kept: it
+    // resumes where it stopped while its store-index cut still holds (#2492).
+    if let Ok(entries) = std::fs::read_dir(&context.scratch) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("proof-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
     loop {
         let store = store.clone();
         let context = st3::store::CheckpointContext {
@@ -26526,6 +27298,67 @@ mod claude_attachment_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
+        let rows = vec![
+            json!({"id": "person-read", "kind": "objective", "status": "met", "target": "p99 ≤ 100 ms",
+                "current": "p99 80 ms over 200 samples", "window": "1h", "remaining_percent": 50.0,
+                "explain": "Reads a person waits on."}),
+            json!({"id": "ada/claude/weekly", "kind": "budget", "status": "stale", "target": "100% allowance",
+                "current": "40% used", "window": "weekly", "remaining_percent": 60.0,
+                "resets_at_unix_ms": 86_400_000u64, "explain": "An allowance that resets."}),
+            json!({"id": "cpu", "kind": "objective", "status": "no-data", "target": "≤ 2 cores",
+                "current": "not measured", "window": "1h", "remaining_percent": null, "explain": "x"}),
+        ];
+        let list = render_slo_list(&rows);
+        let lines = list.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "OBJECTIVES  a target with windows and an error budget · 2");
+        assert!(lines[1].starts_with("STATUS   ID           TARGET"), "{}", lines[1]);
+        assert!(lines[2].starts_with("met      person-read  p99 ≤ 100 ms"), "{}", lines[2]);
+        assert!(lines[2].ends_with("1h      50%"), "{}", lines[2]);
+        assert!(lines[3].ends_with("1h      -"), "{}", lines[3]);
+        assert_eq!(lines[5], "BUDGETS  an allowance that resets · 1");
+        assert!(lines[7].contains("ada/claude/weekly") && lines[7].ends_with("60%"), "{}", lines[7]);
+        assert_eq!(render_slo_list(&[]), "No objectives or budgets.\n");
+
+        let explained = render_slo_explanation(&rows[1]);
+        assert!(explained.starts_with("ada/claude/weekly  budget · stale\n"));
+        assert!(explained.contains("LEFT     60% of the allowance"));
+        assert!(explained.contains("RESETS   1970-01-02 00:00 UTC"));
+        assert!(explained.ends_with("An allowance that resets.\n"));
+    }
+
+    #[test]
+    fn slo_chart_draws_the_lowest_reading_of_each_column_and_marks_gaps() {
+        let row = json!({"id": "person-read", "kind": "objective"});
+        let history = json!({
+            "since_ms": 0, "until_ms": 86_400_000u64, "samples": 3,
+            "steps": [100.0, 50.0, null, 0.0],
+        });
+        let chart = render_slo_chart(&row, &history, "24h");
+        let lines = chart.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "person-read · error budget left · last 24h");
+        assert_eq!(lines[1], "100% │█   ");
+        assert_eq!(lines[5], " 50% │██  ");
+        assert_eq!(lines[8], "  0% │██·▁");
+        assert_eq!(lines[9], "     └────");
+        assert!(lines[10].starts_with("      01-01 00:00 UTC "), "{}", lines[10]);
+        assert!(lines[10].ends_with("01-02 00:00"), "{}", lines[10]);
+        assert_eq!(lines[11], "LOW 0% · LATEST 0% · 3 readings · a column is its lowest reading");
+        let empty = render_slo_chart(&row, &json!({"samples": 0, "steps": [null]}), "1h");
+        assert!(empty.contains("No readings in this period"));
+    }
+
+    #[test]
+    fn slo_period_takes_minutes_hours_and_days_up_to_the_history() {
+        assert_eq!(parse_slo_period("90m").unwrap(), 5_400_000);
+        assert_eq!(parse_slo_period("24h").unwrap(), 86_400_000);
+        assert_eq!(parse_slo_period("7d").unwrap(), 7 * 86_400_000);
+        for bad in ["8d", "0m", "24", "h", "1w", "", "-1h"] {
+            assert!(parse_slo_period(bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
@@ -30477,6 +31310,49 @@ mod tests {
         );
     }
 
+    /// A deploy re-executes every driver while the daemon restarts, and each one then waits for its
+    /// incarnation. Through the outage a driver retries after its spread pause, not the 50 ms poll
+    /// that would bring every driver to the new daemon in the instant it starts to listen.
+    #[tokio::test]
+    async fn an_incarnation_wait_retries_an_outage_after_a_spread_pause() {
+        use axum::{Json, Router, routing::get};
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("st3.sock");
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = requests.clone();
+        let app = Router::new().route(
+            "/v1/status",
+            get(move || {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Json(json!({"api_version": "st3.v1", "value": {
+                        "store_index": 1,
+                        "pending_actions": [],
+                        "subjects": [{
+                            "subject": "agent/example/cedar",
+                            "actual": {"fields": {"incarnation_id": "cedar-1"}},
+                            "conflicts": [],
+                            "claims": [],
+                            "reachability": "reachable",
+                        }],
+                    }}))
+                }
+            }),
+        );
+        let client = Client::new(Endpoint::Unix(socket.clone()));
+        let started = std::time::Instant::now();
+        let wait = tokio::spawn(async move {
+            wait_for_agent_incarnation_from(&client, "agent/example/cedar", false).await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let server = tokio::spawn(async move { serve_unix(&socket, app).await.unwrap() });
+
+        assert_eq!(wait.await.unwrap().unwrap(), "cedar-1");
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        server.abort();
+    }
+
     #[test]
     fn native_driver_binds_the_terminal_tag_only_under_its_declared_invocation() {
         let binding = st3::model::TerminalBinding {
@@ -33520,5 +34396,53 @@ mod terminal_ui_tests {
         let help = cli_help::root_help(false);
         assert!(help.contains("Open the terminal interface"));
         assert!(help.contains("Run st in a terminal"));
+    }
+}
+
+#[cfg(test)]
+mod instance_uninstall_tests {
+    use super::*;
+
+    fn names(paths: Vec<PathBuf>) -> Vec<String> {
+        let mut names = paths
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn an_instance_uninstall_removes_everything_but_the_work_folder() {
+        let root = tempfile::tempdir().unwrap();
+        for entry in ["bin", "state", "work/agents/site"] {
+            fs::create_dir_all(root.path().join(entry)).unwrap();
+        }
+        fs::write(root.path().join("work/agents/site/notes.txt"), "mine").unwrap();
+        let work = root.path().join("work");
+        assert_eq!(names(instance_removals(root.path(), &work)), ["bin", "state"]);
+    }
+
+    #[test]
+    fn an_entry_that_contains_a_nested_work_folder_is_kept_and_the_others_go() {
+        let root = tempfile::tempdir().unwrap();
+        for entry in ["bin", "data/projects", "state"] {
+            fs::create_dir_all(root.path().join(entry)).unwrap();
+        }
+        let work = root.path().join("data/projects");
+        assert_eq!(names(instance_removals(root.path(), &work)), ["bin", "state"]);
+    }
+
+    #[test]
+    fn a_work_folder_outside_the_instance_removes_every_entry() {
+        let root = tempfile::tempdir().unwrap();
+        for entry in ["bin", "state", "work"] {
+            fs::create_dir_all(root.path().join(entry)).unwrap();
+        }
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert_eq!(
+            names(instance_removals(root.path(), elsewhere.path())),
+            ["bin", "state", "work"]
+        );
     }
 }
