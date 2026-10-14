@@ -313,6 +313,12 @@ jobs:
           CHECK: linux-gate
           REPOSITORY: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || (github.event_name == 'merge_group' && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 scripts/ci-evidence-gate
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
@@ -353,6 +359,12 @@ jobs:
           CHECK: typescript-client
           REPOSITORY: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || (github.event_name == 'merge_group' && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 scripts/ci-evidence-gate
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
@@ -393,6 +405,12 @@ jobs:
           CHECK: isolation-vm
           REPOSITORY: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || (github.event_name == 'merge_group' && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 scripts/ci-evidence-gate
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
@@ -433,6 +451,12 @@ jobs:
           CHECK: genie-freshness
           REPOSITORY: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || (github.event_name == 'merge_group' && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 scripts/ci-evidence-gate
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
@@ -473,6 +497,12 @@ jobs:
           CHECK: mail-redelivery-canaries
           REPOSITORY: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || (github.event_name == 'merge_group' && github.repository) || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: python3 scripts/ci-evidence-gate
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'

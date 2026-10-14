@@ -60,7 +60,7 @@ class Fixture:
         return self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'HEAD^{tree}')
 
     def note(self, commit, tree, key, signer, check='unit', command=('make', 'test'), exit_code=0,
-             runner='nix', tier='full', seconds=0, sign=True, naive=False, inputs=None, omit_inputs=False, mutate=None):
+             runner='nix', tier='full', seconds=0, sign=True, naive=False, inputs=None, omit_inputs=False, mutate=None, parent=None):
         statement = {
             '_type': 'https://in-toto.io/Statement/v1',
             'subject': [{'name': commit, 'digest': {'gitTree': tree}}],
@@ -84,7 +84,7 @@ class Fixture:
         args = ['-c', 'gpg.format=ssh', '-c', f'user.signingKey={key}', 'commit-tree']
         if sign:
             args.append('-S')
-        record = self.git(*args, notes, '-p', commit, '-m', 'st gate observation v1')
+        record = self.git(*args, notes, '-p', parent or commit, '-m', 'st gate observation v1')
         self.git('update-ref', f'refs/notes/evidence/{record}', record)
         return record
 
@@ -319,6 +319,14 @@ class Verifier(unittest.TestCase):
         self.f.git('update-ref', f'refs/notes/evidence/{crowded}', crowded)  # more than one blob
         self.assertEqual(self.f.verify(self.tree)[1]['record'], record)
 
+    def test_a_note_whose_parent_is_not_its_subject_commit_is_not_evidence(self):
+        other_commit, _ = self.f.commit('two')
+        # The signed statement names self.commit as its subject but the note hangs off another commit.
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', parent=other_commit)
+        self.assertEqual(self.reason(self.tree), 'no_record')
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=1)
+        self.assertEqual(self.f.verify(self.tree)[0], 0)
+
     def test_two_conflicting_records_resolve_toward_failure(self):
         moment = 5
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=moment)
@@ -420,6 +428,173 @@ class Verifier(unittest.TestCase):
         # The requirement is one second; the test allows slack because CI hosts are busy.
         self.assertLess(found, 3.0)
         self.assertLess(missing, 3.0)
+
+
+OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
+
+
+def policy_text(**overrides):
+    doc = {'version': 1, 'checks': {'unit': {
+        'trust_levels': ['machine'],
+        'kinds': {
+            'observed': {'command': ['github-actions', '{repository}', '.github/workflows/fleet.yml', '{check}'],
+                         'runner_prefix': 'github:{repository}/'},
+            'wrapper': {'command': ['make', 'test'], 'required_inputs': ['flake_lock_sha256', 'toolchain_sha256'],
+                        'bind_inputs': {'flake_lock_sha256': 'file.txt'}},
+        }}}}
+    doc['checks']['unit'].update(overrides)
+    return json.dumps(doc)
+
+
+class SkipPolicy(unittest.TestCase):
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'machine/ci1')
+        self.commit, self.tree = self.f.commit('one')
+        self.good = hashlib.sha256(b'one').hexdigest()
+
+    def rules(self, text=None, check='unit'):
+        return evidence_verify.policy_rules(text or policy_text(), check, 'org/repo')
+
+    def reason(self, **kwargs):
+        code, result = self.f.verify(self.tree, rules=kwargs.pop('rules', None) or self.rules(), **kwargs)
+        self.assertEqual(code, 1, result)
+        return result['reason']
+
+    def observed(self, **kwargs):
+        defaults = dict(runner=OBSERVED, command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        defaults.update(kwargs)
+        return self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', **defaults)
+
+    def wrapper(self, **kwargs):
+        inputs = {'flake_lock_sha256': self.good, 'toolchain_sha256': 'f' * 64}
+        defaults = dict(runner='wrapper', inputs=inputs)
+        defaults.update(kwargs)
+        return self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', **defaults)
+
+    def test_the_policy_is_validated_strictly_so_a_typo_cannot_weaken_it(self):
+        def broken(edit):
+            doc = json.loads(policy_text())
+            edit(doc)
+            with self.assertRaises(evidence_verify.Failure) as caught:
+                evidence_verify.policy_rules(json.dumps(doc), 'unit', 'org/repo')
+            return caught.exception.reason
+        entry = lambda d: d['checks']['unit']
+        self.assertEqual(broken(lambda d: d.update(surprise=1)), 'error')
+        self.assertEqual(broken(lambda d: d.update(version=2)), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(max_age=60)), 'error')  # misspelt max_age_s
+        self.assertEqual(broken(lambda d: entry(d).pop('trust_levels')), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(trust_levels=[])), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(kinds={})), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(max_age_s=True)), 'error')
+        self.assertEqual(broken(lambda d: entry(d).update(max_age_s=0)), 'error')
+        self.assertEqual(broken(lambda d: entry(d)['kinds'].update(hand={'command': ['x']})), 'error')
+        self.assertEqual(broken(lambda d: entry(d)['kinds']['wrapper'].update(typo=1)), 'error')
+        self.assertEqual(broken(lambda d: entry(d)['kinds']['wrapper'].pop('command')), 'error')
+        self.assertEqual(broken(lambda d: entry(d)['kinds']['wrapper'].update(command=[])), 'error')
+        self.assertEqual(broken(lambda d: entry(d)['kinds']['wrapper'].update(required_inputs=[1])), 'error')
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.policy_rules('not json', 'unit', 'org/repo')
+        self.assertEqual(caught.exception.reason, 'error')
+        with self.assertRaises(evidence_verify.Failure) as caught:
+            evidence_verify.policy_rules(policy_text(), 'other-check', 'org/repo')
+        self.assertEqual(caught.exception.reason, 'no_policy')
+
+    def test_placeholders_are_filled_and_binding_an_input_also_requires_it(self):
+        rules = self.rules()
+        self.assertEqual(rules['kinds']['observed']['command'],
+                         ['github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'])
+        self.assertEqual(rules['kinds']['observed']['runner_prefix'], 'github:org/repo/')
+        self.assertEqual(rules['kinds']['wrapper']['required_inputs'], ['flake_lock_sha256', 'toolchain_sha256'])
+        doc = json.loads(policy_text())
+        doc['checks']['unit']['kinds']['wrapper'] = {'command': ['x'], 'bind_inputs': {'a': 'file.txt'}}
+        self.assertEqual(self.rules(json.dumps(doc))['kinds']['wrapper']['required_inputs'], ['a'])
+
+    def test_each_kind_is_judged_by_its_own_rule(self):
+        self.observed()
+        self.assertEqual(self.f.verify(self.tree, rules=self.rules())[1]['kind'], 'observed')
+        self.assertTrue(self.f.verify(self.tree, rules=self.rules())[1]['policy'])
+        self.wrapper(seconds=1)
+        self.assertEqual(self.f.verify(self.tree, rules=self.rules())[1]['kind'], 'wrapper')
+        # The wrapper rule does not accept the observer's command, nor the other way round.
+        self.wrapper(seconds=2, command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        self.assertEqual(self.reason(), 'wrong_command')
+        self.observed(seconds=3, command=('make', 'test'))
+        self.assertEqual(self.reason(), 'wrong_command')
+
+    def test_a_kind_the_policy_does_not_list_is_unsupported(self):
+        doc = json.loads(policy_text())
+        del doc['checks']['unit']['kinds']['wrapper']
+        self.wrapper()
+        self.assertEqual(self.reason(rules=self.rules(json.dumps(doc))), 'unsupported_kind')
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='sekrets', seconds=1)
+        self.assertEqual(self.reason(rules=self.rules(json.dumps(doc))), 'unsupported_kind')
+
+    def test_a_note_missing_a_required_input_does_not_satisfy_and_adding_an_input_tightens(self):
+        self.wrapper(inputs={'flake_lock_sha256': self.good})
+        self.assertEqual(self.reason(), 'missing_input')
+        self.wrapper(seconds=1)
+        self.assertEqual(self.f.verify(self.tree, rules=self.rules())[0], 0)
+        doc = json.loads(policy_text())
+        doc['checks']['unit']['kinds']['wrapper']['required_inputs'] = ['flake_lock_sha256', 'toolchain_sha256',
+                                                                       'wrapper_sha256']
+        self.assertEqual(self.reason(rules=self.rules(json.dumps(doc))), 'missing_input')
+        self.wrapper(seconds=2, inputs={'flake_lock_sha256': self.good, 'toolchain_sha256': 'f' * 64,
+                                         'wrapper_sha256': 'e' * 64})
+        self.assertEqual(self.f.verify(self.tree, rules=self.rules(json.dumps(doc)))[0], 0)
+
+    def test_a_bound_input_must_equal_the_file_in_the_verified_tree(self):
+        self.wrapper(inputs={'flake_lock_sha256': hashlib.sha256(b'other').hexdigest(), 'toolchain_sha256': 'f' * 64})
+        self.assertEqual(self.reason(), 'wrong_input')
+        self.wrapper(seconds=1)
+        self.assertEqual(self.f.verify(self.tree, rules=self.rules())[0], 0)
+
+    def test_trust_levels_runner_prefix_and_age_come_from_the_policy(self):
+        self.observed(runner='github:org/other/actions/runs/7/attempts/1/jobs/9')
+        self.assertEqual(self.reason(), 'wrong_runner')
+        self.observed(seconds=1)
+        self.assertEqual(self.reason(rules=self.rules(policy_text(trust_levels=['fleet']))), 'untrusted_level')
+        # No max_age_s means no age limit: a note a year old is fine; a note from the future never is.
+        old_commit, old_tree = self.f.commit('old')
+        self.f.note(old_commit, old_tree, self.ci, 'machine/ci1', runner=OBSERVED,
+                    command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'),
+                    seconds=-365 * 24 * 3600)
+        self.assertEqual(self.f.verify(old_tree, rules=self.rules())[0], 0)
+        code, result = self.f.verify(old_tree, rules=self.rules(policy_text(max_age_s=3600)))
+        self.assertEqual((code, result['reason']), (1, 'too_old'))
+        future_commit, future_tree = self.f.commit('future')
+        self.f.note(future_commit, future_tree, self.ci, 'machine/ci1', runner=OBSERVED,
+                    command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'), seconds=3 * 3600)
+        code, result = self.f.verify(future_tree, rules=self.rules())
+        self.assertEqual((code, result['reason']), (1, 'future_dated'))
+
+    def test_the_cli_reads_the_policy_from_the_accepted_base(self):
+        self.observed()
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        (self.f.repo / '.st/evidence-skip-policy.json').write_text(policy_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'policy')
+        base = self.f.git('rev-parse', 'HEAD')
+        args = ('--tree', self.tree, '--check', 'unit', '--keys-from', base, '--policy-from', base,
+                '--repository', 'org/repo')
+        code, out, _ = self.f.cli(*args)
+        self.assertEqual((code, json.loads(out)['policy']), (0, True), out)
+        code, out, _ = self.f.cli(*args[:-1], 'org/other')  # another repository's placeholders
+        self.assertEqual((code, json.loads(out)['reason']), (1, 'wrong_runner'))
+        code, out, _ = self.f.cli('--tree', self.tree, '--check', 'absent', '--keys-from', base,
+                                  '--policy-from', base, '--repository', 'org/repo')
+        self.assertEqual((code, json.loads(out)['reason']), (1, 'no_policy'))
+        code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--keys-from', base,
+                                  '--policy-from', self.commit, '--repository', 'org/repo')  # no policy file there
+        self.assertEqual((code, json.loads(out)['reason']), (1, 'no_policy'))
+        for mixed in (['--max-age', '60'], ['--kinds', 'nix'], ['--command', '["x"]'], ['--trust-levels', 'machine']):
+            self.assertEqual(self.f.cli(*args, *mixed)[0], 2, mixed)
+        self.assertEqual(self.f.cli('--tree', self.tree, '--check', 'unit', '--keys-from', base,
+                                    '--policy-from', base)[0], 2)  # needs --repository
+        self.assertEqual(self.f.cli('--tree', self.tree, '--check', 'unit', '--keys-from', base,
+                                    '--repository', 'org/repo')[0], 2)  # only with --policy-from
 
 
 class Sha256Repository(unittest.TestCase):

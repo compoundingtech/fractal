@@ -409,40 +409,83 @@ be ordered against each other.
 This slice verifies SSH-signed `tests` records. The raw Nix output-path signature
 check for the typed `nix` observation is a later slice, agreed with the Nix producer.
 
-## Shadow evidence gate
+## Evidence gate and the skip policy
 
 Five non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
-`typescript-client`, `isolation-vm`, `genie-freshness`, `mail-redelivery-canaries`), ask
-whether a trusted note already exists for the run's tree. **They never skip a check and
-never fail**: nothing `needs` them, and every problem becomes the outcome `unavailable`.
-Skipping is a separate decision, taken only after a day of clean numbers and only for a
-tree with a verified full-trust note.
+`typescript-client`, `isolation-vm`, `genie-freshness`, `mail-redelivery-canaries`), decide whether
+a trusted note already covers the run's tree. Nothing `needs` them, they hold `contents: read`
+only, write nothing and dispatch nothing, and every problem becomes `decision=run`. **The gate
+decides; it does not yet skip anything.** Wiring a skip into the jobs it would skip is a separate
+change, so this one cannot make any check run less.
 
-`scripts/ci-evidence-gate` fetches the accepted base (the pull request base or the merge
-group base) and the `refs/notes/evidence/*` refs, takes the verifier from that base commit
-(never from the change under test), and runs it with `--kinds observed` and `--command`
-naming the repository, workflow and job. Keys come from `.st/evidence-keys` at the base; if
-the base has none yet, an empty list is used, so nothing signed is trusted but an unsigned
-degraded note can still be counted. Fork pull requests run the same job; since it only
-reports, a fork editing it gains nothing.
+### The skip policy
 
-**Limit that must be lifted before anything may skip:** the verifier comes from the base,
-but `scripts/ci-evidence-gate` itself, and the workflow that calls it, run from the checked-out
-change, so a change can alter the very script that decides the outcome. That is harmless
-here because the outcome is only reported. A job that skips a check has to run the gate script
-from the accepted base as well as the verifier (for example a required workflow, or a
+`.st/evidence-skip-policy.json` is read from the accepted base (the pull request base or the merge
+group base), never from the change under test, and says per check what a note must be:
+
+```json
+{"version": 1, "checks": {"linux-gate": {
+  "trust_levels": ["fleet"],
+  "max_age_s": null,
+  "kinds": {
+    "observed": {"command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
+                 "runner_prefix": "github:{repository}/"},
+    "wrapper": {"command": ["..."], "required_inputs": ["flake_lock_sha256", "toolchain_sha256"],
+                "bind_inputs": {"flake_lock_sha256": "flake.lock"}}}}}}
+```
+
+Each kind has its own rule: the exact `command` the record must have run, an optional
+`runner_prefix`, the `required_inputs` it must carry (every one a nonempty string) and
+`bind_inputs`, which must equal the sha256 of a file as it is in the tree being verified.
+**Adding an input to `required_inputs` tightens future notes without breaking anything**: a
+note that lacks it simply stops satisfying the check (`missing_input`). `max_age_s` is `null`
+by default (no age limit; a signature is meant to grow to cover more over time); a note claiming
+a future time is always refused. The file is validated strictly: an unknown key is an error, so
+a typo cannot silently weaken a rule, and a check with no entry never skips. The tree, the check
+name, the command, the exit code and the output hash are part of every record and are always
+checked. Only `observed` (the central observer's record) is listed today; `wrapper` is added per
+check when its real command is known. Write `scripts/evidence-verify --policy-from BASE
+--repository OWNER/NAME` to apply it by hand.
+
+### When the gate says skip
+
+`scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,
+about this run's tree. It prints `decision=skip` only if **all** of these hold, and otherwise
+`decision=run`:
+
+- the head repository is positively this repository (a fork or an unknown head never skips);
+- the event is `pull_request` or `merge_group` (a manual run or a push never skips);
+- the verifier exits 0 reporting `satisfied`, that it applied the policy, tier `full`, and a
+  kind, trust level, signer and record id of the expected shape;
+- the verifier's tree equals this run's own tree and its check equals this job's check;
+- the record's time is not in the future.
+
+A verifier that is missing, slow (30 seconds), crashes, prints invalid UTF-8 or contradicts the run
+leaves `decision=run`. The jobs run the gate script from the checked-out change; a job that actually
+skips must run it from the accepted base as well (for example a required workflow, or a
 `pull_request_target` job that never checks out the change's code).
 
-Each job ends with exactly one of these steps running, which is how a collector reads the
-outcome from the jobs API without extra calls:
+### The decision line
 
-| Step name | Meaning |
-| --- | --- |
-| `evidence satisfied by existing note` | a trusted full-tier note from the central observer exists |
-| `evidence existing note is degraded` | only an unsigned degraded note exists (the signer was unreachable) |
-| `evidence no note` | nothing usable for this tree and check |
-| `evidence note rejected` | a note exists but was refused (signature, signer, failed check, other command) |
-| `evidence verifier unavailable` | the verifier or the notes could not be obtained |
+Every run prints exactly one line, to the job log and `$GITHUB_STEP_SUMMARY`, with no spaces inside
+values and `-` for none:
 
-A note made for a pull request is reused by the merge queue's run only when the tree is
-identical, that is, when main has not moved in between; expect small shares at first.
+```
+evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
+reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=…
+tree=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
+```
+
+(one line; wrapped here). Each job also ends with exactly one of these steps running, which is how a
+collector reads the outcome from the jobs API: `evidence satisfied by existing note`,
+`evidence existing note is degraded`, `evidence no note`, `evidence note rejected`,
+`evidence verifier unavailable`. A note made for a pull request is reused by the merge queue's run
+only when the tree is identical, that is, when main has not moved in between.
+
+### Loops
+
+No workflow has an unfiltered `push` trigger (the `push` triggers are limited to `branches: [main]` or
+tags), so pushing `refs/notes/evidence/*` starts nothing; a test fails if one is added. The gate holds
+`contents: read`, so it cannot push, dispatch or comment and cannot cause a rerun. The record's
+`attempts` count (trusted records for the tree and check) is what a producer reads to refuse a
+second production.
