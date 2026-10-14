@@ -3757,7 +3757,7 @@ pub struct PairingComplete {
 #[serde(untagged)]
 pub enum PairedSession {
     Person(PersonPairedSession),
-    Assistant(AssistantPairedSession),
+    Assistant(Box<AssistantPairedSession>),
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
