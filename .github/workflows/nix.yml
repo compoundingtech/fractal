@@ -16,6 +16,7 @@ on:
         required: false
         default: ""
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - .github/workflows/nix.yml*
       - .github/messaging-compat-baseline.json
@@ -33,7 +34,7 @@ concurrency:
 
 jobs:
   nix-release-x86_64-linux:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, Linux, X64, smalltalk-nix-persistent]
     timeout-minutes: 360
     steps:

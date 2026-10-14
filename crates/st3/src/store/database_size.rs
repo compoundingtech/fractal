@@ -253,12 +253,12 @@ mod tests {
         let on_disk = |suffix: &str| {
             std::fs::metadata(directory.path().join(format!("claims.sqlite3{suffix}"))).map_or(0, |m| m.len())
         };
-        // The measurement precedes storing its sample in meta. That write can grow the WAL.
-        let measured_files = (on_disk(""), on_disk("-wal"));
+        // Saving this sample can append a WAL frame: compare its pre-write measurement.
+        let before = (on_disk(""), on_disk("-wal"));
         let next = store.record_database_size(start + DAY_MS).unwrap();
         assert!(next.physical_growth_bytes_per_day.is_some(), "the earlier sample is a day old");
         assert_eq!(next.physical_bytes, next.main_file_bytes + next.wal_bytes);
-        assert_eq!((next.main_file_bytes, next.wal_bytes), measured_files);
+        assert_eq!((next.main_file_bytes, next.wal_bytes), before);
     }
 
     #[test]

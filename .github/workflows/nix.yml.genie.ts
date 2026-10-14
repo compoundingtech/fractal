@@ -1,8 +1,9 @@
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
 // The dedicated runner retains its Nix store and per-runner GC roots. No Actions cache or FlakeHub service
 // participates in this build. Fork pull requests remain covered by the public Linux gate.
-export default githubWorkflow({
+export default githubWorkflow(readyPRJobs({
   actionlint: {
     ...defaultActionlintConfig,
     selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), 'smalltalk-nix-persistent'],
@@ -26,6 +27,7 @@ export default githubWorkflow({
       }
     },
     "pull_request": {
+      types: readyPullRequestTypes,
       "paths": [".github/workflows/nix.yml*", ".github/messaging-compat-baseline.json", "scripts/ci-nix-release*", "flake.nix", "flake.lock", "nix/**"]
     }
   },
@@ -83,4 +85,4 @@ export default githubWorkflow({
       ]
     }
   }
-})
+}))

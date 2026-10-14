@@ -255,7 +255,7 @@
           inherit cargoDeps;
 
           # The workspace default members include the st3 crates. This package ships only st2;
-          # st3, `st`, stui, and st3-migrate come from the st3 package, so each has one build.
+          # st3, `st`, and st3-migrate come from the st3 package, so each has one build.
           cargoBuildFlags = [
             "-p"
             "st2"
@@ -394,7 +394,7 @@
             substituteInPlace crates/st3/tests/git_evidence.rs \
               --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3'
           '';
-          # Stamp st3, its shared driver library, and stui from this declared flake source.
+          # Stamp st3, its shared driver library, and the terminal UI library from this declared flake source.
           CLI_BUILD_STAMP = buildStamp;
           inherit cargoDeps;
           cargoBuildFlags = [
@@ -402,8 +402,6 @@
             "st3"
             "-p"
             "st3-migrate"
-            "-p"
-            "stui"
           ];
           # `--no-fail-fast` reports every failing test target in one run.
           cargoTestFlags = [
@@ -521,7 +519,7 @@
           nativeBuildInputs = [ pkgs.bashInteractive pkgs.fish pkgs.zsh ];
         } ''
           test "$(readlink ${st3}/bin/st)" = st3
-          test -x ${st3}/bin/stui
+          test ! -e ${st3}/bin/stui
           test -x ${st3}/bin/pty
           expected='${version}+${sourceRev}${pkgs.lib.optionalString (sourceDirty && !(pkgs.lib.hasSuffix "-dirty" sourceRev)) "-dirty"}'
           ${st3}/bin/st3 --version > st3.version
@@ -529,7 +527,7 @@
           test "$(wc -l < st3.version)" -eq 1
           ${st3}/bin/st --version --json > version.json
           test "$(${pkgs.jq}/bin/jq -r .machine_version version.json)" = "$expected"
-          ${st3}/bin/stui --version | grep -F "$expected"
+          ${st3}/bin/st ui --version | grep -F "$expected"
           ${st3}/bin/st3 --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
@@ -551,14 +549,14 @@
           pkgs.runCommand "st3-install-layout-${version}" { } ''
             export HOME=$(mktemp -d)
             test "$(readlink ${st3}/bin/st)" = st3
-            printf '%s\n' pty st st3 st3-migrate stui > expected-package-bin
+            printf '%s\n' pty st st3 st3-migrate > expected-package-bin
             ls ${st3}/bin | sort > actual-package-bin
             cmp expected-package-bin actual-package-bin
 
             mkdir built
-            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate ${st3}/bin/stui built/
+            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate built/
             bash ${self}/scripts/install --from built --bin-dir "$PWD/bin"
-            printf '%s\n' st st3 st3-migrate stui > expected-source-bin
+            printf '%s\n' st st3 st3-migrate > expected-source-bin
             ls bin | sort > actual-source-bin
             cmp expected-source-bin actual-source-bin
             test "$(readlink bin/st)" = st3
@@ -566,7 +564,7 @@
             bin/st3 --help > st3.help
             cmp st.help st3.help
             bin/st3-migrate --help > /dev/null
-            bin/stui --help > /dev/null
+            bin/st ui --help > /dev/null
 
             bash ${self}/scripts/install-test
             touch $out
@@ -809,6 +807,9 @@
       {
         packages.st2 = st2;
         packages.st = st3;
+        # Release runners need a host linker for Cargo build scripts and stamp tests.
+        # The release target still links through the pinned Zig/glibc-baseline wrapper.
+        packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
@@ -1207,6 +1208,9 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.git
+            # Git evidence fixtures sign observations and serve API responses with Python.
+            pkgs.openssh
+            pkgs.python3
             pkgs.sccache
             pkgs.cargo-nextest
             pkgs.pkg-config
@@ -1234,6 +1238,7 @@
           shellHook = ''
             source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              source ${./scripts/ci-cargo-tools-env} || exit $?
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
           '';
