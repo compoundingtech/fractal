@@ -31,7 +31,7 @@ NOTES = 'refs/notes/evidence/'
 STATEMENT_TYPE = 'https://in-toto.io/Statement/v1'
 PREDICATE_TYPE = 'https://smalltalk.dev/evidence/gate/v1'
 KEYS_PATH = '.st/evidence-keys'
-KINDS = ('nix', 'wrapper', 'sekrets')
+KINDS = ('nix', 'wrapper', 'sekrets', 'observed')
 
 
 class Failure(Exception):
@@ -56,6 +56,16 @@ def git(repo, *args, stdin=None, config=()):
     if done.returncode != 0:
         raise Failure('error', f'git {args[0]}: {done.stderr.decode(errors="replace").strip()}')
     return done.stdout
+
+
+def kind_of(runner):
+    """The record kind a runner string names, or None. `github:` is the central observer's
+    record of a finished GitHub job (`st evidence observe-ci`); the others are producers."""
+    if runner in ('nix', 'wrapper', 'sekrets'):
+        return runner
+    if runner.startswith('github:'):
+        return 'observed'
+    return None
 
 
 def parse_time(value):
@@ -165,10 +175,14 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
             statement = load(repo, commit, tree)
             if statement is not None:
                 mine.append((commit, statement))
-        trusted, untrusted = [], []
+        trusted, untrusted, degraded = [], [], []
         for commit, statement in mine:
-            status, principal = signature(repo, commit, keys, revocations.name)
             predicate = statement['predicate']
+            if predicate['tier'] == 'degraded':
+                # Unsigned by design (the signer was unreachable): never evidence, never a signature fault.
+                degraded.append((commit, statement))
+                continue
+            status, principal = signature(repo, commit, keys, revocations.name)
             if status == 'G' and principal and principal == predicate['signer']:
                 trusted.append((commit, statement, principal))
             elif status in ('B', 'N'):
@@ -177,6 +191,10 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
                 untrusted.append(('untrusted_signer', commit))
     with_check = [c for c in trusted if check in c[1]['predicate']['observed']['checks']]
     if not with_check:
+        only_degraded = [c for c in degraded if check in c[1]['predicate']['observed']['checks']]
+        if only_degraded and not untrusted:
+            raise Failure('degraded', f'only unsigned degraded records exist for check {check}',
+                          attempts=len(only_degraded))
         if untrusted and not trusted:
             raise Failure(untrusted[0][0], f'no record for check {check} is signed by a trusted key')
         if trusted:
@@ -194,7 +212,8 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
     attempts = len(with_check)
     if predicate['tier'] != 'full':
         raise Failure('untrusted_tier', f'latest record has tier {predicate["tier"]}, not full', attempts=attempts)
-    if observed['runner'] not in kinds:
+    kind = kind_of(observed['runner'])
+    if kind is None or kind not in kinds:
         raise Failure('unsupported_kind', f'runner {observed["runner"]!r} is not one of {", ".join(kinds)}',
                       attempts=attempts)
     if result['exit_code'] != 0:
@@ -213,7 +232,7 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
                           attempts=attempts)
     return {
         'satisfied': True, 'tree': tree, 'check': check, 'record': commit,
-        'kind': observed['runner'], 'signer': principal, 'trust_level': principal.split('/', 1)[0],
+        'kind': kind, 'signer': principal, 'trust_level': principal.split('/', 1)[0],
         'tier': predicate['tier'], 'observed_at': predicate['observed_at'],
         'command': result['command'], 'inputs': inputs, 'attempts': attempts,
     }
