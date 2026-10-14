@@ -1,9 +1,13 @@
 #!/usr/bin/python3
 """Source-authored controls; run only after fixture source/testing review."""
 import hashlib
+import io
 import importlib.machinery
 import importlib.util
 from pathlib import Path
+import socket
+import sys
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +24,13 @@ def rows():
              "size": len(proof.document_bytes(i)), "latest": True,
              "binding_claim_id": f"claim-{i}", "created_index": i + 1,
              "created_at_unix_ms": 1000, "owner": None} for i in range(50)]
+
+
+def cut():
+    return {"scope": "fixture", "build": proof.BUILD, "fleet_id": "disposable-fleet",
+            "member_key_fingerprints": {"a": "a" * 64, "b": "b" * 64},
+            "claim_count": 50, "input_sha256": "a", "_claim_refs": [("0" * 64, "doc.bound", "a" * 64)],
+            "documents": rows(), "documents_sha256": "b"}
 
 
 class FixtureContract(unittest.TestCase):
@@ -53,8 +64,7 @@ class FixtureContract(unittest.TestCase):
             proof.compare_documents(values)
 
     def test_equal_count_different_binding_or_time_refuses(self):
-        left = {"scope": "fixture", "build": proof.BUILD, "claim_count": 50,
-                "input_sha256": "a", "documents": rows(), "documents_sha256": "b"}
+        left = cut()
         right = dict(left)
         right["documents"] = [dict(row) for row in left["documents"]]
         right["documents"][0]["binding_claim_id"] = "another-claim"
@@ -66,11 +76,164 @@ class FixtureContract(unittest.TestCase):
             proof.compare_cuts(left, right)
 
     def test_inputs_cannot_hide_behind_equal_documents(self):
-        left = {"scope": "fixture", "build": proof.BUILD, "claim_count": 50,
-                "input_sha256": "a", "documents": rows(), "documents_sha256": "b"}
-        right = dict(left, input_sha256="different-admitted-input")
-        with self.assertRaisesRegex(proof.Refused, "member-field-mismatch-input_sha256"):
+        left = cut()
+        right = dict(left, input_sha256="different-admitted-input",
+                     _claim_refs=[("1" * 64, "fleet.member-admitted", "b" * 64)])
+        with self.assertRaisesRegex(proof.CutMismatch, "member-field-mismatch-input_sha256") as caught:
             proof.compare_cuts(left, right)
+        self.assertEqual(caught.exception.differences,
+                         [{"id": "0" * 64, "a_kind": "doc.bound", "b_kind": None},
+                          {"id": "1" * 64, "a_kind": None, "b_kind": "fleet.member-admitted"}])
+        right["_claim_refs"] = [("0" * 64, "doc.bound", "b" * 64)]
+        with self.assertRaises(proof.CutMismatch) as caught:
+            proof.compare_cuts(left, right)
+        self.assertEqual(caught.exception.differences,
+                         [{"id": "0" * 64, "a_kind": "doc.bound", "b_kind": "doc.bound"}])
+        right["_claim_refs"] = [(f"{i:064x}", "doc.bound", "b" * 64) for i in range(30)]
+        with self.assertRaises(proof.CutMismatch) as caught:
+            proof.compare_cuts(left, right)
+        self.assertEqual(len(caught.exception.differences), 20)
+        right["_claim_refs"] = [("stj1-secret", "private_key_secret", "b" * 64)]
+        with self.assertRaises(proof.CutMismatch) as caught:
+            proof.compare_cuts(left, right)
+        self.assertNotIn("stj1-", str(caught.exception.differences))
+        self.assertNotIn("private_key_secret", str(caught.exception.differences))
+
+    def test_environment_allowlist_refuses_injected_credentials(self):
+        environment = dict(proof.ENVIRONMENT, HOSTNAME="fixture-a")
+        proof.check_environment(environment)
+        for key in ("GH_TOKEN", "TS_AUTHKEY", "ST_AGENT", "SSH_AUTH_SOCK"):
+            with self.subTest(key=key), self.assertRaisesRegex(proof.Refused, "unexpected-environment"):
+                proof.check_environment(dict(environment, **{key: "injected"}))
+
+    def test_isolation_interlocks_refuse_default_route_and_external_dns(self):
+        status = "NoNewPrivs:\t1\nCapEff:\t0000000000000000\n"
+        route = "Iface Destination Gateway Flags\neth0 00000000 00000000 0003 0 0 0 00000000 0 0 0\n"
+        checks = proof.isolation_checks(status, route, "", "nameserver 127.0.0.11\n",
+                                        ["lo", "eth0"], lambda *_: (_ for _ in ()).throw(socket.gaierror()))
+        self.assertFalse(checks["no_default_route"])
+        self.assertTrue(checks["external_dns_refused"])
+        checks = proof.isolation_checks(status, route.replace("00000000 00000000", "0000007F 00000000", 1),
+                                        "", "nameserver 127.0.0.11\n", ["lo", "eth0"],
+                                        lambda *_: (_ for _ in ()).throw(socket.gaierror()))
+        self.assertTrue(all(checks.values()))
+        checks = proof.isolation_checks(status, "Iface Destination Gateway Flags\n", "",
+                                        "nameserver 8.8.8.8\n", ["lo", "eth0"], lambda *_: ["resolved"])
+        self.assertFalse(checks["embedded_resolver_only"])
+        self.assertFalse(checks["external_dns_refused"])
+
+    def test_fleet_id_and_exact_member_keys_must_match(self):
+        left = cut()
+        proof.compare_cuts(left, dict(left))
+        with self.assertRaisesRegex(proof.Refused, "member-field-mismatch-fleet_id"):
+            proof.compare_cuts(left, dict(left, fleet_id="other-fleet"))
+        with self.assertRaisesRegex(proof.Refused, "unexpected-fleet-members"):
+            proof.compare_cuts(left, dict(left, member_key_fingerprints={"a": "a" * 64}))
+        with self.assertRaisesRegex(proof.Refused, "member-field-mismatch-member_key_fingerprints"):
+            proof.compare_cuts(left, dict(left, member_key_fingerprints={"a": "a" * 64, "b": "c" * 64}))
+
+    def test_fleet_status_binds_local_key_to_two_current_members_and_anchor(self):
+        members = [{"name": name, "member_key": key, "state": "current", "end": None}
+                   for name, key in (("a", "public-a"), ("b", "public-b"))]
+        fleet = {"node": "a", "member_key": "public-a", "view":
+                 {"anchor": "public-a", "members": members, "legacy_removed": []}}
+        self.assertEqual(proof.fleet_members(fleet)["b"], hashlib.sha256(b"public-b").hexdigest())
+        with self.assertRaisesRegex(proof.Refused, "local-member-key-mismatch"):
+            proof.fleet_members(dict(fleet, member_key="wrong"))
+        with self.assertRaisesRegex(proof.Refused, "uncurrent-fleet-member"):
+            proof.fleet_members(dict(fleet, view=dict(fleet["view"], members=[members[0], dict(members[1], state="ended")])))
+
+    def test_relay_connection_and_total_byte_budgets(self):
+        relay = object.__new__(proof.Relay)
+        relay.lock = threading.Lock()
+        relay.connections = proof.MAX_RELAY_CONNECTIONS - 1
+        relay.total_bytes = proof.MAX_RELAY_BYTES - 1
+        class Fixture:
+            relay_error = None
+            finished = threading.Event()
+        relay.fixture = Fixture()
+        self.assertTrue(relay.verify_request(None, None))
+        self.assertFalse(relay.verify_request(None, None))
+        self.assertEqual(relay.fixture.relay_error, "relay-connection-budget")
+        self.assertTrue(relay.fixture.finished.is_set())
+        relay.charge(1)
+        with self.assertRaisesRegex(proof.Refused, "relay-total-byte-budget"):
+            relay.charge(1)
+
+    def test_unexpected_control_peer_refuses(self):
+        class Fixture:
+            code = "stj1-do-not-disclose"
+            protocol_error = None
+            cut_differences = None
+            finished = threading.Event()
+        fixture = Fixture()
+        handler = object.__new__(proof.sponsor_handler_class(fixture))
+        handler.client_address = ("172.20.0.4", 12345)
+        handler.path = "/invite"
+        handler.wfile = io.BytesIO()
+        responses = []
+        handler.send_response = responses.append
+        handler.send_header = lambda *_: None
+        handler.end_headers = lambda: None
+        with patch.object(proof.socket, "gethostbyname", return_value="172.20.0.3"):
+            handler.dispatch("GET")
+        self.assertEqual(responses, [409])
+        self.assertEqual(fixture.protocol_error, "unexpected-control-peer")
+        self.assertTrue(fixture.finished.is_set())
+        self.assertNotIn(b"stj1-", handler.wfile.getvalue())
+
+    def test_receipt_realistic_fifty_row_width_and_secret_free_error(self):
+        realistic = cut()
+        realistic["documents"] = [dict(row, owner="host/" + "a" * 64,
+                                       binding_claim_id="c" * 64, extra="x" * 300)
+                                  for row in realistic["documents"]]
+        receipt = {"kind": "interim-scratch-proof", "member": "a", "accepted": True,
+                   "cut": proof.public_cut(realistic), "owned_children_reaped": True,
+                   "isolation_checks": {"no_default_route": True}}
+        self.assertLess(len(proof.encoded(receipt)), proof.MAX_RECEIPT)
+        self.assertIn(b'"accepted":true', proof.receipt_output(receipt))
+        self.assertNotIn(b"_claim_refs", proof.receipt_output(receipt))
+
+        class FakeFixture:
+            role = "a"
+            children = []
+            isolation = {}
+            cut_differences = None
+            relay_error = None
+            def __init__(self, role):
+                self.role = role
+            def prepare(self):
+                raise proof.Refused("stj1-secret-code member-private-key-secret")
+            def cleanup(self):
+                pass
+        output = io.StringIO()
+        with (patch.object(proof, "Fixture", FakeFixture),
+              patch.object(sys, "argv", ["proof", "a"]), patch("sys.stdout", output)):
+            self.assertEqual(proof.main(), 1)
+        self.assertNotIn("stj1-", output.getvalue())
+        self.assertNotIn("member-private-key-secret", output.getvalue())
+        self.assertIn('"error":"unrecognized-refusal"', output.getvalue())
+
+    def test_cleanup_failure_forces_nonzero_exit(self):
+        class FakeFixture:
+            role = "b"
+            children = []
+            isolation = {}
+            cut_differences = None
+            relay_error = None
+            def __init__(self, role):
+                self.role = role
+            def prepare(self):
+                pass
+            def cleanup(self):
+                raise OSError("stj1-private")
+        output = io.StringIO()
+        with (patch.object(proof, "Fixture", FakeFixture),
+              patch.object(proof, "run_joiner", lambda fixture: setattr(fixture, "cut", cut())),
+              patch.object(sys, "argv", ["proof", "b"]), patch("sys.stdout", output)):
+            self.assertEqual(proof.main(), 1)
+        self.assertIn('"cleanup_error":"OSError"', output.getvalue())
+        self.assertNotIn("stj1-private", output.getvalue())
 
     def test_host_writable_root_and_missing_noexec_refuse(self):
         text = ("1 0 0:1 / / ro - overlay overlay ro\n"
@@ -92,6 +255,11 @@ class FixtureContract(unittest.TestCase):
                               "unsigned_envelopes", "fenced_envelopes", "unhealthy_projections")})
             if path == "/v1/health":
                 return {"build": {"commit": proof.BUILD}, "store_index": 50}
+            if path == "/v1/internal/fleet/status":
+                return {"fleet_id": "fixture", "node": "a", "member_key": "ka",
+                        "view": {"anchor": "ka", "legacy_removed": [], "members": [
+                            {"name": "a", "member_key": "ka", "state": "current", "end": None},
+                            {"name": "b", "member_key": "kb", "state": "current", "end": None}]}}
             return {"next_cursor": 500, "claims": []}
         with patch.object(proof, "local", local):
             with self.assertRaisesRegex(proof.Refused, "claim-history-over-budget"):

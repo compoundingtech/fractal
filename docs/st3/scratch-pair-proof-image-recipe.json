@@ -30,7 +30,7 @@
     "destination": "/opt/st-scratch/st3-scratch-pair-proof",
     "owner": "root",
     "runtime_mode": "read-only, not copied from caller checkout",
-    "sha256": "83f183d705e22ae9b91bc8e4dbe5991dbf0be13ef423c3d6fff98a4791c2d363"
+    "sha256": "05d5249b32a97a3f8809f9d0ee4ad8fc91fc25d783dd68e51376f0700dd44d1e"
   },
   "members": {
     "a": [
@@ -52,6 +52,7 @@
     "PATH": "/usr/bin:/bin",
     "PYTHONDONTWRITEBYTECODE": "1"
   },
+  "container_set_environment": ["HOSTNAME"],
   "runtime": {
     "uid": 65534,
     "readonly_root": true,
@@ -65,7 +66,9 @@
     "cpu_max": 4,
     "pids_max": 512,
     "whole_run_max_seconds": 1800,
-    "network": "Two fixed aliases a/b on internal network; no published ports, external DNS or egress. Native peer31313/31314 and fixed control31320 only. Not Fabric/Tailscale.",
+    "network": "Two fixed aliases a/b on fresh per-run internal network with exactly two attachments; no published ports, external DNS or egress. Native peer31313/31314 and fixed control31320 only. Not Fabric/Tailscale.",
+    "guest_self_checks": "Before state creation, require NoNewPrivs=1, CapEff=0, no IPv4/IPv6 default route, only embedded 127.0.0.11 nameserver, example.com DNS refusal, and exactly lo/eth0 interfaces. Receipt records booleans. Operations must separately prove network egress refusal out of band.",
+    "relay_caps": "Each member allows at most64 lifetime relay connections and64MiB aggregate bytes across both directions; each direction of each connection remains capped at16MiB.",
     "mounts": "No host mounts beyond operator-qualified private tmpfs/runtime provisions"
   },
   "outputs": {

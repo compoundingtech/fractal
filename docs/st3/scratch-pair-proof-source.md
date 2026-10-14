@@ -26,25 +26,37 @@ Read-only ELF inspection found interpreter `/lib64/ld-linux-x86-64.so.2` and dep
 rootfs must carry its required loader/libraries and Python dependencies. It is not sufficient
 to put that binary in an empty rootfs. No rootfs/image/tarball has been built or loaded.
 
-The fixed image environment sets HOME `/state/home`, XDG_CONFIG_HOME `/state/config`,
-XDG_STATE_HOME `/state/data`, XDG_RUNTIME_DIR `/state/run`. No host `ST_AGENT`, ST3 variables,
-SSH agent, production home/credentials/socket or caller environment is imported. The program
-refuses such an environment; it does not clear or unset the invoking seat's identity.
+The fixed image environment sets exactly HOME `/state/home`, XDG_CONFIG_HOME `/state/config`,
+XDG_STATE_HOME `/state/data`, XDG_RUNTIME_DIR `/state/run`, PATH `/usr/bin:/bin`,
+PYTHONDONTWRITEBYTECODE `1`, and the container-set HOSTNAME. Any extra key or changed value
+refuses, including a token under an otherwise unknown name. No host identity, SSH agent,
+production home/credentials/socket or caller environment is imported.
+Before creating state, the guest checks NoNewPrivs=1, CapEff=0, no IPv4 or IPv6 default route,
+only the embedded 127.0.0.11 resolver, failure to resolve example.com, and exactly lo/eth0
+interfaces. The receipt records each boolean. These are fail-closed honest-guest interlocks,
+not hostile-code isolation or a substitute for Operations' external egress test.
 
 The image's operator-owned program creates a new synthetic guest-local
 `person/scratch-fixture` configuration for the existing invite API. This is test bootstrap,
 not a host person, host agent impersonation, delegated grant or production admission. It is
-an explicit source-review decision, not automatically safe because the environment is empty.
-If Intake does not accept this fixed operator bootstrap path, the fixture must refuse and
-the next source slice must supply a reviewed alternative before a run. No production ancestry
-or person guard is weakened. The existing `st3-fixture` binary is not used.
+an explicit source-review decision. Intake accepted this bootstrap only for the old
+`83f183d7…` script hash; this changed script requires a fresh own-diff review before any run.
+The interim receipt exposes the guest fleet ID and SHA256 fingerprints of the UTF-8 public
+member-key strings for both members. Operations must check that fleet ID against every
+production fleet before trusting a
+result. No production ancestry or person guard is weakened. The existing `st3-fixture`
+binary is not used.
 
 Both members use foreground real release `st3 up` and `replication-worker` processes, fresh
 private stores and native signed fleet invite/join. Ports31313(a)/31314(b) stay inside the
-private two-member network. Fixed loopback relays connect those native endpoints to the
-exact Docker aliases `a`/`b`; no arbitrary destination is accepted. This is local TCP
+private per-run two-member network. Fixed loopback relays connect those native endpoints to the
+exact Docker aliases `a`/`b`; no arbitrary destination is accepted. Each member's relays
+allow at most64 connections and64MiB total transfer in both directions during the run;
+each connection remains limited to16MiB per direction. This is local TCP
 tunneling, NOT Fabric/Tailscale performance or cross-host proof. Operations must test internal
-network egress refusal from inside the member before enabling the fixture. Unsupported
+network egress refusal out of band before enabling the fixture. The `tailscale` transport
+flag is a candidate CLI configuration requirement here; the loopback relay is the actual
+fixture transport and supplies no Tailscale proof. Unsupported
 loopback announcement/join behavior at the candidate pin is a native fixture failure, not
 permission to change the production transport/admission code.
 
@@ -61,7 +73,8 @@ writer ownership. Each member captures health/build/index, one complete claim pa
 below500 claims/8MiB wire bytes, all50 document versions and their content, then the actual
 index/build again. Any physical index change, paginated source, missing binding claim,
 admission residue, wrong build, missing document or byte mismatch refuses. b compares
-matching complete admitted-input hashes and every semantic document field against a; a
+matching complete admitted-input hashes, fleet ID, exactly two current members `a` and `b`
+with the expected public-key fingerprints, and every semantic document field against a; a
 captures again before acknowledging success. Arrival `store_index` and `created_index` are
 kept locally or explicitly excluded from cross-member semantic equality; they are not global
 cut identity. The envelope admission/digest check is diagnostic, not a raw cache oracle.
@@ -73,17 +86,29 @@ an iOS session. If the requested proof needs a broader canonical-input/projectio
 that accessor is missing and the result must be labelled incomplete for that broader goal.
 Do not rename this narrow fixture cut into a full graph certificate.
 
+When admitted-input hashes differ, the receipt contains at most20 differing claim IDs and
+kinds from the two bounded claim pages. The full claim references travel only over the
+private control connection and are omitted from the success receipt. This diagnostic does
+not relax the equality requirement.
+
 Each member emits one final secret-free JSON line below48KiB, fitting Operations'64KiB tail.
 It includes the cut fields, field-comparison result and child-reap status. Invitation tokens,
-native private keys and raw API/child errors never appear in that receipt. Nonzero status,
+native private keys and raw API/child errors never appear in that receipt. Error codes use
+a closed source-authored vocabulary; unknown refusal text is reduced to a fixed code.
+Nonzero status,
 missing receipt or failed operator cleanup stays a failed/incomplete proof.
 
 ## Authored controls and qualification plan
 
-`scripts/st3-scratch-pair-proof-test` contains unrun controls for exact admitted binding identity/body/owner/time, same-count wrong content,
-duplicate documents, differing binding/timestamps, differing admitted input, unsafe mounts
-and overbudget history refusing before document body copies. Python AST parsing and
-diff-check are the only local validations. Tests and fixture have not run.
+`scripts/st3-scratch-pair-proof-test` contains unrun controls for exact admitted binding
+identity/body/owner/time, same-count wrong content, duplicate documents, differing
+binding/timestamps, differing admitted input and bounded claim diagnostics, unsafe mounts,
+and overbudget history refusing before document body copies. New controls cover unexpected
+environment keys, in-guest isolation inputs, injected `stj1-`/key-like exception text staying
+out of stdout, cleanup failure returning nonzero, fleet ID/member key mismatches, relay
+connection/byte budgets, unexpected control peer, and a realistic 50-row receipt width.
+Python AST parsing, JSON syntax and diff-check are the only local validations. Controls and
+fixture have not run.
 
 After exact source/testing disposition, ordinary hosted qualification must retain both
 real member processes, actual binary/image/fixture hashes, INITIAL/TRY/adverse results,

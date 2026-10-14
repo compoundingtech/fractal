@@ -9,6 +9,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import socketserver
 import subprocess
@@ -26,17 +27,60 @@ PREFIX = "doc/scratch-pair-proof/"
 MAX_REPLY = 8 * 1024 * 1024
 MAX_CLAIMS = 500
 MAX_RECEIPT = 48 * 1024
+MAX_CONTROL = 256 * 1024
+MAX_RELAY_CONNECTIONS = 64
+MAX_RELAY_BYTES = 64 * 1024 * 1024
 PORTS = {"a": 31313, "b": 31314}
 CONTROL = 31320
+ENVIRONMENT = {"HOME": "/state/home", "XDG_CONFIG_HOME": "/state/config",
+               "XDG_STATE_HOME": "/state/data", "XDG_RUNTIME_DIR": "/state/run",
+               "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1"}
+ADMISSION_FIELDS = ("pending_records", "unknown_records", "waiting_claims", "invalid_records",
+                    "repaired_records", "unsigned_envelopes", "fenced_envelopes",
+                    "unhealthy_projections")
+COMPARE_FIELDS = ("scope", "build", "fleet_id", "member_key_fingerprints", "input_sha256",
+                  "claim_count", "documents", "documents_sha256")
+REFUSAL_CODES = {
+    "unexpected-environment", "wrong-environment", "missing-hostname", "request-width",
+    "response-width", "child-exited", "condition-not-reached", "root-not-readonly",
+    "private-tmpfs-required", "document-count", "duplicate-document", "missing-document",
+    "document-hash", "document-size", "document-not-current", "binding-id",
+    "binding-not-in-cut", "binding-kind-or-subject", "binding-body-mismatch",
+    "binding-time-mismatch", "binding-physical-index-mismatch", "binding-owner-mismatch",
+    "not-a-fleet", "fleet-status-mismatch", "wrong-running-build", "claim-history-over-budget",
+    "claim-count", "duplicate-claim", "document-page-incomplete", "content-reference",
+    "content-field-mismatch", "cut-changed", "build-changed", "unexpected-fleet-anchor",
+    "unexpected-fleet-members", "unexpected-local-member", "uncurrent-fleet-member",
+    "local-member-key-mismatch", "duplicate-member-key", "missing-fleet-id",
+    "relay-connection-budget", "relay-total-byte-budget", "relay-byte-budget",
+    "relay-copy-not-finished", "cli-failed", "cli-output-width", "wrong-role-or-uid",
+    "guest-isolation-check-failed", "wrong-state-root", "wrong-binary", "state-not-empty",
+    "fixed-member-argv-only", "unexpected-control-peer", "control-response-width",
+    "unknown-control", "control-width", "peer-proof-not-finished", "invite-shape",
+} | {"unready-admission-" + field for field in ADMISSION_FIELDS} | {
+    "member-field-mismatch-" + field for field in COMPARE_FIELDS}
 
 
 class Refused(Exception):
     pass
 
 
+class CutMismatch(Refused):
+    def __init__(self, differences):
+        super().__init__("member-field-mismatch-input_sha256")
+        self.differences = differences
+
+
 def require(condition, code):
     if not condition:
         raise Refused(code)
+
+
+def safe_error(error):
+    if isinstance(error, Refused):
+        code = str(error)
+        return code if code in REFUSAL_CODES or re.fullmatch(r"http-[1-5][0-9]{2}", code) else "unrecognized-refusal"
+    return type(error).__name__
 
 
 def encoded(value):
@@ -45,6 +89,50 @@ def encoded(value):
 
 def digest(value):
     return hashlib.sha256(encoded(value)).hexdigest()
+
+
+def check_environment(environment):
+    require(set(environment) == set(ENVIRONMENT) | {"HOSTNAME"}, "unexpected-environment")
+    require(all(environment[key] == value for key, value in ENVIRONMENT.items()), "wrong-environment")
+    require(bool(environment["HOSTNAME"]), "missing-hostname")
+
+
+def isolation_checks(status, ipv4_routes, ipv6_routes, resolver, interfaces, resolve):
+    """Return all honest-guest interlocks so failures are visible in the final receipt."""
+    fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
+    nameservers = [line.split()[1] for line in resolver.splitlines()
+                   if line.strip().startswith("nameserver ") and len(line.split()) == 2]
+    resolver_lines = [line.split() for line in resolver.splitlines()
+                      if line.strip() and not line.lstrip().startswith("#")]
+    try:
+        resolve("example.com", None)
+        external_dns_refused = False
+    except socket.gaierror:
+        external_dns_refused = True
+    route_lines = ipv4_routes.splitlines()
+    routes = [line.split() for line in route_lines[1:]]
+    ipv6 = [line.split() for line in ipv6_routes.splitlines()]
+    routes_well_formed = (bool(route_lines) and route_lines[0].split()[:2] == ["Iface", "Destination"]
+                          and all(len(row) >= 11 for row in routes) and all(len(row) >= 10 for row in ipv6))
+    return {
+        "no_new_privileges": fields.get("NoNewPrivs", "").strip() == "1",
+        "no_effective_capabilities": fields.get("CapEff", "").strip() == "0000000000000000",
+        "no_default_route": (routes_well_formed
+                             and not any(row[1] == "00000000" for row in routes)
+                             and not any(row and row[0] == "0" * 32 and row[1] == "00" for row in ipv6)),
+        "embedded_resolver_only": (nameservers == ["127.0.0.11"] and
+                                   all(row[0] in {"nameserver", "options"} for row in resolver_lines)),
+        "external_dns_refused": external_dns_refused,
+        "expected_interfaces": set(interfaces) == {"lo", "eth0"},
+    }
+
+
+def guest_isolation():
+    return isolation_checks(Path("/proc/self/status").read_text(),
+                            Path("/proc/net/route").read_text(),
+                            Path("/proc/net/ipv6_route").read_text(),
+                            Path("/etc/resolv.conf").read_text(),
+                            os.listdir("/sys/class/net"), socket.getaddrinfo)
 
 
 class UnixHTTP(http.client.HTTPConnection):
@@ -146,8 +234,10 @@ def capture_cut():
     """
     status = local("GET", "/v1/replication/status")
     require(status["configured"] is True and status["fleet_id"], "not-a-fleet")
-    for field in ("pending_records", "unknown_records", "waiting_claims", "invalid_records", "repaired_records", "unsigned_envelopes",
-                  "fenced_envelopes", "unhealthy_projections"):
+    fleet = local("GET", "/v1/internal/fleet/status")
+    require(fleet["fleet_id"] == status["fleet_id"], "fleet-status-mismatch")
+    members = fleet_members(fleet)
+    for field in ADMISSION_FIELDS:
         require(status[field] == 0, "unready-admission-" + field)
     before = local("GET", "/v1/health")
     require(before["build"]["commit"] == BUILD, "wrong-running-build")
@@ -177,47 +267,131 @@ def capture_cut():
         "scope": "exhaustive-fixture-documents-and-admitted-claims-v1",
         "not_global_source_or_projection_oracle": True,
         "build": BUILD,
+        "fleet_id": status["fleet_id"],
+        "member_key_fingerprints": members,
         "physical_store_index": after["store_index"],
         "claim_count": len(claims),
         "input_sha256": digest(logical_claims),
+        "_claim_refs": sorted((claim["id"], claim["kind"],
+                               digest({key: value for key, value in claim.items()
+                                       if key != "store_index"})) for claim in claims),
         "documents": semantic,
         "documents_sha256": digest(semantic),
     }
 
 
+def fleet_members(fleet):
+    view = fleet["view"]
+    members = view["members"]
+    require(not view["legacy_removed"], "unexpected-fleet-anchor")
+    require(len(members) == 2 and {member["name"] for member in members} == set(PORTS),
+            "unexpected-fleet-members")
+    require(fleet["node"] in PORTS, "unexpected-local-member")
+    require(all(member["state"] == "current" and member["end"] is None and
+                isinstance(member["member_key"], str) and member["member_key"] for member in members),
+            "uncurrent-fleet-member")
+    own = next(member for member in members if member["name"] == fleet["node"])
+    require(own["member_key"] == fleet["member_key"], "local-member-key-mismatch")
+    require(len({member["member_key"] for member in members}) == 2, "duplicate-member-key")
+    require(view["anchor"] == next(member["member_key"] for member in members
+                                   if member["name"] == "a"), "unexpected-fleet-anchor")
+    return {member["name"]: hashlib.sha256(member["member_key"].encode()).hexdigest()
+            for member in members}
+
+
+def claim_differences(left, right):
+    left_refs = {claim_id: (kind, claim_hash) for claim_id, kind, claim_hash in left["_claim_refs"]}
+    right_refs = {claim_id: (kind, claim_hash) for claim_id, kind, claim_hash in right["_claim_refs"]}
+    ids = sorted(set(left_refs) | set(right_refs))
+    def safe_kind(kind):
+        return kind if isinstance(kind, str) and re.fullmatch(r"[a-z][a-z0-9.-]{0,63}", kind) else None
+    differences = [{"id": claim_id if re.fullmatch(r"[0-9a-f]{64}", claim_id) else "invalid-claim-id",
+                    "a_kind": safe_kind(left_refs[claim_id][0]) if claim_id in left_refs else None,
+                    "b_kind": safe_kind(right_refs[claim_id][0]) if claim_id in right_refs else None}
+                   for claim_id in ids if left_refs.get(claim_id) != right_refs.get(claim_id)]
+    return differences[:20]
+
+
 def compare_cuts(left, right):
-    for key in ("scope", "build", "claim_count", "input_sha256", "documents", "documents_sha256"):
+    for cut in (left, right):
+        require(isinstance(cut["fleet_id"], str) and cut["fleet_id"], "missing-fleet-id")
+        require(set(cut["member_key_fingerprints"]) == set(PORTS)
+                and len(set(cut["member_key_fingerprints"].values())) == 2,
+                "unexpected-fleet-members")
+    for key in COMPARE_FIELDS:
+        if key == "input_sha256" and left[key] != right[key]:
+            raise CutMismatch(claim_differences(left, right))
         require(left[key] == right[key], "member-field-mismatch-" + key)
+
+
+def public_cut(cut):
+    return {key: value for key, value in cut.items() if key != "_claim_refs"}
 
 
 class Relay(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
     daemon_threads = True
 
+    def __init__(self, address, handler, destination, fixture):
+        super().__init__(address, handler)
+        self.destination = destination
+        self.fixture = fixture
+        self.lock = threading.Lock()
+        self.connections = 0
+        self.total_bytes = 0
+
+    def reserve_connection(self):
+        with self.lock:
+            self.connections += 1
+            require(self.connections <= MAX_RELAY_CONNECTIONS, "relay-connection-budget")
+
+    def verify_request(self, request, client_address):
+        try:
+            self.reserve_connection()
+            return True
+        except Refused as error:
+            self.fixture.relay_error = safe_error(error)
+            self.fixture.finished.set()
+            return False
+
+    def charge(self, size):
+        with self.lock:
+            self.total_bytes += size
+            require(self.total_bytes <= MAX_RELAY_BYTES, "relay-total-byte-budget")
+
 
 class RelayHandler(socketserver.BaseRequestHandler):
     def handle(self):
         # Fixed loopback tunneling for a local-TCP fixture, NOT Fabric/Tailscale.
-        with socket.create_connection(self.server.destination, timeout=10) as other:
-            def copy(source, target):
-                transferred = 0
-                try:
-                    while True:
-                        data = source.recv(65536)
-                        if not data:
-                            break
-                        transferred += len(data)
-                        require(transferred <= 16 * 1024 * 1024, "relay-byte-budget")
-                        target.sendall(data)
-                finally:
+        try:
+            with socket.create_connection(self.server.destination, timeout=10) as other:
+                def copy(source, target):
+                    transferred = 0
                     try:
-                        target.shutdown(socket.SHUT_WR)
-                    except OSError:
-                        pass
-            worker = threading.Thread(target=copy, args=(self.request, other), daemon=True)
-            worker.start()
-            copy(other, self.request)
-            worker.join(timeout=15)
+                        while True:
+                            data = source.recv(65536)
+                            if not data:
+                                break
+                            transferred += len(data)
+                            require(transferred <= 16 * 1024 * 1024, "relay-byte-budget")
+                            self.server.charge(len(data))
+                            target.sendall(data)
+                    except Refused as error:
+                        self.server.fixture.relay_error = safe_error(error)
+                        self.server.fixture.finished.set()
+                    finally:
+                        try:
+                            target.shutdown(socket.SHUT_WR)
+                        except OSError:
+                            pass
+                worker = threading.Thread(target=copy, args=(self.request, other), daemon=True)
+                worker.start()
+                copy(other, self.request)
+                worker.join(timeout=15)
+                require(not worker.is_alive(), "relay-copy-not-finished")
+        except Refused as error:
+            self.server.fixture.relay_error = safe_error(error)
+            self.server.fixture.finished.set()
 
 
 class Fixture:
@@ -230,6 +404,11 @@ class Fixture:
         self.code = None
         self.cut = None
         self.protocol_error = None
+        self.relay_error = None
+        self.cut_differences = None
+        self.isolation = {key: False for key in ("no_new_privileges", "no_effective_capabilities",
+                                                 "no_default_route", "embedded_resolver_only",
+                                                 "external_dns_refused", "expected_interfaces")}
         self.finished = threading.Event()
 
     def cli(self, *arguments):
@@ -252,13 +431,10 @@ class Fixture:
 
     def prepare(self):
         require(self.role in PORTS and os.geteuid() == 65534, "wrong-role-or-uid")
-        require(not any(key == "ST_AGENT" or key.startswith("ST3_") for key in os.environ), "host-seat-environment")
-        require(os.environ.get("HOME") == "/state/home", "wrong-home")
-        require(os.environ.get("XDG_CONFIG_HOME") == "/state/config", "wrong-config-home")
-        require(os.environ.get("XDG_STATE_HOME") == "/state/data", "wrong-state-home")
-        require(os.environ.get("XDG_RUNTIME_DIR") == "/state/run", "wrong-runtime-home")
-        require(not os.environ.get("SSH_AUTH_SOCK"), "host-credential-agent")
+        check_environment(os.environ)
         check_mounts(Path("/proc/self/mountinfo").read_text())
+        self.isolation = guest_isolation()
+        require(all(self.isolation.values()), "guest-isolation-check-failed")
         require(ROOT.is_dir() and not ROOT.is_symlink() and ROOT.stat().st_uid == 65534,
                 "wrong-state-root")
         require(hashlib.sha256(BINARY.read_bytes()).hexdigest() == BINARY_SHA, "wrong-binary")
@@ -272,8 +448,8 @@ class Fixture:
             f'peer_listen="0.0.0.0:{PORTS[self.role]}"\n'
             'peer_listen_allow_plain_http=true\n')
         other = "b" if self.role == "a" else "a"
-        relay = Relay(("127.0.0.1", PORTS[other]), RelayHandler)
-        relay.destination = (other, PORTS[other])
+        relay = Relay(("127.0.0.1", PORTS[other]), RelayHandler,
+                      (other, PORTS[other]), self)
         self.servers.append(relay)
         threading.Thread(target=relay.serve_forever, daemon=True).start()
 
@@ -283,19 +459,42 @@ class Fixture:
         self.child("replication-worker")
 
     def cleanup(self):
+        first_error = None
         for server in self.servers:
-            server.shutdown()
-            server.server_close()
-        for child in reversed(self.children):
-            if child.poll() is None:
-                child.terminate()
             try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=10)
+                server.shutdown()
+                server.server_close()
+            except Exception as error:
+                first_error = first_error or error
+        for child in reversed(self.children):
+            try:
+                if child.poll() is None:
+                    child.terminate()
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=10)
+            except Exception as error:
+                first_error = first_error or error
         for file in self.files:
-            file.close()
+            try:
+                file.close()
+            except Exception as error:
+                first_error = first_error or error
+        if first_error is not None:
+            raise first_error
+
+
+def receipt_output(receipt):
+    output = encoded(receipt)
+    if len(output) > MAX_RECEIPT:
+        receipt = {"kind": "interim-scratch-proof", "member": receipt["member"],
+                   "accepted": False, "error": "receipt-width",
+                   "owned_children_reaped": receipt["owned_children_reaped"],
+                   "isolation_checks": receipt["isolation_checks"]}
+        output = encoded(receipt)
+    return output
 
 
 def main():
@@ -318,14 +517,17 @@ def main():
             # Force sealing before the later guarded cut capture; no proof from digests alone.
             local("GET", "/v1/replication/status")
             run_sponsor(fixture)
-            receipt["cut"] = fixture.cut
+            receipt["cut"] = public_cut(fixture.cut)
         else:
             run_joiner(fixture)
-            receipt["cut"] = fixture.cut
+            receipt["cut"] = public_cut(fixture.cut)
+        require(fixture.relay_error is None, fixture.relay_error)
         receipt["accepted"] = True
     except Exception as error:
         # Never serialize arbitrary API, child or join-code error text.
-        receipt["error"] = str(error) if isinstance(error, Refused) else type(error).__name__
+        receipt["error"] = safe_error(error)
+        if isinstance(error, CutMismatch):
+            receipt["differing_claims"] = error.differences
     finally:
         try:
             fixture.cleanup()
@@ -333,30 +535,41 @@ def main():
             receipt["accepted"] = False
             receipt["cleanup_error"] = type(error).__name__
         receipt["owned_children_reaped"] = all(child.poll() is not None for child in fixture.children)
-    output = encoded(receipt)
-    require(len(output) <= MAX_RECEIPT, "receipt-width")
+        receipt["isolation_checks"] = fixture.isolation
+        if fixture.cut_differences is not None:
+            receipt["differing_claims"] = fixture.cut_differences
+        if fixture.relay_error is not None:
+            receipt["accepted"] = False
+            receipt["error"] = fixture.relay_error
+    output = receipt_output(receipt)
     print(output.decode(), flush=True)
-    return 0 if receipt["accepted"] and receipt["owned_children_reaped"] else 1
+    return 0 if json.loads(output)["accepted"] and receipt["owned_children_reaped"] else 1
 
 
-def run_sponsor(fixture):
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+def check_control_peer(address, expected):
+    require(address == expected, "unexpected-control-peer")
+
+
+def sponsor_handler_class(fixture):
+    from http.server import BaseHTTPRequestHandler
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *arguments):
             pass
 
         def dispatch(self, method):
             try:
-                require(self.client_address[0] == socket.gethostbyname("b"), "unexpected-control-peer")
+                check_control_peer(self.client_address[0], socket.gethostbyname("b"))
                 if method == "GET":
                     answer = self.get()
                 else:
                     answer = self.post()
                 data = encoded(answer)
-                require(len(data) <= MAX_RECEIPT, "control-response-width")
+                require(len(data) <= MAX_CONTROL, "control-response-width")
                 self.send_response(200)
             except Exception as error:
-                fixture.protocol_error = str(error) if isinstance(error, Refused) else type(error).__name__
+                fixture.protocol_error = safe_error(error)
+                if isinstance(error, CutMismatch):
+                    fixture.cut_differences = error.differences
                 fixture.finished.set()
                 data = encoded({"refused": fixture.protocol_error})
                 self.send_response(409)
@@ -379,7 +592,7 @@ def run_sponsor(fixture):
         def post(self):
             require(self.path == "/done", "unknown-control")
             size = int(self.headers.get("Content-Length", "0"))
-            require(0 < size <= MAX_RECEIPT, "control-width")
+            require(0 < size <= MAX_CONTROL, "control-width")
             remote = json.loads(self.rfile.read(size))
             compare_cuts(fixture.cut, capture_cut())
             compare_cuts(fixture.cut, remote)
@@ -391,11 +604,17 @@ def run_sponsor(fixture):
 
         def do_POST(self):
             self.dispatch("POST")
-    server = HTTPServer(("0.0.0.0", CONTROL), Handler)
+    return Handler
+
+
+def run_sponsor(fixture):
+    from http.server import HTTPServer
+    server = HTTPServer(("0.0.0.0", CONTROL), sponsor_handler_class(fixture))
     fixture.servers.append(server)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     require(fixture.finished.wait(600), "peer-proof-not-finished")
     require(fixture.protocol_error is None, fixture.protocol_error)
+    require(fixture.relay_error is None, fixture.relay_error)
 
 
 def run_joiner(fixture):
@@ -408,8 +627,9 @@ def run_joiner(fixture):
     code = invite["code"]
     require(isinstance(code, str) and len(code) <= 8192 and code.startswith("stj1-"), "invite-shape")
     path = ROOT / "invite.code"
-    path.write_text(code)
-    path.chmod(0o600)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        output.write(code)
     fixture.cli("fleet", "join", "--name", "b", "--no-service", "--no-wait",
                 "--code-file", str(path), "--port", str(PORTS["b"]),
                 "--transports", "tailscale", "--advertise-loopback")
