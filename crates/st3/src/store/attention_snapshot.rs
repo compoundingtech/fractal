@@ -1802,6 +1802,16 @@ fn native_prompt_answer_key(observation: &str) -> String {
     format!("native-prompt-answer:{observation}")
 }
 
+/// Decode the shared diagnostic payload for both recent and durable answer lookups.
+fn native_prompt_answer_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Option<String>> {
+    let status = row.get::<_, Option<String>>(offset)?;
+    // A question's answer is its choices, which the reason holds.
+    match status.as_deref() {
+        Some("answer") => row.get(offset + 1),
+        _ => Ok(status),
+    }
+}
+
 /// The answer recorded for the prompt `observation` opened, if any.
 fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Option<String>> {
     let operation = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(observation));
@@ -1812,14 +1822,7 @@ fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Op
              WHERE json_extract(body, '$._operation.id') IS NOT NULL
                AND json_extract(body, '$._operation.id')=?1 LIMIT 1",
         )?
-        .query_row([operation], |row| {
-            let status = row.get::<_, Option<String>>(0)?;
-            // A question's answer is its choices, which the reason holds.
-            Ok(match status.as_deref() {
-                Some("answer") => row.get::<_, Option<String>>(1)?,
-                _ => status,
-            })
-        })
+        .query_row([operation], |row| native_prompt_answer_from_row(row, 0))
         .optional()?
         .flatten())
 }
@@ -1881,7 +1884,8 @@ fn native_prompt_sequence_resolution(
     // are answer payloads too, not just the permission words "allow" and "deny".
     let mut resolutions = connection.prepare_cached(&canonical_sql(
         "SELECT json_extract(body, '$._operation.id')=?1,
-           json_extract(body, '$.fields.status'), accepted_at_unix_ms
+           json_extract(body, '$.fields.status'), json_extract(body, '$.fields.reason'),
+           accepted_at_unix_ms
          FROM claims INDEXED BY claims_operation_index
          WHERE json_extract(body, '$._operation.id') IS NOT NULL
            AND json_extract(body, '$._operation.id') IN (?1,?2)
@@ -1896,7 +1900,9 @@ fn native_prompt_sequence_resolution(
         let gone = native_prompt_gone_operation(&claim);
         let answer = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&claim));
         let resolved: Option<(bool, Option<String>, String)> = resolutions
-            .query_row(params![gone, answer, index], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .query_row(params![gone, answer, index], |row| {
+                Ok((row.get(0)?, native_prompt_answer_from_row(row, 1)?, row.get(3)?))
+            })
             .optional()?;
         if let Some((gone, answer, at)) = resolved {
             let state = match (gone, answer) {
@@ -2254,6 +2260,18 @@ mod native_prompt_tests {
     #[test]
     fn choice_answers_remain_answered_and_native_closure_wins_over_delayed_answers() {
         let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(&intent, IntentInput { kdl: source, source_name: None })
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "answer-seat", Some("person/avery"))
+            .unwrap();
         let seat = "agent/node.worker";
         let append = |kind: &str, fields: Value, key: Option<String>| {
             store
@@ -2273,15 +2291,17 @@ mod native_prompt_tests {
             "blocked_on":"human", "ask":"question", "reason":"AskUserQuestion",
             "ownership_sequence":1, "transition_sequence":3
         });
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}), None);
         let first = append("harness.observed", waiting.clone(), None);
-        let choice = r#"{"Database":"Postgres"}"#;
-        let answered = append("harness.diagnostic", json!({
-            "code":"native-prompt-answered", "status":choice,
-            "driver":"claude", "incarnation_id":"one"
-        }), Some(native_prompt_answer_key(&first.id)));
-        let restated = append("harness.observed", waiting.clone(), None);
+        let choice = r#"{"0":[1],"1":[0,2]}"#;
+        let answered = store
+            .answer_native_prompt(seat, &first.id, choice, "person/avery")
+            .unwrap();
+        assert_eq!(answered.body["fields"]["status"], "answer");
+        assert_eq!(answered.body["fields"]["reason"], choice);
+        let mut restated = append("harness.observed", waiting.clone(), None);
         for _ in 0..20 {
-            append("harness.observed", waiting.clone(), None);
+            restated = append("harness.observed", waiting.clone(), None);
         }
         let resolve = |index| {
             native_prompt_sequence_resolution(&store.readers.get(), seat, 1, 3, index)
@@ -2297,10 +2317,9 @@ mod native_prompt_tests {
             "code":"native-prompt-gone", "status":"resolved",
             "driver":"claude", "incarnation_id":"one"
         }), Some(native_prompt_gone_key(&first.id)));
-        append("harness.diagnostic", json!({
-            "code":"native-prompt-answered", "status":choice,
-            "driver":"claude", "incarnation_id":"one"
-        }), Some(native_prompt_answer_key(&restated.id)));
+        store
+            .answer_native_prompt(seat, &restated.id, choice, "person/avery")
+            .unwrap();
         assert_eq!(resolve(gone.store_index), Some(NativePromptState::Gone));
         assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));
         assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
