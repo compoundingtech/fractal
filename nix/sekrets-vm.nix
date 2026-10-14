@@ -14,6 +14,14 @@ let
     echo "gh $* token=''${GH_TOKEN:+set} home=$HOME"
     if test -f checkout-marker; then
       echo "checkout=$(pwd):$(cat checkout-marker)"
+      options=$(${pkgs.util-linux}/bin/findmnt -n -o OPTIONS --target .)
+      for flag in ro nosuid nodev; do
+        case ",$options," in
+          *,$flag,*) ;;
+          *) echo "missing-checkout-mount-flag=$flag"; exit 91 ;;
+        esac
+      done
+      echo "checkout-mount-ro-nosuid-nodev"
       if touch forbidden-checkout-write 2>/dev/null; then exit 90; fi
       echo "checkout-readonly"
       cat
@@ -190,6 +198,7 @@ pkgs.testers.runNixOSTest {
     output = program(f"printf 'structured-stdin-only' | {st} sekrets --profile ada/agent-gh -- gh pr view 1")
     assert "checkout=/w/smalltalk:private-runner-checkout" in output
     assert "checkout-readonly" in output and "structured-stdin-only" in output
+    assert "checkout-mount-ro-nosuid-nodev" in output
     machine.fail("test -e /var/cache/evidence/work/smalltalk/forbidden-checkout-write")
     machine.fail("test -e /w/smalltalk") # the gateway host has only the empty mount anchor
 
@@ -210,6 +219,7 @@ pkgs.testers.runNixOSTest {
         swapped = machine.succeed("cat /var/cache/evidence/swap-output")
         assert "checkout=/w/smalltalk:private-runner-checkout" in swapped
         assert "checkout-readonly" in swapped and "exit=0" in swapped
+        assert "checkout-mount-ro-nosuid-nodev" in swapped
         assert "swapped-directory" not in swapped
         machine.succeed("systemctl stop ci-evidence-caller.service && rm -rf /run/st-sekrets/bind-control /var/cache/evidence/work/smalltalk && mv /var/cache/evidence/work/verified-original /var/cache/evidence/work/smalltalk")
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/tmp", succeed=False)
