@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the test-only OTLP collector out of the installed st3 package identity.",
+  "replay": { "status": "none", "detail": "No projection or replay changes." },
+  "schema": { "status": "none", "detail": "No database or migration changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet rule changes." },
+  "compatibility": { "status": "none", "detail": "The runtime executable and collector-backed OTLP export tests are unchanged. The collector is resolved only when Nix checks run." },
+  "downtime": { "status": "none", "detail": "Collector-only input updates no longer change the installed package identity or trigger a downstream package-based daemon restart." },
+  "manual": { "status": "none", "detail": "No manual configuration changes are required." },
+  "recovery": { "status": "none", "detail": "No persistent state changes." }
+}

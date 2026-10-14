@@ -432,7 +432,6 @@
             runHook postCheck
           '';
           ST3_MESSAGING_COMPAT_BIN = "${messagingBaseline}/bin/st3";
-          ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTEL_REQUIRE = "1";
           # These two tests put an openpty(3) terminal into raw mode. In the macOS Nix build one
           # fails and the other hangs, so they run on Linux only until they pass on macOS.
@@ -447,6 +446,9 @@
           # cannot execute in the sandbox) ahead of their declared Nix equivalents.
           preCheck = ''
             export HOME=$(mktemp -d)
+            # Resolve the collector from nativeCheckInputs only while checks run.
+            # A derivation-wide store path would also repin the unchecked runtime package.
+            export ST3_OTELITE_BIN="$(command -v otelite)"
             export SHELL=${pkgs.bashInteractive}/bin/bash
             printf 'export PATH=%q\n' "$PATH" > "$HOME/.bash_profile"
           '';
@@ -823,6 +825,11 @@
         checks.st2 = st2;
         checks.st3 = st3Check;
         checks.st3-help = st3Help;
+        checks.st3-check-input-isolation =
+          assert !(st3.drvAttrs ? ST3_OTELITE_BIN);
+          # Native check inputs must not contribute to the installed package identity.
+          assert st3.outPath == (st3.overrideAttrs (_: { nativeCheckInputs = [ ]; })).outPath;
+          pkgs.runCommand "st3-check-input-isolation" { } ''touch $out'';
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
