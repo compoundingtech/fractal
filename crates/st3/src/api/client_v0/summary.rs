@@ -73,7 +73,7 @@ fn shared(
     // Mission active membership cannot depend on which agent owns a ready queue: a step that
     // waits its turn counts. Native runtime/harness activity therefore reuses this lean
     // mission input instead of rereading every step.
-    let missions = if let Some(windows) = windows {
+    let missions = crate::performance::task("summary/missions", || -> anyhow::Result<_> { Ok(if let Some(windows) = windows {
         let mut internal = request.clone();
         internal.collection = "summary-missions".into();
         internal.limit = None;
@@ -94,7 +94,7 @@ fn shared(
             .0
     } else {
         compute()?.0
-    };
+    }) })?;
     let missions = missions
         .first()
         .and_then(|v| v["missions"].as_array())
@@ -110,6 +110,7 @@ fn shared(
         .collect();
     // A daemon's reads never fold the roster: count from its newest publication, and say which.
     let mut agents_as_of = None;
+    let (agents, working_agents) = crate::performance::task("summary/agents", || -> anyhow::Result<_> {
     let mut agents = if store.agent_roster_refresher_running() {
         let Some((cut, cards, published_at)) = store.published_agent_roster(snapshot.store_index, false)
         else {
@@ -126,8 +127,9 @@ fn shared(
     };
     overlay_agent_resources(store, &mut agents, &client_timestamp(now))?;
     let working_agents = agents.iter().filter(|agent| working(agent)).count();
-    let machines = machine_summary_resources(state, snapshot, session)?;
-    let machines = machine_counts(&machines, &agents, &client_host_id(&state.node), now);
+    Ok((agents, working_agents)) })?;
+    let machines = crate::performance::task("summary/machines", || machine_summary_resources(state, snapshot, session))?;
+    let machines = crate::performance::task("summary/machine-counts", || machine_counts(&machines, &agents, &client_host_id(&state.node), now));
     Ok(SummaryShared {
         cut: snapshot.store_index,
         evaluated_at_unix_ms: now,

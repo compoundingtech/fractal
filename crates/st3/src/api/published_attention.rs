@@ -88,14 +88,14 @@ pub fn start_attention_list(state: &AppState) {
                 results.push(("arrangements", crate::performance::task("person-views/refresh", || {
                     refresh_owner_list(&reader, OwnerView::Arrangements)
                 })));
-                results.push(("summary", crate::performance::task("summary/refresh", || {
+                results.push(("summary", (|| {
                     super::client_v0::summary::refresh_published(
                         &summary_state,
                         ATTENTION_LIST_IDLE.as_millis() as u64,
                         false,
                     )
                     .map(|_| ())
-                })));
+                })()));
                 results
             })
             .await;
@@ -127,13 +127,13 @@ pub fn start_attention_list(state: &AppState) {
                     // selection now, not after the pause.
                     roster_arrived = false;
                     tokio::task::spawn_blocking(move || {
-                        Some(crate::performance::task("summary/refresh", || {
+                        Some((|| {
                             super::client_v0::summary::refresh_published(
                                 &summary_state,
                                 ATTENTION_LIST_IDLE.as_millis() as u64,
                                 false,
                             )
-                        }))
+                        })())
                     })
                     .await
                 } else if store.summary_selection_waiting() {
@@ -207,13 +207,13 @@ fn refresh_waiting_summary(state: &AppState, starting: bool) -> Option<anyhow::R
     (state.store.summary_selection_waiting()
         || starting && state.store.summary_shared_starting())
     .then(|| {
-        crate::performance::task("summary/refresh", || {
+        (|| {
             super::client_v0::summary::refresh_published(
                 state,
                 ATTENTION_LIST_IDLE.as_millis() as u64,
                 true,
             )
-        })
+        })()
     })
 }
 
