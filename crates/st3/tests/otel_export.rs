@@ -1514,6 +1514,7 @@ fn storage_stage_gates_export_detached_roots() {
         let (done, answer) = std::sync::mpsc::sync_channel(1);
         writer.send(smallclaims::sqlite::WriterJob::Batched {
             run: Box::new(|_| true), profile: None, wait: None,
+            holder: smallclaims::windows::holds::Holder::current(),
             enqueued: Instant::now(), done,
         });
         // Enqueue synchronously while the connection is lent; the wait has a fixed lower bound.
