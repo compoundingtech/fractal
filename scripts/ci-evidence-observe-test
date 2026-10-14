@@ -82,9 +82,19 @@ sys.exit(0 if ok else 1)
 """)
     response_file = tmp / 'response.json'
     observer = tmp / 'observer'
-    observer.write_text(f"import sys\nprint(open({str(response_file)!r}).read())\n")
+    observer.write_text(f"""import os, sys
+if os.environ.get('OBSERVER_EXIT'):
+    print('missing or ambiguous CI job: linux-gate', file=sys.stderr)
+    sys.exit(int(os.environ['OBSERVER_EXIT']))
+print(open({str(response_file)!r}).read())
+""")
+    bin_dir = tmp / 'bin'
+    bin_dir.mkdir()
+    gh = bin_dir / 'gh'
+    gh.write_text(f"#!{sys.executable}\nimport json, os, sys\nprint(json.dumps({{'conclusion': os.environ.get('GH_CONCLUSION', 'success')}}))\n")
+    gh.chmod(0o755)
 
-    def execute(response, ok='1', remote=None, scratch=None, keys=True):
+    def execute(response, ok='1', remote=None, scratch=None, keys=True, env=None):
         response_file.write_text(json.dumps(response))
         calls.write_text('')
         command = [sys.executable, str(SCRIPT), '--repository', 'example/repo', '--run', '7', '--attempt', '1',
@@ -94,7 +104,7 @@ sys.exit(0 if ok else 1)
             command += ['--keys', str(signers)]
         if remote:
             command += ['--remote', str(remote)]
-        done = subprocess.run(command, capture_output=True, env=dict(ENV, VERIFIER_OK=ok))
+        done = subprocess.run(command, capture_output=True, env=dict(ENV, VERIFIER_OK=ok, PATH=f'{bin_dir}:{ENV["PATH"]}', **(env or {})))
         return done, json.loads(done.stdout)
 
     def answer(items, pack_bytes, run=7):
@@ -130,6 +140,13 @@ sys.exit(0 if ok else 1)
     done, out = execute(answer([(full, 'bogus')], pack(full)), scratch=tmp / 'tier')
     assert done.returncode == 1 and 'unexpected tier' in out['failures'][0]
     print('passed: an answer for another run, a malformed pack and an unknown tier are refused')
+
+    # A cancelled run has no linux-gate job: the observer exits 2 and there is nothing to attest.
+    done, out = execute(answer([], b''), scratch=tmp / 'cancelled', env={'OBSERVER_EXIT': '2', 'GH_CONCLUSION': 'cancelled'})
+    assert done.returncode == 0 and 'cancelled' in out['nothing_to_attest'] and not out.get('failures'), done.stdout
+    done, out = execute(answer([], b''), scratch=tmp / 'broken', env={'OBSERVER_EXIT': '2', 'GH_CONCLUSION': 'success'})
+    assert done.returncode == 1 and 'linux-gate' in out['failures'][0], 'the same exit on a finished run is a failure'
+    print('passed: a cancelled run is nothing to attest; the same observer failure on a finished run still fails')
 
     remote = tmp / 'remote.git'
     git(tmp, 'init', '-q', '--bare', str(remote))
