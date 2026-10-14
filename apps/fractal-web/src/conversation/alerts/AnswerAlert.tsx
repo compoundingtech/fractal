@@ -7,7 +7,7 @@ import { cleanMessageText } from '../../../../../clients/typescript/st3-views/co
 import { ANSWERS, isRequest, personAnswer, report, spaced, yesNo } from '../../../../../clients/typescript/st3-views/requestView.ts'
 import { ago } from '../../../../../clients/typescript/st3-views/time.ts'
 import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
-import { Button } from '../../ui-compat/components.tsx'
+import { AlertButton } from './AlertButton.tsx'
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 
@@ -262,23 +262,22 @@ export const AnswerAlert = ({
           {confirming === undefined ? (
             <div {...stylex.props(styles.answers)}>
               {choices.map((choice) => (
-                <Button
+                <AlertButton
                   key={choice.key}
-                  size="sm"
-                  variant={choice.tone}
+                  tone={choice.tone}
                   isDisabled={sending || (choice.words === 'required' && words.trim() === '')}
                   aria-describedby={choice.consequence ? `${wordsId}-${choice.key}` : undefined}
                   onPress={() => setConfirming(choice)}
                 >
                   {choice.recommended ? `${choice.label} (recommended)` : choice.label}
-                </Button>
+                </AlertButton>
               ))}
             </div>
           ) : (
             <div {...stylex.props(styles.answers)} role="group" aria-label="Confirm your answer">
               <span>Send “{confirming.label}” to {from}?</span>
-              <Button size="sm" variant="primary" onPress={() => send(confirming)}>Send</Button>
-              <Button size="sm" variant="secondary" onPress={() => setConfirming(undefined)}>Cancel</Button>
+              <AlertButton tone="primary" onPress={() => send(confirming)}>Send</AlertButton>
+              <AlertButton tone="secondary" onPress={() => setConfirming(undefined)}>Cancel</AlertButton>
             </div>
           )}
           {choices.some((choice) => choice.consequence) ? (

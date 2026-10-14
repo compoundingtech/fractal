@@ -18,7 +18,7 @@ import { geometryVars as g, spaceVars as s } from '../../../../../packages/fract
 import { useAttention, useDataSource } from '../../data/react.tsx'
 import type { UxTelemetry } from '../../telemetry/ux.ts'
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
-import { Button } from '../../ui-compat/components.tsx'
+import { AlertButton } from './AlertButton.tsx'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { AnswerAlert } from './AnswerAlert.tsx'
 
@@ -193,10 +193,10 @@ const PromptAlert = ({
               {question.options.map((option, choice) => {
                 const on = (chosen[index] ?? []).includes(choice)
                 return (
-                  <Button key={choice} size="sm" variant={on ? 'primary' : 'secondary'} aria-pressed={on} isDisabled={sending}
+                  <AlertButton key={choice} tone={on ? 'primary' : 'secondary'} aria-pressed={on} isDisabled={sending}
                     onPress={() => choose(index, choice, question.multiSelect)}>
                     {on ? `✓ ${option.label}` : option.label}
-                  </Button>
+                  </AlertButton>
                 )
               })}
             </div>
@@ -217,10 +217,10 @@ const PromptAlert = ({
       {offered.length > 0 ? (
         <div {...stylex.props(styles.answers)}>
           {offered.map((answer) => (
-            <Button key={answer} size="sm" variant={answer === 'deny' ? 'danger' : answer === gated ? 'primary' : 'secondary'}
+            <AlertButton key={answer} tone={answer === 'deny' ? 'danger' : answer === gated ? 'primary' : 'secondary'}
               isDisabled={sending || (answer === 'answer' && sendable === null)} onPress={() => send(answer)}>
               {answer === 'deny' && gated === 'answer' ? 'Decline' : answerLabel(answer)}
-            </Button>
+            </AlertButton>
           ))}
         </div>
       ) : null}
