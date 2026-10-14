@@ -9,27 +9,32 @@ const GROUPS: &[(&str, &[&str])] = &[
     (
         "Everyday use",
         &[
+            "ui",
             "now",
             "agents",
             "conversations",
+            "note",
             "missions",
-            "attention",
+            "alerts",
             "usage",
+            "slo",
             "terminals",
             "machines",
             "launch",
             "lanes",
             "devices",
             "clients",
+            "sekrets",
         ],
     ),
     (
         "Inside an agent seat",
-        &["work", "gh", "claim", "diagnostic", "trace", "skill"],
+        &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
     ),
     (
         "Running st on a machine or fleet",
         &[
+            "setup",
             "up",
             "service",
             "fleet",
@@ -38,6 +43,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "sets",
             "backup",
             "doctor",
+            "admission",
             "rules",
             "repair",
             "uninstall",
@@ -49,6 +55,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "schema",
             "subject",
             "documents",
+            "evidence",
             "blobs",
             "recorder",
             "activity",
@@ -86,7 +93,7 @@ pub(super) fn all_help_requested(arguments: &[std::ffi::OsString]) -> bool {
 pub(super) fn root_help(all: bool) -> String {
     let command = Cli::command();
     let mut output = String::from(
-        "See what needs you:\n  st now\n\nStart an agent and talk to it:\n  st agents new NAME --harness claude --attach\n\nSee what is running:\n  st missions ls\n  st agents ls\n\nUsage: st [OPTIONS] <COMMAND>\n",
+        "See what needs you:\n  st now\n\nRun st in a terminal to open the interface:\n  st\n  st ui --space NAME\n\nStart an agent and talk to it:\n  st agents new NAME --harness claude --attach\n\nSee what is running:\n  st missions ls\n  st agents ls\n\nFrom an agent seat:\n  st skill\n  st work ls --as \"$ST_AGENT\"\n\nRecord an authorized job:\n  Claim an existing step first, or st work start TITLE --as \"$ST_AGENT\".\n  Use a finite mission for dependencies, verification gates or review.\n\nUsage: st [OPTIONS] <COMMAND>\n",
     );
     for (heading, names) in GROUPS {
         if *heading == "Plumbing" && !all {
@@ -101,11 +108,15 @@ pub(super) fn root_help(all: bool) -> String {
             let _ = writeln!(output, "  {name:14} {about}");
         }
     }
+    let _ = writeln!(output, "\n{}", st3::skill::message_sender_guidance());
     // Let clap keep the options, defaults and environment variables accurate.
     let mut options = command.clone().help_template("\nOptions:\n{options}");
     output.push('\n');
     output.push_str(&options.render_help().to_string());
     output.push_str("\nUse st help COMMAND for command help; st help --all also lists plumbing.\n");
+    output.push_str(
+        "\nIssues and suggestions are welcome. Please file an upstream issue:\n  gh issue create --repo compoundingtech/smalltalk\nPull requests are welcome too: https://github.com/compoundingtech/smalltalk\n",
+    );
     output
 }
 
@@ -130,6 +141,7 @@ pub(super) fn agent_state(
             fault.unwrap_or("the agent process failed")
         ),
         "stopped" => "Stopped — the agent is no longer running.".into(),
+        "down" => "Down — st sees no running session for the agent; `st agents show` says since when.".into(),
         "suspended" => {
             "Suspended — the agent stopped at a quiet moment; `st agents resume` brings back its session.".into()
         }
@@ -137,7 +149,7 @@ pub(super) fn agent_state(
             "Still starting — the agent process cannot currently be reached.".into()
         }
         "waiting" => match harness {
-            Some("unauthenticated") => {
+            Some("unauthenticated" | "needs-login") => {
                 "Waiting for you — attach to sign in to the agent's provider.".into()
             }
             _ => "Waiting for you — attach to inspect what the agent needs.".into(),
@@ -238,6 +250,10 @@ pub(super) fn pairing_next_steps(person: &str) -> String {
     next_steps(
         "Waiting for your device — enter the pairing code in its st client before it expires.",
         &[
+            (
+                "Complete on the device",
+                "st devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256".to_owned(),
+            ),
             ("Show paired devices", format!("st devices --as {person}")),
             (
                 "Pair again",
@@ -302,6 +318,9 @@ mod tests {
         );
         assert!(!default.contains("Plumbing:"));
         assert!(all.contains("Plumbing:"));
+        let sender_guidance = st3::skill::message_sender_guidance();
+        assert_eq!(default.matches(sender_guidance).count(), 1);
+        assert_eq!(all.matches(sender_guidance).count(), 1);
         for command in Cli::command()
             .get_subcommands()
             .filter(|command| !command.is_hide_set())
@@ -328,6 +347,7 @@ mod tests {
             ("starting", Some("starting"), "initializing"),
             ("waiting", Some("needs-login"), "Waiting for you"),
             ("failed", None, "Could not start"),
+            ("down", None, "Down — st sees no running session"),
         ] {
             let state = agent_state(state, harness, None, "reachable");
             assert!(state.contains(expected), "{state}");

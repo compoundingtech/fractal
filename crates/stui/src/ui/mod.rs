@@ -6,20 +6,40 @@
 //! same `World`.
 
 pub mod adapt;
+mod alerts;
 mod attach;
+mod clickable;
+mod content;
+mod context;
 #[cfg(test)]
 mod contract;
 pub mod conversation;
 pub mod demo;
+mod direct;
 pub mod doc;
+pub mod checklist;
 mod edit;
 mod glass;
+mod hover;
+mod hyperlinks;
+#[cfg(test)]
+#[path = "../../tests/support/terminal_tab.rs"]
+mod terminal_tab;
 pub use glass::set_glasses_version;
+pub use lastrun::log_panics as lastrun_log_panics;
+pub use lastrun::note_exit as lastrun_note_exit;
 mod glass_store;
+mod lastrun;
+pub(crate) mod open_timing;
 pub mod layout;
 pub mod live;
+pub(crate) mod slo;
 pub mod pane;
+mod drafts_store;
 mod prefs;
+mod resource_sidebar;
+mod arrangement_keys;
+mod observed_resources;
 mod pty;
 pub mod screens;
 pub mod text;
@@ -42,7 +62,7 @@ use crossterm::{
         disable_raw_mode, enable_raw_mode,
     },
 };
-use doc::{Doc, DocExt, Hit};
+use doc::{AlertTap, Doc, DocExt, Hit};
 use pane::Pane;
 use ratatui::{
     Terminal,
@@ -72,11 +92,47 @@ struct FramePane {
     top: usize,
     total: usize,
     lines: Rc<Vec<Line<'static>>>,
+    entries: Vec<(String, usize)>,
+    images: Vec<(content::Key, usize)>,
+    layer: usize,
+}
+
+impl FramePane {
+    fn entry_visible(&self, start: usize, end: usize, covers: &[(Rect, usize)]) -> bool {
+        let start = start.max(self.top);
+        let end = end.min(self.top.saturating_add(self.rect.height as usize));
+        for row in start..end {
+            let y = self.rect.y + (row - self.top) as u16;
+            let mut x = self.rect.x;
+            while x < self.rect.right() {
+                let covered_to = covers
+                    .iter()
+                    .skip(self.layer)
+                    .filter(|(rect, _)| {
+                        rect.y <= y && y < rect.bottom() && rect.x <= x && x < rect.right()
+                    })
+                    .map(|(rect, _)| rect.right())
+                    .max();
+                let Some(right) = covered_to else {
+                    return true;
+                };
+                x = right.min(self.rect.right());
+            }
+        }
+        false
+    }
 }
 
 #[derive(Default)]
 struct FrameInfo {
+    area: Rect,
     hits: Vec<(Rect, Hit)>,
+    /// List rows with their subject and drawing layer, independent of the current focus.
+    context_rows: Vec<(Rect, String, usize)>,
+    /// Opaque layers and the first hit painted on each layer.
+    covers: Vec<(Rect, usize)>,
+    /// The unobscured focused terminal that retains ownership of program motion.
+    terminal_motion: Option<Rect>,
     panes: Vec<FramePane>,
     sidebar: Rect,
     sidebar_lines: usize,
@@ -96,6 +152,15 @@ struct FrameInfo {
     agent_narrow: bool,
     /// The first palette row drawn.
     palette_top: usize,
+    /// Glasses: where the right-click menu was drawn, while it is open.
+    menu: Option<Rect>,
+}
+
+/// The palette remains reachable from a focused terminal. Other space shortcuts
+/// keep the terminal's established ownership until the person detaches.
+fn terminal_space_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('k')
+        && (key.modifiers == KeyModifiers::CONTROL || key.modifiers == KeyModifiers::SUPER)
 }
 
 struct Demo {
@@ -108,9 +173,6 @@ struct Demo {
     cos_seen: Option<Instant>,
     harbor_seen: Option<Instant>,
 }
-
-/// How long an update stays open on Home before it counts as read.
-const UPDATE_READ_AFTER: Duration = Duration::from_secs(3);
 
 /// A request the live loop sends to st. The demo never produces these.
 /// What the agent actions menu does to a seat; each is st's own agent action.
@@ -144,6 +206,8 @@ pub enum Effect {
     OpenImage {
         image: st3_conversation_ui::MailImage,
     },
+    /// Read complete conversation content into the memory-only UI cache.
+    LoadContent(content::Key),
     Attention {
         id: String,
         action: String,
@@ -163,6 +227,8 @@ pub enum Effect {
     Send {
         agent: String,
         text: String,
+        /// A canonical message this conversation draft replies to, using the existing API.
+        in_reply_to: Option<String>,
         /// st's message tags, such as `dictated`.
         tags: Vec<String>,
         /// Images to upload to st and attach (from a paste, a drop or the clipboard).
@@ -194,6 +260,8 @@ pub enum Effect {
     },
     /// Keep a glass in st, or delete it there.
     SaveGlass(glass::GlassWrite),
+    /// Change only the sidebar registers explicitly selected by the person.
+    EditArrangement(resource_sidebar::Write),
     /// Interrupt an agent's turn, as Esc does in its harness's own TUI.
     StopAgent {
         agent: String,
@@ -207,14 +275,6 @@ pub enum Effect {
     /// Start a plain shell for the person; it opens in a new tab.
     CreateTerminal {
         name: String,
-    },
-    CreateAgent {
-        name: String,
-        harness: String,
-        model: Option<String>,
-        effort: Option<String>,
-        host: Option<String>,
-        message: Option<String>,
     },
     /// Send a failed or unconfirmed message again, as the same request.
     Resend {
@@ -274,6 +334,19 @@ struct ChatState {
     editing: bool,
 }
 
+/// How long an agent's tab stays in front before its terminal attaches, on a device that opens
+/// agents on their terminal: flicking through tabs attaches nothing.
+const ATTACH_DWELL: Duration = Duration::from_millis(300);
+
+/// How long a second Ctrl+T may follow the first and leave the terminal.
+/// How many closed items Home keeps listed under "Recently closed".
+const RECENTLY_CLOSED: usize = 5;
+const LEAVE_TAP: Duration = Duration::from_millis(400);
+
+/// How often typing is written to the drafts file at most, and how long a failing write waits.
+const DRAFTS_EVERY: std::time::Duration = std::time::Duration::from_millis(400);
+const DRAFTS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub struct Ui {
     world: World,
     tab: usize,
@@ -283,7 +356,10 @@ pub struct Ui {
     /// the selection; only a new selection brings it back.
     list_follows: RefCell<[Option<usize>; 6]>,
     conversation_state: st3_conversation_ui::State,
+    /// Each conversation's header (contract §3) as st last sent it, drawn above its entries.
+    pub(crate) conversation_headers: std::collections::BTreeMap<String, serde_json::Value>,
     cache: conversation::Cache,
+    content: content::Content,
     editing: bool,
     confirm: Option<char>,
     /// What an agent's actions menu will do once y confirms it.
@@ -292,21 +368,40 @@ pub struct Ui {
     tick: u64,
     help: bool,
     sidebar: bool,
+    resource_sidebar: resource_sidebar::Sidebar,
     system: bool,
     frame: RefCell<FrameInfo>,
+    hover: hover::Hover,
+    /// Reply context follows the conversation draft through navigation.
+    replies: HashMap<String, String>,
+    /// A menu owns its press through release, even after an action closes it.
+    context_button: Option<MouseButton>,
+    /// The tab owning a middle-button press until release.
+    middle_tab: Option<(usize, usize)>,
     dragging: bool,
     demo: Option<Demo>,
     quit: bool,
     /// Live: actions become `effects` for the live loop instead of demo edits.
     live: bool,
+    quality: slo::Draw,
     effects: Vec<Effect>,
-    /// The update open on Home and since when: one left open a moment counts as read.
-    update_open: Option<(String, Instant)>,
     /// Updates marked read from here, so each is sent once.
     updates_read: HashSet<String>,
+    /// Attention items the person acted on from here: st closing them is their doing.
+    acted: HashSet<String>,
+    /// Attention items st no longer lists that nobody here acted on. Nothing leaves Home by
+    /// itself (Nathan, 2026-10-07): they stay, marked, until `x` clears them.
+    closed: HashSet<String>,
     /// Conversations scrolled up to their oldest entry since the last frame: each asks st for
     /// the page before it.
     older_wanted: RefCell<BTreeSet<String>>,
+    /// This device opens an agent's tab on its terminal, not its conversation (a setting).
+    terminal_first: bool,
+    /// This device permits the daemon after a failed direct terminal route.
+    pub(crate) terminal_fallback: bool,
+    /// The agent whose tab just took the focus, and when: its terminal attaches once the tab has
+    /// stayed in front for a moment, so passing through tabs attaches nothing.
+    attach_when: Option<(String, Instant)>,
     popover: Option<String>,
     chat: Option<ChatState>,
     /// st's conversation search for the palette: the query asked and what came back.
@@ -333,17 +428,35 @@ pub struct Ui {
     pub(crate) simple: bool,
     /// An attached terminal shown in place of the conversation.
     pub(crate) terminal: Option<TerminalView>,
+    /// Glasses: the other terminals still attached, each behind its own tab or split. The one
+    /// whose tab has focus is `terminal`; they swap places as focus moves.
+    pub(crate) parked: Vec<TerminalView>,
+    /// Glasses: the right-click menu, while it is open.
+    pub(crate) context: Option<glass::ContextMenu>,
     /// A Ctrl-C or Ctrl-D pressed once in a terminal, waiting for its confirming second press.
     terminal_confirm: Option<(KeyCode, Instant)>,
+    /// A Ctrl+T held back from an attached terminal: a second press soon leaves it.
+    terminal_hold: Option<(KeyEvent, Instant)>,
     /// The New mission form: title, request, mission id, workspace; and the focused field.
     new_mission: Option<([String; 4], usize)>,
     /// A device awaiting a confirmed revoke.
     revoke: Option<String>,
     /// Home items put off until later. Demo only: kept in memory on this machine.
     snoozed: HashSet<String>,
+    /// Where this device keeps unsent drafts: none in tests and the demo, which touch nothing.
+    pub(crate) drafts_path: Option<std::path::PathBuf>,
+    /// The drafts as last read from or written to that file.
+    drafts_saved: HashMap<String, String>,
+    /// When they were last written, and until when to leave a failing write alone.
+    drafts_wrote: Instant,
+    drafts_backoff: Option<Instant>,
+    /// The conversations whose alert band the person expanded; every other one is a single line.
+    alerts_open: HashSet<String>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
     /// sidebar layout.
     pub(crate) glasses: Option<glass::Glasses>,
+    /// A directly opened session in the sidebar layout, independent of its agent list.
+    session_focus: Option<String>,
     /// The footer names this build (version, revision, age); off in tests, whose screens must
     /// not change with every commit.
     pub(crate) build: bool,
@@ -352,12 +465,6 @@ pub struct Ui {
     details_here: HashSet<String>,
     /// Finding text in a conversation.
     find: Option<Find>,
-    /// The new agent form, kept while the person looks elsewhere.
-    new_agent: Option<screens::AgentForm>,
-    /// The Agents tab shows the new agent form rather than the selected agent.
-    agent_form: bool,
-    /// An agent just started from here, to select once st lists it.
-    started: Option<String>,
     /// Images attached to each draft, by its key, until it is sent.
     attachments: HashMap<String, Vec<attach::Attachment>>,
     /// Where typing goes in the input that has the keyboard.
@@ -373,11 +480,14 @@ pub struct Ui {
     terminal_cursor: Cell<Option<pty::Cursor>>,
     /// Whether a drag is selecting in the attached terminal.
     terminal_selecting: bool,
+    terminal_selection_mode: bool,
     /// The last press in the attached terminal, where and when, and how many in a row: a
     /// second selects a word, a third a line.
     terminal_press: Option<(Instant, u16, u16, u8)>,
     /// How this terminal draws images (kitty, sixel, iTerm2, half blocks), asked once at start.
     pub(crate) picker: Option<ratatui_image::picker::Picker>,
+    /// Auto-fetch only on terminals known to support graphics, not half-block fallback.
+    pub(crate) auto_images: bool,
     /// Each attachment's thumbnail, encoded once so a redraw never sends the image again.
     thumbnails: RefCell<HashMap<std::path::PathBuf, Option<ratatui_image::protocol::Protocol>>>,
     /// When st last sent each conversation something, shown above its message box.
@@ -386,7 +496,131 @@ pub struct Ui {
     stalled: HashMap<String, String>,
 }
 
+/// What clicking a link says it did: an address is pasted in a browser; a path names a file on the
+/// machine the writer works on, which stui cannot open.
+fn link_note(target: &str) -> String {
+    let shown = text::truncate(target, 60);
+    if target.starts_with('/') || target.starts_with("~/") {
+        format!("Copied {shown} · a file on the writer's machine")
+    } else {
+        format!("Copied {shown} · paste it in a browser")
+    }
+}
+
+/// What clicking a web address did when it also opened the browser here.
+fn link_opened_note(target: &str) -> String {
+    format!("Opened {} in your browser · also copied", text::truncate(target, 60))
+}
+
+/// The program that opens a web address in the browser of the machine stui runs on, when that is
+/// where the person sits: not over SSH, and with a desktop (always on macOS). Anything but an
+/// http(s) address is only copied.
+fn browser_opener(url: &str, set: impl Fn(&str) -> bool, macos: bool) -> Option<&'static str> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return None;
+    }
+    if ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"].iter().any(|name| set(name)) {
+        return None;
+    }
+    if macos {
+        Some("open")
+    } else if set("DISPLAY") || set("WAYLAND_DISPLAY") {
+        Some("xdg-open")
+    } else {
+        None
+    }
+}
+
+/// Open `url` in the default browser here if this looks like the person's own machine. It never
+/// waits for the browser and never fails the click: the link is copied either way.
+fn open_in_browser(url: &str) -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    let Some(program) = browser_opener(url, set, cfg!(target_os = "macos")) else {
+        return false;
+    };
+    match std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            // Reap it when it exits, so a click never leaves a zombie behind.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Whether `c` can be part of a written-out web address.
+fn is_address_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)
+}
+
 impl Ui {
+    /// Inspect the rendered viewport, without interpreting a loading/header line as content.
+    /// The caller records this only after terminal presentation succeeded.
+    pub(crate) fn conversation_entry_visible(&self, target: &str) -> bool {
+        if self.help || self.popover.is_some()
+            || self.glasses.as_ref().is_some_and(|glasses| glasses.palette_open())
+        {
+            return false;
+        }
+        let frame = self.frame.borrow();
+        frame.panes.iter().any(|pane| {
+            pane.key.strip_prefix("chat:") == Some(target)
+                && pane.entries.iter().enumerate().any(|(index, (_, start))| {
+                    let end = pane.entries.get(index + 1).map_or(pane.total, |(_, line)| *line);
+                    pane.entry_visible(*start, end, &frame.covers)
+                })
+        })
+    }
+
+    fn quality_visible(&self) -> u8 {
+        let frame = self.frame.borrow();
+        let mut visible =
+            if self.glasses.is_none() && frame.area.width >= 20 && frame.area.height >= 6 {
+                1
+            } else {
+                0
+            };
+        for pane in &frame.panes {
+            if !pane.entry_visible(pane.top, pane.total, &frame.covers) {
+                continue;
+            }
+            if pane.key == "list:home" || pane.key.starts_with("home:") {
+                visible |= 1;
+            }
+            if pane.key == "list:agents"
+                || pane.key == "agent-header"
+                || pane.key.starts_with("agent:")
+                || pane.key.starts_with("details:agent/")
+            {
+                visible |= 2;
+            }
+        }
+        visible
+    }
+
+    fn terminal_ready_visible(&self, target: &str) -> bool {
+        let ready = self
+            .terminal_view(target)
+            .and_then(|view| view.native.as_ref())
+            .is_some_and(|native| native.presented());
+        ready
+            && self.frame.borrow().panes.iter().any(|pane| {
+                pane.key.strip_prefix("terminal:") == Some(target)
+                    && pane.entry_visible(pane.top, pane.total, &self.frame.borrow().covers)
+            })
+    }
+
     /// Call only after the terminal successfully presented this frame.
     pub(crate) fn visible_messages(&self) -> HashSet<String> {
         if self.help
@@ -400,7 +634,64 @@ impl Ui {
         }
         self.frame.borrow().read_messages.clone()
     }
+
+    /// Use the last presented viewport, not every row in the conversation.
+    pub(crate) fn next_content_read(&mut self, reads: &mut content::Reads) -> Option<content::Key> {
+        if reads.idle()
+            && let Some(key) = self.request_visible_content()
+        {
+            reads.enqueue(key);
+        }
+        reads.next(&self.content)
+    }
+
+    fn request_visible_content(&mut self) -> Option<content::Key> {
+        if self.help
+            || self.popover.is_some()
+            || self
+                .glasses
+                .as_ref()
+                .is_some_and(|glasses| glasses.palette_open())
+        {
+            return None;
+        }
+        let frame = self.frame.borrow();
+        for pane in &frame.panes {
+            let Some(conversation) = pane.key.strip_prefix("chat:") else {
+                continue;
+            };
+            if pane.rect.width == 0 || pane.rect.height == 0 {
+                continue;
+            }
+            if self.auto_images {
+                for (key, line) in &pane.images {
+                    if pane.entry_visible(*line, line.saturating_add(1), &frame.covers)
+                        && self.content.request_visible_image(key)
+                    {
+                        return Some(key.clone());
+                    }
+                }
+            }
+            for (index, (entry, start)) in pane.entries.iter().enumerate() {
+                let end = pane
+                    .entries
+                    .get(index + 1)
+                    .map_or(pane.total, |(_, line)| *line);
+                if self.content.expanded_all.contains(conversation)
+                    && self.conversation_state.expanded.contains(entry)
+                    && pane.entry_visible(*start, end, &frame.covers)
+                    && let Some(key) = self.content.request_next_visible_tool(conversation, entry)
+                {
+                    return Some(key);
+                }
+            }
+        }
+        None
+    }
+
     pub fn new(world: World) -> Self {
+        let mut resource_sidebar = resource_sidebar::Sidebar::default();
+        resource_sidebar.observe(&world);
         Self {
             world,
             tab: 0,
@@ -408,6 +699,7 @@ impl Ui {
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
             conversation_state: st3_conversation_ui::State::default(),
+            conversation_headers: std::collections::BTreeMap::new(),
             cache: conversation::Cache::default(),
             editing: false,
             confirm: None,
@@ -416,18 +708,30 @@ impl Ui {
             tick: 0,
             help: false,
             sidebar: true,
+            resource_sidebar,
             system: false,
             frame: RefCell::new(FrameInfo::default()),
+            hover: hover::Hover::default(),
+            replies: HashMap::new(),
+            context_button: None,
+            middle_tab: None,
             dragging: false,
             demo: None,
             quit: false,
             live: false,
+            quality: slo::Draw::new(Instant::now()),
             effects: Vec::new(),
-            update_open: None,
             updates_read: HashSet::new(),
+            acted: HashSet::new(),
+            closed: HashSet::new(),
             older_wanted: RefCell::default(),
+            terminal_first: false,
+            terminal_fallback: true,
+            attach_when: None,
             popover: None,
             chat: None,
+            parked: Vec::new(),
+            context: None,
             said: None,
             voice: None,
             answering: None,
@@ -441,32 +745,97 @@ impl Ui {
             simple: false,
             terminal: None,
             terminal_confirm: None,
+            terminal_hold: None,
             new_mission: None,
             revoke: None,
             snoozed: HashSet::new(),
+            drafts_path: None,
+            drafts_saved: HashMap::new(),
+            drafts_wrote: Instant::now(),
+            drafts_backoff: None,
+            alerts_open: HashSet::new(),
             glasses: None,
+            session_focus: None,
             build: false,
             details_here: HashSet::new(),
             find: None,
-            new_agent: None,
-            agent_form: false,
-            started: None,
             attachments: HashMap::new(),
             cursor: edit::Cursor::default(),
             terminal_size: Cell::new((24, 80)),
             terminal_body: Cell::new(None),
             terminal_cursor: Cell::new(None),
             terminal_selecting: false,
+            terminal_selection_mode: false,
             terminal_press: None,
             anchors: RefCell::new(HashMap::new()),
             picker: None,
+            auto_images: false,
             thumbnails: RefCell::new(HashMap::new()),
+            content: content::Content::default(),
             updated: HashMap::new(),
             stalled: HashMap::new(),
         }
     }
 
     /// Replace the world, keeping each tab's selection on the same item.
+    /// Note what the person did to an item from here, so its closing is not listed under Recently closed.
+    pub(crate) fn note_acted(&mut self, effect: &Effect) {
+        match effect {
+            Effect::Attention { id, .. }
+            | Effect::LaunchRevise { id, .. }
+            | Effect::Reply { id, .. } => {
+                self.acted.insert(id.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// An item st stopped listing stays on Home, marked, unless the person acted on it: another
+    /// device, an agent or st itself closed it, and it must not go while it is being read.
+    fn keep_closed_attention(&mut self, mut before: Vec<view::Attention>) {
+        let Load::Ready(items) = &mut self.world.attention else {
+            return;
+        };
+        // Items already kept go first, so the newly closed ones sit after them and the oldest
+        // closed item is the first to drop off.
+        before.sort_by_key(|old| !self.closed.contains(&old.id));
+        for old in before {
+            if let Some(now) = items.iter().find(|item| item.id == old.id) {
+                if !self.closed.contains(&now.id) {
+                    continue;
+                }
+                self.closed.remove(&old.id);
+                continue;
+            }
+            if self.acted.contains(&old.id) {
+                self.closed.remove(&old.id);
+                continue;
+            }
+            let mut kept = old;
+            if self.closed.insert(kept.id.clone()) {
+                kept.waiting = Some(match kept.waiting.take() {
+                    Some(who) => format!("closed, x clears it · {who}"),
+                    None => "closed, x clears it".into(),
+                });
+                kept.actions.clear();
+            }
+            items.push(kept);
+        }
+        // Home lists only the latest few closed items; the rest drop off, oldest first.
+        let mut over = self.closed.len().saturating_sub(RECENTLY_CLOSED);
+        if over > 0 {
+            let closed = &mut self.closed;
+            items.retain(|item| {
+                if over > 0 && closed.contains(&item.id) {
+                    closed.remove(&item.id);
+                    over -= 1;
+                    return false;
+                }
+                true
+            });
+        }
+    }
+
     pub fn set_world(&mut self, world: World) {
         let tab = self.tab;
         let mut chosen = Vec::new();
@@ -474,7 +843,23 @@ impl Ui {
             self.tab = index;
             chosen.push(self.selected_id());
         }
+        // Only what was on screen from a live reading can have closed under the person's eyes;
+        // a stored copy, or a reading before the first live one, is just replaced.
+        let before = if matches!(self.world.link, Link::Live) {
+            self.world.attention.items().to_vec()
+        } else {
+            Vec::new()
+        };
+        self.resource_sidebar.observe(&world);
+        if world.agents.ready().is_some_and(|agents| agents.is_empty())
+            && world.missions.ready().is_some_and(|missions| missions.is_empty())
+            && world.attention.ready().is_some_and(|attention| attention.is_empty())
+            && let Some(glasses) = self.glasses.as_mut()
+            && !glasses.sidebar.configured {
+            glasses.sidebar.shown = true;
+        }
         self.world = world;
+        self.keep_closed_attention(before);
         for (index, id) in chosen.into_iter().enumerate() {
             self.tab = index;
             if let Some(id) = id
@@ -484,7 +869,6 @@ impl Ui {
             }
         }
         self.tab = tab;
-        self.select_started();
         if self.glasses.is_some() {
             self.resync_focus();
         }
@@ -515,7 +899,75 @@ impl Ui {
         if let Some(path) = prefs::path() {
             // Simplified is the default, as on the phone (Nathan, 2026-10-04); a device that
             // chose the full view keeps it.
-            self.simple = simplified(&prefs::load(&path));
+            let loaded = prefs::load(&path);
+            self.simple = simplified(&loaded);
+            self.terminal_first = loaded.terminal_first == Some(true);
+            self.terminal_fallback = loaded.terminal_fallback != Some(false);
+        }
+    }
+
+    /// Bring back what was typed and not sent when the last stui ended, read once at start. A box
+    /// already holding text keeps it.
+    pub(crate) fn load_drafts(&mut self) {
+        if let Some(path) = &self.drafts_path {
+            let saved = drafts_store::load(path);
+            for (key, text) in &saved {
+                self.conversation_state
+                    .drafts
+                    .entry(key.clone())
+                    .or_insert_with(|| text.clone());
+            }
+            self.drafts_saved = saved;
+        }
+    }
+
+    /// Write the boxes to this device when they changed, at most every few hundred milliseconds
+    /// of typing, at once when a box was emptied (a sent message must not come back) or the box
+    /// lost the keyboard, and on the way out (`flush_drafts`, and a panic). A failing write waits
+    /// a while before the next try. Cheap when nothing changed: one comparison.
+    pub(crate) fn step_drafts(&mut self) {
+        if self.conversation_state.drafts == self.drafts_saved {
+            return;
+        }
+        let Some(path) = self.drafts_path.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        if self.drafts_backoff.is_some_and(|until| now < until) {
+            return;
+        }
+        let live = |text: &String| !text.trim().is_empty();
+        let emptied = self.drafts_saved.iter().any(|(key, text)| {
+            live(text) && !self.conversation_state.drafts.get(key).is_some_and(live)
+        });
+        if emptied
+            || !self.editing
+            || now.duration_since(self.drafts_wrote) >= DRAFTS_EVERY
+        {
+            self.write_drafts(&path);
+        } else {
+            drafts_store::note_unsaved(&path, &self.drafts_saved, &self.conversation_state.drafts);
+        }
+    }
+
+    /// Write the boxes now: quitting.
+    pub(crate) fn flush_drafts(&mut self) {
+        if let Some(path) = self.drafts_path.clone()
+            && self.conversation_state.drafts != self.drafts_saved
+        {
+            self.write_drafts(&path);
+        }
+    }
+
+    fn write_drafts(&mut self, path: &std::path::Path) {
+        self.drafts_wrote = Instant::now();
+        match drafts_store::save(path, &self.drafts_saved, &self.conversation_state.drafts) {
+            Ok(()) => {
+                self.drafts_saved = self.conversation_state.drafts.clone();
+                self.drafts_backoff = None;
+                drafts_store::clear_unsaved();
+            }
+            Err(_) => self.drafts_backoff = Some(Instant::now() + DRAFTS_RETRY),
         }
     }
 
@@ -527,20 +979,110 @@ impl Ui {
         }
     }
 
-    /// Every conversation simplified (a tool call to a line, a run of calls to one line) or in
-    /// full: this device's choice, remembered.
-    pub(crate) fn toggle_simple(&mut self) {
-        self.simple = !self.simple;
-        // Tests never touch the device's own choice.
+    /// Remember this device's choices. Tests never touch the device's own.
+    fn save_prefs(&self) {
         #[cfg(not(test))]
         if let Some(path) = prefs::path() {
             let _ = prefs::save(
                 &path,
                 &prefs::Prefs {
                     simple: Some(self.simple),
+                    terminal_first: Some(self.terminal_first),
+                    terminal_fallback: Some(self.terminal_fallback),
                 },
             );
         }
+    }
+
+    /// Change the next terminal attachment's route policy on this device.
+    pub(crate) fn toggle_terminal_fallback(&mut self) {
+        self.terminal_fallback = !self.terminal_fallback;
+        self.save_prefs();
+        self.flash(if self.terminal_fallback {
+            "Terminal routes: fall back through the daemon on failure"
+        } else {
+            "Terminal routes: fabric only, no fallback"
+        });
+    }
+
+    /// Open an agent's tab on its terminal, or on its conversation (the default): this device's
+    /// choice, remembered.
+    pub(crate) fn toggle_terminal_first(&mut self) {
+        self.terminal_first = !self.terminal_first;
+        self.save_prefs();
+        self.flash(if self.terminal_first {
+            "Agents open on their terminal · the conversation is a key away (Ctrl+\\ leaves the terminal)"
+        } else {
+            "Agents open on their conversation · Ctrl+] attaches the terminal"
+        });
+    }
+
+    /// Whether this device opens agents on their terminal.
+    pub(crate) fn terminal_first(&self) -> bool {
+        self.terminal_first
+    }
+
+    /// Attach the terminal of an agent whose tab has been in front for a moment, when this device
+    /// opens agents on their terminal.
+    pub(crate) fn step_default_view(&mut self) {
+        let Some((id, at)) = &self.attach_when else {
+            return;
+        };
+        if at.elapsed() < ATTACH_DWELL {
+            return;
+        }
+        let id = id.clone();
+        self.attach_when = None;
+        let still_here = matches!(self.focused_pane(), Some(Pane::Agent(Some(ref now))) if *now == id);
+        let attached = self.terminal.as_ref().is_some_and(|view| view.agent == id)
+            || self.parked.iter().any(|view| view.agent == id);
+        if still_here && !attached && !self.editing && self.terminal_first {
+            self.attach_terminal(&id);
+        }
+    }
+
+    /// A terminal's tab is never left dead (Nathan, 2026-10-10): once the agents are known, each
+    /// terminal tab in front attaches (stui reopened with the tab saved, or a terminal that was
+    /// let go), or turns back into the agent's conversation when the agent has no terminal.
+    pub(crate) fn step_terminal_tabs(&mut self) {
+        if self.glasses.is_none() || self.home_open() {
+            return;
+        }
+        let Some(agents) = self.world.agents.ready() else {
+            return;
+        };
+        let loose: Vec<(usize, String)> = self
+            .shown_panes()
+            .into_iter()
+            .filter_map(|(group, pane)| match pane {
+                Pane::Terminal(id) if self.terminal_view(&id).is_none() => Some((group, id)),
+                _ => None,
+            })
+            .collect();
+        let without: Vec<(usize, String)> = loose
+            .iter()
+            .filter(|(_, id)| {
+                !id.starts_with("terminal/")
+                    && !agents.iter().any(|agent| agent.id == *id && agent.terminal)
+            })
+            .cloned()
+            .collect();
+        for (_, id) in loose {
+            if !without.iter().any(|(_, other)| *other == id) {
+                self.attach_terminal(&id);
+            }
+        }
+        for (group, id) in without {
+            self.swap_shown_pane(group, Pane::Agent(Some(id)));
+        }
+    }
+
+    /// Every conversation simplified (a tool call to a line, a run of calls to one line) or in
+    /// full: this device's choice, remembered.
+    pub(crate) fn toggle_simple(&mut self) {
+        self.simple = !self.simple;
+        // Tests never touch the device's own choice.
+        self.save_prefs();
         self.flash(if self.simple {
             "Simplified: each tool call is one line, a run of them one line · ctrl+p for everything"
         } else {
@@ -561,6 +1103,7 @@ impl Ui {
     pub(crate) fn usage_period_next(&mut self) {
         self.usage_hours = usage::next_period(self.usage_hours);
         self.world.usage = Load::Loading;
+        self.world.agent_messages = None;
         self.flash(format!(
             "Usage over {}",
             usage::period_name(self.usage_hours)
@@ -582,6 +1125,14 @@ impl Ui {
             None => self.tab == 4,
         };
         shown.then_some(self.usage_hours)
+    }
+
+    pub(crate) fn inventories_wanted(&self) -> crate::feed::Inventories {
+        self.glasses.as_ref().map_or_else(|| crate::feed::Inventories {
+            clients: self.clients_wanted(), usage_hours: self.usage_wanted(),
+            machines: self.tab == 3, devices: self.tab == 3,
+            sessions: self.tab == 1 || self.tab == 3, terminals: false,
+        }, |glasses| glasses.inventories_wanted(self.tab, self.usage_hours))
     }
 
     /// Details beside the conversation, or in its place when the pane is too narrow for both;
@@ -609,6 +1160,28 @@ impl Ui {
         self.stalled.insert(target.to_owned(), error.to_owned());
     }
 
+    /// What is on screen, as kinds and counts only, for a slow-turn note: which pane has focus,
+    /// whether Home or the palette floats over it, and how much st has sent.
+    pub(crate) fn slow_context(&self) -> String {
+        let pane = self
+            .focused_pane()
+            .map(|pane| pane.key())
+            .map(|key| key.split(':').next().unwrap_or("").to_owned())
+            .unwrap_or_else(|| "none".to_owned());
+        let area = self.frame.borrow().area;
+        format!(
+            "pane {pane}, {}x{}, home {}, palette {}, terminal {}, agents {}, missions {}, attention {}",
+            area.width,
+            area.height,
+            self.home_open(),
+            self.palette_open(),
+            self.native_terminal().is_some(),
+            self.world.agents.items().len(),
+            self.world.missions.items().len(),
+            self.world.attention.items().len(),
+        )
+    }
+
     /// The agent whose message box has the keyboard: the selected agent while the Agents tab
     /// is the focused one.
     fn composing(&self, agent: &str) -> bool {
@@ -616,8 +1189,14 @@ impl Ui {
     }
 
     /// Make the links drawn in `area` clickable: addresses written out, and markdown links by
-    /// the text they were drawn with.
+    /// the text they were drawn with. An address the renderer wrapped at the edge is one link on
+    /// every row it covers, so a click on any part of it opens or copies all of it.
     fn links(&self, buf: &Buffer, area: Rect) {
+        let chars = |y: u16| -> Vec<(u16, char)> {
+            (area.x..area.x + area.width)
+                .map(|x| (x, buf[(x, y)].symbol().chars().next().unwrap_or(' ')))
+                .collect()
+        };
         for y in area.y..area.y + area.height {
             let cells = (area.x..area.x + area.width)
                 .map(|x| (x, &buf[(x, y)]))
@@ -636,25 +1215,59 @@ impl Ui {
                     from = start + 4;
                     continue;
                 }
-                let url = tail
-                    .split(char::is_whitespace)
-                    .next()
-                    .unwrap_or("")
-                    .trim_end_matches(['.', ',', ')', ']', ';', ':', '"', '\'', '>']);
+                let token = tail.split(char::is_whitespace).next().unwrap_or("");
                 let column = text[..start].chars().count();
-                let width = url.chars().count();
+                // Each part of the address: where it sits on its row, and how wide it is.
+                let mut parts = Vec::new();
+                let mut url = token.to_owned();
                 if let Some((x, _)) = cells.get(column) {
-                    self.hit(
-                        Rect {
-                            x: *x,
-                            y,
-                            width: width as u16,
-                            height: 1,
-                        },
-                        Hit::Link(url.to_owned()),
-                    );
+                    parts.push((*x, y, token.chars().count()));
                 }
-                from = start + url.len().max(1);
+                // An address that runs to the right edge goes on at the start of the next row.
+                let mut reaches_edge = token.len() == tail.trim_end().len()
+                    && column + token.chars().count() >= usize::from(area.width).saturating_sub(3);
+                let mut next = y + 1;
+                while reaches_edge && next < area.y + area.height {
+                    let below = chars(next);
+                    let indent = below.iter().take_while(|(_, c)| *c == ' ').count();
+                    let more = below[indent..]
+                        .iter()
+                        .take_while(|(_, c)| !c.is_whitespace())
+                        .collect::<Vec<_>>();
+                    if indent > 4
+                        || more.is_empty()
+                        || more.iter().any(|(_, c)| !is_address_char(*c))
+                    {
+                        break;
+                    }
+                    url.extend(more.iter().map(|(_, c)| *c));
+                    parts.push((below[indent].0, next, more.len()));
+                    reaches_edge = indent + more.len() >= below.len().saturating_sub(3)
+                        && below[indent + more.len()..].iter().all(|(_, c)| *c == ' ');
+                    next += 1;
+                }
+                let trimmed = url
+                    .trim_end_matches(['.', ',', ')', ']', ';', ':', '"', '\'', '>'])
+                    .to_owned();
+                // The last part loses whatever trailing punctuation the address lost.
+                let cut = url.chars().count() - trimmed.chars().count();
+                if let Some(last) = parts.last_mut() {
+                    last.2 = last.2.saturating_sub(cut);
+                }
+                for (x, row_y, width) in parts {
+                    if width > 0 {
+                        self.hit(
+                            Rect {
+                                x,
+                                y: row_y,
+                                width: width as u16,
+                                height: 1,
+                            },
+                            Hit::Link(trimmed.clone()),
+                        );
+                    }
+                }
+                from = start + token.len().max(1);
             }
             // Markdown links: underlined runs whose text names a link.
             let mut index = 0;
@@ -814,6 +1427,47 @@ impl Ui {
     }
 
     /// Attach the image on this machine's clipboard to the message being written.
+    /// The top bar's connection word, clicked: live opens this machine, where its clients and
+    /// links show; anything else says why it is not reached (Nathan, 2026-10-06).
+    fn show_connection(&mut self) {
+        match self.world.link.clone() {
+            Link::Live => {
+                let machine = format!("machine/{}", self.world.host);
+                let known = self
+                    .world
+                    .machines
+                    .items()
+                    .iter()
+                    .any(|candidate| format!("machine/{}", candidate.name) == machine);
+                if !self.world.diverged.is_empty() {
+                    self.flash(format!(
+                        "Diverged from {}: what shows here can be wrong until that host is repaired",
+                        self.world.diverged.join(", ")
+                    ));
+                }
+                if !self.world.stale.is_empty() {
+                    self.flash(format!(
+                        "Out of date: st stopped serving {}",
+                        self.world.stale.join("; ")
+                    ));
+                }
+                if known {
+                    self.open(&machine);
+                } else if self.world.diverged.is_empty() && self.world.stale.is_empty() {
+                    self.flash(format!(
+                        "Connected to {} as {}",
+                        self.world.host, self.world.person
+                    ));
+                }
+            }
+            Link::Connecting => self.flash(format!(
+                "Connecting to {}: st has not answered yet",
+                self.world.host
+            )),
+            Link::Offline(reason) => self.flash(reason),
+        }
+    }
+
     fn attach_clipboard(&mut self) {
         let Some(key) = self.draft_key() else { return };
         // kitty hands over the person's own clipboard through the terminal, wherever stui
@@ -909,11 +1563,11 @@ impl Ui {
 
     fn listing_for(&self, tab: usize, width: usize) -> Listing {
         match tab {
-            0 => screens::home_list(&self.world, &self.snoozed),
+            0 => screens::home_list(&self.world, &self.snoozed, &self.closed),
             1 if self.tree => screens::agents_tree(&self.world, self.spinner(), width),
             1 => screens::agents_list(&self.world, self.spinner(), width),
             2 if self.tree => screens::missions_tree(&self.world, self.spinner(), self.system),
-            2 => screens::missions_list(&self.world, self.spinner(), self.system),
+            2 => screens::missions_list(&self.world, width, self.spinner(), self.system),
             3 => screens::fleet_list(&self.world),
             4 => usage::list(&self.world, self.usage_by, self.usage_hours),
             _ => screens::worktrees_list(&self.world),
@@ -925,6 +1579,9 @@ impl Ui {
     }
 
     fn selected_id(&self) -> Option<String> {
+        if self.tab == 1 && self.glasses.is_none() && self.session_focus.is_some() {
+            return self.session_focus.clone();
+        }
         let ids = self.ids();
         ids.get(self.selected[self.tab].min(ids.len().saturating_sub(1)))
             .cloned()
@@ -947,7 +1604,10 @@ impl Ui {
     pub fn render(&self, frame: &mut ratatui::Frame<'_>) {
         let area = frame.area();
         let buf = frame.buffer_mut();
-        *self.frame.borrow_mut() = FrameInfo::default();
+        *self.frame.borrow_mut() = FrameInfo {
+            area,
+            ..FrameInfo::default()
+        };
         self.terminal_cursor.set(None);
         buf.set_style(area, Style::default().bg(theme::BASE).fg(theme::TEXT));
         if area.width < 20 || area.height < 6 {
@@ -964,11 +1624,12 @@ impl Ui {
             self.render_glass(buf, area);
         } else {
             self.top_bar(buf, Rect { height: 1, ..area });
+            self.top_bar_border(buf, area);
             self.draw_body(
                 buf,
                 Rect {
-                    y: area.y + 1,
-                    height: area.height - 2,
+                    y: area.y + 2,
+                    height: area.height - 3,
                     ..area
                 },
             );
@@ -984,8 +1645,22 @@ impl Ui {
         if let Some(subject) = &self.popover {
             self.draw_popover(buf, area, subject);
         }
+        self.draw_context_menu(buf, area);
         if self.help {
             self.draw_help(buf, area);
+        }
+        self.draw_hover(buf);
+        for view in self.terminal.iter().chain(self.parked.iter()) {
+            if let Some(native) = &view.native
+                && (!self
+                .frame
+                .borrow()
+                .panes
+                .iter()
+                .any(|pane| pane.key == Pane::Terminal(view.agent.clone()).key()))
+            {
+                native.hide_graphics();
+            }
         }
         if let Some(cursor) = self.terminal_cursor.get() {
             frame.set_cursor_position((cursor.x, cursor.y));
@@ -1038,6 +1713,15 @@ impl Ui {
 
     fn hit(&self, rect: Rect, hit: Hit) {
         self.frame.borrow_mut().hits.push((rect, hit));
+    }
+
+    /// A soft, single-row edge between the top bar and the content in either layout.
+    fn top_bar_border(&self, buf: &mut Buffer, area: Rect) {
+        for x in area.x..area.right() {
+            buf[(x, area.y + 1)]
+                .set_symbol("─")
+                .set_style(theme::fg(theme::OVERLAY0).bg(theme::BASE));
+        }
     }
 
     fn top_bar(&self, buf: &mut Buffer, area: Rect) {
@@ -1143,6 +1827,7 @@ impl Ui {
         let (glyph, word, color) = match &self.world.link {
             // Live, but showing a graph that exchanges cannot correct.
             Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged", theme::RED),
+            Link::Live if !self.world.stale.is_empty() => ("◐", "stale", theme::YELLOW),
             Link::Live => ("●", "live", theme::GREEN),
             Link::Connecting => (self.spinner(), "connecting", theme::YELLOW),
             Link::Offline(_) => ("○", "offline", theme::RED),
@@ -1170,30 +1855,16 @@ impl Ui {
             self.hit(
                 Rect {
                     x: start,
-                    width,
+                    width: text::width(&format!("{glyph} {word}")) as u16,
                     ..area
                 },
-                Hit::Help,
+                Hit::Connection,
             );
         }
     }
 
     fn footer(&self, buf: &mut Buffer, area: Rect) {
         buf.set_style(area, Style::default().bg(theme::CRUST));
-        let backlog_notice = match &self.world.mail_backlog {
-            Load::Ready(backlog) if backlog.count > 0 => Some(format!(
-                "{} unread >1h · {}", backlog.count, backlog.cleanup_command
-            )),
-            Load::Failed(error) => Some(error.clone()),
-            _ => None,
-        };
-        if let Some(notice) = backlog_notice {
-            buf.set_stringn(
-                area.x + 1, area.y, notice, area.width.saturating_sub(2) as usize,
-                Style::default().fg(theme::YELLOW).bg(theme::CRUST),
-            );
-            return;
-        }
         if let Link::Offline(message) = &self.world.link {
             buf.set_stringn(
                 area.x + 1,
@@ -1217,11 +1888,32 @@ impl Ui {
                 ("ctrl+k", "find"),
             ]
         } else if self.terminal_focused() {
-            vec![
-                ("ctrl+\\", "back to stui"),
-                ("keys", "go to the terminal"),
-                ("ctrl-c twice", "interrupt"),
-            ]
+            if self.native_terminal().is_some_and(|native| {
+                native
+                    .mode()
+                    .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
+            }) || self.terminal_selection_mode
+            {
+                vec![
+                    ("ctrl+\\", "back"),
+                    ("alt+drag", "copy"),
+                    (
+                        "ctrl+alt+s",
+                        if self.terminal_selection_mode {
+                            "program mouse"
+                        } else {
+                            "select"
+                        },
+                    ),
+                    ("ctrl+alt+r", "reset modes"),
+                ]
+            } else {
+                vec![
+                    ("ctrl+\\", "back to stui"),
+                    ("drag", "copy"),
+                    ("ctrl+alt+r", "reset modes"),
+                ]
+            }
         } else if self.new_mission.is_some() && self.tab == 2 {
             vec![
                 ("tab", "next field"),
@@ -1275,6 +1967,14 @@ impl Ui {
             .as_deref()
             .map_or(0, |build| text::width(build) as u16 + 1);
         let mut x = area.x + 1;
+        buf.set_stringn(
+            x,
+            area.y,
+            "Keys: ",
+            area.width.saturating_sub(2) as usize,
+            theme::dim().bg(theme::CRUST),
+        );
+        x += 6;
         for (key, label) in hints {
             let key_text = format!("{key} ");
             let label_text = format!("{label}   ");
@@ -1444,7 +2144,12 @@ impl Ui {
         let selected = selected.min(listing.ids.len().saturating_sub(1));
         let mut rows: Vec<(Option<usize>, Line<'static>, bool)> = Vec::new();
         let mut selected_range = (0, 0);
+        // Whether the item before was a heading or a note: a note joins it without a gap.
+        let mut joined = false;
         for item in &listing.items {
+            let before = joined;
+            joined = matches!(item, Item::Header { .. } | Item::Note(_));
+            let joined = before;
             match item {
                 Item::Header {
                     title,
@@ -1455,7 +2160,8 @@ impl Ui {
                         rows.push((None, Line::default(), false));
                     }
                     let label = format!(" {title}");
-                    let count = format!("{count} ");
+                    // A heading with nothing to count (usage's summary) shows no number.
+                    let count = if *count == 0 { String::new() } else { format!("{count} ") };
                     let fill = width.saturating_sub(text::width(&label) + text::width(&count) + 1);
                     rows.push((
                         None,
@@ -1508,10 +2214,26 @@ impl Ui {
                 }
                 Item::Folder(line) => rows.push((None, line.clone(), false)),
                 Item::Note(line) => {
-                    if !rows.is_empty() {
+                    // Notes straight after a heading or another note read as one block; a note
+                    // after rows stands apart. Each wraps to the width instead of being cut.
+                    if !rows.is_empty() && !joined {
                         rows.push((None, Line::default(), false));
                     }
-                    rows.push((None, line.clone(), false));
+                    let runs = line
+                        .spans
+                        .iter()
+                        .map(|span| text::run(span.content.to_string(), span.style))
+                        .collect::<Vec<_>>();
+                    let lead = text::run(" ", theme::dim());
+                    for wrapped in text::wrap(
+                        &runs,
+                        width.saturating_sub(1),
+                        &[],
+                        std::slice::from_ref(&lead),
+                        None,
+                    ) {
+                        rows.push((None, wrapped, false));
+                    }
                 }
             }
         }
@@ -1551,6 +2273,11 @@ impl Ui {
             buf.set_line(list.x + 1, y, line, list.width.saturating_sub(1));
             if let Some(index) = index {
                 self.hit(row, hit(*index));
+                if let Some(subject) = listing.ids.get(*index) {
+                    let mut info = self.frame.borrow_mut();
+                    let layer = info.covers.len();
+                    info.context_rows.push((row, subject.clone(), layer));
+                }
             }
         }
         if rows.len() > height {
@@ -1640,6 +2367,15 @@ impl Ui {
             editing: self.editing,
             confirm: self.confirm,
             answering: self.answering,
+            needs_words: self.changes_answer.as_ref().and_then(|wanted| {
+                self.structured_request().and_then(|(_, request)| {
+                    request
+                        .answers
+                        .iter()
+                        .find(|answer| &answer.id == wanted)
+                        .map(|answer| answer.label.clone())
+                })
+            }),
             chat,
         }
     }
@@ -1649,7 +2385,6 @@ impl Ui {
         let id = self.selected_id();
         match self.tab {
             0 => Pane::Home(id),
-            1 if self.agent_form => Pane::NewAgent,
             // In spaces an attached terminal is its own tab's: another tab shows what it holds,
             // and the terminal stays attached behind it (Nathan, 2026-10-02).
             1 => match &self.terminal {
@@ -1696,19 +2431,6 @@ impl Ui {
                     width,
                 )
             }
-            Pane::NewAgent => {
-                let empty = Default::default();
-                let form = self.new_agent.as_ref().unwrap_or(&empty);
-                screens::new_agent_form(
-                    form,
-                    &self.other_hosts(),
-                    [
-                        self.cursor.at("agent:task", &form.task),
-                        self.cursor.at("agent:name", &form.name),
-                    ],
-                    width,
-                )
-            }
             Pane::Declaration(id) => screens::mission_kdl(&self.world, id.as_deref(), width),
             Pane::Mission(id) => {
                 let decision =
@@ -1736,6 +2458,7 @@ impl Ui {
             Pane::Worktree(id) => {
                 screens::worktree_detail(&self.world, id.as_deref(), width, self.spinner())
             }
+            Pane::Resource(id) => observed_resources::detail(id, self.resource_sidebar.observations.iter().find(|row| &row.id == id), width),
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
         };
         self.pane(buf, &pane.key(), area, doc, false);
@@ -1750,9 +2473,13 @@ impl Ui {
                 .iter()
                 .find(|agent| agent.id == id)
         }) else {
-            let message = match self.world.agents {
-                Load::Loading => format!("{} Loading agents…", self.spinner()),
-                _ => "Select an agent.".into(),
+            let message = if id.is_some_and(|id| id.starts_with("session/")) {
+                "Loading conversation…".into()
+            } else {
+                match self.world.agents {
+                    Load::Loading => format!("{} Loading agents…", self.spinner()),
+                    _ => "Select an agent.".into(),
+                }
             };
             buf.set_stringn(area.x, area.y + 1, message, width, theme::dim());
             return;
@@ -1839,7 +2566,9 @@ impl Ui {
             header,
             false,
         );
-        let rule_y = area.y + header_height - 1;
+        // A header that wraps taller than a small pane leaves no room for its rule.
+        let header_height = header_height.min(area.height);
+        let rule_y = area.y + header_height.saturating_sub(1);
         buf.set_stringn(
             area.x,
             rule_y,
@@ -1915,7 +2644,18 @@ impl Ui {
             }
             Some(Load::Ready(entries)) if entries.is_empty() => {
                 let mut doc = Doc::new();
-                doc.line(Line::from(Span::styled(" No messages yet.", theme::dim())));
+                // A seat still starting has said nothing yet: one calm line, not an empty box.
+                doc.line(Line::from(Span::styled(
+                    if agent.state == AgentState::Starting {
+                        format!(
+                            " {} Starting · the conversation appears as soon as the seat says something.",
+                            self.spinner()
+                        )
+                    } else {
+                        " No messages yet.".to_owned()
+                    },
+                    theme::dim(),
+                )));
                 doc
             }
             Some(Load::Ready(entries)) => {
@@ -1939,17 +2679,41 @@ impl Ui {
                     }));
                 }
                 let mut doc = Doc::new();
+                // The conversation header (q3) sits above the entries, each field saying
+                // where it came from and how old it is.
+                if let Some(header) = self.conversation_headers.get(&agent.id) {
+                    let line = st3_conversation_ui::header::line(
+                        header,
+                        &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    );
+                    if !line.is_empty() {
+                        doc.line(Line::from(Span::styled(
+                            st3_conversation_ui::header::row(&line, width),
+                            theme::dim(),
+                        )));
+                    }
+                }
                 doc.blank();
                 doc.append(
                     self.cache
                         .render(entries, width, &expanded, self.spinner(), self.density()),
                     0,
                 );
+                self.content.decorate(&mut doc, &agent.id, &expanded, width);
                 doc.blank();
                 doc
             }
         };
         let key = format!("chat:{}", agent.id);
+        if let Some(entry) = self.content.scroll_to.borrow_mut().remove(&agent.id)
+            && let Some((_, line)) = doc.entries.iter().find(|(id, _)| *id == entry)
+        {
+            self.anchors.borrow_mut().remove(&key);
+            let mut panes = self.conversation_state.panes.borrow_mut();
+            let state = panes.entry(key.clone()).or_default();
+            state.top = *line;
+            state.follow = false;
+        }
         let matches = find
             .map(|find| find_matches(&doc, &find.query))
             .unwrap_or_default();
@@ -1979,9 +2743,24 @@ impl Ui {
         } else {
             composer.len() as u16 + 2 + strip
         };
+        // What waits on the person in this conversation is one line above the box, a card only
+        // when asked for. The box keeps its place and its size either way: the band takes its
+        // rows from the conversation and never more than half of the pane.
+        let mut band = if agent.unmanaged || find.is_some() {
+            Vec::new()
+        } else {
+            self.alert_band(&agent.id, area.width as usize)
+        };
+        let room = area
+            .height
+            .saturating_sub(header_height + composer_height + 4) as usize;
+        band.truncate(room.min((area.height as usize / 2).max(1)));
+        let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
-            height: area.height.saturating_sub(header_height + composer_height),
+            height: area
+                .height
+                .saturating_sub(header_height + composer_height + band_height),
             ..area
         };
         if let Some(find) = find {
@@ -1999,6 +2778,21 @@ impl Ui {
             }
         }
         self.pane(buf, &key, body, doc, true);
+        for (offset, row) in band.iter().enumerate() {
+            let y = body.y + body.height + offset as u16;
+            buf.set_line(area.x, y, &row.line, area.width);
+            for (column, width, hit) in &row.hits {
+                self.hit(
+                    Rect {
+                        x: area.x + column,
+                        y,
+                        width: (*width).min(area.width.saturating_sub(*column)),
+                        height: 1,
+                    },
+                    hit.clone(),
+                );
+            }
+        }
         // Every match on screen is marked; the current one stands out.
         if let Some(find) = find {
             let top = self
@@ -2029,8 +2823,10 @@ impl Ui {
                 }
             }
         }
-        if composer_height > 0 {
-            let y = body.y + body.height;
+        // A pane too short for the box shows as much of it as fits, and never draws below itself.
+        let bottom = area.y + area.height;
+        if composer_height > 0 && body.y + body.height + band_height < bottom {
+            let y = body.y + body.height + band_height;
             buf.set_stringn(
                 area.x,
                 y,
@@ -2074,7 +2870,9 @@ impl Ui {
             }
             for (index, attachment) in thumbnails.iter().enumerate() {
                 let x = area.x + 2 + index as u16 * (THUMBNAIL.width + 1);
-                if x + THUMBNAIL.width > area.x + area.width {
+                if x + THUMBNAIL.width > area.x + area.width
+                    || y + 1 + THUMBNAIL.height > bottom
+                {
                     break;
                 }
                 self.draw_thumbnail(
@@ -2089,19 +2887,24 @@ impl Ui {
                 );
             }
             for (offset, line) in composer.iter().enumerate() {
-                buf.set_line(area.x, y + 1 + strip + offset as u16, line, area.width);
+                let row = y + 1 + strip + offset as u16;
+                if row >= bottom {
+                    break;
+                }
+                buf.set_line(area.x, row, line, area.width);
             }
             self.hit(
                 Rect {
                     x: area.x,
                     y: y + 1,
                     width: area.width,
-                    height: composer.len().max(1) as u16,
+                    height: (composer.len().max(1) as u16).min(bottom - y - 1),
                 },
                 Hit::Composer,
             );
             // Where this stui can listen, the box offers it: a click or Ctrl+R.
             if crate::voice::available()
+                && y + 1 + strip < bottom
                 && self.composing(&agent.id)
                 && self.voice_for(&agent.id).is_none()
             {
@@ -2134,6 +2937,7 @@ impl Ui {
 
     /// Draw a document into a scrolling pane, registering its click targets.
     fn pane(&self, buf: &mut Buffer, key: &str, area: Rect, doc: Doc, follow_default: bool) {
+        let layer = self.frame.borrow().covers.len();
         let height = area.height as usize;
         let total = doc.lines.len();
         let state = {
@@ -2184,6 +2988,37 @@ impl Ui {
             *state
         };
         let top = state.top;
+        if matches!(
+            Pane::parse(key),
+            Some(Pane::Home(Some(_)) | Pane::Mission(Some(_)) | Pane::Declaration(Some(_)))
+        ) {
+            self.hit(
+                Rect {
+                    height: total.saturating_sub(top).min(height) as u16,
+                    width: area.width.saturating_sub(1),
+                    ..area
+                },
+                Hit::Subject,
+            );
+        }
+        if key.starts_with("chat:") {
+            for (index, (id, start)) in doc.entries.iter().enumerate() {
+                let end = doc.entries.get(index + 1).map_or(total, |(_, line)| *line);
+                let first = (*start).max(top);
+                let last = end.min(top + height);
+                if first < last && id != live::HISTORY_NOTE {
+                    self.hit(
+                        Rect {
+                            x: area.x,
+                            y: area.y + (first - top) as u16,
+                            width: area.width.saturating_sub(1),
+                            height: (last - first) as u16,
+                        },
+                        Hit::Message,
+                    );
+                }
+            }
+        }
         if area.width > 1 && height > 0 {
             self.frame.borrow_mut().read_messages.extend(
                 doc.messages
@@ -2217,7 +3052,21 @@ impl Ui {
                     width: target.width.min(area.width.saturating_sub(target.column)),
                     height: 1,
                 };
-                self.hit(rect, target.hit.clone());
+                if !matches!(target.hit, Hit::InlineImage(_)) { self.hit(rect, target.hit.clone()); }
+            }
+            if let Hit::InlineImage(key) = &target.hit
+                && target.line < top + height
+                && target.line + 12 > top
+                && let Some(picker) = &self.picker
+            {
+                let start = target.line.max(top);
+                let end = (target.line + 12).min(top + height);
+                self.content.draw_image(picker, key, Rect {
+                    x: area.x + 2,
+                    y: area.y + (start - top) as u16,
+                    width: area.width.saturating_sub(3),
+                    height: (end - start) as u16,
+                }, buf);
             }
         }
         if let Some(selection) = &self.conversation_state.selection
@@ -2279,6 +3128,15 @@ impl Ui {
             top,
             total,
             lines,
+            entries: doc.entries,
+            images: doc.targets.iter().filter_map(|target| {
+                if let Hit::ContentImage(key) = &target.hit {
+                    Some((key.clone(), target.line))
+                } else {
+                    None
+                }
+            }).collect(),
+            layer,
         });
     }
 
@@ -2297,7 +3155,7 @@ impl Ui {
             _ if menu_for.is_some() => "actions",
             "agent" | "session" => "agent",
             "mission" => "mission",
-            "attention" => "needs you",
+            "attention" => "alert",
             _ => "details",
         };
         doc.card(
@@ -2316,11 +3174,13 @@ impl Ui {
         };
         // Everything outside the card closes it.
         self.hit(area, Hit::Escape);
+        self.cover(area);
         buf.set_style(rect, Style::default().bg(theme::MANTLE));
         for (offset, line) in doc.lines.iter().take(height as usize).enumerate() {
             buf.set_line(rect.x, rect.y + offset as u16, line, rect.width);
         }
         self.hit(rect, Hit::Peek(subject.to_owned()));
+        self.links(buf, rect);
         for target in &doc.targets {
             if (target.line as u16) < height {
                 self.hit(
@@ -2337,7 +3197,7 @@ impl Ui {
     }
 
     fn draw_terminal(&self, buf: &mut Buffer, area: Rect, agent: &str) {
-        let Some(view) = self.terminal.as_ref().filter(|view| view.agent == agent) else {
+        let Some(view) = self.terminal_view(agent) else {
             buf.set_stringn(
                 area.x,
                 area.y + 1,
@@ -2345,14 +3205,46 @@ impl Ui {
                 area.width as usize,
                 theme::dim(),
             );
+            if area.height > 3 {
+                let mut doc = Doc::new();
+                doc.buttons(&[("Ctrl+]", "Attach", Hit::Attach, theme::ACCENT)]);
+                let button = Rect::new(
+                    area.x + 1,
+                    area.y + 3,
+                    area.width.saturating_sub(1),
+                    1,
+                );
+                buf.set_line(button.x, button.y, &doc.lines[0], button.width);
+                let target = &doc.targets[0];
+                self.hit(
+                    Rect { width: target.width.min(button.width), ..button },
+                    target.hit.clone(),
+                );
+            }
             return;
         };
         if let Some(native) = view.native.as_ref() {
             // One line for where this is and how to leave; the PTY gets the rest of the pane.
             let scrolled = native.scrolled();
+            let selection_here = self.terminal_selection_mode
+                && self
+                    .terminal
+                    .as_ref()
+                    .is_some_and(|view| view.agent == agent);
             let status = match (native.ended(), native.attached(), scrolled) {
                 (Some(reason), _, _) => format!("ended: {reason}"),
                 (None, false, _) => "attaching…".into(),
+                (None, true, 0) if selection_here => {
+                    "selection on · drag copies · ctrl+alt+s resumes program mouse".into()
+                }
+                (None, true, 0)
+                    if native
+                        .mode()
+                        .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE) =>
+                {
+                    "program mouse · alt+drag copies · ctrl+alt+s selects · ctrl+alt+r resets"
+                        .into()
+                }
                 (None, true, 0) if self.shell_focused() => {
                     "drag selects and copies · wheel or shift+pgup scrolls back".into()
                 }
@@ -2378,16 +3270,41 @@ impl Ui {
                 height: area.height.saturating_sub(1),
                 ..area
             };
-            self.terminal_size
-                .set((body.height.max(1), body.width.max(1)));
-            self.terminal_body.set(Some(body));
+            // Where the mouse maps and where a new attach starts is the focused terminal's body;
+            // every attached terminal fits its own.
+            let focused = self.terminal.as_ref().is_some_and(|view| view.agent == agent)
+                || self.parked.is_empty();
+            if focused {
+                self.terminal_size
+                    .set((body.height.max(1), body.width.max(1)));
+                self.terminal_body.set(Some(body));
+            }
             native.fit(body.height, body.width);
+            let layer = self.frame.borrow().covers.len();
+            self.frame.borrow_mut().panes.push(FramePane {
+                key: Pane::Terminal(agent.to_owned()).key(),
+                rect: body,
+                top: scrolled,
+                total: usize::from(body.height) + scrolled,
+                lines: Rc::new(Vec::new()),
+                entries: Vec::new(),
+                images: Vec::new(),
+                layer,
+            });
             // The person's own cursor only where nothing is drawn over the terminal.
             let real = self.terminal_focused()
+                && self.focused_pane() == Some(Pane::Terminal(agent.to_owned()))
                 && !self.help
                 && self.popover.is_none()
+                && self.context.is_none()
                 && !self.palette_open();
-            self.terminal_cursor.set(native.draw(buf, body, real));
+            let cursor = native.draw(buf, body, real);
+            if real {
+                self.terminal_cursor.set(cursor);
+            }
+            if let Some(picker) = &self.picker {
+                native.draw_graphics(buf, body, picker);
+            }
             return;
         }
         let header = format!(" ← Return · Ctrl+\\   {}", view.title);
@@ -2448,9 +3365,7 @@ impl Ui {
     fn terminal_key(&mut self, key: KeyEvent) {
         match self.native_terminal() {
             Some(native) => {
-                if let Some(bytes) = pty::key_bytes(key, native.mode()) {
-                    native.write(bytes);
-                }
+                native.key(key);
             }
             None => self.effects.push(Effect::TerminalKey(key)),
         }
@@ -2524,6 +3439,15 @@ impl Ui {
             })
             .unwrap_or_default();
         let mut lines = self.composer_text(agent, width, editing, &draft);
+        if let Some(message) = self.replies.get(&agent.id) {
+            lines.insert(
+                0,
+                Line::from(Span::styled(
+                    text::truncate(&format!("  Reply to {message}"), width),
+                    theme::dim(),
+                )),
+            );
+        }
         if !chips.is_empty() {
             lines.splice(0..0, chips);
         }
@@ -2683,7 +3607,6 @@ impl Ui {
                     ("ctrl+o", "zoom the split, and back"),
                     ("ctrl+s", "show or hide the sidebar"),
                     ("ctrl+g", "another space, or a new one"),
-                    ("ctrl+n", "start a new agent"),
                     ("1-5", "open the palette at a section"),
                 ],
             );
@@ -2700,6 +3623,11 @@ impl Ui {
             "lists and cards",
             &[
                 ("↑↓ j k or click", "select"),
+                ("F10", "top bar actions; ↑↓ and Enter choose"),
+                (
+                    "shift+F10 or Menu",
+                    "the selected subject's actions; ↑↓ and Enter choose",
+                ),
                 ("t", "Agents, Missions: the path tree or the groups"),
                 ("x", "Missions: show st's own missions"),
                 ("n", "Agents: a new agent; Missions: a new mission"),
@@ -2723,7 +3651,13 @@ impl Ui {
                     "ctrl+a",
                     "the agent's actions: restart, suspend, retire, terminal…",
                 ),
-                ("ctrl+e", "expand or collapse tool output"),
+                (
+                    "o / ctrl+e",
+                    "expand all; load visible clipped output one at a time; collapse releases",
+                ),
+                ("ctrl+↑ ctrl+↓", "focus the previous or next tool"),
+                ("ctrl+enter", "expand/collapse the focused tool; read its full content"),
+                ("ctrl+u", "load/hide focused tool images inline (outside a draft)"),
                 (
                     "ctrl+p",
                     "simplified (the default: a tool call is one line, a run of them one) or full (every call and its output); this device",
@@ -2733,7 +3667,7 @@ impl Ui {
                     "this agent's details beside it (ctrl+i too, where the terminal tells it from tab)",
                 ),
                 ("drag", "select text in one pane; release copies it"),
-                ("ctrl+]  ctrl+\\", "attach the agent's terminal; leave it"),
+                ("ctrl+]  ctrl+\\  ctrl+t ctrl+t", "attach the agent's terminal; leave it (or Ctrl+T twice)"),
                 (
                     "ctrl+r  backspace",
                     "a message that was not sent: send it again; take it back to change",
@@ -2782,7 +3716,7 @@ impl Ui {
         }
         let mut doc = Doc::new();
         doc.card(
-            "help · any key closes",
+            "help · any key or click closes",
             theme::ACCENT,
             false,
             inner,
@@ -2862,6 +3796,9 @@ impl Ui {
                     ));
                 }
             }
+            // The other ways to answer or set the card aside are always reachable: write in
+            // words (c), chat about it (t), dismiss it (x), go to the agent (g).
+            KeyCode::Char('c' | 't' | 'x' | 'g') => return false,
             _ => {}
         }
         true
@@ -2879,6 +3816,7 @@ impl Ui {
     }
 
     fn select(&mut self, index: usize) {
+        self.session_focus = None;
         self.answering = None;
         let count = self.ids().len();
         if count == 0 {
@@ -2892,6 +3830,7 @@ impl Ui {
     }
 
     fn switch_tab(&mut self, tab: usize) {
+        self.session_focus = None;
         self.answering = None;
         self.tab = tab.min(TABS.len() - 1);
         self.editing = false;
@@ -2914,10 +3853,16 @@ impl Ui {
             0
         } else if id.starts_with("mission/") {
             2
+        } else if id.starts_with("machine/") {
+            3
         } else {
             1
         };
         self.switch_tab(tab);
+        if id.starts_with("session/") {
+            self.session_focus = Some(id.to_owned());
+            return;
+        }
         if let Some(index) = self.ids().iter().position(|candidate| candidate == id) {
             self.select(index);
         }
@@ -2967,16 +3912,214 @@ impl Ui {
         }
     }
 
+    /// Dispatch the outer terminal's decoded input, shared by the live and demo loops.
+    fn input_event(&mut self, event: Event) -> bool {
+        if self.live
+            && matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release)
+            && (self.editing
+                || self.chat.as_ref().is_some_and(|chat| chat.editing)
+                || self.new_mission.is_some()
+                || self.find.is_some()
+                || self.palette_open())
+        {
+            self.quality.key();
+        }
+        if let Event::Mouse(mouse) = event
+            && mouse.kind == MouseEventKind::Moved
+        {
+            return self.mouse_moved(mouse);
+        }
+        if event == Event::FocusLost {
+            self.hover.clear();
+            self.hover.pressed.set(false);
+            self.dragging = false;
+            self.middle_tab = None;
+            self.terminal_selecting = false;
+            self.cancel_drag();
+        }
+        let focused = self.input_terminal();
+        match event {
+            Event::Key(key) => self.key(shifted(key)),
+            Event::Paste(text) => {
+                self.sync_terminal_slot();
+                self.paste(text)
+            }
+            Event::Mouse(mouse) => self.mouse(mouse),
+            Event::FocusGained | Event::FocusLost if focused.is_some() => {
+                if let Some(native) = self.native_terminal() {
+                    native.focus(matches!(event, Event::FocusGained));
+                }
+            }
+            _ => {}
+        }
+        self.sync_terminal_slot();
+        let now = self.input_terminal();
+        if focused != now {
+            for (agent, gained) in [(focused, false), (now, true)] {
+                if let Some(agent) = agent
+                    && let Some(native) = self
+                        .terminal_view(&agent)
+                        .and_then(|view| view.native.as_ref())
+                {
+                    native.focus(gained);
+                }
+            }
+        }
+        true
+    }
+
+    fn input_terminal(&self) -> Option<String> {
+        (self.terminal_focused()
+            && !self.palette_open()
+            && !self.help
+            && self.popover.is_none()
+            && self.voice.is_none()
+            && self.context.is_none())
+        .then(|| match self.focused_pane() {
+            Some(Pane::Terminal(agent)) => Some(agent),
+            _ => self.terminal.as_ref().map(|view| view.agent.clone()),
+        })
+        .flatten()
+    }
+
+    /// Leave the attached terminal: an agent's tab turns back into its conversation; a shell's
+    /// tab stays a shell, detached.
+    fn leave_terminal(&mut self) {
+        self.terminal_selection_mode = false;
+        self.terminal_selecting = false;
+        self.terminal_hold = None;
+        if let Some(Pane::Terminal(agent)) = self.focused_pane()
+            && agent.starts_with("agent/")
+        {
+            self.swap_focused_pane(Pane::Agent(Some(agent)));
+            self.terminal = None;
+        }
+        self.effects.push(Effect::CloseTerminal);
+    }
+
+    /// A Ctrl+T held back goes to the program once no second press came to leave with.
+    pub(crate) fn step_terminal_hold(&mut self) {
+        if let Some((key, at)) = self.terminal_hold
+            && at.elapsed() >= LEAVE_TAP
+        {
+            self.terminal_hold = None;
+            if self.terminal_focused() {
+                self.terminal_key(key);
+            }
+        }
+    }
+
+    /// Whether a held key may act again as a press. While text is being typed (a message box,
+    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may; outside
+    /// it only the keys that move. Never a pending confirmation or answer: Enter, y and the
+    /// commands that change things act once per press, so holding one can never repeat them.
+    fn repeat_is_safe(&self, key: &KeyEvent) -> bool {
+        if self.confirm.is_some() || self.answering.is_some() || self.terminal_focused() {
+            return false;
+        }
+        let typing = self.editing
+            || self.find.is_some()
+            || self.palette_open()
+            || self.chat.as_ref().is_some_and(|chat| chat.editing)
+            || self.new_mission.is_some();
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab | KeyCode::F(_) => {
+                false
+            }
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End => true,
+            _ => typing,
+        }
+    }
+
     pub fn key(&mut self, key: KeyEvent) {
+        if self.glasses.is_none() && self.resource_sidebar.focused && self.resource_sidebar_key(key) { return; }
+
+        let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
+        if self.terminal_hold.is_some() {
+            if ctrl_t && key.kind != KeyEventKind::Press {
+                // The held press's own repeat or release goes with it.
+                return;
+            }
+            if !ctrl_t {
+                // Anything else first lets the held key go, so the program sees them in order.
+                if let Some((held, _)) = self.terminal_hold.take()
+                    && self.terminal_focused()
+                {
+                    self.terminal_key(held);
+                }
+            }
+        }
         if key.kind != KeyEventKind::Press {
+            // Repeats and releases belong to the child, never to stui shortcuts or confirmations.
+            if self.terminal_focused()
+                && !self.palette_open()
+                && !self.help
+                && self.popover.is_none()
+                && self.voice.is_none()
+                && self.context.is_none()
+                && !terminal_space_key(key)
+                && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
+                && !matches!(key.code, KeyCode::Char('s' | 'S' | 'r' | 'R') if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT))
+                && !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown if key.modifiers.contains(KeyModifiers::SHIFT))
+                && !matches!(key.code, KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.shell_focused())
+            {
+                self.terminal_key(key);
+            } else if key.kind == KeyEventKind::Repeat && self.repeat_is_safe(&key) {
+                // Held down, a key goes on: Ctrl+W deletes word after word, an arrow moves on.
+                let mut again = key;
+                again.kind = KeyEventKind::Press;
+                self.key(again);
+            }
             return;
         }
+        // Ctrl+\ always leaves the attached tab, including through palette overlays.
+        if self.terminal_focused()
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('\\' | '4'))
+        {
+            self.leave_terminal();
+            return;
+        }
+        self.sync_terminal_slot();
         // Listening takes every key until the words are sent, kept or dropped.
         if self.voice_key(key) {
             return;
         }
+        // A text box that has the keyboard always gets the keys: choosing an answer yields to it,
+        // so a person who picked an option and then clicked into a box can type (Nathan,
+        // 2026-10-11: "I can't type until I hit esc").
+        if self.answering.is_some()
+            && (self.editing || self.chat.as_ref().is_some_and(|chat| chat.editing))
+        {
+            self.answering = None;
+        }
         // Choosing a structured request's answer: ↑↓ another, Enter sends, Esc puts it away.
         if self.answer_key(key) {
+            return;
+        }
+        if self.context_key(key) {
+            return;
+        }
+        if let Some(action) = self.confirm {
+            // Confirmation owns the keys even when a sidebar or terminal is behind the menu.
+            // Ctrl+C retains its existing second-press confirmation of an interrupt.
+            if key.code == KeyCode::Char('y')
+                || (action == 's'
+                    && key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                self.confirm = None;
+                self.act(action);
+            } else {
+                self.confirm = None;
+            }
             return;
         }
         if self.glass_key(key) {
@@ -2986,17 +4129,42 @@ impl Ui {
         if self.terminal_focused() {
             let control = key.modifiers.contains(KeyModifiers::CONTROL);
             match key.code {
-                // Terminals send Ctrl+\\ as 0x1c, which crossterm reports as Ctrl+4.
-                KeyCode::Char('\\' | '4') if control => {
-                    // In glasses an agent's tab turns back into its conversation; a shell's tab
-                    // stays a shell, detached.
-                    if let Some(Pane::Terminal(agent)) = self.focused_pane()
-                        && agent.starts_with("agent/")
-                    {
-                        self.swap_focused_pane(Pane::Agent(Some(agent)));
-                        self.terminal = None;
+                KeyCode::Char('s' | 'S')
+                    if key
+                        .modifiers
+                        .contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.terminal_selection_mode = !self.terminal_selection_mode;
+                    self.flash(if self.terminal_selection_mode {
+                        "Selection on · drag copies · Ctrl+Alt+S resumes program mouse"
+                    } else {
+                        "Program mouse restored"
+                    });
+                }
+                KeyCode::Char('r' | 'R')
+                    if key
+                        .modifiers
+                        .contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    if let Some(native) = self.native_terminal() {
+                        native.reset_modes();
                     }
-                    self.effects.push(Effect::CloseTerminal);
+                    self.terminal_selection_mode = false;
+                    self.terminal_selecting = false;
+                    self.terminal_confirm = None;
+                    self.flash("Terminal input modes reset");
+                }
+                // Ctrl+T twice leaves the terminal. The first press is held back a moment, and
+                // the program gets it if no second one comes (a shell swaps two characters).
+                KeyCode::Char('t') if key.modifiers == KeyModifiers::CONTROL => {
+                    if self
+                        .terminal_hold
+                        .is_some_and(|(_, at)| at.elapsed() < LEAVE_TAP)
+                    {
+                        self.leave_terminal();
+                    } else {
+                        self.terminal_hold = Some((key, Instant::now()));
+                    }
                 }
                 // An agent's terminal asks twice before Ctrl-C or Ctrl-D reach it, so a reflex
                 // never stops an agent; a shell gets them at once, as in any terminal.
@@ -3074,10 +4242,6 @@ impl Ui {
                     }
                 }
             }
-            return;
-        }
-        if self.agent_form && self.tab == 1 && self.new_agent.is_some() {
-            self.agent_form_key(key);
             return;
         }
         if self.mission_form_focused()
@@ -3210,18 +4374,6 @@ impl Ui {
             }
             return;
         }
-        if let Some(action) = self.confirm {
-            match key.code {
-                // Only y confirms. Enter is how a message is sent, so it never confirms anything
-                // that acts for the person: stopping, approving, closing, cancelling, revoking.
-                KeyCode::Char('y') => {
-                    self.confirm = None;
-                    self.act(action);
-                }
-                _ => self.confirm = None,
-            }
-            return;
-        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             // Ctrl+H is Home; in a text box it stays backspace.
@@ -3235,6 +4387,8 @@ impl Ui {
             }
             KeyCode::Tab => self.switch_tab((self.tab + 1) % TABS.len()),
             KeyCode::BackTab => self.switch_tab((self.tab + TABS.len() - 1) % TABS.len()),
+            KeyCode::Up if self.tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.focus_tool(-1),
+            KeyCode::Down if self.tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.focus_tool(1),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.select(self.selected[self.tab].saturating_sub(1))
             }
@@ -3254,6 +4408,8 @@ impl Ui {
             // Classic's list; in spaces only Ctrl+S has a sidebar.
             KeyCode::Char('s') if self.glasses.is_none() => self.sidebar = !self.sidebar,
             KeyCode::Char('x') if self.tab == 2 => self.system = !self.system,
+            KeyCode::Enter if self.tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_tool(),
+            KeyCode::Char('u') if self.tab == 1 && key.modifiers.contains(KeyModifiers::CONTROL) => self.toggle_focused_images(),
             KeyCode::Char('o') if self.tab == 1 => self.toggle_all_tools(),
             KeyCode::Char('O') => self.toggle_simple(),
             KeyCode::Char('/') if self.tab == 1 => {
@@ -3292,7 +4448,6 @@ impl Ui {
             {
                 self.open_terminal()
             }
-            KeyCode::Char('n') if self.tab == 1 => self.open_new_agent(None),
             KeyCode::Char('n') if self.tab == 2 => {
                 self.new_mission = Some((Default::default(), 0));
             }
@@ -3346,6 +4501,10 @@ impl Ui {
         let Some(id) = self.attention_focus() else {
             return;
         };
+        self.read_update_id(id);
+    }
+
+    fn read_update_id(&mut self, id: String) {
         if !self.updates_read.insert(id.clone()) {
             return;
         }
@@ -3361,24 +4520,6 @@ impl Ui {
         }
     }
 
-    /// An update left open on Home for a moment has been read (docs: it clears when the person
-    /// opens it). Passing over it with the arrows does not count.
-    pub(crate) fn read_open_update(&mut self) {
-        let open = self
-            .attention_focus()
-            .filter(|_| !self.help && self.popover.is_none())
-            .filter(|_| self.current_kind() == Some("update"));
-        match (open, &self.update_open) {
-            (None, _) => self.update_open = None,
-            (Some(id), Some((shown, since))) if *shown == id => {
-                if since.elapsed() >= UPDATE_READ_AFTER {
-                    self.read_update();
-                }
-            }
-            (Some(id), _) => self.update_open = Some((id, Instant::now())),
-        }
-    }
-
     fn current_kind(&self) -> Option<&'static str> {
         let id = self.attention_focus()?;
         self.world
@@ -3389,8 +4530,99 @@ impl Ui {
             .map(|item| item.kind.word())
     }
 
+    fn content_conversation(&self) -> Option<String> {
+        if self.glasses.is_some() {
+            match self.focused_pane()? {
+                Pane::Agent(id) => id,
+                _ => None,
+            }
+        } else if self.tab == 1 { self.selected_id() } else { None }
+    }
+
+    fn focused_tool(&self, conversation: &str) -> Option<String> {
+        let entries = self.world.conversations.get(conversation)?.items();
+        let focused = self.content.focused.get(conversation);
+        if let Some(entry) = entries.iter().find(|entry| focused == Some(&entry.id) && matches!(entry.body, Body::Tool { .. })) {
+            return Some(entry.id.clone());
+        }
+        let frame = self.frame.borrow();
+        let pane = frame.panes.iter().rev().find(|pane| pane.key == format!("chat:{conversation}"));
+        pane.and_then(|pane| pane.entries.iter().rev().find_map(|(id, line)| {
+            (*line >= pane.top && *line < pane.top + pane.rect.height as usize
+                && entries.iter().any(|entry| &entry.id == id && matches!(entry.body, Body::Tool { .. })))
+                .then(|| id.clone())
+        })).or_else(|| entries.iter().rev().find(|entry| matches!(entry.body, Body::Tool { .. })).map(|entry| entry.id.clone()))
+    }
+
+    fn focus_tool(&mut self, direction: isize) {
+        let Some(conversation) = self.content_conversation() else { return };
+        let Some(entries) = self.world.conversations.get(&conversation) else { return };
+        let tools: Vec<_> = entries.items().iter().filter(|entry| matches!(entry.body, Body::Tool { .. }))
+            .map(|entry| entry.id.clone()).collect();
+        if tools.is_empty() { return; }
+        let current = self.focused_tool(&conversation).and_then(|id| tools.iter().position(|tool| *tool == id));
+        let index = current.map_or(tools.len() - 1, |index| index.saturating_add_signed(direction).min(tools.len() - 1));
+        let id = tools[index].clone();
+        self.content.focused.insert(conversation.clone(), id.clone());
+        // A bundled call becomes individually reachable when keyboard-focused.
+        self.conversation_state.expanded.extend(tools.iter().map(|id| st3_conversation_ui::bundle_id(id)));
+        self.content.scroll_to.borrow_mut().insert(conversation.clone(), id);
+        self.flash(format!("Tool {} of {} focused · Ctrl+Enter expand · Ctrl+U images", index + 1, tools.len()));
+    }
+
+    fn toggle_focused_tool(&mut self) {
+        let Some(conversation) = self.content_conversation() else { return };
+        let Some(id) = self.focused_tool(&conversation) else { return };
+        self.toggle_content_tool(&conversation, id);
+    }
+
+    fn toggle_content_tool(&mut self, conversation: &str, id: String) {
+        self.content.focused.insert(conversation.to_owned(), id.clone());
+        self.reveal_tool_bundles(conversation);
+        self.conversation_state.expand(id.clone());
+        if self.conversation_state.expanded.contains(&id) {
+            self.content.scroll_to.borrow_mut().insert(conversation.to_owned(), id.clone());
+            for key in self.content.request_tool(conversation, &id) {
+                self.effects.push(Effect::LoadContent(key));
+            }
+        } else {
+            self.content.release_tool(conversation, &id);
+            if let Some(first) = id.strip_prefix("bundle:")
+                && let Some(entries) = self.world.conversations.get(conversation)
+            {
+                for entry in entries.items().iter().skip_while(|entry| entry.id != first)
+                    .take_while(|entry| matches!(entry.body, Body::Tool { .. }))
+                {
+                    self.conversation_state.expanded.remove(&entry.id);
+                    self.content.release_tool(conversation, &entry.id);
+                }
+            }
+        }
+    }
+
+    fn toggle_focused_images(&mut self) {
+        let Some(conversation) = self.content_conversation() else { return };
+        let Some(id) = self.focused_tool(&conversation) else { return };
+        self.conversation_state.expanded.insert(id.clone());
+        self.reveal_tool_bundles(&conversation);
+        self.content.scroll_to.borrow_mut().insert(conversation.clone(), id.clone());
+        for key in self.content.tool_images(&conversation, &id) {
+            if self.content.toggle_image(&key) { self.effects.push(Effect::LoadContent(key)); }
+        }
+    }
+
+    fn reveal_tool_bundles(&mut self, conversation: &str) {
+        if let Some(entries) = self.world.conversations.get(conversation) {
+            self.conversation_state.expanded.extend(entries.items().iter()
+                .filter(|entry| matches!(entry.body, Body::Tool { .. }))
+                .map(|entry| st3_conversation_ui::bundle_id(&entry.id)));
+        }
+    }
+
     fn toggle_all_tools(&mut self) {
-        let Some(id) = self.selected_id() else { return };
+        let Some(id) = self.content_conversation() else {
+            return;
+        };
         let Some(Load::Ready(entries)) = self.world.conversations.get(&id) else {
             return;
         };
@@ -3403,11 +4635,15 @@ impl Ui {
             .iter()
             .all(|tool| self.conversation_state.expanded.contains(tool))
         {
+            self.content.expanded_all.remove(&id);
             for tool in tools {
                 self.conversation_state.expanded.remove(&tool);
+                self.content.release_tool(&id, &tool);
             }
         } else {
             self.conversation_state.expanded.extend(tools);
+            self.content.expanded_all.insert(id.clone());
+            self.reveal_tool_bundles(&id);
         }
     }
 
@@ -3434,10 +4670,33 @@ impl Ui {
                 let Some(kind) = self.current_kind() else {
                     return;
                 };
+                if self.current_item().is_some_and(|item| item.actions.iter().any(|a| a == "custom.reply"))
+                    && matches!(key, 'y' | 'n' | 'r' | 'x') {
+                    self.flash("Reply with c using this source's declared fields");
+                    return;
+                }
+                if let Some(id) = self.attention_focus()
+                    && self.closed.contains(&id)
+                {
+                    if key == 'x' {
+                        self.closed.remove(&id);
+                        self.acted.insert(id.clone());
+                        if let Load::Ready(items) = &mut self.world.attention {
+                            items.retain(|item| item.id != id);
+                        }
+                        let index = self.selected[self.tab];
+                        self.select(index);
+                    } else {
+                        self.flash("This was closed and stays under Recently closed until you clear it with x");
+                    }
+                    return;
+                }
                 match (kind, key) {
                     // x dismisses whatever can be dismissed, one key for every kind (Nathan,
                     // 2026-10-03): a request is closed with word to its asker that there is
                     // nothing for the person to do, after a y; an update or a message is read.
+                    // A decision or choice needs one of its named answers, which a dismissal
+                    // is not, so x says so rather than sending something st would refuse.
                     ("request", 'x') => self.confirm = Some('r'),
                     ("update", 'x') => self.read_update(),
                     ("message", 'x') => self.act('m'),
@@ -3568,8 +4827,14 @@ impl Ui {
         if self.glasses.is_some() {
             match self.focused_pane() {
                 Some(Pane::Terminal(id)) if id == agent.id => {}
+                // One tab for each thing: a terminal already open in a tab is focused, not
+                // opened a second time.
                 Some(Pane::Agent(Some(id))) if id == agent.id => {
-                    self.swap_focused_pane(Pane::Terminal(agent.id.clone()))
+                    if self.shows_in_glass(&Pane::Terminal(agent.id.clone())) {
+                        self.open_in_glass(Pane::Terminal(agent.id.clone()), glass::Open::Tab)
+                    } else {
+                        self.swap_focused_pane(Pane::Terminal(agent.id.clone()))
+                    }
                 }
                 _ => self.open_in_glass(Pane::Terminal(agent.id.clone()), glass::Open::Tab),
             }
@@ -3577,6 +4842,78 @@ impl Ui {
             return;
         }
         self.attach_terminal(&agent.id);
+    }
+
+    /// The view of the terminal attached for `agent`, the focused one or one behind another tab.
+    pub(crate) fn terminal_view(&self, agent: &str) -> Option<&TerminalView> {
+        self.terminal
+            .as_ref()
+            .filter(|view| view.agent == agent)
+            .or_else(|| self.parked.iter().find(|view| view.agent == agent))
+    }
+
+    pub(crate) fn terminal_view_mut(&mut self, agent: &str) -> Option<&mut TerminalView> {
+        if self.terminal.as_ref().is_some_and(|view| view.agent == agent) {
+            return self.terminal.as_mut();
+        }
+        self.parked.iter_mut().find(|view| view.agent == agent)
+    }
+
+    /// About to attach `agent`: in a glass another attached terminal stays attached behind its
+    /// own tab (Nathan, 2026-10-06: two terminals in two splits); elsewhere it is let go.
+    pub(crate) fn park_for(&mut self, agent: &str) {
+        self.parked.retain(|view| view.agent != agent);
+        if let Some(old) = self.terminal.take()
+            && old.agent != agent
+            && self.glasses.is_some()
+        {
+            self.parked.push(old);
+        }
+    }
+
+    /// Put the terminal whose tab has focus in `terminal`, where keys and the mouse find it.
+    pub(crate) fn sync_terminal_slot(&mut self) {
+        if self.glasses.is_none() || self.parked.is_empty() {
+            return;
+        }
+        let Some(Pane::Terminal(agent)) = self.focused_pane() else {
+            return;
+        };
+        if self.terminal.as_ref().is_some_and(|view| view.agent == agent) {
+            return;
+        }
+        if let Some(index) = self.parked.iter().position(|view| view.agent == agent) {
+            let wanted = self.parked.remove(index);
+            if let Some(old) = self.terminal.replace(wanted) {
+                self.parked.push(old);
+            }
+            self.terminal_selection_mode = false;
+            self.terminal_selecting = false;
+            self.terminal_press = None;
+            if let Some(body) = self
+                .frame
+                .borrow()
+                .panes
+                .iter()
+                .find(|pane| pane.key == Pane::Terminal(agent.clone()).key())
+                .map(|pane| pane.rect)
+            {
+                self.terminal_body.set(Some(body));
+                self.terminal_size
+                    .set((body.height.max(1), body.width.max(1)));
+            }
+        }
+    }
+
+    /// Let go of `agent`'s terminal wherever it is attached; whether there was one.
+    pub(crate) fn drop_terminal(&mut self, agent: &str) -> bool {
+        let before = self.parked.len();
+        self.parked.retain(|view| view.agent != agent);
+        let focused = self.terminal.as_ref().is_some_and(|view| view.agent == agent);
+        if focused {
+            self.terminal = None;
+        }
+        focused || self.parked.len() != before
     }
 
     /// Attach `agent`'s terminal: followed live, or the demo's in demo mode.
@@ -3589,6 +4926,7 @@ impl Ui {
                 });
                 self.flash("Opening the terminal…");
             } else {
+                self.park_for(agent);
                 self.terminal = Some(TerminalView {
                     agent: agent.to_owned(),
                     title: "shell · demo terminal".into(),
@@ -3616,6 +4954,7 @@ impl Ui {
             self.effects.push(Effect::OpenTerminal { agent: agent.id });
             self.flash("Opening the terminal…");
         } else {
+            self.park_for(&agent.id);
             self.terminal = Some(TerminalView {
                 agent: agent.id.clone(),
                 title: format!("{} · demo terminal", agent.name),
@@ -3626,120 +4965,6 @@ impl Ui {
                 ended: None,
                 native: None,
             });
-        }
-    }
-
-    /// The fleet's machines other than this one, in list order: the new agent form's hosts.
-    fn other_hosts(&self) -> Vec<String> {
-        self.world
-            .machines
-            .items()
-            .iter()
-            .filter(|machine| machine.reach != Reach::Here)
-            .map(|machine| machine.name.clone())
-            .collect()
-    }
-
-    /// Open the new agent form: in a new tab of the focused split in a glass, on the Agents
-    /// tab otherwise. `task` fills in what it should do.
-    pub(crate) fn open_new_agent(&mut self, task: Option<String>) {
-        match self.new_agent.as_mut() {
-            Some(form) => {
-                if let Some(task) = task {
-                    form.task = task;
-                }
-            }
-            None => self.new_agent = Some(screens::AgentForm::new(task.unwrap_or_default())),
-        }
-        if self.glasses.is_some() {
-            self.open_in_glass(Pane::NewAgent, glass::Open::Tab);
-        } else {
-            self.tab = 1;
-            self.agent_form = true;
-            self.terminal = None;
-        }
-    }
-
-    fn cancel_agent_form(&mut self) {
-        self.new_agent = None;
-        self.agent_form = false;
-        if self.glasses.is_some() {
-            self.close_form_tab();
-        }
-    }
-
-    fn agent_form_key(&mut self, key: KeyEvent) {
-        let hosts = self.other_hosts().len();
-        let Some(form) = self.new_agent.as_mut() else {
-            return;
-        };
-        let shifted = key
-            .modifiers
-            .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
-        match key.code {
-            KeyCode::Esc => self.cancel_agent_form(),
-            KeyCode::Tab | KeyCode::Down if form.focus >= 2 || key.code == KeyCode::Tab => {
-                form.focus = (form.focus + 1) % screens::AgentForm::FIELDS;
-            }
-            KeyCode::BackTab | KeyCode::Up if form.focus >= 2 || key.code == KeyCode::BackTab => {
-                form.focus =
-                    (form.focus + screens::AgentForm::FIELDS - 1) % screens::AgentForm::FIELDS;
-            }
-            KeyCode::Left | KeyCode::Right if form.focus >= 2 => {
-                form.cycle(key.code == KeyCode::Right, hosts);
-            }
-            KeyCode::Enter if shifted && form.focus == 0 => {
-                edit::insert(&mut form.task, &self.cursor, "agent:task", "\n")
-            }
-            KeyCode::Enter => self.start_agent(),
-            _ => match form.focus {
-                0 => {
-                    edit::edit(&mut form.task, &self.cursor, "agent:task", key);
-                }
-                1 => {
-                    // A name is one word of letters, digits, dots and dashes.
-                    if let KeyCode::Char(character) = key.code
-                        && !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !(character.is_ascii_alphanumeric() || matches!(character, '-' | '.'))
-                    {
-                        return;
-                    }
-                    edit::edit(&mut form.name, &self.cursor, "agent:name", key);
-                }
-                _ => {}
-            },
-        }
-    }
-
-    fn start_agent(&mut self) {
-        let hosts = self.other_hosts();
-        let Some(form) = self.new_agent.clone() else {
-            return;
-        };
-        if form.name.trim().is_empty() {
-            if let Some(form) = self.new_agent.as_mut() {
-                form.focus = 1;
-            }
-            self.flash("Give it a name");
-            return;
-        }
-        let message = Some(form.task.trim().to_owned()).filter(|task| !task.is_empty());
-        let host = form
-            .host
-            .checked_sub(1)
-            .and_then(|index| hosts.get(index).cloned());
-        if self.live {
-            self.effects.push(Effect::CreateAgent {
-                name: form.name.trim().to_owned(),
-                harness: form.harness().to_owned(),
-                model: form.model().map(str::to_owned),
-                effort: form.effort().map(str::to_owned),
-                host,
-                message,
-            });
-            self.flash(format!("Starting {}…", form.name.trim()));
-        } else {
-            self.flash("Agent started · demo: nothing was sent");
         }
     }
 
@@ -3774,34 +4999,6 @@ impl Ui {
             self.open_in_glass(Pane::Terminal(id.clone()), glass::Open::Tab);
         }
         self.attach_terminal(&id);
-    }
-
-    pub(crate) fn agent_started(&mut self, id: String) {
-        self.new_agent = None;
-        self.agent_form = false;
-        if self.glasses.is_some() {
-            // The agent's conversation takes the form's tab.
-            self.close_form_tab();
-            self.open_in_glass(Pane::Agent(Some(id.clone())), glass::Open::Tab);
-        } else {
-            self.tab = 1;
-        }
-        self.started = Some(id);
-        self.select_started();
-    }
-
-    /// Select the agent just started once st lists it.
-    fn select_started(&mut self) {
-        let Some(id) = self.started.clone() else {
-            return;
-        };
-        let tab = self.tab;
-        self.tab = 1;
-        if let Some(position) = self.ids().iter().position(|candidate| *candidate == id) {
-            self.selected[1] = position;
-            self.started = None;
-        }
-        self.tab = tab;
     }
 
     fn create_launch(&mut self) {
@@ -3882,6 +5079,7 @@ impl Ui {
                     to_name,
                     editing: true,
                 });
+                self.answering = None;
                 self.editing = false;
                 self.confirm = None;
             }
@@ -3923,11 +5121,13 @@ impl Ui {
             }
             context.push(')');
             self.effects.push(Effect::Discuss {
-                to: chat.to,
+                to: chat.to.clone(),
                 title,
                 text: context,
             });
             self.flash("Sending…");
+            // Go where the reply will appear (Nathan, 2026-10-06).
+            self.open(&chat.to);
             return;
         }
         let at = chrono::Local::now().format("%H:%M").to_string();
@@ -3942,6 +5142,7 @@ impl Ui {
                     body: text,
                     delivered: false,
                     dictated: false,
+                    signed: None,
                     images: Vec::new(),
                 },
             });
@@ -3955,11 +5156,13 @@ impl Ui {
                     body: "Good question. Here is what I know, and what I would need from you to go on. (demo reply)".into(),
                     delivered: false,
                     dictated: false,
+                    signed: None,
                     images: Vec::new(),
                 },
             });
         }
         self.flash("Sent · demo: nothing left this machine");
+        self.open(&chat.to);
     }
 
     fn submit(&mut self) {
@@ -3975,7 +5178,22 @@ impl Ui {
             _ => None,
         };
         let Some(mut draft) = draft else {
-            self.flash("Write something first");
+            // An answer that asks for changes is sent with the changes in words.
+            let wanted = self.changes_answer.clone().and_then(|wanted| {
+                self.structured_request().and_then(|(_, request)| {
+                    request
+                        .answers
+                        .iter()
+                        .find(|answer| answer.id == wanted)
+                        .map(|answer| answer.label.clone())
+                })
+            });
+            self.flash(match wanted {
+                Some(label) => format!(
+                    "“{label}” needs your words: write what should change, then Enter. Esc cancels"
+                ),
+                None => "Write something first".to_owned(),
+            });
             return;
         };
         // Live, the images go to st with the message, so an agent on any machine can read them
@@ -3996,6 +5214,7 @@ impl Ui {
             let effect = match self.tab {
                 1 => Some(Effect::Send {
                     agent: id.clone(),
+                    in_reply_to: self.replies.remove(&id),
                     tags: if self.dictated.remove(&id) {
                         vec!["dictated".into()]
                     } else {
@@ -4031,7 +5250,15 @@ impl Ui {
                     }),
                     Some(AttentionKind::Request { .. }) => Some(Effect::Attention {
                         id: id.clone(),
-                        action: "work.done".into(),
+                        action: if self
+                            .current_item()
+                            .is_some_and(|item| item.actions.iter().any(|a| a == "custom.reply"))
+                        {
+                            "custom.reply"
+                        } else {
+                            "work.done"
+                        }
+                        .into(),
                         reason: Some(draft),
                         answer: self.changes_answer.take(),
                     }),
@@ -4072,6 +5299,7 @@ impl Ui {
         }
         match self.tab {
             1 => {
+                self.replies.remove(&id);
                 let name = self
                     .world
                     .agents
@@ -4091,6 +5319,7 @@ impl Ui {
                             body: draft,
                             delivered: false,
                             dictated: false,
+                            signed: None,
                             images: Vec::new(),
                         },
                     });
@@ -4111,7 +5340,7 @@ impl Ui {
 
     /// The agent whose conversation is shown, by name, while it is working.
     fn working_agent(&self) -> Option<String> {
-        if self.tab != 1 || self.agent_form || self.terminal_focused() {
+        if self.tab != 1 || self.terminal_focused() {
             return None;
         }
         let id = self.selected_id()?;
@@ -4155,12 +5384,8 @@ impl Ui {
                 self.confirm = Some('A');
             }
             ('i', None) => {
-                if self.live {
-                    self.effects.push(Effect::StopAgent { agent });
-                    self.flash("Interrupting…");
-                } else {
-                    self.flash("Interrupted · demo: nothing was sent");
-                }
+                self.open(&agent);
+                self.action_key('S');
             }
             ('t', None) => {
                 self.open(&agent);
@@ -4241,11 +5466,23 @@ impl Ui {
         let Some(id) = self.attention_focus() else {
             return;
         };
+        if self
+            .current_item()
+            .is_some_and(|item| item.actions.iter().any(|a| a == "custom.reply"))
+        {
+            return;
+        }
         if matches!(action, 'y' | 'n' | 'r') && self.current_kind() == Some("request") {
-            // r closes a request that needs nothing from the person; the step continues.
+            // r closes a request that needs nothing from the person; the step continues. A
+            // decision or choice is set aside by name: st tells its asker it was dismissed.
+            let named = action == 'r'
+                && self
+                    .structured_request()
+                    .is_some_and(|(_, request)| !request.answers.is_empty());
             let answer = match action {
                 'y' => "Yes",
                 'n' => "No",
+                _ if named => "Dismissed without an answer.",
                 _ => "Nothing for me to do here.",
             };
             if self.live {
@@ -4253,7 +5490,7 @@ impl Ui {
                     id,
                     action: "work.done".into(),
                     reason: Some(answer.into()),
-                    answer: None,
+                    answer: named.then(|| "dismiss".to_owned()),
                 });
                 self.flash(format!("Answering “{answer}”…"));
             } else {
@@ -4337,13 +5574,128 @@ impl Ui {
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent) {
+        if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+            && self.frame.borrow().hits.iter().rev().any(|(rect, hit)| {
+                contains(*rect, mouse.column, mouse.row) && matches!(hit, Hit::ResourceRow(_) | Hit::ResourceFilter)
+            }) {
+            self.resource_sidebar.selected = if mouse.kind == MouseEventKind::ScrollUp {
+                self.resource_sidebar.selected.saturating_sub(3)
+            } else {
+                (self.resource_sidebar.selected + 3).min(self.resource_sidebar.rows().len().saturating_sub(1))
+            };
+            return;
+        }
+
+        if mouse.kind == MouseEventKind::Moved {
+            self.mouse_moved(mouse);
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(_) | MouseEventKind::Drag(_) => {
+                self.hover.pressed.set(true);
+                self.hover.clear();
+            }
+            MouseEventKind::Up(_) => self.hover.pressed.set(false),
+            _ => {}
+        }
+        if let Some(button) = self.context_button {
+            match mouse.kind {
+                MouseEventKind::Up(released) if released == button => {
+                    self.context_button = None;
+                    return;
+                }
+                MouseEventKind::Drag(dragged) if dragged == button => return,
+                MouseEventKind::Down(_) => self.context_button = None,
+                _ => {}
+            }
+        }
+        self.sync_terminal_slot();
         if self.help {
             if matches!(mouse.kind, MouseEventKind::Down(_)) {
                 self.help = false;
             }
             return;
         }
+        // The right-click menu takes the next press: a row acts, anywhere else only closes it.
+        if self.context.is_some() && matches!(mouse.kind, MouseEventKind::Down(_)) {
+            if let MouseEventKind::Down(button) = mouse.kind {
+                self.context_button = Some(button);
+            }
+            let action = if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.frame
+                    .borrow()
+                    .hits
+                    .iter()
+                    .rev()
+                    .find_map(|(rect, hit)| match hit {
+                        Hit::Menu(action) if contains(*rect, mouse.column, mouse.row) => {
+                            Some(action.clone())
+                        }
+                        _ => None,
+                    })
+            } else {
+                None
+            };
+            self.context = None;
+            if let Some(action) = action {
+                self.run_menu_action(action);
+            }
+            return;
+        }
+        if let Some(menu) = &mut self.context {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => menu.selected = menu.selected.saturating_sub(1),
+                MouseEventKind::ScrollDown => {
+                    menu.selected = (menu.selected + 1).min(menu.items.len().saturating_sub(1));
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Tabs own a middle press through release, even when released outside the strip.
+        if mouse.kind == MouseEventKind::Drag(MouseButton::Middle) && self.middle_tab.is_some() {
+            return;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            self.middle_tab = None;
+        }
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Middle) | MouseEventKind::Up(MouseButton::Middle)
+        ) {
+            let tab = self
+                .frame
+                .borrow()
+                .hits
+                .iter()
+                .rev()
+                .find(|(rect, _)| contains(*rect, mouse.column, mouse.row))
+                .and_then(|(_, hit)| match hit {
+                    Hit::GlassTab(group, tab) => Some((*group, *tab)),
+                    _ => None,
+                });
+            if mouse.kind == MouseEventKind::Down(MouseButton::Middle) {
+                if self.popover.is_none() && !self.home_open() && !self.palette_open() {
+                    self.middle_tab = tab;
+                    if tab.is_some() {
+                        return;
+                    }
+                }
+            } else if let Some(pressed) = self.middle_tab.take() {
+                if tab == Some(pressed) {
+                    self.run_menu_action(glass::MenuAction::CloseTab(pressed.0, pressed.1));
+                }
+                return;
+            }
+        }
         if self.terminal_mouse(mouse) {
+            return;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right)) {
+            self.open_context_menu(mouse.column, mouse.row);
+            if self.context.is_some() {
+                self.context_button = Some(MouseButton::Right);
+            }
             return;
         }
         // A tab dragged to another place or a split's edge.
@@ -4364,7 +5716,7 @@ impl Ui {
                         .map(|(_, hit)| hit.clone())
                 };
                 self.conversation_state.selection = None;
-                if let Some(hit) = hit {
+                if let Some(hit) = hit.filter(|hit| !matches!(hit, Hit::Message | Hit::Subject)) {
                     self.click(hit);
                     return;
                 }
@@ -4434,8 +5786,14 @@ impl Ui {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if self.palette_open() => {
                 self.scroll_palette(matches!(mouse.kind, MouseEventKind::ScrollUp));
             }
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+            MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight => {
+                let delta = if matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft
+                ) {
                     -3
                 } else {
                     3
@@ -4458,7 +5816,12 @@ impl Ui {
                             .map(|pane| pane.key.clone()),
                     )
                 };
-                if in_sidebar {
+                if in_sidebar
+                    && !matches!(
+                        mouse.kind,
+                        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                    )
+                {
                     let (lines, height, tab) = {
                         let info = self.frame.borrow();
                         (info.sidebar_lines, info.sidebar_height, info.sidebar_tab)
@@ -4469,15 +5832,44 @@ impl Ui {
                         as usize;
                 } else if let Some(key) = pane {
                     // An attached terminal scrolls its own history (or tells its program).
-                    match self.native_terminal() {
-                        Some(native)
-                            if self.terminal.as_ref().is_some_and(|view| {
-                                key == Pane::Terminal(view.agent.clone()).key()
-                            }) =>
-                        {
-                            native.wheel(-(delta as i32));
+                    let target = self
+                        .terminal
+                        .iter()
+                        .chain(self.parked.iter())
+                        .find(|view| key == Pane::Terminal(view.agent.clone()).key());
+                    match target.and_then(|view| view.native.as_ref()) {
+                        Some(native) => {
+                            if let Some(body) = self
+                                .frame
+                                .borrow()
+                                .panes
+                                .iter()
+                                .find(|pane| pane.key == key)
+                                .map(|pane| pane.rect)
+                            {
+                                native.wheel(
+                                    -(delta as i32),
+                                    mouse,
+                                    mouse.column.saturating_sub(body.x),
+                                    mouse.row.saturating_sub(body.y),
+                                    (self.terminal_selection_mode
+                                        && self.terminal.as_ref().is_some_and(|view| {
+                                            key == Pane::Terminal(view.agent.clone()).key()
+                                        }))
+                                        || mouse
+                                            .modifiers
+                                            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT),
+                                );
+                            }
                         }
-                        _ => self.scroll_pane(&key, delta),
+                        _ if !matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight
+                        ) =>
+                        {
+                            self.scroll_pane(&key, delta)
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -4487,7 +5879,8 @@ impl Ui {
 
     /// The mouse in the focused terminal, as a terminal takes it: a program that asked for the
     /// mouse gets it, and otherwise a drag selects and copies on release. Shift selects even
-    /// while the program has the mouse. Whether the terminal took it.
+    /// while the program has the mouse; Alt/Option and selection mode work when kitty owns Shift.
+    /// Whether the terminal took it.
     fn terminal_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !self.terminal_focused() {
             return false;
@@ -4501,11 +5894,34 @@ impl Ui {
             i32::from(mouse.row) - i32::from(body.y),
         );
         if inside
-            && !self.terminal_selecting
-            && !mouse.modifiers.contains(KeyModifiers::SHIFT)
-            && let Some(bytes) = pty::mouse_bytes(mouse, column as u16, row as u16, native.mode())
+            && mouse
+                .modifiers
+                .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(link) = native.hyperlink(column as u16, row as u16)
         {
-            native.write(bytes);
+            copy(&link);
+            self.flash("Copied link destination");
+            return true;
+        }
+        if inside
+            && !self.terminal_selecting
+            && !self.terminal_selection_mode
+            && !mouse
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            && !matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            )
+            && native
+                .mode()
+                .intersects(alacritty_terminal::term::TermMode::MOUSE_MODE)
+        {
+            native.mouse(mouse, column as u16, row as u16);
             return true;
         }
         match mouse.kind {
@@ -4566,19 +5982,22 @@ impl Ui {
 
     fn click(&mut self, hit: Hit) {
         match hit {
+            Hit::Message | Hit::Subject | Hit::Resize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
             Hit::PaletteSection(section) => self.open_palette(Some(section), glass::Open::Here),
-            Hit::NewAgent => self.open_new_agent(None),
             Hit::Home if self.home_open() && !self.usage_open() => self.close_home(),
             Hit::Home => self.open_home(),
             // The terminal may be on another machine than stui (over SSH or fabric): the
-            // clipboard is the person's, so the link lands where their browser is.
+            // clipboard is the person's, so the link lands where their browser is. Run locally,
+            // the browser opens too.
             Hit::Link(url) => {
                 copy(&url);
-                self.flash(format!(
-                    "Copied {} · paste it in a browser",
-                    text::truncate(&url, 60)
-                ));
+                let opened = open_in_browser(&url);
+                self.flash(if opened {
+                    link_opened_note(&url)
+                } else {
+                    link_note(&url)
+                });
             }
             Hit::Split(right) => self.split(right),
             Hit::GlassTab(group, tab) => self.show_in(group, tab),
@@ -4590,6 +6009,16 @@ impl Ui {
             Hit::Tab(tab) => self.switch_tab(tab),
             Hit::Row(index) => self.select(index),
             Hit::NewTerminal => self.open_new_terminal(),
+            Hit::ResourceRow(index) => self.open_resource_row(index),
+            Hit::ResourceNewFolder => self.open_sidebar_palette(resource_sidebar::PaletteMode::New { subject: None }),
+            Hit::ResourceAdd(folder) => self.open_sidebar_palette(resource_sidebar::PaletteMode::Add { folder }),
+            Hit::ResourceFolderMenu(id) => self.open_sidebar_palette(resource_sidebar::PaletteMode::Manage { id }),
+            Hit::ResourceFolderDrag(_) => {},
+            Hit::ResourceFilter => {
+                self.resource_sidebar.focused = true;
+                self.resource_sidebar.filtering = true;
+                if let Some(glasses) = self.glasses.as_mut() { glasses.sidebar.focused = true; }
+            }
             Hit::SidebarRow(index) => {
                 if let Some(glasses) = self.glasses.as_mut() {
                     let sidebar = &mut glasses.sidebar;
@@ -4598,6 +6027,8 @@ impl Ui {
                 self.open_from_sidebar();
             }
             Hit::Usage => self.toggle_usage(),
+            Hit::Connection => self.show_connection(),
+            Hit::Menu(action) => self.run_menu_action(action),
             Hit::SidebarSection(section) => {
                 if let Some(glasses) = self.glasses.as_mut() {
                     glasses.sidebar.section = section;
@@ -4626,15 +6057,18 @@ impl Ui {
                     _ => {}
                 }
             }
-            Hit::Key('\t') if self.agent_form => {
-                if let Some(form) = self.new_agent.as_mut() {
-                    form.focus = (form.focus + 1) % screens::AgentForm::FIELDS;
-                }
-            }
             Hit::Key('\t') => {
                 if let Some((_, focus)) = self.new_mission.as_mut() {
                     *focus = (*focus + 1) % 4;
                 }
+            }
+            Hit::Key('s') if self.glasses.is_none() => self.sidebar = !self.sidebar,
+            // "↑↓ Another" while an answer is being chosen goes to the next one, round again.
+            Hit::Key('a') if self.answering.is_some() => {
+                let count = self
+                    .structured_request()
+                    .map_or(0, |(_, request)| request.answers.len());
+                self.answering = self.answering.map(|index| (index + 1) % count.max(1));
             }
             Hit::Key(key) => {
                 if key == 'y' {
@@ -4647,8 +6081,10 @@ impl Ui {
                 }
             }
             Hit::Enter if self.new_mission.is_some() => self.create_launch(),
-            Hit::Enter if self.agent_form && self.tab == 1 => self.start_agent(),
-            Hit::Escape if self.agent_form && self.tab == 1 => self.cancel_agent_form(),
+            // "Send this answer" sends the answer being chosen, not the (empty) text box.
+            Hit::Enter if self.answering.is_some() => {
+                self.answer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
             Hit::Enter => {
                 if self.chat.is_some() {
                     self.submit_chat()
@@ -4656,6 +6092,7 @@ impl Ui {
                     self.submit()
                 }
             }
+            Hit::Escape if self.answering.is_some() => self.answering = None,
             Hit::Escape if self.new_mission.is_some() => {
                 self.new_mission = None;
                 self.close_form_tab();
@@ -4674,8 +6111,27 @@ impl Ui {
                 }
             }
             Hit::ToggleTool(id) | Hit::Pane(PaneIntent::Expand(id)) => {
-                self.conversation_state.expand(id);
+                if let Some(conversation) = self.content_conversation() {
+                    self.toggle_content_tool(&conversation, id);
+                } else {
+                    self.conversation_state.expand(id);
+                }
             }
+            Hit::ContentImage(key) => {
+                if let Some((_, entry)) = self.content.image_owner(&key) {
+                    self.conversation_state.expanded.insert(entry.clone());
+                    self.conversation_state.expanded.insert(st3_conversation_ui::bundle_id(&entry));
+                }
+                if self.content.toggle_image(&key) { self.effects.push(Effect::LoadContent(key)); }
+            }
+            Hit::ContentOutput(key) => {
+                if let Some((conversation, entry)) = self.content.image_owner(&key) {
+                    self.conversation_state.expanded.insert(entry);
+                    self.reveal_tool_bundles(&conversation);
+                }
+                if self.content.request(&key) { self.effects.push(Effect::LoadContent(key)); }
+            }
+            Hit::InlineImage(_) => {}
             Hit::Pane(PaneIntent::Open(id)) => self.open(&id),
             Hit::Pane(PaneIntent::Image(image)) => {
                 self.flash(format!(
@@ -4708,16 +6164,14 @@ impl Ui {
             }
             Hit::Help => self.help = !self.help,
             Hit::Answer(index) => self.answering = Some(index),
+            Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
+            Hit::Alert(id, AlertTap::Answer(answer)) => self.answer_alert(&id, &answer),
+            Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
             Hit::Voice => {
                 self.editing = true;
                 self.start_voice();
             }
             Hit::Open(id) => self.open(&id),
-            Hit::Field(index) if self.agent_form => {
-                if let Some(form) = self.new_agent.as_mut() {
-                    form.focus = index;
-                }
-            }
             Hit::Field(index) => {
                 if let Some((_, focus)) = self.new_mission.as_mut() {
                     *focus = index;
@@ -4728,6 +6182,7 @@ impl Ui {
                 self.confirm = Some('v');
                 self.flash("Revoke this device? y to confirm");
             }
+            Hit::Attach => self.open_terminal(),
             Hit::Detach => {
                 if self.live {
                     self.effects.push(Effect::CloseTerminal);
@@ -4791,6 +6246,7 @@ impl Ui {
                 self.world.machines = full.machines.clone();
                 self.world.usage = full.usage.clone();
                 self.world.usage_limits = full.usage_limits.clone();
+                self.world.agent_messages = full.agent_messages.clone();
                 self.world.worktrees = full.worktrees.clone();
                 self.world.conversations = full.conversations;
                 if let Some(Load::Ready(entries)) = self
@@ -4893,6 +6349,19 @@ impl Ui {
 }
 
 /// Editing at the text's end, for an input without a cursor of its own (the palette's query).
+/// A terminal that reports every key as an escape code may send Shift+i as `i` with Shift, and
+/// a terminal that does not give the layout's own character leaves that to us: a letter at least.
+fn shifted(mut key: KeyEvent) -> KeyEvent {
+    if let KeyCode::Char(letter) = key.code
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && letter.is_ascii_lowercase()
+    {
+        key.code = KeyCode::Char(letter.to_ascii_uppercase());
+    }
+    key
+}
+
 fn edit_text(text: &mut String, key: KeyEvent) -> bool {
     edit::edit(text, &edit::Cursor::default(), "", key)
 }
@@ -5047,7 +6516,8 @@ impl Guard {
             io::stdout(),
             EnterAlternateScreen,
             EnableMouseCapture,
-            crossterm::event::EnableBracketedPaste
+            crossterm::event::EnableBracketedPaste,
+            crossterm::event::EnableFocusChange
         )?;
         let enhanced = keys && crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
         if enhanced {
@@ -5055,6 +6525,11 @@ impl Guard {
                 io::stdout(),
                 crossterm::event::PushKeyboardEnhancementFlags(
                     crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                        | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                        // With every key an escape code, Shift+; arrives as `;` plus Shift. This
+                        // asks the terminal to say what the layout makes of it: `:`.
+                        | crossterm::event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                 )
             )?;
         }
@@ -5071,6 +6546,7 @@ impl Drop for Guard {
             io::stdout(),
             crossterm::cursor::SetCursorStyle::DefaultUserShape,
             crossterm::event::DisableBracketedPaste,
+            crossterm::event::DisableFocusChange,
             DisableMouseCapture,
             LeaveAlternateScreen
         );
@@ -5147,21 +6623,9 @@ pub fn run_demo(args: &[String]) -> Result<()> {
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         terminal.draw(|frame| ui.render(frame))?;
         execute!(io::stdout(), EndSynchronizedUpdate)?;
-        if event::poll(Duration::from_millis(80))? {
-            // Drain everything queued so a fast wheel does not lag behind. crossterm's read never
-            // returns on a closed terminal, so check for one before each read.
-            while !stopping.load(std::sync::atomic::Ordering::Relaxed) && !crate::stdin_hung_up() {
-                match event::read()? {
-                    Event::Key(key) => ui.key(key),
-                    Event::Paste(text) => ui.paste(text),
-                    Event::Mouse(mouse) => ui.mouse(mouse),
-                    _ => {}
-                }
-                if !event::poll(Duration::ZERO)? {
-                    break;
-                }
-            }
-        }
+        hover::poll_input(Duration::from_millis(80), &stopping, |input| {
+            ui.input_event(input)
+        })?;
     }
     Ok(())
 }
@@ -5273,6 +6737,358 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_useful_conversation_requires_a_rendered_entry_not_a_placeholder() {
+        let mut ui = Ui::new(demo::world());
+        ui.tab = 1;
+        let target = ui.selected_id().unwrap();
+        let entries = ui.world.conversations.get(&target).unwrap().clone();
+        for state in [Load::Loading, Load::Failed("unavailable".into()), Load::Ready(Vec::new())] {
+            ui.world.conversations.insert(target.clone(), state);
+            frame(&ui, 120, 30);
+            assert!(!ui.conversation_entry_visible(&target));
+        }
+        ui.world.conversations.insert(target.clone(), entries);
+        frame(&ui, 120, 30);
+        assert!(ui.conversation_entry_visible(&target));
+        assert!(!ui.conversation_entry_visible("agent/test/other"));
+        frame(&ui, 10, 4);
+        assert!(!ui.conversation_entry_visible(&target));
+    }
+
+    #[test]
+    fn first_useful_conversation_excludes_covered_and_offscreen_entries() {
+        let (mut ui, target) = expand_all_viewport_fixture();
+        assert!(ui.conversation_entry_visible(&target));
+        ui.frame.borrow_mut().covers.push((Rect::new(0, 0, 40, 4), 0));
+        assert!(!ui.conversation_entry_visible(&target));
+        ui.frame.borrow_mut().covers.clear();
+        ui.frame.borrow_mut().panes[0].entries = vec![("offscreen".into(), 5)];
+        assert!(!ui.conversation_entry_visible(&target));
+        ui.frame.borrow_mut().panes[0].entries = vec![("visible".into(), 0)];
+        ui.frame.borrow_mut().panes[0].rect.width = 0;
+        assert!(!ui.conversation_entry_visible(&target));
+        ui.frame.borrow_mut().panes[0].rect.width = 40;
+        ui.help = true;
+        assert!(!ui.conversation_entry_visible(&target));
+    }
+
+    fn expand_all_viewport_fixture() -> (Ui, String) {
+        let mut ui = Ui::new(demo::world());
+        ui.tab = 1;
+        let conversation = ui.selected_id().unwrap();
+        let items = [
+            ("one", Some("size-limit")),
+            ("ordinary", None),
+            ("two", Some("size-limit")),
+            ("image", Some("on-demand")),
+            ("offscreen", Some("size-limit")),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(sequence, (id, reason))| {
+            let mut block = serde_json::json!({
+                "id":id,"kind":"tool_call","source_type":"native","payload":"clipped"
+            });
+            if let Some(reason) = reason {
+                block["continuation"] = serde_json::json!({
+                    "ref":id,"media_type":"application/json","reason":reason
+                });
+            }
+            serde_json::from_value(serde_json::json!({
+                "id":id,"sequence":sequence,"revision":1,
+                "timestamp":"2026-10-08T10:00:00Z","role":"assistant",
+                "type":"tool_call","final":true,
+                "body":{"call_id":id,"name":"tool","arguments":{},"blocks":[block]}
+            }))
+            .unwrap()
+        })
+        .collect::<Vec<st3_client::TimelineEntry>>();
+        let entries = adapt::conversation(&items, &std::collections::BTreeMap::new());
+        ui.world
+            .conversations
+            .insert(conversation.clone(), Load::Ready(entries));
+        ui.content.index(&std::collections::BTreeMap::from([(
+            conversation.clone(),
+            st3_conversation_ui::Timeline {
+                items,
+                session_id: Some("session/expand-all".into()),
+                ..Default::default()
+            },
+        )]));
+        ui.frame.borrow_mut().panes.push(FramePane {
+            key: format!("chat:{conversation}"),
+            rect: Rect::new(0, 0, 40, 4),
+            top: 0,
+            total: 6,
+            lines: Rc::new(Vec::new()),
+            entries: vec![
+                ("one".into(), 0),
+                ("ordinary".into(), 1),
+                ("two".into(), 2),
+                ("image".into(), 3),
+                ("offscreen".into(), 5),
+            ],
+            images: Vec::new(),
+            layer: 0,
+        });
+        (ui, conversation)
+    }
+
+    #[test]
+    fn content_controls_emit_load_effects_once_and_release_on_collapse_or_hide() {
+        let (mut ui, conversation) = expand_all_viewport_fixture();
+        ui.click(Hit::ToggleTool("one".into()));
+        let [Effect::LoadContent(output)] = ui.effects.as_slice() else {
+            panic!("expanding referenced output must request its content");
+        };
+        let output = output.clone();
+        assert_eq!(output.reference, "one");
+        assert_eq!(output.conversation, "session/expand-all");
+        assert!(ui.content.is_loading(&output));
+        ui.click(Hit::ContentOutput(output.clone()));
+        assert_eq!(ui.effects.len(), 1, "an in-flight read is not duplicated");
+        ui.click(Hit::ToggleTool("one".into()));
+        assert!(!ui.content.is_loading(&output));
+        ui.effects.clear();
+        ui.click(Hit::ContentOutput(output.clone()));
+        assert_eq!(ui.effects, vec![Effect::LoadContent(output)]);
+        assert!(ui.conversation_state.expanded.contains("one"));
+        ui.effects.clear();
+
+        let image = ui.content.tool_images(&conversation, "image").pop().unwrap();
+        ui.click(Hit::ContentImage(image.clone()));
+        assert_eq!(ui.effects, vec![Effect::LoadContent(image.clone())]);
+        assert!(ui.content.is_loading(&image));
+        assert!(ui.conversation_state.expanded.contains("image"));
+        ui.effects.clear();
+        ui.click(Hit::ContentImage(image.clone()));
+        assert!(ui.effects.is_empty(), "hiding an image does not fetch it");
+        assert!(!ui.content.is_loading(&image));
+    }
+
+    #[test]
+    fn expand_all_loads_visible_clipped_blocks_sequentially_and_collapse_releases() {
+        let (mut ui, conversation) = expand_all_viewport_fixture();
+        let mut reads = content::Reads::default();
+        // Restoring expanded rows is not an expand-all loading request.
+        ui.conversation_state.expanded.extend(
+            ui.world.conversations[&conversation]
+                .items()
+                .iter()
+                .map(|entry| entry.id.clone()),
+        );
+        assert!(ui.next_content_read(&mut reads).is_none());
+        ui.conversation_state.expanded.clear();
+        ui.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        let first = ui.next_content_read(&mut reads).unwrap();
+        assert_eq!(first.reference, "one");
+        assert!(ui.next_content_read(&mut reads).is_none());
+        reads.complete(&first);
+        ui.content.complete(
+            first.clone(),
+            Ok(("application/json".into(), b"{}".to_vec())),
+        );
+        let second = ui.next_content_read(&mut reads).unwrap();
+        assert_eq!(
+            second.reference, "two",
+            "ordinary output and images are not fetched"
+        );
+        assert!(ui.next_content_read(&mut reads).is_none());
+        // Scrolling updates the next candidate, never starts a concurrent read.
+        {
+            let mut frame = ui.frame.borrow_mut();
+            frame.panes[0].top = 5;
+            frame.panes[0].rect.height = 1;
+        }
+        assert!(ui.next_content_read(&mut reads).is_none());
+        reads.complete(&second);
+        ui.content.complete(
+            second.clone(),
+            Ok(("application/json".into(), b"{}".to_vec())),
+        );
+        let third = ui.next_content_read(&mut reads).unwrap();
+        assert_eq!(
+            third.reference, "offscreen",
+            "load only after it scrolls into view"
+        );
+        assert!(ui.content.request_tool(&conversation, "one").is_empty());
+        ui.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(!ui.content.is_loading(&third));
+        assert!(ui.next_content_read(&mut reads).is_none());
+        reads.complete(&third);
+        ui.content
+            .complete(third, Ok(("application/json".into(), b"{}".to_vec())));
+        assert!(ui.next_content_read(&mut reads).is_none());
+        assert_eq!(ui.content.request_tool(&conversation, "one").len(), 1);
+        assert_eq!(ui.content.request_tool(&conversation, "two").len(), 1);
+        assert_eq!(ui.content.request_tool(&conversation, "offscreen").len(), 1);
+    }
+
+    #[test]
+    fn automatic_images_use_visible_image_lines_graphics_and_one_read_at_a_time() {
+        let (mut ui, conversation) = expand_all_viewport_fixture();
+        let items = ["first", "second"].into_iter().enumerate().map(|(sequence, id)| {
+            serde_json::from_value(serde_json::json!({
+                "id":id,"sequence":sequence,"revision":1,"timestamp":"2026-10-08T10:00:00Z","role":"assistant","type":"content","final":true,
+                "body":{"media_type":"image/png","blocks":[{"id":id,"kind":"image","source_type":"native","payload":{},
+                "continuation":{"ref":id,"media_type":"image/png","reason":"on-demand"}}]}
+            })).unwrap()
+        }).collect::<Vec<st3_client::TimelineEntry>>();
+        ui.content.index(&std::collections::BTreeMap::from([(conversation.clone(), st3_conversation_ui::Timeline {
+            items, session_id: Some("session/visible-images".into()), ..Default::default()
+        })]));
+        let first = ui.content.tool_images(&conversation, "first#images").pop().unwrap();
+        let second = ui.content.tool_images(&conversation, "second#images").pop().unwrap();
+        {
+            let mut frame = ui.frame.borrow_mut();
+            let pane = &mut frame.panes[0];
+            pane.total = 40;
+            pane.entries = vec![("first#images".into(), 0), ("second#images".into(), 20)];
+            pane.images = vec![(first.clone(), 12), (second.clone(), 22)];
+        }
+        let mut reads = content::Reads::default();
+        ui.auto_images = true;
+        assert!(ui.next_content_read(&mut reads).is_none(), "visible text in a tall row does not authorize its offscreen image");
+        ui.frame.borrow_mut().panes[0].top = 12;
+        ui.auto_images = false;
+        assert!(ui.next_content_read(&mut reads).is_none(), "half-block fallback does not auto-fetch");
+        ui.auto_images = true;
+        ui.frame.borrow_mut().covers.push((Rect::new(0, 0, 40, 4), 0));
+        assert!(ui.next_content_read(&mut reads).is_none(), "covered images are not visible");
+        ui.frame.borrow_mut().covers.clear();
+        assert_eq!(ui.next_content_read(&mut reads), Some(first.clone()));
+        ui.frame.borrow_mut().panes[0].top = 22;
+        assert!(ui.next_content_read(&mut reads).is_none(), "no concurrent read after scrolling");
+        reads.complete(&first);
+        ui.content.complete(first.clone(), Err("synthetic failure".into()));
+        assert_eq!(ui.next_content_read(&mut reads), Some(second.clone()));
+        assert!(!ui.content.toggle_image(&second), "Ctrl+U hides an automatic load");
+        reads.complete(&second);
+        ui.content.complete(second, Err("late response".into()));
+        assert!(ui.next_content_read(&mut reads).is_none(), "redraw cannot undo Ctrl+U");
+        ui.frame.borrow_mut().panes[0].top = 12;
+        assert!(ui.next_content_read(&mut reads).is_none(), "automatic loading does not retry a failure");
+    }
+
+    #[test]
+    fn glasses_ctrl_e_loads_visible_clipped_output_and_collapse_releases_it() {
+        let (mut ui, conversation) = expand_all_viewport_fixture();
+        let mut reads = content::Reads::default();
+        ui.glasses = Some(glass::Glasses::open(None, None));
+        ui.open_in_glass(Pane::Agent(Some(conversation.clone())), glass::Open::Tab);
+        ui.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert!(ui.content.expanded_all.contains(&conversation));
+        let first = ui.next_content_read(&mut reads).unwrap();
+        assert_eq!(first.reference, "one");
+        assert!(ui.next_content_read(&mut reads).is_none());
+        reads.complete(&first);
+        ui.content
+            .complete(first, Ok(("application/json".into(), b"{}".to_vec())));
+        ui.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert!(!ui.content.expanded_all.contains(&conversation));
+        assert!(ui.next_content_read(&mut reads).is_none());
+        assert_eq!(ui.content.request_tool(&conversation, "one").len(), 1);
+    }
+
+    #[test]
+    fn expand_all_does_not_load_a_viewport_hidden_by_an_opaque_layer() {
+        let (mut ui, _) = expand_all_viewport_fixture();
+        let mut reads = content::Reads::default();
+        ui.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        {
+            let mut frame = ui.frame.borrow_mut();
+            let rect = frame.panes[0].rect;
+            frame.covers.push((rect, 0));
+        }
+        assert!(ui.next_content_read(&mut reads).is_none());
+        ui.frame.borrow_mut().covers.clear();
+        assert_eq!(ui.next_content_read(&mut reads).unwrap().reference, "one");
+    }
+
+    #[test]
+    fn mail_image_click_keeps_the_existing_blob_open_effect() {
+        let mut ui = Ui::new(demo::world());
+        let image = st3_conversation_ui::MailImage {
+            sha256: "cd".repeat(32),
+            message: "message/picture".into(),
+            media_type: "image/jpeg".into(),
+            name: Some("photo.jpg".into()),
+            size: 3,
+        };
+        ui.click(Hit::Pane(PaneIntent::Image(image.clone())));
+        assert_eq!(ui.effects, vec![Effect::OpenImage { image }]);
+    }
+
+    #[test]
+    fn focused_tool_chords_expand_and_collapse_without_toggling_all_tools() {
+        let mut ui = Ui::new(demo::world());
+        ui.tab = 1;
+        let conversation = ui.selected_id().unwrap();
+        let entries = vec![
+            Entry { id: "one".into(), at: "10:00".into(), body: Body::Tool { title: "one".into(), state: ToolState::Ok, output: vec![] } },
+            Entry { id: "two".into(), at: "10:00".into(), body: Body::Tool { title: "two".into(), state: ToolState::Ok, output: vec![] } },
+        ];
+        ui.world.conversations.insert(conversation.clone(), Load::Ready(entries));
+        ui.content.focused.insert(conversation.clone(), "one".into());
+        ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(ui.conversation_state.expanded.contains("one"));
+        assert!(!ui.conversation_state.expanded.contains("two"));
+        ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(!ui.conversation_state.expanded.contains("one"));
+        ui.key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!(ui.content.focused.get(&conversation).map(String::as_str), Some("two"));
+    }
+
+    #[test]
+    fn a_custom_request_sends_the_generic_reply_and_has_no_yes_no_shortcut() {
+        let mut world = demo::world();
+        world.attention = Load::Ready(vec![Attention {
+            conversations: vec![],
+            id: "attention/garden".into(),
+            tier: Tier::Today,
+            title: "Retain the seed history?".into(),
+            waiting: None,
+            age: "1m".into(),
+            mission: None,
+            agent: None,
+            kind: AttentionKind::Request {
+                from: "Seed".into(),
+                from_id: "agent/garden/seed".into(),
+                question: "selection (keep / discard)".into(),
+                structured: None,
+            },
+            actions: vec!["custom.reply".into()],
+            related: vec![],
+            raised_by: None,
+            blocked: None,
+        }]);
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.tab = 0;
+        ui.selected[0] = ui
+            .listing(60)
+            .ids
+            .iter()
+            .position(|id| id == "attention/garden")
+            .unwrap();
+        let rendered = frame(&ui, 120, 50).join("\n");
+        assert!(rendered.contains("Reply with fields"));
+        assert!(!rendered.contains("Dismiss: nothing to do"));
+        ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(ui.effects.is_empty());
+        assert!(ui.confirm.is_none());
+        ui.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(ui.editing);
+        for letter in "keep".chars() {
+            ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+        }
+        ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(ui.effects.last(),Some(Effect::Attention{action,reason:Some(reason),..}) if action=="custom.reply" && reason=="keep")
+        );
+    }
+
+    #[test]
     fn drafts_take_the_terminal_editing_keys() {
         let key = |code, modifiers| KeyEvent::new(code, modifiers);
         let mut text = "look at the  ".to_owned();
@@ -5287,6 +7103,14 @@ mod tests {
         assert_eq!(text, "look ", "a control key never types its letter");
         edit_text(&mut text, key(KeyCode::Char('X'), KeyModifiers::SHIFT));
         assert_eq!(text, "look X");
+        // A terminal that reports Shift+i as `i` with Shift still types a capital.
+        edit_text(&mut text, shifted(key(KeyCode::Char('i'), KeyModifiers::SHIFT)));
+        assert_eq!(text, "look XI");
+        assert_eq!(
+            shifted(key(KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)).code,
+            KeyCode::Char('c'),
+            "a chord keeps its key"
+        );
         let mut lines = "first\nsecond line".to_owned();
         edit_text(&mut lines, key(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(lines, "first\n");
@@ -5307,6 +7131,64 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn the_top_bar_border_keeps_controls_above_the_body_in_both_layouts() {
+        for spaces in [false, true] {
+            for (width, height) in [(20, 6), (80, 12), (140, 40)] {
+                let mut ui = Ui::new(demo::world());
+                if spaces {
+                    ui.glasses = Some(glass::Glasses::open(None, None));
+                }
+                ui.world.link = Link::Offline("Connection unavailable".into());
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+                let buffer = terminal.backend().buffer();
+                for x in 0..width {
+                    let cell = &buffer[(x, 1)];
+                    assert_eq!(cell.symbol(), "─");
+                    assert_eq!(cell.fg, theme::OVERLAY0);
+                    assert_eq!(cell.bg, theme::BASE);
+                }
+                assert!(ui.frame.borrow().panes.iter().all(|pane| pane.rect.y >= 2));
+                assert!(
+                    ui.frame
+                        .borrow()
+                        .hits
+                        .iter()
+                        .all(|(rect, _)| !contains(*rect, 1, 1))
+                );
+                let target = if spaces { Hit::Connection } else { Hit::Tab(1) };
+                let rect = ui
+                    .frame
+                    .borrow()
+                    .hits
+                    .iter()
+                    .find(|(_, hit)| *hit == target)
+                    .map(|(rect, _)| *rect)
+                    .unwrap();
+                assert_eq!(rect.y, 0);
+                assert_eq!(rect.height, 1);
+                if rect.x < width {
+                    ui.mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: rect.x,
+                        row: 0,
+                        modifiers: KeyModifiers::NONE,
+                    });
+                    if spaces {
+                        assert!(
+                            ui.flash
+                                .as_ref()
+                                .is_some_and(|(text, _)| text.contains("Connection unavailable"))
+                        );
+                    } else {
+                        assert_eq!(ui.tab, 1);
+                    }
+                }
+            }
+        }
     }
 
     /// A feedback gate offers approve and request-changes, an approval gate approve and reject.
@@ -5378,6 +7260,7 @@ mod tests {
     fn answering_a_request_leaves_the_next_one_closed() {
         let mut world = demo::world();
         let asks = |id: &str| Attention {
+            conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
             title: "Merge the three PRs?".into(),
@@ -5394,6 +7277,7 @@ mod tests {
             actions: vec!["work.done".into()],
             related: Vec::new(),
             raised_by: None,
+            blocked: None,
         };
         if let Load::Ready(items) = &mut world.attention {
             items.insert(0, asks("attention/request-one"));
@@ -5419,6 +7303,59 @@ mod tests {
     }
 
     #[test]
+    fn the_missions_under_next_in_an_agents_details_open_when_clicked() {
+        // Nathan, 2026-10-10: the missions listed under `next` should open their mission.
+        let mut world = demo::world();
+        let Load::Ready(agents) = &mut world.agents else { panic!() };
+        let id = agents[0].id.clone();
+        agents[0].details.next = Some("Atlas move › cleanup".into());
+        agents[0].details.next_mission = Some("mission/fleet/atlas/store-move".into());
+        agents[0].details.queue = vec!["Atlas move › cleanup".into(), "Weekly release › publish".into()];
+        agents[0].details.queue_missions =
+            vec!["mission/fleet/atlas/store-move".into(), "mission/fleet/release/weekly".into()];
+        let mut ui = Ui::new(world);
+        ui.switch_tab(1);
+        ui.open(&id);
+        let shown = frame(&ui, 140, 50);
+        let at = |needle: &str| {
+            let row = shown.iter().position(|line| line.contains(needle)).expect(needle);
+            let column = shown[row].find(needle).unwrap();
+            (shown[row][..column].chars().count() as u16, row as u16)
+        };
+        let hits = ui.frame.borrow().hits.clone();
+        let on = |(x, y): (u16, u16)| {
+            hits.iter()
+                .rev()
+                .find(|(rect, _)| rect.contains((x, y).into()))
+                .map(|(_, hit)| hit.clone())
+        };
+        assert_eq!(on(at("Atlas move › cleanup")), Some(Hit::Open("mission/fleet/atlas/store-move".into())));
+        assert_eq!(on(at("Weekly release › publish")), Some(Hit::Open("mission/fleet/release/weekly".into())));
+    }
+
+    #[test]
+    fn an_agents_details_name_its_effort_beside_its_model() {
+        // Nathan, 2026-10-10: "I'd like to see the effort level too" in the details sidebar.
+        let mut world = demo::world();
+        let Load::Ready(agents) = &mut world.agents else { panic!() };
+        let id = agents[0].id.clone();
+        agents[0].details.model = Some("claude-sonnet-5-5".into());
+        agents[0].details.effort = Some("high".into());
+        let mut ui = Ui::new(world);
+        ui.switch_tab(1);
+        ui.open(&id);
+        let shown = frame(&ui, 140, 50).join("\n");
+        let model = shown.lines().position(|line| line.contains("model ") && line.contains("claude-sonnet-5-5")).expect(&shown);
+        let effort = shown.lines().position(|line| line.contains("effort") && line.contains("high")).expect(&shown);
+        assert_eq!(effort, model + 1, "{shown}");
+        // An agent whose seat names none shows no row for it.
+        let Load::Ready(agents) = &mut ui.world.agents else { panic!() };
+        agents[0].details.effort = None;
+        let shown = frame(&ui, 140, 50).join("\n");
+        assert!(!shown.contains("effort"), "{shown}");
+    }
+
+    #[test]
     fn shift_o_simplifies_every_conversation_and_back() {
         let mut ui = Ui::new(demo::world());
         ui.tab = 1;
@@ -5440,6 +7377,91 @@ mod tests {
     }
 
     #[test]
+    fn typing_is_written_at_most_every_few_hundred_milliseconds_and_sending_clears_it() {
+        let _serial = drafts_store::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let mut ui = Ui::new(demo::world());
+        ui.drafts_path = Some(path.clone());
+        ui.editing = true;
+        let agent = "agent/example/atlas/builder".to_owned();
+        // Typing within the interval writes nothing yet; the panic hook's copy has it.
+        ui.conversation_state.drafts.insert(agent.clone(), "a long mes".into());
+        ui.step_drafts();
+        assert!(!path.exists(), "debounced while the box has the keyboard");
+        drafts_store::flush_unsaved();
+        assert_eq!(drafts_store::load(&path)[&agent], "a long mes");
+        std::fs::remove_file(&path).unwrap();
+        // After the interval the next step writes it.
+        ui.drafts_wrote = Instant::now() - DRAFTS_EVERY;
+        ui.conversation_state.drafts.insert(agent.clone(), "a long message".into());
+        ui.step_drafts();
+        assert_eq!(drafts_store::load(&path)[&agent], "a long message");
+        // The box losing the keyboard writes at once.
+        ui.conversation_state.drafts.insert(agent.clone(), "a long message, more".into());
+        ui.editing = false;
+        ui.step_drafts();
+        assert_eq!(drafts_store::load(&path)[&agent], "a long message, more");
+        // Sending empties the box: written at once, never restored.
+        ui.editing = true;
+        ui.conversation_state.drafts.remove(&agent);
+        ui.step_drafts();
+        assert!(drafts_store::load(&path).is_empty());
+    }
+
+    #[test]
+    fn a_draft_comes_back_into_an_empty_box_and_never_over_typed_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let agent = "agent/example/atlas/builder".to_owned();
+        drafts_store::save(
+            &path,
+            &HashMap::new(),
+            &HashMap::from([(agent.clone(), "what I was typing".to_owned())]),
+        )
+        .unwrap();
+        let mut ui = Ui::new(demo::world());
+        ui.drafts_path = Some(path.clone());
+        ui.load_drafts();
+        assert_eq!(ui.conversation_state.drafts[&agent], "what I was typing");
+        // Nothing is rewritten for what was only read.
+        std::fs::remove_file(&path).unwrap();
+        ui.step_drafts();
+        assert!(!path.exists());
+        let mut busy = Ui::new(demo::world());
+        busy.drafts_path = Some(dir.path().join("other.json"));
+        busy.conversation_state.drafts.insert(agent.clone(), "already here".into());
+        drafts_store::save(
+            busy.drafts_path.as_ref().unwrap(),
+            &HashMap::new(),
+            &HashMap::from([(agent.clone(), "older".to_owned())]),
+        )
+        .unwrap();
+        busy.load_drafts();
+        assert_eq!(busy.conversation_state.drafts[&agent], "already here");
+    }
+
+    #[test]
+    fn a_failing_write_waits_before_it_tries_again() {
+        let _serial = drafts_store::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // The drafts file's parent is a file, so no write can succeed.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let mut ui = Ui::new(demo::world());
+        ui.drafts_path = Some(blocker.join("drafts.json"));
+        ui.editing = false;
+        ui.conversation_state.drafts.insert("a".into(), "text".into());
+        ui.step_drafts();
+        let until = ui.drafts_backoff.expect("a failed write backs off");
+        let wrote = ui.drafts_wrote;
+        ui.step_drafts();
+        assert_eq!(ui.drafts_wrote, wrote, "no second try during the wait");
+        assert_eq!(ui.drafts_backoff, Some(until));
+        assert_ne!(ui.drafts_saved, ui.conversation_state.drafts);
+    }
+
+    #[test]
     fn a_failed_mission_ages_out_of_the_list_after_its_day() {
         let mut world = demo::world();
         let now = chrono::Local::now();
@@ -5457,7 +7479,7 @@ mod tests {
             missions.push(today);
             missions.push(failed);
         }
-        let shown = screens::missions_list(&world, "⠋", false);
+        let shown = screens::missions_list(&world, 40, "⠋", false);
         assert!(shown.ids.iter().any(|id| id == "mission/example/failed-today"));
         assert!(!shown.ids.iter().any(|id| id == "mission/example/failed-yesterday"));
         let note = shown
@@ -5470,8 +7492,234 @@ mod tests {
             .unwrap_or_default();
         assert!(note.contains("1 failed before today"), "{note}");
         // x shows it again.
-        let all = screens::missions_list(&world, "⠋", true);
+        let all = screens::missions_list(&world, 40, "⠋", true);
         assert!(all.ids.iter().any(|id| id == "mission/example/failed-yesterday"));
+    }
+
+    #[test]
+    fn clicking_a_link_says_whether_it_copied_an_address_or_a_file_path() {
+        assert_eq!(
+            link_note("https://example.com/a"),
+            "Copied https://example.com/a · paste it in a browser"
+        );
+        assert_eq!(
+            link_note("/srv/repo/spec.md"),
+            "Copied /srv/repo/spec.md · a file on the writer's machine"
+        );
+        assert!(link_note("~/notes/a.md").contains("a file on the writer's machine"));
+    }
+
+    #[test]
+    fn a_web_address_opens_the_browser_only_on_the_persons_own_machine() {
+        let none = |_: &str| false;
+        let only = |wanted: &'static str| move |name: &str| name == wanted;
+        let url = "https://example.com/a";
+        // A Mac opens it; Linux needs a desktop; SSH never does; a path or other scheme never does.
+        assert_eq!(browser_opener(url, none, true), Some("open"));
+        assert_eq!(browser_opener(url, none, false), None);
+        assert_eq!(browser_opener(url, only("DISPLAY"), false), Some("xdg-open"));
+        assert_eq!(browser_opener(url, only("WAYLAND_DISPLAY"), false), Some("xdg-open"));
+        assert_eq!(browser_opener(url, |name| name == "SSH_CONNECTION" || name == "DISPLAY", false), None);
+        assert_eq!(browser_opener(url, only("SSH_TTY"), true), None);
+        assert_eq!(browser_opener("/srv/repo/spec.md", none, true), None);
+        assert_eq!(browser_opener("file:///etc/passwd", none, true), None);
+        assert_eq!(browser_opener("javascript:alert(1)", none, true), None);
+        assert!(link_opened_note(url).contains("also copied"));
+    }
+
+    #[test]
+    fn a_chosen_answer_never_stops_a_text_box_from_taking_keys() {
+        let mut world = demo::world();
+        let request = st3_client::StructuredRequest {
+            version: 1,
+            entry_type: "choice".into(),
+            question: "Which one?".into(),
+            why_person: "Taste.".into(),
+            answers: vec![
+                st3_client::RequestAnswerOption {
+                    id: "a".into(),
+                    label: "First".into(),
+                    consequence: "Goes first.".into(),
+                    ..Default::default()
+                },
+                st3_client::RequestAnswerOption {
+                    id: "b".into(),
+                    label: "Second".into(),
+                    consequence: "Goes second.".into(),
+                    ..Default::default()
+                },
+            ],
+            custom: true,
+            ..Default::default()
+        };
+        let item = Attention {
+            conversations: vec![],
+            id: "attention/pick".into(),
+            tier: Tier::Stopped,
+            title: "Pick".into(),
+            waiting: None,
+            age: "1m".into(),
+            mission: None,
+            agent: Some("agent/example/cos".into()),
+            kind: AttentionKind::Request {
+                from: "Chief of Staff".into(),
+                from_id: "agent/example/cos".into(),
+                question: request.question.clone(),
+                structured: Some(Box::new(request)),
+            },
+            actions: vec!["work.done".into()],
+            related: Vec::new(),
+            raised_by: None,
+            blocked: None,
+        };
+        if let Load::Ready(items) = &mut world.attention {
+            items.insert(0, item);
+        }
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.tab = 0;
+        let at = ui.listing(60).ids.iter().position(|id| id == "attention/pick").unwrap();
+        ui.select(at);
+        let type_in = |ui: &mut Ui, text: &str| {
+            for letter in text.chars() {
+                ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+            }
+        };
+        // Chat about it, after choosing: the box takes every letter, 'x' and 'j' included.
+        ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(ui.answering, Some(0));
+        ui.click(Hit::Key('t'));
+        assert!(ui.chat.as_ref().is_some_and(|chat| chat.editing));
+        type_in(&mut ui, "xj a question");
+        let key = format!("chat:{}", "attention/pick");
+        assert_eq!(ui.conversation_state.drafts[&key], "xj a question");
+        // Answering in words after choosing does too.
+        let mut ui2 = {
+            let mut again = Ui::new(ui.world.clone());
+            again.live = true;
+            again.tab = 0;
+            let at = again.listing(60).ids.iter().position(|id| id == "attention/pick").unwrap();
+            again.select(at);
+            again
+        };
+        ui2.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        ui2.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(ui2.answering, Some(1));
+        ui2.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(ui2.editing);
+        type_in(&mut ui2, "jk and x too");
+        assert_eq!(ui2.conversation_state.drafts["attention/pick"], "jk and x too");
+        assert_eq!(ui2.answering, None, "the box has the keyboard, the choice yielded");
+    }
+
+    #[test]
+    fn a_feedback_request_offers_words_and_a_dismissal_not_an_answer_to_choose() {
+        // Nathan, 2026-10-05: "why can't I dismiss this attention item?"
+        let feedback = |kind: &str, answers: Vec<st3_client::RequestAnswerOption>| {
+            let mut world = demo::world();
+            let request = st3_client::StructuredRequest {
+                version: 1,
+                entry_type: kind.into(),
+                question: "What did you run and what did you see?".into(),
+                why_person: "Only you saw the failure.".into(),
+                summary: None,
+                reasons: Vec::new(),
+                subjects: Vec::new(),
+                recommendation: None,
+                answers,
+                custom: false,
+            };
+            let item = Attention {
+                conversations: vec![],
+                id: "attention/feedback".into(),
+                tier: Tier::Stopped,
+                title: "What went wrong?".into(),
+                waiting: None,
+                age: "1h".into(),
+                mission: None,
+                agent: Some("agent/example/cos".into()),
+                kind: AttentionKind::Request {
+                    from: "Chief of Staff".into(),
+                    from_id: "agent/example/cos".into(),
+                    question: request.question.clone(),
+                    structured: Some(Box::new(request)),
+                },
+                actions: vec!["work.done".into()],
+                related: Vec::new(),
+                raised_by: None,
+                blocked: None,
+            };
+            if let Load::Ready(items) = &mut world.attention {
+                items.insert(0, item);
+            }
+            let mut ui = Ui::new(world);
+            ui.live = true;
+            ui.tab = 0;
+            let at = ui
+                .listing(60)
+                .ids
+                .iter()
+                .position(|id| id == "attention/feedback")
+                .unwrap();
+            ui.select(at);
+            ui
+        };
+        let mut ui = feedback("feedback", Vec::new());
+        let screen = frame(&ui, 140, 50).join("\n");
+        for shown in ["Answer in words", "Dismiss: nothing to do"] {
+            assert!(screen.contains(shown), "{shown}: {screen}");
+        }
+        assert!(!screen.contains("Choose an answer"), "{screen}");
+        // x then y closes it with word to its asker, as a plain request does.
+        ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(frame(&ui, 140, 50).join("\n").contains("tell Chief of Staff there is nothing"));
+        ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(
+            matches!(&ui.effects[..], [Effect::Attention { id, action, reason: Some(reason), .. }]
+                if id == "attention/feedback" && action == "work.done" && reason.contains("Nothing for me")),
+            "{:?}",
+            ui.effects
+        );
+        // A choice has named answers: it offers those, and x still dismisses it after asking,
+        // telling its asker it was set aside (Nathan, 2026-10-11).
+        let answer = st3_client::RequestAnswerOption {
+            id: "yes".into(),
+            label: "Yes".into(),
+            consequence: "Goes ahead.".into(),
+            outcome: None,
+            conditions: Vec::new(),
+        };
+        let mut ui = feedback("choice", vec![answer]);
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("Choose an answer"), "{screen}");
+        assert!(!screen.contains("Dismiss: nothing to do"), "{screen}");
+        assert!(screen.contains("Dismiss without answering"), "{screen}");
+        ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(ui.confirm.is_some());
+        assert!(ui.effects.is_empty(), "it asks first");
+        assert!(frame(&ui, 140, 50).join("\n").contains("you set it aside without answering"));
+        ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(
+            matches!(&ui.effects[..], [Effect::Attention { id, action, answer: Some(answer), .. }]
+                if id == "attention/feedback" && action == "work.done" && answer == "dismiss"),
+            "{:?}",
+            ui.effects
+        );
+        // Esc at the question keeps it.
+        let hold = st3_client::RequestAnswerOption {
+            id: "hold".into(),
+            label: "Hold".into(),
+            consequence: "Nothing is approved.".into(),
+            outcome: Some("decline".into()),
+            conditions: Vec::new(),
+        };
+        let mut ui = feedback("decision", vec![hold]);
+        ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(ui.confirm.is_none());
+        assert!(ui.effects.is_empty());
+        // A decision with an answer that declines names it: that is the way to close it
+        // without agreeing (Nathan, 2026-10-06).
     }
 
     #[test]
@@ -5514,6 +7762,7 @@ mod tests {
             custom: true,
         };
         let item = Attention {
+            conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
             title: "Shipped today".into(),
@@ -5530,6 +7779,7 @@ mod tests {
             actions: vec!["work.done".into()],
             related: Vec::new(),
             raised_by: None,
+            blocked: None,
         };
         if let Load::Ready(items) = &mut world.attention {
             items.insert(0, item);
@@ -5553,6 +7803,7 @@ mod tests {
             "Read it",
             "Clears this item.",
             "Why you: You asked for a summary.",
+            "Dismiss without answering",
         ] {
             assert!(screen.contains(shown), "{shown}: {screen}");
         }
@@ -5570,9 +7821,223 @@ mod tests {
     }
 
     #[test]
+    fn the_buttons_under_a_chosen_answer_send_it_move_on_and_put_it_away() {
+        // Nathan, 2026-10-07: "I can't choose an option for this attention item, it says I must
+        // write something": the Send button went to the empty text box.
+        let mut world = demo::world();
+        let option = |id: &str, label: &str| st3_client::RequestAnswerOption {
+            id: id.into(),
+            label: label.into(),
+            consequence: "Clears this item.".into(),
+            ..Default::default()
+        };
+        let request = st3_client::StructuredRequest {
+            version: 1,
+            entry_type: "choice".into(),
+            question: "What should change?".into(),
+            why_person: "Only you can say.".into(),
+            summary: None,
+            reasons: Vec::new(),
+            recommendation: None,
+            subjects: Vec::new(),
+            answers: vec![option("a", "Refresh"), option("b", "Shorten"), option("c", "Leave it")],
+            custom: false,
+        };
+        let item = Attention {
+            conversations: vec![],
+            id: "attention/choose".into(),
+            tier: Tier::Stopped,
+            title: "What should change?".into(),
+            waiting: None,
+            age: "1h".into(),
+            mission: None,
+            agent: Some("agent/example/cos".into()),
+            kind: AttentionKind::Request {
+                from: "Chief of Staff".into(),
+                from_id: "agent/example/cos".into(),
+                question: request.question.clone(),
+                structured: Some(Box::new(request)),
+            },
+            actions: vec!["work.done".into()],
+            related: Vec::new(),
+            raised_by: None,
+            blocked: None,
+        };
+        if let Load::Ready(items) = &mut world.attention {
+            items.insert(0, item);
+        }
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.tab = 0;
+        ui.select(0);
+        ui.click(Hit::Answer(1));
+        // Another goes to the next answer, round again, and does not start over at the first.
+        ui.click(Hit::Key('a'));
+        assert_eq!(ui.answering, Some(2));
+        ui.click(Hit::Key('a'));
+        assert_eq!(ui.answering, Some(0));
+        ui.click(Hit::Key('a'));
+        ui.click(Hit::Key('a'));
+        assert_eq!(ui.answering, Some(2));
+        // Not now puts it away without sending.
+        ui.click(Hit::Escape);
+        assert_eq!(ui.answering, None);
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        // Send this answer sends the chosen one, and never says "Write something first".
+        ui.click(Hit::Answer(2));
+        ui.click(Hit::Enter);
+        assert!(
+            matches!(&ui.effects[..], [Effect::Attention { id, answer: Some(answer), .. }]
+                if id == "attention/choose" && answer == "c"),
+            "{:?}",
+            ui.effects
+        );
+        assert!(
+            ui.flash.as_ref().is_none_or(|(text, _)| !text.contains("Write something")),
+            "{:?}",
+            ui.flash
+        );
+    }
+
+    #[test]
+    fn an_answer_that_asks_for_changes_says_it_needs_words() {
+        // Nathan, 2026-10-07: "it says I must type something. What does this mean?"
+        let mut world = demo::world();
+        let request = st3_client::StructuredRequest {
+            version: 1,
+            entry_type: "decision".into(),
+            question: "Approve as written?".into(),
+            why_person: "Only you can waive it.".into(),
+            summary: None,
+            reasons: Vec::new(),
+            recommendation: Some(st3_client::RequestRecommendation {
+                answer: "follow".into(),
+                reason: "it keeps the brief".into(),
+            }),
+            subjects: Vec::new(),
+            answers: vec![
+                st3_client::RequestAnswerOption {
+                    id: "follow".into(),
+                    label: "Follow the brief".into(),
+                    consequence: "The author gets your terms.".into(),
+                    outcome: Some("request_changes".into()),
+                    ..Default::default()
+                },
+                st3_client::RequestAnswerOption {
+                    id: "approve".into(),
+                    label: "Approve as written".into(),
+                    consequence: "It is queued.".into(),
+                    outcome: Some("accept".into()),
+                    ..Default::default()
+                },
+            ],
+            custom: false,
+        };
+        let item = Attention {
+            conversations: vec![],
+            id: "attention/decide".into(),
+            tier: Tier::Stopped,
+            title: "Decide".into(),
+            waiting: None,
+            age: "1m".into(),
+            mission: None,
+            agent: Some("agent/example/cos".into()),
+            kind: AttentionKind::Request {
+                from: "Chief of Staff".into(),
+                from_id: "agent/example/cos".into(),
+                question: request.question.clone(),
+                structured: Some(Box::new(request)),
+            },
+            actions: vec!["work.done".into()],
+            related: Vec::new(),
+            raised_by: None,
+            blocked: None,
+        };
+        if let Load::Ready(items) = &mut world.attention {
+            items.insert(0, item);
+        }
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.tab = 0;
+        let at = ui
+            .listing(60)
+            .ids
+            .iter()
+            .position(|id| id == "attention/decide")
+            .unwrap();
+        ui.select(at);
+        assert!(frame(&ui, 140, 50).join("\n").contains("needs your words"));
+        ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("what should change? Enter sends it with “Follow the brief”"), "{screen}");
+        // Enter with nothing written says what is wanted, not just "Write something first".
+        ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            ui.flash.as_ref().is_some_and(|(text, _)| text.contains("“Follow the brief” needs your words")),
+            "{:?}",
+            ui.flash
+        );
+        assert!(ui.effects.is_empty());
+    }
+
+    #[test]
+    fn a_mission_backed_ask_names_its_mission_and_the_step_that_waits() {
+        // Nathan, 2026-10-05: a request a mission step made lost its mission link.
+        let mut world = demo::world();
+        let mission = "mission/release-proof";
+        let item = Attention {
+            conversations: vec![],
+            id: "attention/capacity".into(),
+            tier: Tier::Stopped,
+            title: "Allocate capacity?".into(),
+            waiting: None,
+            age: "1m".into(),
+            mission: Some(mission.into()),
+            agent: Some("agent/example/cos".into()),
+            kind: AttentionKind::Request {
+                from: "Chief of Staff".into(),
+                from_id: "agent/example/cos".into(),
+                question: "The proof needs a runner.".into(),
+                structured: None,
+            },
+            actions: vec!["work.done".into()],
+            related: Vec::new(),
+            raised_by: None,
+            blocked: Some(Blocked {
+                step: "tag-proof".into(),
+                goal: "Prove the published tag builds.".into(),
+            }),
+        };
+        if let Load::Ready(items) = &mut world.attention {
+            items.insert(0, item);
+        }
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.tab = 0;
+        let at = ui
+            .listing(60)
+            .ids
+            .iter()
+            .position(|id| id == "attention/capacity")
+            .unwrap();
+        ui.select(at);
+        let screen = frame(&ui, 140, 50).join("\n");
+        for shown in [
+            "release-proof",
+            "waits    tag-proof · Prove the published tag builds.",
+            "it continues once you answer",
+            "Go to the mission",
+        ] {
+            assert!(screen.contains(shown), "{shown}: {screen}");
+        }
+    }
+
+    #[test]
     fn an_update_shows_what_was_asked_for_and_clears_once_read() {
         let mut world = demo::world();
         let item = Attention {
+            conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
             title: "The audit you asked for".into(),
@@ -5589,6 +8054,7 @@ mod tests {
             actions: vec!["work.done".into()],
             related: Vec::new(),
             raised_by: None,
+            blocked: None,
         };
         if let Load::Ready(items) = &mut world.attention {
             items.insert(0, item);
@@ -5612,9 +8078,6 @@ mod tests {
         ] {
             assert!(screen.contains(shown), "{shown}: {screen}");
         }
-        // Open, but only just: not read yet.
-        ui.read_open_update();
-        assert!(ui.effects.is_empty());
         // x dismisses it: it is read, once.
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
@@ -5624,15 +8087,137 @@ mod tests {
             "{:?}",
             ui.effects
         );
-        // Left open a moment, it counts as read without a key.
+        // Left open, or moved off, it stays: only x or r reads an update.
         ui.effects.clear();
         ui.updates_read.clear();
-        ui.update_open = Some((
-            "attention/update".into(),
-            Instant::now() - UPDATE_READ_AFTER,
-        ));
-        ui.read_open_update();
-        assert_eq!(ui.effects.len(), 1);
+        ui.select(0);
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+    }
+
+    #[test]
+    fn an_item_st_stops_listing_stays_on_home_until_x_clears_it() {
+        let world = demo::world();
+        let mut ui = Ui::new(world.clone());
+        ui.live = true;
+        ui.tab = 0;
+        let ids = ui.listing(60).ids.clone();
+        let (gone, acted) = (ids[0].clone(), ids[1].clone());
+        ui.select(0);
+        // Another device closes the first; the person answers the second here.
+        ui.note_acted(&Effect::Attention {
+            id: acted.clone(),
+            action: "work.done".into(),
+            reason: None,
+            answer: None,
+        });
+        let mut next = world;
+        if let Load::Ready(items) = &mut next.attention {
+            items.retain(|item| item.id != gone && item.id != acted);
+        }
+        ui.set_world(next.clone());
+        let listing = ui.listing(60);
+        assert!(listing.ids.contains(&gone), "it stays");
+        assert!(!listing.ids.contains(&acted), "what the person acted on goes");
+        ui.select(listing.ids.iter().position(|id| *id == gone).unwrap());
+        let shown = frame(&ui, 140, 50).join("\n");
+        assert!(!shown.contains("elsewhere"), "{shown}");
+        // It sits under its own heading, apart from what needs the person.
+        assert!(shown.contains("Recently closed: x clears each"), "{shown}");
+        // It survives later updates, and only x clears it.
+        ui.set_world(next.clone());
+        assert!(ui.listing(60).ids.contains(&gone));
+        ui.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(ui.listing(60).ids.contains(&gone), "other keys leave it");
+        ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!ui.listing(60).ids.contains(&gone));
+        assert!(ui.effects.is_empty(), "nothing sent for an item already closed");
+        ui.set_world(next);
+        assert!(!ui.listing(60).ids.contains(&gone));
+    }
+
+    #[test]
+    fn recently_closed_lists_only_the_latest_few() {
+        let mut world = demo::world();
+        if let Load::Ready(items) = &mut world.attention {
+            let template = items[0].clone();
+            items.clear();
+            for n in 0..RECENTLY_CLOSED + 3 {
+                items.push(Attention { id: format!("attention/n{n}"), ..template.clone() });
+            }
+        }
+        let mut ui = Ui::new(world.clone());
+        ui.live = true;
+        let ids: Vec<String> = ui.world.attention.items().iter().map(|a| a.id.clone()).collect();
+        // One closes per reading, oldest first.
+        let mut next = world;
+        for id in ids.iter().take(RECENTLY_CLOSED + 2) {
+            if let Load::Ready(items) = &mut next.attention {
+                items.retain(|item| item.id != *id);
+            }
+            ui.set_world(next.clone());
+        }
+        let shown: Vec<&String> = ui.closed.iter().collect();
+        assert_eq!(shown.len(), RECENTLY_CLOSED, "{shown:?}");
+        for old in ids.iter().take(2) {
+            assert!(!ui.closed.contains(old), "closed {old}: {:?}", ui.closed);
+            assert!(!ui.listing(60).ids.contains(old), "listed {old}");
+        }
+        for recent in ids.iter().skip(2).take(RECENTLY_CLOSED) {
+            assert!(ui.closed.contains(recent), "{recent}");
+        }
+    }
+
+    #[test]
+    fn a_held_key_repeats_while_typing_and_never_repeats_a_command() {
+        // Nathan, 2026-10-07: holding Ctrl+W deleted one word, not word after word.
+        let mut ui = Ui::new(demo::world());
+        ui.live = true;
+        ui.tab = 1;
+        ui.select(0);
+        let agent = ui.selected_id().unwrap();
+        ui.editing = true;
+        ui.conversation_state
+            .drafts
+            .insert(agent.clone(), "one two three four".into());
+        let key = |code, modifiers, kind| {
+            let mut key = KeyEvent::new(code, modifiers);
+            key.kind = kind;
+            key
+        };
+        ui.key(key(KeyCode::Char('w'), KeyModifiers::CONTROL, KeyEventKind::Press));
+        for _ in 0..2 {
+            ui.key(key(KeyCode::Char('w'), KeyModifiers::CONTROL, KeyEventKind::Repeat));
+        }
+        assert_eq!(ui.conversation_state.drafts[&agent], "one ");
+        // A release is nothing, and a held Enter never sends again.
+        ui.key(key(KeyCode::Char('w'), KeyModifiers::CONTROL, KeyEventKind::Release));
+        ui.key(key(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat));
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        assert_eq!(ui.conversation_state.drafts[&agent], "one ");
+        // Not typing, a held command key acts once (its press), never on repeats; a held arrow moves on.
+        ui.editing = false;
+        ui.tab = 0;
+        ui.select(0);
+        ui.key(key(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Repeat));
+        assert!(ui.confirm.is_none() && ui.effects.is_empty() && ui.flash.is_none());
+        ui.key(key(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Press));
+        let after_press = ui.selected[0];
+        ui.key(key(KeyCode::Down, KeyModifiers::NONE, KeyEventKind::Repeat));
+        assert_eq!(ui.selected[0], after_press + 1);
+    }
+
+    #[test]
+    fn a_list_st_stopped_serving_after_it_loaded_marks_the_connection_stale_and_says_why() {
+        let mut world = demo::world();
+        world.stale = vec!["Agents: collection source is unavailable".into()];
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        let top = frame(&ui, 140, 50)[0].clone();
+        assert!(top.contains("stale") && !top.contains("live"), "{top}");
+        // Clicking the connection word says why, and the rows stay.
+        ui.show_connection();
+        assert!(ui.flash.as_ref().is_some_and(|(text, _)| text.contains("collection source is unavailable")));
+        assert!(!ui.world.agents.items().is_empty());
     }
 
     #[test]
@@ -5647,6 +8232,7 @@ mod tests {
             items.insert(
                 0,
                 Attention {
+                    conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,
                     title: "Which runner should take the release?".into(),
@@ -5663,6 +8249,7 @@ mod tests {
                     actions: vec!["work.done".into()],
                     related: Vec::new(),
                     raised_by: None,
+                    blocked: None,
                 },
             );
         }
@@ -5997,8 +8584,8 @@ mod tests {
     #[test]
     fn conversations_are_simplified_unless_this_device_chose_the_full_view() {
         assert!(simplified(&prefs::Prefs::default()));
-        assert!(simplified(&prefs::Prefs { simple: Some(true) }));
-        assert!(!simplified(&prefs::Prefs { simple: Some(false) }));
+        assert!(simplified(&prefs::Prefs { simple: Some(true), ..Default::default() }));
+        assert!(!simplified(&prefs::Prefs { simple: Some(false), ..Default::default() }));
     }
 
     #[test]
@@ -6267,12 +8854,11 @@ mod tests {
             press(&mut ui, KeyCode::Char(character));
         }
         press(&mut ui, KeyCode::Enter);
+        // Sending goes to the agent's conversation, where the reply will appear.
+        assert_eq!(ui.tab, 1);
+        assert_eq!(ui.selected_id().as_deref(), Some("agent/example/atlas/builder"));
+        assert!(ui.chat.is_none());
         let screen = frame(&ui, 150, 70).join("\n");
-        assert!(
-            screen.contains("CHAT WITH ATLAS BUILDER")
-                || screen.contains("chat with Atlas Builder"),
-            "{screen}"
-        );
         assert!(screen.contains("why now?"), "{screen}");
     }
 
@@ -6288,6 +8874,89 @@ mod tests {
         ui.set_world(world);
         let item = ui.world.attention.items()[3].clone();
         assert_eq!(ui.chat_target(&item).unwrap().0, "agent/example/cos");
+    }
+
+    #[test]
+    fn what_a_seats_step_last_reported_leads_in_the_sidebar_and_on_its_card() {
+        let mut world = demo::world();
+        if let Load::Ready(agents) = &mut world.agents {
+            agents[0].details.progress = Some("Cut over 2 of 3 stores; waiting on the signer".into());
+        }
+        let mut ui = Ui::new(world);
+        ui.switch_tab(1);
+        let screen = frame(&ui, 150, 40).join("\n");
+        assert!(screen.contains("Cut over 2 of 3 stores"), "{screen}");
+        // The details pane says it whole, above the step it comes from.
+        let whole = screen.replace('\n', " ");
+        assert!(whole.contains("Cut over 2 of 3 stores; waiting on"), "{whole}");
+        // A run in progress says what its step last reported on its row in Missions.
+        let mut world = demo::world();
+        if let Load::Ready(missions) = &mut world.missions {
+            let mission = missions
+                .iter_mut()
+                .find(|mission| mission.steps.iter().any(|step| step.state == StepState::Working))
+                .unwrap();
+            let id = mission
+                .steps
+                .iter()
+                .find(|step| step.state == StepState::Working)
+                .unwrap()
+                .id
+                .clone();
+            mission.step_metadata.insert(
+                id,
+                st3_ui_model::missions::StepMetadata {
+                    blocked_reason: None,
+                    last_progress: Some("Tests pass; opening the PR".into()),
+                    nudged: None,
+                },
+            );
+        }
+        let mut ui = Ui::new(world);
+        ui.switch_tab(2);
+        let listed = frame(&ui, 150, 40).join("\n");
+        assert!(listed.contains("Tests pass; opening the PR"), "{listed}");
+    }
+
+    #[test]
+    fn voice_that_never_answers_cannot_hold_the_keys() {
+        // Nathan, 2026-10-06: keys stopped working, Ctrl+Q did not quit, until the
+        // terminal tab was closed.
+        let mut ui = Ui::new(demo::world());
+        ui.switch_tab(1);
+        let input = ui.draft_key().expect("a conversation is open");
+        let mut waiting = voice::VoiceState::stand_in(&input);
+        waiting.started = Instant::now() - Duration::from_secs(30);
+        ui.voice = Some(waiting);
+        ui.step_voice();
+        assert!(ui.voice.is_none(), "a helper silent for 30 s is given up");
+        assert!(
+            ui.flash.as_ref().is_some_and(|(text, _)| text.contains("keys work again")),
+            "{:?}",
+            ui.flash
+        );
+        // While it listens, a chord is not swallowed: Ctrl+Q quits.
+        ui.voice = Some(voice::VoiceState::stand_in(&input));
+        ui.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(ui.voice.is_none());
+        assert!(ui.quit, "Ctrl+Q went through");
+        // Plain typing still waits (it must not mix into the words) and Esc drops them.
+        let mut ui = Ui::new(demo::world());
+        ui.switch_tab(1);
+        let input = ui.draft_key().unwrap();
+        let mut heard = voice::VoiceState::stand_in(&input);
+        heard.device = "Built-in microphone".into();
+        ui.voice = Some(heard);
+        ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(ui.voice.is_some());
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(ui.voice.is_none());
+        // Leaving its conversation ends it.
+        let mut away = voice::VoiceState::stand_in("agent/example/someone-else");
+        away.device = "Built-in microphone".into();
+        ui.voice = Some(away);
+        ui.step_voice();
+        assert!(ui.voice.is_none());
     }
 
     #[test]

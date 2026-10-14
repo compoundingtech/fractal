@@ -5,6 +5,102 @@ use smallclaims::store::checkpoint_agreement::*;
 const FLEET: &str = "fleet/test";
 const CUT: u128 = 20 * DAY_MS;
 
+#[test]
+fn startup_revisions_are_display_metadata_in_a_mixed_checkpoint_round() {
+    fn started(store: &Store, subject: &str, version: Option<&str>) {
+        let mut fields = BTreeMap::from([("status".into(), json!("running"))]);
+        if let Some(version) = version {
+            fields.insert("version".into(), json!(version));
+        }
+        // Both old and new startup strings use the existing closed registry unchanged.
+        st3_schema::registry()
+            .validate_claim(subject, "daemon.started", &fields)
+            .unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "daemon.started".into(),
+                actor: None,
+                fields,
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let [alder, birch, cedar, dogwood] =
+        ["alder", "birch", "cedar", "dogwood"].map(|name| Store::open_memory(name).unwrap());
+    started(&alder, "daemon/alder", Some("0.1.0+local.abc1234.dirty"));
+    started(&birch, "daemon/birch", Some("0.1.0"));
+    started(&cedar, "daemon/cedar", None);
+    started(&dogwood, "daemon/dogwood", Some("0.1.0+dev"));
+    // A newer foreign-origin startup must not replace the member's own advertisement.
+    started(&birch, "daemon/alder", Some("0.1.0+decaf00"));
+    let nodes = [&alder, &birch, &cedar, &dogwood];
+    sync(&nodes);
+    for node in nodes {
+        assert_eq!(kinds(&step(node, &context)), ["sealed"]);
+    }
+    sync(&nodes);
+    let status = birch.checkpoint_status(context.now_unix_ms, &[]).unwrap();
+    let advertised = BTreeMap::from([("alder".into(), "0.1.0+local.abc1234.dirty".into())]);
+    assert_eq!(status.machine_version, advertised);
+    assert_eq!(
+        status.pending.as_ref().unwrap().builds,
+        nodes
+            .iter()
+            .map(|node| (node.origin.clone(), checkpoint_build()))
+            .collect()
+    );
+    let mut json = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        json["machine_version"]["alder"],
+        "0.1.0+local.abc1234.dirty"
+    );
+    json.as_object_mut().unwrap().remove("machine_version");
+    assert!(
+        serde_json::from_value::<CheckpointStatusView>(json)
+            .unwrap()
+            .machine_version
+            .is_empty()
+    );
+    for node in nodes {
+        assert_eq!(kinds(&step(node, &context)), ["verified"]);
+    }
+    sync(&nodes);
+    for node in nodes {
+        assert_eq!(stable_cuts(node), [newest_due_cut(context.now_unix_ms)]);
+        assert_eq!(kinds(&step(node, &context)), ["trimmed"]);
+        let status = node.checkpoint_status(context.now_unix_ms, &[]).unwrap();
+        assert!(status.pending.is_none());
+        assert_eq!(status.machine_version, advertised);
+    }
+    // Restart on another stamped revision republishes at each start.
+    started(&alder, "daemon/alder", Some("0.1.0+def5678-dirty"));
+    sync(&nodes);
+    assert_eq!(
+        birch
+            .checkpoint_status(context.now_unix_ms, &[])
+            .unwrap()
+            .machine_version["alder"],
+        "0.1.0+def5678-dirty"
+    );
+    // Rolling back to an older binary replaces the revision with a bare announcement.
+    started(&alder, "daemon/alder", Some("0.1.0"));
+    sync(&nodes);
+    let status = birch.checkpoint_status(context.now_unix_ms, &[]).unwrap();
+    assert!(status.machine_version.is_empty());
+    assert!(
+        serde_json::to_value(status)
+            .unwrap()
+            .get("machine_version")
+            .is_none()
+    );
+}
+
 fn claim(kind: &str, subject: &str, writer: &str, fields: Value) -> CheckpointClaim {
     CheckpointClaim {
         id: format!("{kind}:{subject}:{writer}:{fields}"),
@@ -249,6 +345,7 @@ fn kinds(actions: &[CheckpointAction]) -> Vec<&'static str> {
             CheckpointAction::Trimmed { .. } => "trimmed",
             CheckpointAction::ManifestNeeded { .. } => "manifest-needed",
             CheckpointAction::TrimGraphChanged { .. } => "graph-changed",
+            CheckpointAction::SweptTrimmedClaimRows { .. } => "swept",
         })
         .collect()
 }
@@ -299,6 +396,32 @@ fn nodes_seal_then_verify_once_every_participant_sealed_the_same_set() {
             assert!(claim.accepted_at_unix_ms < cut, "{claim:?}");
         }
     }
+}
+
+#[test]
+fn verification_refuses_stale_rule_terms_without_consuming_first_verification() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let cut = newest_due_cut(context.now_unix_ms);
+    let checkpoint = checkpoint_name(cut);
+    let store = Store::open_memory("alder").unwrap();
+    observe(&store, 4);
+    let sealed = store.checkpoint_sealed_identities(cut, None).unwrap();
+    let terms = SealTerms {
+        cut_unix_ms: cut, participants: names(&["alder"]),
+        sealed_digest: sealed.digest.clone(), rules_digest: "previous-rules".into(),
+    };
+    store.publish_seal(&checkpoint, &terms, &sealed, None).unwrap();
+    let mut actions = Vec::new();
+    store.verify_checkpoint(&checkpoint, &terms, sealed.seal_rowid, &context, &mut actions).unwrap();
+    assert!(actions.is_empty());
+    assert!(first_verifications(&store.checkpoint_claims().unwrap(), &checkpoint).is_empty());
+    assert_eq!(kinds(&step(&store, &context)), ["sealed"]);
+    assert_eq!(kinds(&step(&store, &context)), ["verified"]);
+    let claims = store.checkpoint_claims().unwrap();
+    assert_eq!(first_verifications(&claims, &checkpoint).len(), 1);
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    assert!(step(&store, &context).is_empty());
 }
 
 #[test]
@@ -827,7 +950,7 @@ fn status_names_what_differs_between_verifications() {
         .unwrap();
     plan.retained_digest = "another".into();
     birch
-        .publish_verification(&checkpoint, &terms, &plan, &proof)
+        .publish_verification(&checkpoint, &terms, &smallclaims::store::checkpoint_staging::StagedPlan::of(&plan), &proof)
         .unwrap();
     sync(&[&alder, &birch]);
 
@@ -857,8 +980,14 @@ fn participants_trim_the_stable_checkpoint_and_keep_every_identity() {
     let held = claim_ids(&alder);
     let index = alder.index().unwrap();
     for node in [&alder, &birch] {
+        let reclaim_before = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
         assert_eq!(kinds(&step(node, &context)), ["trimmed"]);
+        let reclaimed = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
+        assert_eq!(reclaimed.0 - reclaim_before.0, 1,
+            "checkpoint application and its nested finish reclaim once");
         assert!(step(node, &context).is_empty());
+        assert_eq!(smallclaims::store::checkpoint::allocator_reclaim_stats_for_test(), reclaimed,
+            "periodic completed-checkpoint polling never reclaims");
     }
     // Every identity stays in the inventory, so the authority digest does not move, and
     // the graph is the same.
@@ -890,6 +1019,7 @@ fn participants_trim_the_stable_checkpoint_and_keep_every_identity() {
 #[test]
 fn a_trim_that_stops_anywhere_finishes_the_same_after_a_restart() {
     for fault in [
+        TrimFault::AfterTombstoneChunk(1),
         TrimFault::AfterTombstones,
         TrimFault::AfterChunk(1),
         TrimFault::AfterChunk(2),
@@ -903,13 +1033,32 @@ fn a_trim_that_stops_anywhere_finishes_the_same_after_a_restart() {
         stable_pair(&alder, &birch, &context);
         assert_eq!(kinds(&step(&birch, &context)), ["trimmed"]);
         alder.set_trim_chunk_envelopes(2);
+        if fault == TrimFault::AfterTombstoneChunk(1) {
+            // Slow enough that recording takes several chunks, so the crash leaves some
+            // tombstones recorded and others not.
+            alder.set_trim_row_cost(std::time::Duration::from_millis(12));
+        }
         alder.set_trim_fault(Some(fault));
+        let reclaim_before = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
         assert!(alder.checkpoint_step(&context).is_err(), "{fault:?}");
+        if fault == TrimFault::AfterTombstoneChunk(1) {
+            let count = |sql: &str| -> u64 { alder.readers.get().query_row(sql, [], |row| row.get(0)).unwrap() };
+            let recorded = count("SELECT (SELECT COUNT(*) FROM checkpoint_envelopes) + (SELECT COUNT(*) FROM checkpoint_claims)");
+            let deleted = count("SELECT COUNT(*) FROM checkpoint_envelopes AS tombstone WHERE NOT EXISTS (
+                SELECT 1 FROM replica_envelopes AS held WHERE held.writer=tombstone.writer
+                  AND held.sequence=tombstone.sequence AND held.envelope_hash=tombstone.envelope_hash)");
+            assert!(recorded > 0 && deleted == 0, "some tombstones are recorded and nothing is deleted");
+            let manifest = birch.checkpoint_manifest(&checkpoint_name(newest_due_cut(context.now_unix_ms)), newest_due_cut(context.now_unix_ms)).unwrap();
+            assert!((recorded as usize) < manifest.claims.len() + manifest.envelopes.len(), "the crash came part way through");
+        }
+        assert_eq!(smallclaims::store::checkpoint::allocator_reclaim_stats_for_test().0 - reclaim_before.0, 1);
         drop(alder);
 
         let alder = Store::open(&path, "alder").unwrap();
+        let reclaim_before = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
         let actions = step(&alder, &context);
         assert_eq!(kinds(&actions), ["trimmed"], "{fault:?}");
+        assert_eq!(smallclaims::store::checkpoint::allocator_reclaim_stats_for_test().0 - reclaim_before.0, 1);
         assert!(step(&alder, &context).is_empty());
         assert_eq!(claim_ids(&alder), claim_ids(&birch), "{fault:?}");
         assert_eq!(authority(&alder), authority(&birch), "{fault:?}");
@@ -1104,4 +1253,138 @@ fn a_node_that_left_the_fleet_is_not_waited_for() {
     let known = names(&["alder", "birch"]);
     let left = names(&["birch"]);
     assert_eq!(participants(&known, &left, &[]), names(&["alder"]));
+}
+
+#[test]
+fn v9_v10_seals_wait_for_matching_rules_before_verifying() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let cut = newest_due_cut(context.now_unix_ms);
+    let checkpoint = checkpoint_name(cut);
+    let [alder, birch] = ["alder", "birch"].map(|name| Store::open_memory(name).unwrap());
+    observe(&alder, 4);
+    observe(&birch, 3);
+    sync(&[&alder, &birch]);
+    assert_eq!(kinds(&step(&alder, &context)), ["sealed"]);
+    sync(&[&alder, &birch]);
+    let mut legacy =
+        newest_seals(&alder.checkpoint_claims().unwrap(), &checkpoint)["alder"].clone();
+    // Exact rules-v9 description/version from main 2e075af9, before native-auth retention.
+    legacy.rules_digest = "ba69471dde5e5a9d835a2576a55a9fe9b1c387095ee1dcabdd6abc8e03400780".into();
+    assert_ne!(legacy.rules_digest, rules_digest());
+    let sealed = birch.checkpoint_sealed_identities(cut, None).unwrap();
+    assert_eq!(sealed.digest, legacy.sealed_digest);
+    birch
+        .publish_seal(&checkpoint, &legacy, &sealed, None)
+        .unwrap();
+    sync(&[&alder, &birch]);
+    assert!(step(&alder, &context).is_empty());
+    let pending = alder
+        .checkpoint_status(context.now_unix_ms, &[])
+        .unwrap()
+        .pending
+        .unwrap();
+    assert_eq!(pending.disagreeing["birch"], "rules");
+    assert!(pending.verified.is_empty());
+    assert!(stable_cuts(&alder).is_empty());
+    assert!(stable_cuts(&birch).is_empty());
+    // The updated participant reseals under v10; only then can either side verify.
+    assert_eq!(kinds(&step(&birch, &context)), ["sealed"]);
+    sync(&[&alder, &birch]);
+    assert_eq!(kinds(&step(&alder, &context)), ["verified"]);
+    assert_eq!(kinds(&step(&birch, &context)), ["verified"]);
+    sync(&[&alder, &birch]);
+    assert_eq!(stable_cuts(&alder), [cut]);
+    assert_eq!(stable_cuts(&birch), [cut]);
+}
+
+#[test]
+fn stale_rule_seals_do_not_end_excusal_until_normal_matching_runtime_reentry() {
+    let scratch = tempfile::tempdir().unwrap();
+    let first = context(scratch.path(), 0);
+    let [alder, birch] = ["alder", "birch"].map(|name| Store::open_memory(name).unwrap());
+    observe(&alder, 2);
+    observe(&birch, 2);
+    sync(&[&alder, &birch]);
+    alder.excuse_checkpoint_writer(&CheckpointExcuseRequest {
+        writer:"birch".into(), reason:"old runtime is away".into(), actor:"person/operator".into(),
+    }).unwrap();
+    sync(&[&alder, &birch]);
+    let cut = newest_due_cut(first.now_unix_ms);
+    let sealed = birch.checkpoint_sealed_identities(cut, None).unwrap();
+    birch.publish_seal(&checkpoint_name(cut), &SealTerms {
+        cut_unix_ms:cut, participants:names(&["alder", "birch"]),
+        sealed_digest:sealed.digest.clone(), rules_digest:"rules13".into(),
+    }, &sealed, None).unwrap();
+    sync(&[&alder, &birch]);
+    let status = alder.checkpoint_status(first.now_unix_ms, &[]).unwrap();
+    assert_eq!(status.excused, names(&["birch"]));
+    assert_eq!(status.participants, names(&["alder"]));
+    let actions = step(&alder, &first);
+    let CheckpointAction::Sealed { participants, .. } = &actions[0] else { panic!("{actions:?}") };
+    assert_eq!(participants, &names(&["alder"]));
+    assert_eq!(kinds(&step(&alder, &first)), ["verified"]);
+    sync(&[&alder, &birch]);
+    assert_eq!(kinds(&step(&alder, &first)), ["trimmed"]);
+    let next = CheckpointContext { now_unix_ms:first.now_unix_ms + DAY_MS, ..first };
+    let actions = step(&birch, &next);
+    if kinds(&actions).contains(&"manifest-needed") {
+        let need = birch.checkpoint_manifest_need().unwrap().unwrap();
+        let manifest = alder.checkpoint_manifest(&need.checkpoint, need.cut_unix_ms).unwrap();
+        assert_eq!(kinds(&birch.adopt_checkpoint(&manifest).unwrap()), ["trimmed"]);
+        assert_eq!(kinds(&step(&birch, &next)), ["sealed"]);
+    } else {
+        assert!(kinds(&actions).contains(&"trimmed"), "{actions:?}");
+        assert!(kinds(&actions).contains(&"sealed"), "{actions:?}");
+    }
+    sync(&[&alder, &birch]);
+    let status = alder.checkpoint_status(next.now_unix_ms, &[]).unwrap();
+    assert!(status.excused.is_empty());
+    assert_eq!(status.participants, names(&["alder", "birch"]));
+}
+
+#[test]
+fn the_agent_card_fold_matches_per_subject_reductions_after_a_trim() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let [alder, birch] = ["alder", "birch"].map(|name| Store::open_memory(name).unwrap());
+    for (store, seat) in [(&alder, "agent/alder.keeper"), (&birch, "agent/birch.keeper")] {
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status": "running", "runtime_id": seat,
+                "incarnation_id": "keeper-1"})),
+            ("harness.observed", json!({"state": "working", "driver": "omp",
+                "incarnation_id": "keeper-1"})),
+            ("harness.observed", json!({"state": "idle", "driver": "omp",
+                "incarnation_id": "keeper-1"})),
+            ("runtime.observed", json!({"status": "stopped", "runtime_id": seat,
+                "incarnation_id": "keeper-1"})),
+            ("runtime.observed", json!({"status": "running", "runtime_id": seat,
+                "incarnation_id": "keeper-2"})),
+        ] {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+    }
+    sync(&[&alder, &birch]);
+    let mut trimmed = false;
+    for _ in 0..4 {
+        for node in [&alder, &birch] {
+            trimmed |= kinds(&step(node, &context)).contains(&"trimmed");
+        }
+        sync(&[&alder, &birch]);
+    }
+    assert!(trimmed, "the fixture reached a trim");
+    for node in [&alder, &birch] {
+        let indexes = (0..=node.index().unwrap()).collect::<Vec<_>>();
+        super::card_fold_tests::assert_card_fold_parity(node, &indexes);
+    }
 }

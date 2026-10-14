@@ -196,6 +196,14 @@ fn rust_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = action_method(id);
+        if id == "arrangements.list" {
+            writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
+            continue;
+        }
+        if id == "arrangements.get" {
+            writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
+            continue;
+        }
         if id == "capabilities.get" {
             writeln!(
                 out,
@@ -206,11 +214,15 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn host_repositories(&self, host: &str) -> Result<Envelope<HostRepositories>, ClientError> {{ self.get(&format!(\"/v1/client/hosts/{{}}/repositories\", percent_encode(host))).await }}"
             )?;
+        } else if id == "publication.definition" {
+            writeln!(out, "    pub async fn publication_definition(&self, subject: &str) -> Result<Envelope<PublicationDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/publication-definition?subject={{}}\", percent_encode(subject))).await }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
                 "    pub async fn subject_definition(&self, subject: &str, show_env_values: bool) -> Result<Envelope<SubjectDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/subject-definition?subject={{}}&show_env_values={{show_env_values}}\", percent_encode(subject))).await }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -248,11 +260,18 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn events(&self, after: Option<&str>, limit: Option<usize>, wait_ms: Option<u64>) -> Result<Envelope<EventPage>, ClientError> {{ self.events_internal(after, limit, wait_ms).await }}"
             )?;
+        } else if id == "conversation-content.chunk" {
+            writeln!(
+                out,
+                "    pub async fn conversation_content_chunk(&self, id: &str, reference: &str, offset: u64) -> Result<Envelope<ConversationContentChunk>, ClientError> {{ self.get(&format!(\"/v1/client/conversations/{{}}/content/{{}}/chunk?offset={{offset}}\", percent_encode_segment(id), percent_encode_segment(reference))).await }}"
+            )?;
         } else if id == "terminal.screen" {
             writeln!(
                 out,
                 "    pub async fn terminal_screen(&self, terminal_id: &str) -> Result<Envelope<TerminalScreen>, ClientError> {{ self.terminal_screen_internal(terminal_id).await }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {{ self.get(&format!(\"/v1/client/message-bodies/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "agent-queue.get" {
@@ -260,10 +279,20 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn agent_queue(&self, agent_id: &str) -> Result<Envelope<AgentQueue>, ClientError> {{ self.agent_queue_internal(agent_id).await }}"
             )?;
+        } else if id == "agent-workspace.get" {
+            writeln!(
+                out,
+                "    pub async fn agent_workspace_get(&self, id: &str) -> Result<Envelope<AgentWorkspace>, ClientError> {{ self.get(&format!(\"/v1/client/agent-workspaces/{{}}\", percent_encode(id))).await }}"
+            )?;
         } else if id == "agent-declaration.get" {
             writeln!(
                 out,
                 "    pub async fn agent_declaration_get(&self, id: &str, revision: Option<&str>, show_env_values: bool) -> Result<Envelope<AgentDeclaration>, ClientError> {{ let path = format!(\"/v1/client/agent-declarations/{{}}?show_env_values={{show_env_values}}\", percent_encode(id)); let path = if let Some(revision) = revision {{ format!(\"{{path}}&revision={{}}\", percent_encode(revision)) }} else {{ path }}; self.get(&path).await }}"
+            )?;
+        } else if id == "custom-subjects.list" {
+            writeln!(
+                out,
+                "    pub async fn custom_subjects_list(&self, kind: Option<&str>, version: Option<u32>, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<Page>, ClientError> {{ let version = version.map(|v| v.to_string()); let values = [(\"kind\", kind), (\"version\", version.as_deref())]; let filters = values.into_iter().filter_map(|(k,v)| v.map(|v| (k,v))).collect::<Vec<_>>(); self.list_internal_with_filters(\"custom-subjects\", cursor, limit, false, &filters).await }}"
             )?;
         } else if id == "resources.list" {
             writeln!(
@@ -303,10 +332,17 @@ fn rust_operation_methods(
     for (action, definition) in actions {
         let method = action_method(action);
         let parameters = action_parameter(action, definition)?;
-        writeln!(
-            out,
-            "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
-        )?;
+        if action == "message.send" {
+            writeln!(
+                out,
+                "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, mut parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let idempotency_key = idempotency_key.into(); if parameters.signature.is_none() && let Some(device) = &self.signing_device {{ parameters.signature = Some(device.sign_message(&idempotency_key, &parameters).map_err(|error| ClientError::Protocol(error.to_string()))?); }} let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
+            )?;
+        } else {
+            writeln!(
+                out,
+                "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
+            )?;
+        }
     }
     Ok(out.trim_end().to_owned())
 }
@@ -320,6 +356,14 @@ fn swift_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = lower_camel(&pascal(id));
+        if id == "arrangements.list" {
+            writeln!(out, "    public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements\", query: query) }}")?;
+            continue;
+        }
+        if id == "arrangements.get" {
+            writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
+            continue;
+        }
         if matches!(
             id,
             "capabilities.get"
@@ -330,11 +374,18 @@ fn swift_operation_methods(
                 | "agent-queue.get"
         ) {
             continue;
+        } else if id == "conversation-content.chunk" {
+            writeln!(
+                out,
+                "    public func conversationContentChunk(id: String, reference: String, offset: UInt64 = 0) async throws -> Envelope<ConversationContentChunk> {{ try await get(\"v1/client/conversations/\\(Self.routedSessionID(id))/content/\\(Self.routedSessionID(reference))/chunk\", query: [.init(name: \"offset\", value: String(offset))]) }}"
+            )?;
         } else if id == "conversation.search" {
             writeln!(
                 out,
                 "    public func conversationSearch(text: String, agent: String? = nil, since: String? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ConversationSearch> {{ var query: [URLQueryItem] = [.init(name: \"text\", value: text)]; for (name, value) in [(\"agent\", agent), (\"since\", since), (\"cursor\", cursor)] {{ if let value {{ query.append(.init(name: name, value: value)) }} }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/conversations/search\", query: query) }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -352,6 +403,13 @@ fn swift_operation_methods(
                 out,
                 "    public func documentGet(name: String) async throws -> Envelope<DocumentContent> {{ try await get(\"v1/client/documents/content\", query: [.init(name: \"name\", value: name)]) }}"
             )?;
+        } else if id == "agent-workspace.get" {
+            writeln!(
+                out,
+                "    public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> {{ try await get(\"v1/client/agent-workspaces/\\(id)\") }}"
+            )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> {{ try await get(\"v1/client/message-bodies/\\(id)\") }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> {{ try await get(\"v1/client/status-history/\\(id)\") }}")?;
         } else if id == "agent-declaration.get" {
@@ -364,10 +422,17 @@ fn swift_operation_methods(
                 out,
                 "    public func hostRepositories(id: String) async throws -> Envelope<HostRepositories> {{ try await get(\"v1/client/hosts/\\(id)/repositories\") }}"
             )?;
+        } else if id == "publication.definition" {
+            writeln!(out, "    public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> {{ try await get(\"v1/client/publication-definition\", query: [.init(name: \"subject\", value: subject)]) }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
                 "    public func subjectDefinition(subject: String, showEnvValues: Bool = false) async throws -> Envelope<SubjectDefinition> {{ try await get(\"v1/client/subject-definition\", query: [.init(name: \"subject\", value: subject), .init(name: \"show_env_values\", value: showEnvValues ? \"true\" : \"false\")]) }}"
+            )?;
+        } else if id == "custom-subjects.list" {
+            writeln!(
+                out,
+                "    public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let kind {{ query.append(.init(name: \"kind\", value: kind)) }}; if let version {{ query.append(.init(name: \"version\", value: String(version))) }}; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/custom-subjects\", query: query) }}"
             )?;
         } else if id == "resources.list" {
             writeln!(
@@ -574,34 +639,53 @@ fn validate_surfaces(
         bail!("KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}", known.len());
     }
     for definition in [
+        "DirectiveNote",
+        "DirectiveNotes",
         "ResourceObservation",
         "ResourcesFilter",
         "ResourcesPage",
+        "AttentionBlocked",
         "AttentionTargetState",
         "DocumentContent",
+        "MessageBody",
         "AgentDeclaration",
+        "AgentWorkspace",
         "StatusHistory",
         "StatusTransition",
         "AgentRepository",
+        "AgentCheckout",
         "HostRepositories",
         "CanonicalNode",
         "SubjectDefinition",
+        "PublicationDefinition",
         "UsagePeriod",
+        "AgentMessageEstimate",
+        "AgentMessageDay",
         "MailBacklog",
         "UsageRow",
+        "UsagePricing",
+        "UsagePricingRates",
         "ClientConnections",
         "ClientConnection",
         "UsageLimit",
         "LaunchPreview",
         "MissionRunSummary",
+        "MissionStep",
+        "MissionWake",
         "AgentQueue",
         "AgentQueueRun",
         "AgentQueueMove",
         "LaneEntry",
         "LaneChange",
+        "TimelineBlock",
+        "ConversationContentRef",
+        "ConversationContentChunk",
         "TimelineEntry",
         "TimelinePage",
         "ConversationChanges",
+        "ObservationReport",
+        "ObservationAccepted",
+        "ObservationResponse",
         "PairingBegin",
         "PairingChallenge",
         "PairingComplete",
@@ -634,6 +718,7 @@ fn validate_surfaces(
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
     for token in [
+        "pub async fn observations_report",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
         "pub async fn terminal_stream",
@@ -650,6 +735,7 @@ fn validate_surfaces(
         "func timeline(",
         "cursor: String?",
         "func events(",
+        "func observationsReport(",
         "func beginPairing(",
         "func completePairing(",
         "func terminalScreen(",
@@ -923,6 +1009,7 @@ fn ts_type(value: &Value) -> Result<String> {
         Some("integer" | "number") => "number".into(),
         Some("boolean") => "boolean".into(),
         Some("null") => "null".into(),
+        Some("array") if value.get("prefixItems").is_some() => format!("[{}]", value["prefixItems"].as_array().context("tuple items")?.iter().map(ts_type).collect::<Result<Vec<_>>>()?.join(", ")),
         Some("array") => format!("Array<{}>", ts_type(&value["items"])?),
         Some("object") => ts_object(value)?,
         Some(other) => bail!("unsupported TypeScript schema type `{other}`"),
@@ -1008,6 +1095,23 @@ fn ts_conditional_body(value: &Value) -> Result<Option<String>> {
     }
 }
 
+/// The typed `TimelineView` and `ConversationHeader` schemas serve schema consumers and docs;
+/// generated clients carry both as loose JSON, so the raw TypeScript model renders the named
+/// fields as `unknown` instead of projecting every definition.
+fn ts_loose_json_fields(definition: &Value, fields: &[&str]) -> Value {
+    let mut loose = definition.clone();
+    for field in fields {
+        if let Some(properties) = loose
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .and_then(|properties| properties.get_mut(*field))
+        {
+            *properties = Value::Object(serde_json::Map::new());
+        }
+    }
+    loose
+}
+
 fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     let mut out = format!(
@@ -1017,6 +1121,13 @@ fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
         if name == "ActionRequest" {
             continue;
         }
+        let loose = match name.as_str() {
+            "TimelineBlock" => ts_loose_json_fields(definition, &["view"]),
+            "TimelinePage" | "ConversationChanges" | "TimelineDelta" => {
+                ts_loose_json_fields(definition, &["header"])
+            }
+            _ => definition.clone(),
+        };
         let shape = if name == "Resource" {
             // UnknownResource's open `kind: string` would defeat discriminant narrowing in the
             // raw union; like the Rust and Swift clients, raw TypeScript models known kinds only.
@@ -1026,7 +1137,7 @@ fn typescript_models(schema: &Value, operations: &Value) -> Result<String> {
             }
             ts_type(&known)?
         } else {
-            ts_conditional_body(definition)?.unwrap_or(ts_type(definition)?)
+            ts_conditional_body(&loose)?.unwrap_or(ts_type(&loose)?)
         };
         writeln!(out, "export type {name} = {shape};\n")?;
     }
@@ -1104,6 +1215,14 @@ fn typescript_operation_methods(
         } else {
             path.to_owned()
         };
+        if id == "arrangements.list" {
+            writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }})); }}")?;
+            continue;
+        }
+        if id == "arrangements.get" {
+            writeln!(out, "    async arrangementsGet(personName: string, uuid: string): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`); }}")?;
+            continue;
+        }
         if id == "conversation.search" {
             writeln!(
                 out,
@@ -1114,6 +1233,8 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(options: EventOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events', requestOptions); }}"
             )?;
+        } else if id == "notes.list" {
+            writeln!(out, "    async notesList(): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes'); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -1131,6 +1252,11 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(name: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ name }}), undefined, requestOptions); }}"
             )?;
+        } else if id == "custom-subjects.list" {
+            writeln!(
+                out,
+                "    async customSubjectsList(options: PageOptions & {{ kind?: string; version?: number }} = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('{route}' + query(options)); }}"
+            )?;
         } else if id == "resources.list" {
             writeln!(
                 out,
@@ -1146,10 +1272,17 @@ fn typescript_operation_methods(
                 out,
                 "    async hostRepositories(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HostRepositories>> {{ return this.get(`{route}`, undefined, requestOptions); }}"
             )?;
+        } else if id == "publication.definition" {
+            writeln!(out, "    async publicationDefinition(subject: string): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }})); }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
                 "    async subjectDefinition(subject: string, showEnvValues = false, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ subject, show_env_values: showEnvValues }}), undefined, requestOptions); }}"
+            )?;
+        } else if id == "conversation-content.chunk" {
+            writeln!(
+                out,
+                "    async conversationContentChunk(id: string, reference: string, offset = 0): Promise<EnvelopeOf<ConversationContentChunk>> {{ return this.get(`/v1/client/conversations/${{encodeURIComponent(id)}}/content/${{encodeURIComponent(reference)}}/chunk` + query({{offset}})); }}"
             )?;
         } else if id == "conversation.changes" {
             writeln!(

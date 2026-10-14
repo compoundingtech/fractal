@@ -1,9 +1,10 @@
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, installNixStep } from '../../repos/effect-utils/genie/external.ts'
 import { readOnlyBinaryCaches } from './workspace-ci.ts'
 
 // ci1 retains its Nix store and per-runner GC roots. No Actions cache or FlakeHub service
 // participates in this build. Fork pull requests remain covered by the public Linux gate.
-export default githubWorkflow({
+export default githubWorkflow(readyPRJobs({
   actionlint: {
     ...defaultActionlintConfig,
     selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), 'ci1'],
@@ -18,6 +19,7 @@ export default githubWorkflow({
     "schedule": [{ "cron": "17 1 * * *" }],
     "workflow_dispatch": {},
     "pull_request": {
+      types: readyPullRequestTypes,
       "paths": [".github/workflows/nix.yml*", ".github/messaging-compat-baseline.json", "scripts/ci-nix-release*", "flake.nix", "flake.lock", "nix/**"]
     }
   },
@@ -61,4 +63,4 @@ export default githubWorkflow({
       ]
     }
   }
-})
+}))

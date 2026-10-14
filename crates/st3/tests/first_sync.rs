@@ -60,6 +60,9 @@ const RENEWALS_PER_STEP: usize = 5;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_empty_node_syncs_its_peer_within_two_minutes() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     if cfg!(debug_assertions) {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
@@ -323,6 +326,7 @@ fn run_cycle(store: &Store, workspace: &str, index: usize) {
         .unwrap();
     for step in &run.steps {
         let request = |action: &str, n: usize| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/bench/builder".into()),
             incarnation: Some(format!("builder-{index}")),
             // A renewal with a summary publishes its claim, as a lease near expiry does.
@@ -570,7 +574,7 @@ struct Node(Vec<Child>);
 impl Node {
     fn start(dir: &Path, path_dir: &Path) -> Self {
         let spawn = |args: &[&str], log: &str| {
-            st3::test_support::command(env!("CARGO_BIN_EXE_st3-fixture"))
+            st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"))
                 .args(args)
                 .arg("--config")
                 .arg(dir.join("config.toml"))

@@ -33,7 +33,7 @@ struct Handoffs {
 pub async fn run(
     client: &Client,
     subject: &str,
-    incarnation: &str,
+    incarnation: impl std::future::Future<Output = Result<String>>,
     paths: &st_drivers::driver_paths::Paths,
     identity: &str,
     runtime_id: &str,
@@ -56,14 +56,55 @@ pub async fn run(
         // unconditional replay of instructions whose consumption is uncertain.
         let ledger = ledger.unwrap_or_default();
         State {
-            fence: Fence::new(subject, incarnation, "delivery"),
+            fence: Fence::new(subject, "", "delivery"),
             attempted: ledger.attempted,
             confirmed: ledger.confirmed,
             accepted: ledger.accepted,
             ..State::default()
         }
     };
-    state.fence.bind(client).await?;
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+    let spawn_reader =
+        |sender: tokio::sync::mpsc::UnboundedSender<st_drivers::reexec::StdinChunk>| {
+            st_drivers::reexec::StdinReader::spawn(move |chunk| sender.send(chunk).is_ok())
+        };
+    let mut reader = Some(spawn_reader(input_tx.clone()));
+    let mut stdout = tokio::io::stdout();
+    // Claude times out MCP startup independently of st's daemon. Serve the local protocol
+    // while discovering and binding ownership; this grants no mailbox access or readiness.
+    let mut fence = state.fence.clone();
+    let binding = async {
+        anyhow::ensure!(
+            fence.subject == subject && fence.component == "delivery",
+            "the resumed Claude channel belongs to another subject or component"
+        );
+        let incarnation = incarnation.await?;
+        anyhow::ensure!(
+            fence.incarnation.is_empty() || fence.incarnation == incarnation,
+            "the resumed Claude channel belongs to another runtime incarnation"
+        );
+        fence.incarnation = incarnation;
+        fence.bind(client).await?;
+        Ok::<_, anyhow::Error>(fence)
+    };
+    tokio::pin!(binding);
+    loop {
+        tokio::select! {
+            bound = &mut binding => { state.fence = bound?; break; },
+            chunk = input_rx.recv() => match chunk {
+                Some(st_drivers::reexec::StdinChunk::Bytes(bytes)) => {
+                    state.lines.push(&bytes);
+                    while let Some(line) = state.lines.next_line() {
+                        if let Some(response) = request(&line, &mut state.initialized)? {
+                            write(&mut stdout, &response).await?;
+                        }
+                    }
+                },
+                Some(st_drivers::reexec::StdinChunk::Eof) | None => return Ok(()),
+                Some(st_drivers::reexec::StdinChunk::Failed(error)) => return Err(error.into()),
+            },
+        }
+    }
     let report = || {
         json!({"transport":"claude-channel", "pid":std::process::id(),
         "image":st_drivers::reexec::running_identity().map(|i| i.token()),
@@ -72,14 +113,14 @@ pub async fn run(
         "ready":state.initialized})
     };
     let mut subscription = Subscription::start(client.clone(), state.fence.clone(), report());
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
-    let spawn_reader =
-        |sender: tokio::sync::mpsc::UnboundedSender<st_drivers::reexec::StdinChunk>| {
-            st_drivers::reexec::StdinReader::spawn(move |chunk| sender.send(chunk).is_ok())
-        };
-    let mut reader = Some(spawn_reader(input_tx.clone()));
     let mut watch = st_drivers::reexec::ReplacementWatch::for_current_process();
-    let mut stdout = tokio::io::stdout();
+    // Retry the identical claim after a failed acknowledgement. The existing tick
+    // schedules retries; polling the POST separately keeps MCP input and EOF live.
+    let initialization_input = channel_initialization_claim(&state.fence);
+    let initialization = announce_initialization(client, &initialization_input);
+    tokio::pin!(initialization);
+    let mut initialization_recorded = false;
+    let mut initialization_pending = true;
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut messages = Vec::<MessageView>::new();
@@ -92,8 +133,18 @@ pub async fn run(
     let mut diagnostics = BTreeMap::<String, DiagnosticReport>::new();
     loop {
         tokio::select! {
+            result = &mut initialization, if state.initialized && initialization_pending => {
+                initialization_pending = false;
+                initialization_recorded = result.is_ok();
+                if initialization_recorded {
+                    retries.remove("channel-initialized");
+                } else {
+                    retry_failed(&mut retries, "channel-initialized");
+                }
+            },
             frame = subscription.receiver.recv() => match frame {
                 Some(Frame::Mailbox { messages: next }) => { messages = next; replayed = true; },
+                Some(Frame::Replay { nonce }) => subscription.acknowledge_replay(nonce),
                 Some(Frame::Drain { operation }) => subscription.acknowledge_drain(operation),
                 Some(Frame::Seat { .. }) => {}, // the outer driver owns the PTY title
                 Some(Frame::Fenced { reason }) => anyhow::bail!("{reason}"),
@@ -107,21 +158,16 @@ pub async fn run(
                             write(&mut stdout, &response).await?;
                         }
                     }
-                    if state.initialized {
-                        // MCP initialization is positive native readiness, independent of hooks.
-                        let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
-                            subject: subject.into(), kind:"harness.observed".into(), actor:Some(subject.into()),
-                            fields:{let mut fields=BTreeMap::from([("state".into(),json!("ready")),("driver".into(),json!("claude")),
-                                ("transport".into(),json!("claude-channel")),("incarnation_id".into(),json!(incarnation))]);
-                                crate::suspension::annotate_quiescence(&mut fields); fields},
-                            evidence:Vec::new(),expected_subject:None,idempotency_key:Some(format!("channel-ready:{subject}:{incarnation}:{}",state.fence.epoch)),
-                        }).await;
-                    }
                 },
                 Some(st_drivers::reexec::StdinChunk::Eof) | None => return Ok(()),
                 Some(st_drivers::reexec::StdinChunk::Failed(error)) => return Err(error.into()),
             },
             _ = interval.tick() => {
+                if state.initialized && !initialization_recorded && !initialization_pending
+                    && retry_ready(&retries, "channel-initialized") {
+                    initialization.set(announce_initialization(client, &initialization_input));
+                    initialization_pending = true;
+                }
                 subscription.report(json!({"transport":"claude-channel", "pid":std::process::id(),
                     "image":st_drivers::reexec::running_identity().map(|i| i.token()),
                     "follows":st_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
@@ -169,7 +215,7 @@ pub async fn run(
                             }
                             let body = body(client, message).await?;
                             let attachments = crate::blobs::materialize_for_seat(client, subject, &agent_dir.join("attachments"), message).await?;
-                            Ok::<_, anyhow::Error>(Some(st_drivers::ding::with_dictation_notice(
+                            Ok::<_, anyhow::Error>(Some(st_drivers::ding::with_tag_notices(
                                 st_drivers::ding::st3_notification_with_attachments(&message.subject, &message.from, &message.to,
                                     message.title.as_deref(), &body, &st_drivers::ding::st3_body_sha256(&body), &attachments), &message.tags)))
                         }.await;
@@ -299,6 +345,10 @@ pub async fn run(
     }
 }
 
+async fn announce_initialization(client: &Client, input: &ClaimInput) -> Result<ClaimRecord> {
+    client.post("/v1/claims", input).await
+}
+
 #[derive(Default)]
 struct Retry {
     failures: u32,
@@ -312,8 +362,10 @@ fn retry_ready(retries: &BTreeMap<String, Retry>, key: &str) -> bool {
 fn retry_failed(retries: &mut BTreeMap<String, Retry>, key: &str) {
     let retry = retries.entry(key.into()).or_default();
     retry.failures = retry.failures.saturating_add(1);
-    let seconds = (1_u64 << retry.failures.saturating_sub(1).min(5)).min(30);
-    retry.due = Some(Instant::now() + Duration::from_secs(seconds));
+    retry.due = Some(Instant::now() + retry_delay(retry.failures));
+}
+fn retry_delay(failures: u32) -> Duration {
+    Duration::from_secs((1_u64 << failures.saturating_sub(1).min(5)).min(30))
 }
 struct DiagnosticReport {
     reason: String,
@@ -386,34 +438,68 @@ fn save_handoffs(path: &Path, state: &State) -> Result<()> {
 #[derive(Default)]
 struct Transcript {
     path: std::path::PathBuf,
+    identity: Option<(u64, u64)>,
     offset: u64,
     lines: st_drivers::reexec::LineBuffer,
+    recover: bool,
+    discard_line: bool,
 }
+// Restart and uncertain-body recovery inspect recent proof, not an unbounded
+// session history. Each poll has the same byte budget; an oversized/incomplete
+// native record cannot retain the rest of the transcript in memory.
+const TRANSCRIPT_WINDOW: usize = 4 * 1024 * 1024;
 impl Transcript {
     fn body_available(&mut self, uncertain: bool) {
-        if uncertain {
-            self.offset = 0;
-            self.lines = Default::default();
-        }
+        self.recover |= uncertain;
     }
     fn appended(&mut self, path: &Path) -> Result<Vec<Value>> {
         use std::io::{Read as _, Seek as _};
+        use std::os::unix::fs::MetadataExt as _;
         let mut file = std::fs::File::open(path)?;
-        if self.path != path || file.metadata()?.len() < self.offset {
+        let metadata = file.metadata()?;
+        let identity = (metadata.dev(), metadata.ino());
+        if self.recover
+            || self.path != path
+            || self.identity != Some(identity)
+            || metadata.len() < self.offset
+        {
             self.path = path.to_owned();
-            self.offset = 0;
+            self.identity = Some(identity);
+            self.offset = metadata.len().saturating_sub(TRANSCRIPT_WINDOW as u64);
             self.lines = Default::default();
+            self.discard_line = false;
+            if self.offset > 0 {
+                // A window may start inside a JSON record. Skip that fragment,
+                // but keep a complete record starting exactly at the boundary.
+                file.seek(std::io::SeekFrom::Start(self.offset - 1))?;
+                let mut previous = [0];
+                file.read_exact(&mut previous)?;
+                self.discard_line = previous[0] != b'\n';
+            }
+            self.recover = false;
         }
         file.seek(std::io::SeekFrom::Start(self.offset))?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        file.take(TRANSCRIPT_WINDOW as u64)
+            .read_to_end(&mut bytes)?;
         self.offset += bytes.len() as u64;
         self.lines.push(&bytes);
         let mut records = Vec::new();
         while let Some(line) = self.lines.next_line() {
+            if self.discard_line {
+                self.discard_line = false;
+                continue;
+            }
+            if line.len() > TRANSCRIPT_WINDOW {
+                continue;
+            }
             if let Ok(record) = serde_json::from_str(&line) {
                 records.push(record);
             }
+        }
+        if self.lines.buffered_len() > TRANSCRIPT_WINDOW || self.discard_line {
+            self.lines = Default::default();
+            self.discard_line = true;
         }
         Ok(records)
     }
@@ -457,7 +543,9 @@ fn user_text(record: &Value) -> Vec<&str> {
     }
 }
 async fn body(client: &Client, message: &MessageView) -> Result<String> {
-    if message.content.starts_with("doc/") {
+    if message.body_ref.is_some() {
+        crate::message_body::full_text(client, message).await
+    } else if message.content.starts_with("doc/") {
         let value: Value = client
             .get(&format!(
                 "/v1/documents/content?reference={}",
@@ -501,6 +589,48 @@ async fn receipt(
         )
         .await
 }
+/// A user-scoped plugin may be loaded by ordinary Claude sessions outside a seat.
+/// Serve the protocol without paths, daemon access, mailbox fences or readiness observations.
+pub async fn run_idle() -> Result<()> {
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut stdout = tokio::io::stdout();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let incoming: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(_) => {
+                write(&mut stdout, &json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}})).await?;
+                continue;
+            }
+        };
+        let id = &incoming["id"];
+        if id.is_null() {
+            continue;
+        }
+        let result = match incoming["method"].as_str() {
+            Some("initialize") => json!({"protocolVersion":"2025-03-26","capabilities":{},
+                "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")}}),
+            Some("tools/list") => json!({"tools":[]}),
+            Some("resources/list") => json!({"resources":[]}),
+            Some("resources/templates/list") => json!({"resourceTemplates":[]}),
+            Some("prompts/list") => json!({"prompts":[]}),
+            Some("ping") => json!({}),
+            _ => {
+                write(&mut stdout, &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}})).await?;
+                continue;
+            }
+        };
+        write(
+            &mut stdout,
+            &json!({"jsonrpc":"2.0","id":id,"result":result}),
+        )
+        .await?;
+    }
+    Ok(())
+}
 async fn write(stdout: &mut tokio::io::Stdout, frame: &Value) -> Result<()> {
     stdout
         .write_all(format!("{}\n", serde_json::to_string(frame)?).as_bytes())
@@ -508,13 +638,37 @@ async fn write(stdout: &mut tokio::io::Stdout, frame: &Value) -> Result<()> {
     stdout.flush().await?;
     Ok(())
 }
+fn channel_initialization_claim(fence: &Fence) -> ClaimInput {
+    ClaimInput {
+        subject: fence.subject.clone(),
+        kind: "harness.diagnostic".into(),
+        actor: Some(fence.subject.clone()),
+        fields: BTreeMap::from([
+            ("code".into(), json!("claude-channel-initialized")),
+            ("status".into(), json!("initialized")),
+            ("driver".into(), json!("claude")),
+            ("incarnation_id".into(), json!(fence.incarnation)),
+            ("reason".into(), json!("The scoped MCP protocol initialized; provider activity and live attachment are reported independently.")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        // This payload is different from the legacy provider-ready observation.
+        // Preserve that old request's immutable input by using a fresh namespace.
+        idempotency_key: Some(format!(
+            "channel-initialized:{}:{}:{}",
+            fence.subject, fence.incarnation, fence.epoch,
+        )),
+    }
+}
+
 fn request(line: &str, initialized: &mut bool) -> Result<Option<Value>> {
     let request: Value = serde_json::from_str(line)?;
     let id = &request["id"];
     let result = match request["method"].as_str() {
         Some("initialize") => {
             json!({"protocolVersion":"2025-03-26","capabilities":{"experimental":{"claude/channel":{}}},
-            "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")}})
+            "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")},
+            "instructions":st_drivers::ding::CHANNEL_INSTRUCTIONS})
         }
         Some("notifications/initialized") => {
             *initialized = true;
@@ -533,6 +687,63 @@ fn request(line: &str, initialized: &mut bool) -> Result<Option<Value>> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn claude_channel_retry_backoff_caps_at_thirty_seconds() {
+        for (failures, seconds) in [
+            (1, 1),
+            (2, 2),
+            (3, 4),
+            (4, 8),
+            (5, 16),
+            (6, 30),
+            (7, 30),
+            (u32::MAX, 30),
+        ] {
+            assert_eq!(retry_delay(failures), Duration::from_secs(seconds));
+        }
+    }
+
+    #[test]
+    fn scoped_protocol_keeps_channel_capability_and_empty_tool_surface() {
+        let mut initialized = false;
+        let initialize = request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            &mut initialized,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            initialize["result"]["capabilities"]["experimental"]["claude/channel"],
+            json!({})
+        );
+        assert_eq!(
+            initialize["result"]["instructions"],
+            st_drivers::ding::CHANNEL_INSTRUCTIONS
+        );
+        assert!(
+            initialize["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("people have no inbox, so do not reply with st")
+        );
+        let tools = request(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            &mut initialized,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(tools["result"], json!({"tools":[]}));
+        assert!(
+            request(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                &mut initialized
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(initialized);
+    }
 
     #[test]
     fn claude_receipt_state_accepts_ledgers_written_before_native_acceptance_tracking() {
@@ -573,6 +784,9 @@ mod tests {
                 title: None,
                 in_reply_to: None,
                 tags: Vec::new(),
+                body_ref: None,
+                body_bytes: None,
+                body_origin: None,
                 created_index: 1,
                 attachments: Vec::new(),
             };
@@ -667,6 +881,144 @@ mod tests {
         transcript.body_available(false);
         assert!(transcript.appended(&path).unwrap().is_empty());
         assert!(!root.path().join("resources").exists());
+    }
+
+    #[test]
+    fn claude_100_mb_transcript_bounds_startup_recovery_and_each_append() {
+        fn cpu_time() -> Duration {
+            let mut time = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+                0
+            );
+            Duration::new(time.tv_sec as u64, time.tv_nsec as u32)
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        // Dense, valid JSONL exercises splitting rather than a sparse-file seek.
+        // Build the history without allocating a transcript-sized test buffer.
+        let history = format!(
+            "{}\n",
+            json!({"type":"assistant","padding":"x".repeat(980)})
+        );
+        let batch = history.repeat(64);
+        while file.metadata().unwrap().len() < 100 * 1024 * 1024 {
+            file.write_all(batch.as_bytes()).unwrap();
+        }
+        let envelope = "QUARTZ SIGNAL";
+        let acceptance = json!({"type":"queue-operation","operation":"enqueue","content":envelope});
+        let user = json!({"type":"user","message":{"role":"user","content":envelope}});
+        let absorbed = json!({"type":"queue-operation","operation":"remove","reason":"absorbed_mid_turn",
+            "content":envelope,"commandUuid":"native-command","deliveryId":"native-delivery"});
+        writeln!(file, "{acceptance}").unwrap();
+        writeln!(file, "{user}").unwrap();
+        writeln!(file, "{absorbed}").unwrap();
+        let size = file.metadata().unwrap().len();
+        let mut transcript = Transcript::default();
+        let mut recovery_cpu = Duration::ZERO;
+        for _ in 0..3 {
+            let started = cpu_time();
+            let records = transcript.appended(&path).unwrap();
+            assert_eq!(transcript.offset, size);
+            assert!(records.len() <= TRANSCRIPT_WINDOW / history.len() + 3);
+            assert!(
+                records
+                    .iter()
+                    .any(|record| native_acceptance(record, envelope))
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| native_receipt(record, envelope))
+                    .count(),
+                2
+            );
+            assert_eq!(transcript.lines.buffered_len(), 0);
+            let elapsed = cpu_time() - started;
+            recovery_cpu = recovery_cpu.max(elapsed);
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "recovery CPU: {elapsed:?}"
+            );
+            assert!(transcript.appended(&path).unwrap().is_empty());
+            transcript.body_available(true);
+        }
+        // A fresh driver reads the same bounded tail, retaining both forms of
+        // consumption proof and the separate native acceptance evidence.
+        transcript = Transcript::default();
+        assert!(
+            transcript
+                .appended(&path)
+                .unwrap()
+                .iter()
+                .any(|record| native_receipt(record, envelope))
+        );
+        let mut append_cpu = Duration::ZERO;
+        for _ in 0..32 {
+            let started = cpu_time();
+            let before = transcript.offset;
+            writeln!(file, "{acceptance}").unwrap();
+            writeln!(file, "{user}").unwrap();
+            let records = transcript.appended(&path).unwrap();
+            assert_eq!(records, [acceptance.clone(), user.clone()]);
+            assert!(transcript.offset - before < 1024);
+            assert_eq!(transcript.lines.buffered_len(), 0);
+            let elapsed = cpu_time() - started;
+            append_cpu = append_cpu.max(elapsed);
+            assert!(elapsed < Duration::from_secs(1), "append CPU: {elapsed:?}");
+        }
+        eprintln!(
+            "100 MB transcript: maximum recovery CPU {recovery_cpu:?}, maximum append CPU {append_cpu:?}; recovery/read budget {TRANSCRIPT_WINDOW} bytes, append reads <1024 bytes, retained partial bytes 0"
+        );
+    }
+
+    #[test]
+    fn claude_transcript_bounds_backlogs_and_unterminated_records() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        let mut transcript = Transcript::default();
+        assert!(transcript.appended(&path).unwrap().is_empty());
+        let block = vec![b'x'; TRANSCRIPT_WINDOW];
+        for _ in 0..4 {
+            file.write_all(&block).unwrap();
+        }
+        for _ in 0..4 {
+            let before = transcript.offset;
+            assert!(transcript.appended(&path).unwrap().is_empty());
+            assert_eq!(transcript.offset - before, TRANSCRIPT_WINDOW as u64);
+            assert!(transcript.lines.buffered_len() <= TRANSCRIPT_WINDOW);
+        }
+        let record = json!({"type":"user","message":{"role":"user","content":"QUARTZ"}});
+        writeln!(file, "\n{record}").unwrap();
+        assert_eq!(transcript.appended(&path).unwrap(), [record.clone()]);
+        // Replacement at the same path can be longer than the old file; inode
+        // identity must still trigger a fresh tail rather than skipping proof.
+        let replacement = root.path().join("replacement.jsonl");
+        let mut replaced = std::fs::File::create(&replacement).unwrap();
+        for _ in 0..5 {
+            replaced.write_all(&block).unwrap();
+        }
+        writeln!(replaced, "\n{record}").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert_eq!(transcript.appended(&path).unwrap(), [record]);
+    }
+
+    #[test]
+    fn claude_transcript_keeps_a_complete_record_at_the_tail_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("native.jsonl");
+        let record = json!({"type":"user","message":{"role":"user","content":"QUARTZ"}});
+        let line = format!("{record}\n");
+        let mut bytes = b"old\n".to_vec();
+        bytes.extend_from_slice(line.as_bytes());
+        bytes.resize(TRANSCRIPT_WINDOW + 4, b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(Transcript::default().appended(&path).unwrap(), [record]);
     }
 
     #[test]

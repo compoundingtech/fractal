@@ -63,11 +63,15 @@ pub fn world() -> World {
         "This codex process was found running on lark, but st cannot tell which session file it writes, so there is no conversation to show. Start it through st to see it here.",
     )));
     World {
+        inventory_supported: None, inventory_partial: Vec::new(),
         person: s("person/robin"),
         host: s("lark"),
         link: Link::Live,
-        mail_backlog: Load::Ready(st3_client::MailBacklog { count: 0, threshold_ms: 3_600_000, cleanup_command: String::new() }),
         diverged: Vec::new(),
+        stale: Vec::new(),
+        missions_followed: true,
+        settled: true,
+        active_missions: None,
         attention: Load::Ready(attention()),
         agents: Load::Ready(agents()),
         missions: Load::Ready(missions()),
@@ -93,6 +97,7 @@ pub fn world() -> World {
         quiet_missions: 6,
         usage: Load::Ready(usage()),
         usage_limits: usage_limits(),
+        agent_messages: None,
         clients: Load::Ready(vec![
             Connected {
                 client: s("stui 0.1.0+1ecae71"),
@@ -134,11 +139,15 @@ pub fn world() -> World {
 /// The same world before anything has loaded, so the first second is honest.
 pub fn loading() -> World {
     World {
+        inventory_supported: None, inventory_partial: Vec::new(),
         person: s("person/robin"),
         host: s("lark"),
         link: Link::Connecting,
-        mail_backlog: Load::Loading,
         diverged: Vec::new(),
+        stale: Vec::new(),
+        missions_followed: true,
+        settled: true,
+        active_missions: None,
         attention: Load::Loading,
         agents: Load::Loading,
         missions: Load::Loading,
@@ -149,6 +158,7 @@ pub fn loading() -> World {
         quiet_missions: 0,
         usage: Load::Loading,
         usage_limits: Vec::new(),
+        agent_messages: None,
         clients: Load::Loading,
     }
 }
@@ -162,6 +172,7 @@ fn usage_limits() -> Vec<st3_client::UsageLimit> {
         st3_client::UsageLimit {
             account: s("anthropic"),
             account_ref: None,
+            identified: Some(true),
             driver: s("claude"),
             plan: Some(s("max")),
             five_hour_percent: Some(41.0),
@@ -176,6 +187,7 @@ fn usage_limits() -> Vec<st3_client::UsageLimit> {
         st3_client::UsageLimit {
             account: s("openai"),
             account_ref: None,
+            identified: Some(true),
             driver: s("codex"),
             plan: None,
             five_hour_percent: None,
@@ -211,6 +223,8 @@ fn usage() -> Vec<st3_client::UsageRow> {
         })),
         host: Some(s(host)),
         pricing: Some(s("list-2026-10-02")),
+        native_session_id: None,
+        pricing_provenance: None,
         total_tokens: tokens,
         input_tokens: tokens / 50,
         output_tokens: output,
@@ -290,6 +304,7 @@ fn usage() -> Vec<st3_client::UsageRow> {
 fn attention() -> Vec<Attention> {
     vec![
         Attention {
+            conversations: vec![],
             id: s("attention/1"),
             tier: Tier::Stopped,
             title: s("Approve the atlas store cut-over"),
@@ -300,6 +315,7 @@ fn attention() -> Vec<Attention> {
             actions: vec![],
             related: vec![],
             raised_by: None,
+            blocked: None,
             kind: AttentionKind::Review {
                 question: s(
                     "The row counts agree and the contract check passed. Cut over to the new store?",
@@ -323,6 +339,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/2"),
             tier: Tier::Stopped,
             title: s("Feedback on the new pricing page"),
@@ -333,6 +350,7 @@ fn attention() -> Vec<Attention> {
             actions: vec![],
             related: vec![],
             raised_by: None,
+            blocked: None,
             kind: AttentionKind::Feedback {
                 question: s(
                     "Here is the draft of the pricing page. What should change before it goes live?",
@@ -351,6 +369,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/3"),
             tier: Tier::Today,
             title: s("Launch harbor/nightly-audit"),
@@ -361,6 +380,7 @@ fn attention() -> Vec<Attention> {
             actions: vec![],
             related: vec![],
             raised_by: None,
+            blocked: None,
             kind: AttentionKind::Launch {
                 planner: s("Planner"),
                 name: s("harbor/nightly-audit"),
@@ -413,6 +433,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/4"),
             tier: Tier::Alert,
             title: s("Release Captain keeps restarting"),
@@ -423,6 +444,7 @@ fn attention() -> Vec<Attention> {
             actions: vec![],
             related: vec![],
             raised_by: None,
+            blocked: None,
             kind: AttentionKind::Fault {
                 what: s(
                     "Release Captain exited 4 times in 10 minutes and st stopped restarting it.",
@@ -435,6 +457,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/5"),
             tier: Tier::Today,
             title: s("Add an audit step to the rekey mission"),
@@ -445,6 +468,7 @@ fn attention() -> Vec<Attention> {
             actions: vec![],
             related: vec![],
             raised_by: None,
+            blocked: None,
             kind: AttentionKind::Revision {
                 reason: s(
                     "A key rotated mid-run last week and nobody noticed. An audit step would catch it.",
@@ -462,6 +486,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/6"),
             tier: Tier::Later,
             title: s("Weekly usage is up 18%"),
@@ -472,6 +497,7 @@ fn attention() -> Vec<Attention> {
             actions: vec![],
             related: vec![],
             raised_by: None,
+            blocked: None,
             kind: AttentionKind::Message {
                 from: s("Chief of Staff"),
                 body: s(
@@ -642,12 +668,16 @@ fn agents() -> Vec<Agent> {
             claimed: Some(s(claimed)),
             next: next.map(s),
             queue: queue.iter().map(|item| s(item)).collect(),
+            next_mission: next.map(|_| s("mission/fleet/atlas/store-move")),
+            queue_missions: queue.iter().map(|_| s("mission/fleet/atlas/store-move")).collect(),
             queued: queue.len() as u64,
             harness_state: Some(s(state)),
             runtime: Some(s("running · incarnation 3")),
             fault: None,
             under: None,
             model: Some(s("claude-sonnet-5-5")),
+            effort: Some(s("high")),
+            progress: None,
         };
     list[0].details = detail(
         "Cut over to the new store once a person approves.",
@@ -668,12 +698,16 @@ fn agents() -> Vec<Agent> {
         claimed: Some(s("1h ago")),
         next: Some(s("Weekly release › publish")),
         queue: vec![],
+        next_mission: Some(s("mission/fleet/release/weekly")),
+        queue_missions: vec![],
         queued: 0,
         harness_state: Some(s("exited 4 times in 10 minutes")),
         runtime: Some(s("restarts paused")),
         fault: Some(s("401 Unauthorized: the API key expired at 08:40.")),
         under: None,
         model: Some(s("gpt-5.5-codex")),
+        effort: None,
+        progress: None,
     };
     list[3].details = detail(
         "Keep Robin's fleet moving; answer questions.",
@@ -1264,6 +1298,7 @@ fn cos_conversation() -> Vec<Entry> {
                 ),
                 delivered: false,
                 dictated: false,
+                signed: None,
                 images: Vec::new(),
             },
         ),
@@ -1291,6 +1326,7 @@ fn cos_conversation() -> Vec<Entry> {
                 ),
                 delivered: false,
                 dictated: false,
+                signed: None,
                 images: Vec::new(),
             },
         ),
@@ -1468,6 +1504,7 @@ pub fn late_mail() -> Entry {
             ),
             delivered: false,
             dictated: false,
+            signed: None,
             images: Vec::new(),
         },
     )

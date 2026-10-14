@@ -42,9 +42,10 @@ pub const HEAL_REPLAY_BACKOFF_MS: u128 = 10 * 60 * 1000;
 pub const HEAL_REPLAY_BACKOFF_MAX_MS: u128 = 24 * 60 * 60 * 1000;
 
 /// The claims a projection reads: every claim with its batch, except repaired originals.
-pub const PROJECTED_CLAIMS: &str = "FROM claims JOIN batches ON batches.id=claims.batch_id
+pub const PROJECTED_CLAIMS: &str = "FROM claims INDEXED BY claims_batch_claim_id
+     JOIN batches ON batches.id=claims.batch_id
      WHERE NOT EXISTS (
-         SELECT 1 FROM replica_records
+         SELECT 1 FROM replica_records INDEXED BY replica_records_repaired_claim
          WHERE replica_records.claim_id=claims.id AND replica_records.state='repaired'
      )";
 
@@ -53,8 +54,41 @@ pub struct HealState {
     /// When this node last replayed its graph for a heal, and how long it waits until the next.
     pub replayed_at_unix_ms: Option<u128>,
     pub replay_backoff_ms: u128,
+    /// Reserve before waiting for the writer, so simultaneous peer heals cannot
+    /// all pass the backoff check and queue whole-graph rebuilds.
+    replay_in_progress: bool,
     /// Each heal this node is asking, by peer.
     pub sessions: BTreeMap<String, HealSession>,
+}
+
+struct HealReplayReservation<'a> {
+    state: &'a Mutex<HealState>,
+}
+
+impl Drop for HealReplayReservation<'_> {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replay_in_progress = false;
+    }
+}
+
+fn reserve_heal_replay(
+    state: &Mutex<HealState>,
+    now: u128,
+    minimum_backoff: u128,
+) -> Option<HealReplayReservation<'_>> {
+    let mut held = state.lock().unwrap_or_else(PoisonError::into_inner);
+    if held.replay_in_progress
+        || held
+            .replayed_at_unix_ms
+            .is_some_and(|at| now.saturating_sub(at) < held.replay_backoff_ms.max(minimum_backoff))
+    {
+        return None;
+    }
+    held.replay_in_progress = true;
+    Some(HealReplayReservation { state })
 }
 
 #[derive(Default)]
@@ -581,17 +615,14 @@ impl Store {
     /// passed. Returns whether it replayed.
     pub fn replay_graph_for_heal(&self) -> Result<bool> {
         let now = now_ms();
-        {
-            let state = self.heal.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(at) = state.replayed_at_unix_ms
-                && now.saturating_sub(at) < state.replay_backoff_ms.max(self.heal_replay_backoff_ms)
-            {
-                return Ok(false);
-            }
-        }
+        let Some(_reservation) = reserve_heal_replay(&self.heal, now, self.heal_replay_backoff_ms)
+        else {
+            return Ok(false);
+        };
         self.replay_replication_graph()?;
         let mut state = self.heal.lock().unwrap_or_else(PoisonError::into_inner);
-        state.replayed_at_unix_ms = Some(now);
+        // Queueing and reconstruction must not consume the completed replay's backoff.
+        state.replayed_at_unix_ms = Some(now_ms());
         state.replay_backoff_ms = (state.replay_backoff_ms.max(self.heal_replay_backoff_ms) * 2)
             .clamp(self.heal_replay_backoff_ms, HEAL_REPLAY_BACKOFF_MAX_MS);
         Ok(true)
@@ -611,9 +642,7 @@ impl Store {
             let transaction = connection.transaction()?;
             let now = now_ms().to_string();
             for envelope in envelopes {
-                let Ok(bytes) =
-                    base64::engine::general_purpose::STANDARD.decode(envelope.payload.as_bytes())
-                else {
+                let Ok(bytes) = envelope.payload.bytes() else {
                     continue;
                 };
                 let hash = replica_envelope_hash(
@@ -621,7 +650,7 @@ impl Store {
                     envelope.sequence,
                     envelope.previous_hash.as_deref(),
                     envelope.accepted_at_unix_ms,
-                    &bytes,
+                    bytes,
                 );
                 if hash != envelope.hash {
                     continue;
@@ -651,23 +680,27 @@ impl Store {
                     )?;
                 }
                 let held = transaction
-                    .query_row(
+                    .prepare_cached(
                         "SELECT 1 FROM replica_envelopes
                          WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                    )?
+                    .query_row(
                         params![envelope.writer, envelope.sequence, envelope.hash],
                         |_| Ok(()),
                     )
                     .optional()?
                     .is_some();
                 inserted |= !held;
-                transaction.execute(
-                    "INSERT INTO replica_envelopes(
+                transaction
+                    .prepare_cached(
+                        "INSERT INTO replica_envelopes(
                          writer, sequence, envelope_hash, previous_hash, accepted_at_unix_ms,
                          payload, relay, receipt_state, received_at_unix_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)
                      ON CONFLICT(writer, sequence, envelope_hash) DO UPDATE SET
                          payload=excluded.payload, receipt_state='pending', validation_error=NULL",
-                    params![
+                    )?
+                    .execute(params![
                         envelope.writer,
                         envelope.sequence,
                         envelope.hash,
@@ -676,8 +709,7 @@ impl Store {
                         envelope.payload,
                         relay,
                         now,
-                    ],
-                )?;
+                    ])?;
             }
             transaction.commit()?;
         }
@@ -1007,4 +1039,133 @@ pub fn differing_subjects(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+#[cfg(test)]
+mod replay_reservation_tests {
+    use super::*;
+
+    #[test]
+    fn simultaneous_heal_replay_refuses_before_waiting_for_the_writer() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            Store::open(
+                &root.path().join("store.sqlite3"),
+                "test",
+                Arc::new(runtime::Plain),
+            )
+            .unwrap(),
+        );
+        let writer = store.connection.write();
+        let first_store = store.clone();
+        let first = std::thread::spawn(move || first_store.replay_graph_for_heal());
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !store.heal.lock().unwrap().replay_in_progress && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let reserved = store.heal.lock().unwrap().replay_in_progress;
+        let second_store = store.clone();
+        let (done, outcome) = std::sync::mpsc::sync_channel(1);
+        let second = std::thread::spawn(move || {
+            let work = crate::sqlite::work::SqliteWorkScope::start();
+            let result = second_store.replay_graph_for_heal();
+            done.send((result, work.finish())).unwrap();
+        });
+        let refused = outcome.recv_timeout(std::time::Duration::from_secs(2));
+        // Observe a later real clock tick while the first replay is still waiting.
+        // The old admission-time timestamp must not count as completed backoff.
+        let waiting_at = now_ms();
+        let clock_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while now_ms() <= waiting_at && std::time::Instant::now() < clock_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let released_at = now_ms();
+        // Always release the real loan before checking failures or joining workers.
+        drop(writer);
+        let first = first.join().unwrap().unwrap();
+        second.join().unwrap();
+        assert!(reserved && first);
+        let (result, work) =
+            refused.expect("a second replay must not queue behind the held writer");
+        assert!(!result.unwrap());
+        assert_eq!(work, crate::sqlite::work::SqliteWork::default());
+        assert!(released_at > waiting_at, "the clock witness must advance");
+        assert!(store.heal.lock().unwrap().replayed_at_unix_ms.unwrap() >= released_at);
+        assert!(!store.heal.lock().unwrap().replay_in_progress);
+        assert!(
+            !store.replay_graph_for_heal().unwrap(),
+            "the completed replay retains its backoff"
+        );
+    }
+
+    #[test]
+    fn two_peers_asking_for_a_replay_start_one_rebuild() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(
+            &root.path().join("store.sqlite3"),
+            "test",
+            Arc::new(runtime::Plain),
+        )
+        .unwrap();
+        // Without a backoff, only the reservation can refuse the second peer.
+        store.heal_replay_backoff_ms = 0;
+        let store = Arc::new(store);
+        let writer = store.connection.write();
+        let ask = |peer: &'static str| {
+            let store = store.clone();
+            let (done, answer) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let replayed = match store.heal_answer(peer, &ReplicationHealQuery::Replay) {
+                    Ok(ReplicationHealAnswer::Replayed { replayed, .. }) => Ok(replayed),
+                    other => Err(format!("{other:?}")),
+                };
+                done.send(replayed).unwrap();
+            });
+            (worker, answer)
+        };
+        let (first, first_answer) = ask("peer-a");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !store.heal.lock().unwrap().replay_in_progress && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let reserved = store.heal.lock().unwrap().replay_in_progress;
+        let (second, second_answer) = ask("peer-b");
+        // The second peer is answered while the first still waits for the writer.
+        let refused = second_answer.recv_timeout(std::time::Duration::from_secs(2));
+        // Always release the writer before checking failures or joining workers.
+        drop(writer);
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(reserved, "the first peer reserves the rebuild before the writer");
+        assert_eq!(
+            refused.expect("the second peer must not queue a rebuild behind the writer"),
+            Ok(false),
+            "only one of two concurrent peers rebuilds the graph"
+        );
+        assert_eq!(first_answer.recv().unwrap(), Ok(true));
+        assert!(!store.heal.lock().unwrap().replay_in_progress);
+        assert!(
+            store.replay_graph_for_heal().unwrap(),
+            "the reservation ends with the rebuild"
+        );
+    }
+
+    #[test]
+    fn heal_replay_reservation_releases_after_failure_and_unwind() {
+        let state = Mutex::new(HealState::default());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _reserved = reserve_heal_replay(&state, 10, 100).unwrap();
+                panic!("injected replay failure");
+            }))
+            .is_err()
+        );
+        assert!(!state.lock().unwrap().replay_in_progress);
+        let reserved = reserve_heal_replay(&state, 11, 100).unwrap();
+        assert!(reserve_heal_replay(&state, 12, 100).is_none());
+        drop(reserved);
+        state.lock().unwrap().replayed_at_unix_ms = Some(11);
+        assert!(reserve_heal_replay(&state, 110, 100).is_none());
+        assert!(reserve_heal_replay(&state, 111, 100).is_some());
+    }
 }
