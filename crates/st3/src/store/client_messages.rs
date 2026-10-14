@@ -358,7 +358,7 @@ fn next_selection_row(connection: &Connection, work: &FoldWork) -> Result<Option
         let columns = [("from","text"),("to","text"),("tags","array"),("status","text")]
             .into_iter().map(|(field, kind)| {
                 let path = format!("CASE WHEN json_type(claims.body,'$.fields') IS NULL THEN '$.{field}' ELSE '$.fields.{field}' END");
-                format!("CASE WHEN {ACTUAL_STATE_CLAIM} THEN json_type(claims.body,{path}) IS NOT NULL ELSE 0 END,CASE WHEN {ACTUAL_STATE_CLAIM} AND json_type(claims.body,{path})='{kind}' THEN json_extract(claims.body,{path}) END")
+                format!("CASE WHEN {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM} THEN json_type(claims.body,{path}) IS NOT NULL ELSE 0 END,CASE WHEN {ACTUAL_STATE_CLAIM} AND {UNREPAIRED_CLAIM} AND json_type(claims.body,{path})='{kind}' THEN json_extract(claims.body,{path}) END")
             }).collect::<Vec<_>>().join(",");
         format!("SELECT claims.store_index,claims.accepted_at_unix_ms,batches.origin,batches.replica_sequence,claims.batch_id,
             (SELECT MIN(position) FROM replica_records WHERE claim_id=claims.id),claims.id,{columns}
@@ -2003,6 +2003,58 @@ mod tests {
         assert_eq!(rows.len(),1);
         assert_eq!(rows[0]["message"]["subject"],"message/repair-route");
         assert_eq!(rows[0]["message"]["to"],"agent/old");
+    }
+
+    #[test]
+    fn repaired_actual_claim_reselection_matches_message_body_routing() {
+        let source = Store::open_memory("source").unwrap();
+        let target = Store::open_memory("target").unwrap();
+        let send = |recipient: &str, key: &str| {
+            source.append_claim(&ClaimInput {
+                subject: "message/repair-actual-route".into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/sender".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!("agent/sender")),
+                    ("to".into(), json!(recipient)),
+                    ("content".into(), json!("repair actual routing")),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            }).unwrap().id
+        };
+        let replacement = send("agent/old", "initial-actual-route");
+        let repaired = send("agent/new", "changed-actual-route");
+        let exchange = super::super::tests::exchange_from(&source, &target.replication_inventory().unwrap());
+        super::super::tests::receive_and_project(&target, "source", &exchange);
+        while target.maintain_client_message_selectors().unwrap() {}
+        assert_eq!(paged_backfill_rows(&target, Some("agent/new"), None, true).len(), 1);
+        let record = {
+            let connection = target.connection.write();
+            let record: String = connection.query_row(
+                "SELECT record_ref FROM replica_records WHERE claim_id=?1",
+                [&repaired], |row| row.get(0),
+            ).unwrap();
+            connection.execute(
+                "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
+                [&record],
+            ).unwrap();
+            record
+        };
+        target.repair_replica_record(
+            &record, &replacement, "restore the earlier actual routing",
+            "person/alex", "repair-actual-routing",
+        ).unwrap();
+        while target.maintain_client_message_selectors().unwrap() {}
+        assert!(paged_backfill_rows(&target, Some("agent/new"), None, true).is_empty());
+        let rows = paged_backfill_rows(&target, Some("agent/old"), None, true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["message"]["subject"], "message/repair-actual-route");
+        assert_eq!(rows[0]["message"]["to"], "agent/old");
+        let unfiltered = paged_backfill_rows(&target, None, None, true);
+        assert_eq!(unfiltered, rows, "selectors and the folded body must agree after repair");
     }
 
     #[test]
