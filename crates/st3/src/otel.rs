@@ -730,7 +730,7 @@ fn register_daemon_memory_metrics(provider: &SdkMeterProvider) {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_rss_bytes() -> Option<u64> {
+pub(crate) fn linux_rss_bytes() -> Option<u64> {
     let mut buffer = [0_u8; 128];
     let bytes = std::fs::File::open("/proc/self/statm").ok()?.read(&mut buffer).ok()?;
     let pages = std::str::from_utf8(&buffer[..bytes]).ok()?
