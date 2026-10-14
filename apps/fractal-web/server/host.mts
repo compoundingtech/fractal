@@ -1,5 +1,5 @@
 import type { IncomingMessage } from 'node:http'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Tracer } from 'effect'
 import { createFractalWebServer, type FractalWebServer } from './core.mts'
@@ -32,8 +32,13 @@ export const tailnetAdmission = ({ origin, logins, listener }: TailnetAdmissionO
     const host = request.headers.host
     if (host !== published.host && (host === undefined || host !== listener())) return false
     const requestOrigin = request.headers.origin
-    // Browsers send Origin on every upgrade and every unsafe method; only plain reads may omit it.
-    if (requestOrigin === undefined) return request.headers.upgrade === undefined && safeMethods.has(request.method ?? 'GET')
+    // Browsers send Origin on every upgrade and every unsafe method; only plain reads may omit it,
+    // and a browser that says a read came from another site is refused even without an Origin.
+    if (requestOrigin === undefined) {
+      const site = request.headers['sec-fetch-site']
+      return request.headers.upgrade === undefined && safeMethods.has(request.method ?? 'GET') &&
+        (site === undefined || site === 'same-origin' || site === 'none')
+    }
     return requestOrigin === origin
   }
 }
@@ -51,8 +56,18 @@ export interface HostConfig {
 
 const loopbackHosts = new Set(['127.0.0.1', '::1', 'localhost'])
 
-/** Reads the host's environment. The bearer comes from a file so it never sits in the process environment. */
-export const readHostConfig = (env: NodeJS.ProcessEnv, readText: (path: string) => string = (path) => readFileSync(path, 'utf8')): HostConfig => {
+export interface SecretFiles {
+  readonly readText: (path: string) => string
+  /** The file's permission bits and owner. */
+  readonly owner: (path: string) => { readonly mode: number; readonly uid: number }
+}
+const localFiles: SecretFiles = { readText: (path) => readFileSync(path, 'utf8'), owner: (path) => statSync(path) }
+
+/**
+ * Reads the host's environment. The bearer comes from a file so it never sits in the process
+ * environment, and that file must belong to this user and be unreadable by anyone else.
+ */
+export const readHostConfig = (env: NodeJS.ProcessEnv, files: SecretFiles = localFiles, uid: number | undefined = process.getuid?.()): HostConfig => {
   const required = (name: string): string => {
     const value = env[name]?.trim()
     if (!value) throw new TypeError(`${name} is required`)
@@ -65,7 +80,11 @@ export const readHostConfig = (env: NodeJS.ProcessEnv, readText: (path: string) 
   const origin = required('WF_PUBLIC_ORIGIN')
   const logins = required('WF_TAILNET_LOGINS').split(',').map((login) => login.trim()).filter((login) => login !== '')
   if (logins.length === 0) throw new TypeError('WF_TAILNET_LOGINS must name at least one tailnet login')
-  const token = readText(required('WF_ST_AUTHORIZATION_FILE')).trim()
+  const bearerFile = required('WF_ST_AUTHORIZATION_FILE')
+  const { mode, uid: fileOwner } = files.owner(bearerFile)
+  if ((mode & 0o077) !== 0 || (uid !== undefined && fileOwner !== uid))
+    throw new TypeError('WF_ST_AUTHORIZATION_FILE must be owned by this user and readable by no one else (chmod 600)')
+  const token = files.readText(bearerFile).trim()
   if (token === '' || /\s/.test(token.replace(/^Bearer /, ''))) throw new TypeError('WF_ST_AUTHORIZATION_FILE must hold one bearer token')
   return {
     dist: resolve(env.WF_DIST?.trim() || 'dist/web'),

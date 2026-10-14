@@ -30,8 +30,10 @@ describe('tailnetAdmission', () => {
     expect(admit(request({ ...signedIn, origin }))).toBe(false)
   })
 
-  it('admits Origin-less reads only', () => {
+  it('admits Origin-less reads only, and not when the browser says they came from another site', () => {
     expect(admit(request({ ...signedIn, host: 'atlas.example.ts.net:8443' }, 'HEAD'))).toBe(true)
+    for (const site of ['same-origin', 'none']) expect(admit(request({ ...signedIn, host: 'atlas.example.ts.net:8443', 'sec-fetch-site': site }))).toBe(true)
+    for (const site of ['cross-site', 'same-site']) expect(admit(request({ ...signedIn, host: 'atlas.example.ts.net:8443', 'sec-fetch-site': site }))).toBe(false)
     expect(admit(request({ ...signedIn, host: 'atlas.example.ts.net:8443' }, 'POST'))).toBe(false)
     expect(admit(request({ ...signedIn, host: 'atlas.example.ts.net:8443', upgrade: 'websocket' }))).toBe(false)
   })
@@ -48,19 +50,29 @@ describe('readHostConfig', () => {
     WF_PORT: '7410', WF_PUBLIC_ORIGIN: origin, WF_TAILNET_LOGINS: 'river@example.com, cedar@example.com',
     WF_ST_GATEWAY: 'unix:/run/example/st3-client.sock', WF_ST_AUTHORIZATION_FILE: '/secrets/web-bearer', WF_DIST: '/srv/web',
   }
-  const files = (path: string) => { if (path === '/secrets/web-bearer') return 'synthetic-token\n'; throw new Error(path) }
+  const secret = (text: string, mode = 0o100600, uid = 1000) => ({
+    readText: (path: string) => { if (path === '/secrets/web-bearer') return text; throw new Error(path) },
+    owner: () => ({ mode, uid }),
+  })
+  const files = secret('synthetic-token\n')
 
   it('reads the bearer from its file and defaults to a loopback listener', () => {
-    expect(readHostConfig(env, files)).toEqual({
+    expect(readHostConfig(env, files, 1000)).toEqual({
       dist: '/srv/web', host: '127.0.0.1', port: 7410, origin, logins: ['river@example.com', 'cedar@example.com'],
       socketPath: '/run/example/st3-client.sock', authorization: ['Bearer', 'synthetic-token'].join(' '), deploymentId: 'atlas.example.ts.net:8443',
     })
   })
 
   it('refuses a non-loopback listener, a missing setting, no logins and a malformed bearer', () => {
-    expect(() => readHostConfig({ ...env, WF_HOST: '0.0.0.0' }, files)).toThrow(/loopback/)
-    expect(() => readHostConfig({ ...env, WF_PORT: '' }, files)).toThrow(/WF_PORT/)
-    expect(() => readHostConfig({ ...env, WF_TAILNET_LOGINS: ' , ' }, files)).toThrow(/WF_TAILNET_LOGINS/)
-    expect(() => readHostConfig(env, () => 'two tokens')).toThrow(/one bearer/)
+    expect(() => readHostConfig({ ...env, WF_HOST: '0.0.0.0' }, files, 1000)).toThrow(/loopback/)
+    expect(() => readHostConfig({ ...env, WF_PORT: '' }, files, 1000)).toThrow(/WF_PORT/)
+    expect(() => readHostConfig({ ...env, WF_TAILNET_LOGINS: ' , ' }, files, 1000)).toThrow(/WF_TAILNET_LOGINS/)
+    expect(() => readHostConfig(env, secret('two tokens'), 1000)).toThrow(/one bearer/)
+  })
+
+  it('refuses a bearer file that others can read or another user owns', () => {
+    expect(() => readHostConfig(env, secret('synthetic-token', 0o100640), 1000)).toThrow(/chmod 600/)
+    expect(() => readHostConfig(env, secret('synthetic-token', 0o100604), 1000)).toThrow(/chmod 600/)
+    expect(() => readHostConfig(env, secret('synthetic-token', 0o100600, 0), 1000)).toThrow(/chmod 600/)
   })
 })
