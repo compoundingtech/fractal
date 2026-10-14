@@ -487,14 +487,14 @@ export class St3Client {
         return response;
     }
 
-    async notesList(): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes'); }
-    async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options)); }
+    async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
+    async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async hostRepositories(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HostRepositories>> { return this.get(`/v1/client/hosts/${encodeURIComponent(routedId(id))}/repositories`, undefined, requestOptions); }
     async setsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/sets' + query(options), undefined, requestOptions); }
     async setsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/sets/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async documentGet(name: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentContent>> { return this.get('/v1/client/documents/content' + query({ name }), undefined, requestOptions); }
-    async publicationDefinition(subject: string): Promise<EnvelopeOf<PublicationDefinition>> { return this.get('/v1/client/publication-definition' + query({ subject })); }
+    async publicationDefinition(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PublicationDefinition>> { return this.get('/v1/client/publication-definition' + query({ subject }), undefined, requestOptions); }
     async subjectDefinition(subject: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectDefinition>> { return this.get('/v1/client/subject-definition' + query({ subject, show_env_values: showEnvValues }), undefined, requestOptions); }
     async mailBacklogSummary(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MailBacklog>> { return this.get('/v1/client/mail-backlog', undefined, requestOptions); }
     async usagePeriod(options: { since_ms?: number; until_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<UsagePeriod>> { return this.get('/v1/client/usage' + query(options), undefined, requestOptions); }
@@ -540,12 +540,12 @@ export class St3Client {
     async sessionsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/sessions/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async conversationSearch(text: string, options: { agent?: string; since?: string; cursor?: string; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ConversationSearch>> { return this.get('/v1/client/conversations/search' + query({ text, ...options }), undefined, requestOptions); }
     async timelineList(id: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<TimelinePage>> { return this.get(`/v1/client/sessions/${encodeURIComponent(routedId(id))}/timeline` + query(options), undefined, requestOptions); }
-    async conversationContentChunk(id: string, reference: string, offset = 0): Promise<EnvelopeOf<ConversationContentChunk>> { return this.get(`/v1/client/conversations/${encodeURIComponent(id)}/content/${encodeURIComponent(reference)}/chunk` + query({offset})); }
+    async conversationContentChunk(id: string, reference: string, offset = 0, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ConversationContentChunk>> { return this.get(`/v1/client/conversations/${encodeURIComponent(id)}/content/${encodeURIComponent(reference)}/chunk` + query({offset}), undefined, requestOptions); }
     async conversationChanges(id: string, options: { after?: string; wait_ms?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ConversationChanges>> { return this.get(`/v1/client/conversations/${encodeURIComponent(routedId(id))}/changes` + query(options), undefined, requestOptions); }
     async eventsList(options: EventOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<EventPage>> { return this.get('/v1/client/events' + query(options), 'events', requestOptions); }
     async terminalScreen(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<TerminalScreen>> { return this.get(`/v1/client/terminals/${encodeURIComponent(routedId(id))}/screen`, undefined, requestOptions); }
-    async arrangementsList(person: string, options: PageOptions = {}): Promise<EnvelopeOf<ArrangementPage>> { return this.get('/v1/client/arrangements' + query({ person, ...options })); }
-    async arrangementsGet(personName: string, uuid: string): Promise<EnvelopeOf<Arrangement>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}`); }
+    async arrangementsList(person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ArrangementPage>> { return this.get('/v1/client/arrangements' + query({ person, ...options }), undefined, requestOptions); }
+    async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Arrangement>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}`, undefined, requestOptions); }
     async glassesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/glasses' + query(options), undefined, requestOptions); }
     async glassesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.get(`/v1/client/glasses/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async agentCreate(input: Omit<ActionOf<'agent.create'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'agent.create' } as ActionOf<'agent.create'>, requestOptions); }

@@ -1216,11 +1216,11 @@ fn typescript_operation_methods(
             path.to_owned()
         };
         if id == "arrangements.list" {
-            writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }})); }}")?;
+            writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "arrangements.get" {
-            writeln!(out, "    async arrangementsGet(personName: string, uuid: string): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`); }}")?;
+            writeln!(out, "    async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`, undefined, requestOptions); }}")?;
             continue;
         }
         if id == "conversation.search" {
@@ -1234,7 +1234,7 @@ fn typescript_operation_methods(
                 "    async {method}(options: EventOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events', requestOptions); }}"
             )?;
         } else if id == "notes.list" {
-            writeln!(out, "    async notesList(): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes'); }}")?;
+            writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
         } else if id == "clients.list" {
             writeln!(
                 out,
@@ -1255,7 +1255,7 @@ fn typescript_operation_methods(
         } else if id == "custom-subjects.list" {
             writeln!(
                 out,
-                "    async customSubjectsList(options: PageOptions & {{ kind?: string; version?: number }} = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('{route}' + query(options)); }}"
+                "    async customSubjectsList(options: PageOptions & {{ kind?: string; version?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
         } else if id == "resources.list" {
             writeln!(
@@ -1273,7 +1273,7 @@ fn typescript_operation_methods(
                 "    async hostRepositories(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HostRepositories>> {{ return this.get(`{route}`, undefined, requestOptions); }}"
             )?;
         } else if id == "publication.definition" {
-            writeln!(out, "    async publicationDefinition(subject: string): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }})); }}")?;
+            writeln!(out, "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}")?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -1282,7 +1282,7 @@ fn typescript_operation_methods(
         } else if id == "conversation-content.chunk" {
             writeln!(
                 out,
-                "    async conversationContentChunk(id: string, reference: string, offset = 0): Promise<EnvelopeOf<ConversationContentChunk>> {{ return this.get(`/v1/client/conversations/${{encodeURIComponent(id)}}/content/${{encodeURIComponent(reference)}}/chunk` + query({{offset}})); }}"
+                "    async conversationContentChunk(id: string, reference: string, offset = 0, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ConversationContentChunk>> {{ return this.get(`/v1/client/conversations/${{encodeURIComponent(id)}}/content/${{encodeURIComponent(reference)}}/chunk` + query({{offset}}), undefined, requestOptions); }}"
             )?;
         } else if id == "conversation.changes" {
             writeln!(

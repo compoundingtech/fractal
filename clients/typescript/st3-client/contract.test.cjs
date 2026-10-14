@@ -212,6 +212,85 @@ const capabilityFixture = require('../../../docs/st3/client-v0/fixtures/capabili
 const cursorGapFixture = require('../../../docs/st3/client-v0/fixtures/cursor-gap-error.json');
 const capabilities = { ...capabilityFixture.value, limits: { ...capabilityFixture.value.limits, max_page_items: 2, max_event_items: 3, max_wait_ms: 10 } };
 
+test('every HTTP API keeps cancellation in transport options, including all manifest reads and actions', async () => {
+    const manifest = require('../../../docs/st3/client-v0/schemas/operations.json');
+    const methodName = id => {
+        const pascal = id.split(/[^a-zA-Z0-9]+/).filter(Boolean)
+            .map(part => part[0].toUpperCase() + part.slice(1)).join('');
+        return pascal[0].toLowerCase() + pascal.slice(1);
+    };
+    const readArguments = (id, options) => {
+        switch (id) {
+            case 'capabilities.get': case 'notes.list': case 'clients.list': case 'mail-backlog.summary': return [options];
+            case 'arrangements.list': return ['person/example', {}, options];
+            case 'arrangements.get': return ['example', 'arrangement-id', options];
+            case 'conversation.search': return ['needle', {}, options];
+            case 'resources.list': return [{}, {}, options];
+            case 'agent-declaration.get': return ['agent/example', undefined, false, options];
+            case 'publication.definition': return ['mission/example', options];
+            case 'subject.definition': return ['mission/example', false, options];
+            case 'conversation-content.chunk': return ['session/example', 'reference', 0, options];
+            case 'conversation.changes': case 'timeline.list': return ['session/example', {}, options];
+            case 'document.get': return ['document-name', options];
+            case 'host.repositories': return ['host/example', options];
+            case 'terminal.screen': return ['terminal/example', options];
+            default:
+                if (id.endsWith('.get')) return ['resource/example', options];
+                if (id.startsWith('launch-')) return ['launch/example', {}, options];
+                return [{}, options];
+        }
+    };
+    const cases = manifest.reads.map(read => [
+        read.id === 'capabilities.get' ? 'capabilities' : methodName(read.id),
+        options => readArguments(read.id, options),
+    ]);
+    cases.push(...Object.keys(manifest.actions).map(id => [methodName(id), options => [{}, options]]));
+    cases.push(
+        ['discover', options => [options]],
+        ['uploadBlob', options => [new Uint8Array([1]), 'image/png', options]],
+        ['blobChunk', options => ['a'.repeat(64), {}, options]],
+        ['blob', options => ['a'.repeat(64), undefined, options]],
+        ['submitAction', options => [{}, options]],
+        ['observationsReport', options => [{}, options]],
+        ['beginPairing', options => [{}, options]],
+        ['completePairing', options => ['pairing/example', {}, options]],
+        ['followOperation', options => ['operation/example', { ...options, intervalMs: 100 }]],
+        ['listGlasses', options => [{}, options]],
+        ['getGlass', options => ['glass/example', options]],
+        ['putGlass', options => ['glass/example', {}, 'idempotency-key', options]],
+        ['deleteGlass', options => ['glass/example', {}, 'idempotency-key', options]],
+        ['terminalsListFiltered', options => [{}, options]],
+    );
+    for (const [method, argumentsFor] of cases) {
+        const requests = [];
+        const client = new St3Client({
+            baseUrl: 'https://example.test',
+            fetchImpl: async (url, init) => {
+                requests.push([String(url), init]);
+                return response(String(url).endsWith('/capabilities') ? capabilityFixture
+                    : envelope({ kind: 'operation', state: 'completed', data: '', size: 0, filters: {} }));
+            },
+        });
+        assert.equal(typeof client[method], 'function', method);
+        const aborted = new AbortController();
+        const reason = new Error(`cancel ${method}`);
+        aborted.abort(reason);
+        await assert.rejects(() => client[method](...argumentsFor({ signal: aborted.signal })),
+            error => error === reason || (method === 'followOperation' && error.message === 'Operation follow aborted'), method);
+        assert.equal(requests.length, 0, `${method}: pre-aborted signal must prevent discovery and target fetch`);
+        const live = new AbortController();
+        await client[method](...argumentsFor({ signal: live.signal }));
+        assert.ok(requests.length > 0, `${method}: must exercise its HTTP transport`);
+        for (const [url, init] of requests) {
+            assert.equal(init.signal, live.signal, `${method}: discovery and target fetch keep the same signal`);
+            assert.equal(new URL(url).searchParams.has('signal'), false, `${method}: signal is not a query field`);
+            if (typeof init.body === 'string') {
+                assert.equal(init.body.includes('"signal"'), false, `${method}: signal is not an action/body field`);
+            }
+        }
+    }
+});
+
 test('notesList reads the typed advisory current notes endpoint', async () => {
     const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json');
     const calls = [];
