@@ -6,10 +6,14 @@ fn fixture(restart: &str) -> (Arc<Store>, Arc<FakeRuntime>, DesiredSubject) {
 }
 
 fn fixture_with_launch(restart: &str, launch: bool) -> (Arc<Store>, Arc<FakeRuntime>, DesiredSubject) {
-    let preparation = if launch { "" } else {
+    fixture_with_state(restart, launch, launch)
+}
+
+fn fixture_with_state(restart: &str, ready: bool, launch: bool) -> (Arc<Store>, Arc<FakeRuntime>, DesiredSubject) {
+    let preparation = if ready { "" } else {
         "step \"prepare\" { assigned-to \"agent/unavailable\"; goal \"Wait for preparation.\" }"
     };
-    let dependencies = if launch { "" } else {
+    let dependencies = if ready { "" } else {
         "depends-on { step \"prepare\" completed };"
     };
     let store = Arc::new(Store::open_memory("node").unwrap());
@@ -53,7 +57,7 @@ mission "dotfiles/ui-design/recovery" state="ready" {{
         assert!(owner.mission.starts_with("mission/__st3/"));
         let expected_gate = Reconciler::<FakeRuntime>::round_gate_agent(&owner)
             .expect("the upstream gate classifier must recognize this real round").to_owned();
-        if !launch && store.desired_subjects_named(std::slice::from_ref(&expected_gate)).unwrap().is_empty() {
+        if !ready && store.desired_subjects_named(std::slice::from_ref(&expected_gate)).unwrap().is_empty() {
             // Restore an already-declared, pre-upgrade gate. Do not admit new unready work.
             let source = format!("version 2\nagent \"gate\" {{ workspace \"/tmp\"; harness \"codex\" {{}}; restart {restart:?} }}\n");
             let mut intent = crate::graph::parse_execution_intent(&source, "node", &owner.id).unwrap();
@@ -75,16 +79,18 @@ mission "dotfiles/ui-design/recovery" state="ready" {{
         if let Some(gate) = store.desired_subjects_for_owner_run(&round).unwrap().into_iter()
             .find(|subject| subject.kind == "agent" && subject.subject == expected_gate)
         {
-            if !launch {
+            if !ready {
                 assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
                 return (store, runtime, gate);
             }
             let gate_work = owner.steps.iter().find(|step| step.step == "gate").unwrap();
             assert_eq!(gate_work.status, "ready", "upstream admission must persist ready work");
             assert!(store.work_for_reconcile(&gate.subject).unwrap().iter().any(|work| work.status == "ready"));
-            reconciler.perform_start(&gate, gate.member.as_ref().unwrap(), "regression fixture").unwrap();
-            assert!(store.runtime_start_for(&gate.subject).unwrap().is_none());
-            assert_eq!(status(&store, &gate), "starting");
+            if launch {
+                reconciler.perform_start(&gate, gate.member.as_ref().unwrap(), "regression fixture").unwrap();
+                assert!(store.runtime_start_for(&gate.subject).unwrap().is_none());
+                assert_eq!(status(&store, &gate), "starting");
+            }
             return (store, runtime, gate);
         }
     }
@@ -104,7 +110,78 @@ fn diagnostic(store: &Store, gate: &DesiredSubject) -> bool {
 fn a_missing_starting_round_gate_is_reported_after_daemon_restart_without_relaunch() {
     let (store, _, gate) = fixture("never");
     let runtime = Arc::new(FakeRuntime::default());
-[…73ln elided…]
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_once().unwrap();
+    assert_ne!(status(&store, &gate), "starting", "a missing runtime must not remain silently starting");
+    assert!(diagnostic(&store, &gate));
+    assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    let fault = store.member_reconcile_fault(&gate.subject, None).unwrap().unwrap();
+    assert!(!fault.is_empty());
+    restarted.reconcile_once().unwrap();
+    assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    assert_eq!(store.member_reconcile_fault(&gate.subject, None).unwrap().as_deref(), Some(fault.as_str()));
+}
+
+#[test]
+fn a_live_starting_round_gate_is_adopted_after_daemon_restart() {
+    let (store, _, gate) = fixture("never");
+    let runtime = Arc::new(FakeRuntime::default());
+    runtime.ptys.lock().unwrap_or_else(PoisonError::into_inner).push(RuntimeObservation {
+        runtime_id: gate.member.as_ref().unwrap().runtime_id.clone(),
+        terminal: true,
+        status: "running".into(),
+        exit_code: None,
+        incarnation_id: Some("surviving-gate".into()),
+    });
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_once().unwrap();
+    assert_eq!(status(&store, &gate), "running");
+    assert!(!diagnostic(&store, &gate));
+    assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    assert!(runtime.stops.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    assert!(runtime.kills.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+}
+
+#[test]
+fn a_missing_starting_round_gate_uses_its_declared_restart_policy() {
+    let (store, _, gate) = fixture("always");
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    restarted.reconcile_once().unwrap();
+    assert_eq!(*runtime.starts.lock().unwrap_or_else(PoisonError::into_inner), [gate.member.as_ref().unwrap().runtime_id.clone()]);
+    assert_eq!(status(&store, &gate), "starting");
+}
+
+#[test]
+fn a_manual_stop_of_a_missing_starting_round_gate_survives_daemon_restart() {
+    let (store, _, gate) = fixture("always");
+    let stop = crate::graph::parse_internal_intent(
+        &format!("version 2\nstop {:?}\n", gate.subject), "node",
+    ).unwrap();
+    store.apply(&stop, &BTreeMap::new(), "gate-recovery-stop").unwrap();
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    for _ in 0..3 { restarted.reconcile_once().unwrap(); }
+    assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+    assert!(matches!(status(&store, &gate).as_str(), "stopped" | "absent"));
+    assert!(!diagnostic(&store, &gate));
+}
+
+struct UnverifiedRuntime(FakeRuntime, Option<Arc<std::sync::Barrier>>);
+impl RuntimeControl for UnverifiedRuntime {
+    fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> { self.0.snapshot_ptys() }
+    fn observe_exec(&self, id: &str) -> Result<Option<RuntimeObservation>> { self.0.observe_exec(id) }
+    fn observe_start(&self, _: &MemberSpec) -> Result<Option<RuntimeObservation>> { Ok(None) }
+    fn start(&self, member: &MemberSpec) -> Result<()> {
+        if let Some(barrier) = &self.1 {
             barrier.wait(); // The test observes the actual worker entering the backend.
             barrier.wait(); // The test releases it after the reconciliation pass.
         }
@@ -125,7 +202,7 @@ fn a_missing_starting_round_gate_is_reported_after_daemon_restart_without_relaun
 
 #[test]
 fn a_finished_unverified_round_gate_start_keeps_admission_and_reports_a_durable_fault() {
-    let (store, _, gate) = fixture("never");
+    let (store, _, gate) = fixture_with_state("never", true, false);
     let runtime = Arc::new(UnverifiedRuntime(FakeRuntime::default(), None));
     let reconciler = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
@@ -151,7 +228,7 @@ fn a_finished_unverified_round_gate_start_keeps_admission_and_reports_a_durable_
 
 #[test]
 fn a_live_in_flight_round_gate_start_is_not_retired_or_duplicated() {
-    let (store, _, gate) = fixture("never");
+    let (store, _, gate) = fixture_with_state("never", true, false);
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let runtime = Arc::new(UnverifiedRuntime(FakeRuntime::default(), Some(barrier.clone())));
     let reconciler = Reconciler::new(
@@ -302,5 +379,3 @@ fn a_completed_round_terminalizes_its_missing_starting_gate_without_restarting_i
     );
     assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
 }
-
-[Showing lines 1-97 and 171-367 of 367; 73 middle lines (3.5KB) elided. Use :368 to continue. Read artifact://20314 for full output]
