@@ -2728,6 +2728,11 @@ fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Re
 }
 
 /// Live presentation of already folded cards: freshness, delivery presence and subagents.
+/// The card's `reason` while rival hosts both claim a seat's runtime. A sentence, not a code:
+/// clients may print it as it is.
+pub(crate) const AUTHORITY_INDETERMINATE_REASON: &str =
+    "st cannot tell which host runs this agent; its processes may be running";
+
 fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
@@ -3235,6 +3240,13 @@ fn client_agent_cards_presented(
                 .transpose()?.flatten();
             let moving = handoff.as_ref().is_some_and(|h| h.phase != "running");
             let state = if member_fault.is_some() { "failed" } else if mailbox_fault.is_some() || moving { "waiting" } else { state };
+            // A session is observed but st cannot tell which host owns it (rival origins claim
+            // the runtime): the seat is neither running nor stopped as far as st can say.
+            let authority_unknown = member_fault.is_none()
+                && mailbox_fault.is_none()
+                && !moving
+                && subject.reachability == "indeterminate"
+                && matches!(observed, Some("running" | "ready" | "working" | "idle"));
             let suspension = if card_reads.may_have_suspension(&subject.subject) {
                 crate::suspension::current(store, &subject.subject)?
             } else {
@@ -3310,7 +3322,8 @@ fn client_agent_cards_presented(
                 "_launch_since_ms": launch_since_ms.map(|ms| ms as u64),
                 "blocked_on": subject.harness.as_ref().and_then(|harness| harness.blocked_on.as_deref()),
                 "ask": subject.harness.as_ref().and_then(|harness| harness.ask.as_deref()),
-                "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref()),
+                "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref())
+                    .or_else(|| authority_unknown.then_some(AUTHORITY_INDETERMINATE_REASON)),
                 // What the seat is doing that is neither work nor a wait on anyone: a status,
                 // never an alert.
                 "activity": subject
