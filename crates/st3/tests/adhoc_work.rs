@@ -118,6 +118,9 @@ impl Daemon {
         }
     }
     async fn cli(&self, args: &[&str]) -> std::process::Output {
+        self.cli_output(args, true).await
+    }
+    async fn cli_output(&self, args: &[&str], json: bool) -> std::process::Output {
         let mut command =
             st3::test_support::async_command(test_bin!("st3-fixture"));
         command
@@ -126,8 +129,11 @@ impl Daemon {
             .env("XDG_STATE_HOME", self.root.join("state"))
             .arg("--endpoint")
             .arg(self.socket())
-            .args(["--daemon-wait", "0", "--json"])
-            .args(args);
+            .args(["--daemon-wait", "0"]);
+        if json {
+            command.arg("--json");
+        }
+        command.args(args);
         command.output().await.unwrap()
     }
     async fn ok(&self, args: &[&str]) -> Value {
@@ -232,6 +238,13 @@ async fn progress_eta_survives_replay_and_is_replaced_by_the_next_note() {
     daemon.restart().await;
     assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported)"));
     assert!(daemon.ok(&["work", "ls", "--as", ALDER]).await.to_string().contains("ETA (self-reported)"));
+    let human = daemon.cli_output(&["work", "show", step], false).await;
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("Progress: Review in progress"));
+    assert!(human.contains("ETA (self-reported): "));
+    assert!(human.contains("reported at "));
+    assert!(human.contains("Not a deadline."));
     daemon
         .ok(&["work", "progress", step, "--as", ALDER, "--incarnation", "alder-one"])
         .await;

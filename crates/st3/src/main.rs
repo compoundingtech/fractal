@@ -17363,6 +17363,9 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
     for blocker in &work.blockers {
         let _ = writeln!(output, "Blocker: {blocker}");
     }
+    if let Some(progress) = &work.last_progress {
+        let _ = writeln!(output, "Progress: {progress}");
+    }
     for goal in &work.goals {
         let _ = writeln!(output, "Goal: {goal}");
     }
