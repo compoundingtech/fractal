@@ -2503,11 +2503,15 @@ jobs:
             [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
           fi
           echo "stage results: $RESULTS (evidence skip: ${GATE_SKIP:-none})"
+          position=0
           for result in $RESULTS; do
+            position=$((position + 1))
             [ "$result" = success ] && continue
-            # A stage the evidence gate skipped reports `skipped`; accepted only when this gate decided to skip,
-            # and never a failure or a cancellation.
-            [ "${GATE_SKIP:-}" = true ] && [ "$result" = skipped ] && continue
+            # A stage the evidence gate skipped reports `skipped`: accepted only when this gate decided to skip, only
+            # in the positions of stages skipped at job level, and never for a failure or a cancellation.
+            if [ "${GATE_SKIP:-}" = true ] && [ "$result" = skipped ]; then
+              case "$position" in 1|3|4|5|6|8|9) continue ;; esac
+            fi
             exit 1
           done
       - name: Report job cache coverage
