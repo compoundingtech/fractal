@@ -1301,7 +1301,7 @@ mod tests {
     #[test]
     fn a_daemon_is_st3_or_st_started_with_up() {
         let argv = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
-        assert!(is_daemon_argv(&argv("/home/a/.st-instance/t/bin/st3 up --config c")));
+        assert!(is_daemon_argv(&argv("/opt/example/bin/st3 up --config c")));
         assert!(is_daemon_argv(&argv("st up")));
         assert!(!is_daemon_argv(&argv("st3 agents ls")));
         assert!(!is_daemon_argv(&argv("sleep up")));
