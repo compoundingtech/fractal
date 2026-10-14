@@ -2902,13 +2902,13 @@ impl Ui {
                 },
                 Hit::Composer,
             );
-            // Where this stui can listen, the box offers it: a click or Ctrl+R.
+            // Where this stui can listen, the box offers it: a click or Ctrl+Y.
             if crate::voice::available()
                 && y + 1 + strip < bottom
                 && self.composing(&agent.id)
                 && self.voice_for(&agent.id).is_none()
             {
-                let label = " ◉ ctrl+r speak ";
+                let label = " ◉ ctrl+y speak ";
                 let width = text::width(label) as u16;
                 // Only beside the text, never over it.
                 let typed = composer.first().map_or(0, |line| line.width()) as u16;
@@ -3686,8 +3686,8 @@ impl Ui {
                 ("ctrl+w  ctrl+u", "delete a word; clear the box"),
                 ("ctrl+v", "attach the clipboard's image"),
                 (
-                    "ctrl+r",
-                    "speak instead of typing (a Mac with SmallTalk.app's speech helper)",
+                    "ctrl+y",
+                    "speak instead of typing, with the box open or not (a Mac with SmallTalk.app's speech helper)",
                 ),
                 ("esc", "stop writing; the keys above work again"),
             ],
@@ -4368,8 +4368,8 @@ impl Ui {
                     self.changes_answer = None;
                 }
                 KeyCode::Enter => self.submit(),
-                // Ctrl+R speaks into the input instead of typing.
-                KeyCode::Char('r') if control => self.start_voice(),
+                // Ctrl+Y speaks into the input instead of typing.
+                KeyCode::Char('y') if control => self.start_voice(),
                 // Ctrl+V while writing to an agent attaches the clipboard's image.
                 KeyCode::Char('v') if control && self.tab == 1 => self.attach_clipboard(),
                 // Backspace in an empty box takes back the last image.
