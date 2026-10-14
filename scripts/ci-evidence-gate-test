@@ -76,6 +76,8 @@ def enforcing(path):
     doc = json.loads(Path(path).read_text())
     for entry in doc['checks'].values():
         entry['enforce'] = True
+        entry['sample_one_in'] = 1  # sampling is tested on its own; here a matching note must always skip
+        entry.pop('inputs', None)  # these tests use exact-tree notes
     return json.dumps(doc)
 
 
@@ -482,6 +484,62 @@ class EndToEnd(unittest.TestCase):
         for check, entry in policy['checks'].items():
             self.assertIn(entry.get('enforce', False), (True, False), check)
 
+    def input_scenario(self, **per_check):
+        """A base whose policy declares `inputs.txt` as the only input of every check; head 1 has a note."""
+        doc = json.loads(skip_policy())
+        for entry in doc['checks'].values():
+            entry['inputs'] = ['inputs.txt']
+            entry.update(per_check)
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'fleet/ci')
+        (self.f.repo / 'inputs.txt').write_text('declared')
+        base = self.commit_base(policy=json.dumps(doc))
+        commit, tree = self.head()
+        key = fixtures.evidence_verify.project(str(self.f.repo), tree, ('inputs.txt',))
+        record = self.note(commit, tree, inputs={'source_inputs': key})
+        self.f.git('update-ref', f'refs/notes/evidence-input/linux-gate/{key}/{record}', record)
+        return base, key, record
+
+    def test_a_record_of_another_tree_with_the_same_input_key_skips_and_says_so(self):
+        base, key, record = self.input_scenario()
+        self.f.commit('an undeclared file changed')
+        fields, outputs = self.run_gate(base)
+        self.assertEqual((fields['decision'], fields['outcome'], fields['match'], fields['source_inputs'], outputs['record']),
+                         ('skip', 'satisfied', 'inputs', key, record))
+        (self.f.repo / 'inputs.txt').write_text('a declared file changed')
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'declared')
+        self.assertEqual(self.assertRuns(base)['outcome'], 'no_note')  # nothing matches the new key, so the check runs
+
+    def test_sampling_keeps_running_a_deterministic_share_of_matching_runs(self):
+        base, key, record = self.input_scenario(sample_one_in=1)
+        self.f.commit('two')
+        self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
+        decisions = set()
+        for n in range(12):  # twelve different heads: with one in 3 some are sampled and some are not
+            base, key, record = self.input_scenario(sample_one_in=3)
+            self.f.commit(f'head {n}')
+            first = self.run_gate(base)[0]
+            decisions.add(first['decision'])
+            self.assertEqual(first['decision'], self.run_gate(base)[0]['decision'])  # a retry behaves the same
+            if first['decision'] == 'run':
+                self.assertEqual(first['outcome'], 'satisfied')
+                self.assertTrue(first['reason'].startswith('satisfied_but_not_skipped:_sampled:'), first['reason'])
+        self.assertEqual(decisions, {'skip', 'run'})
+        self.assertTrue(gate.sampled({'check': 'c', 'head': 'h'}, {'sample_one_in': 'x'}, 't'))  # unreadable: sample
+        self.assertFalse(gate.sampled({'check': 'c', 'head': 'h'}, {'sample_one_in': 1}, 't'))
+        self.assertFalse(gate.sampled({'check': 'c', 'head': 'h'}, {}, 't'))
+
+    def test_the_index_ref_alone_proves_nothing_in_the_gate(self):
+        base, key, record = self.input_scenario()
+        self.f.commit('two')
+        wrong = fixtures.evidence_verify.project(str(self.f.repo), self.f.git('rev-parse', 'HEAD^{tree}'), ('file.txt',))
+        self.f.git('update-ref', '-d', f'refs/notes/evidence-input/linux-gate/{key}/{record}')
+        self.f.git('update-ref', f'refs/notes/evidence-input/linux-gate/{key}/{"2" * len(record)}', record)  # wrong suffix
+        self.f.git('update-ref', f'refs/notes/evidence-input/linux-gate/{wrong}/{record}', record)  # another key
+        self.assertEqual(self.assertRuns(base)['outcome'], 'no_note')
+
     def test_adding_a_required_input_tightens_future_notes_without_breaking_anything(self):
         entry = {'trust_levels': ['fleet'], 'enforce': True, 'kinds': {'observed': {
             'command': ['github-actions', '{repository}', '.github/workflows/fleet.yml', '{check}'],
@@ -797,7 +855,7 @@ class EndToEnd(unittest.TestCase):
         fields, outputs = self.run_gate(base, PR_NUMBER='123', EVENT_NAME='pull_request')
         self.assertEqual(list(fields), [
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
-            'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'tree', 'head', 'base', 'event', 'pr', 'repo', 'run',
+            'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'head', 'base', 'event', 'pr', 'repo', 'run',
             'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
                          ('123', REPOSITORY, '42', '1', 'false'))

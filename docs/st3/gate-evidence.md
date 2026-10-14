@@ -621,6 +621,19 @@ on is the one-line change `"enforce": false` to `"enforce": true` in this file, 
 like any change (the file is read from the accepted base, so the change takes effect for the runs
 after it merges).
 
+`inputs` (optional, per check) lists the repository paths the check's result depends on. With it, a record
+of ANOTHER tree counts when it carries the same input key: `source_inputs`, the git tree id of the tested
+tree reduced to exactly those paths (`git write-tree` of only their files; `.` means everything, whose key is
+the tree itself). `scripts/evidence-verify --project --check C --paths-from BASE ...` prints it, so a producer,
+the observer and the gate compute the same key. The producer signs it as `observed.inputs.source_inputs` and
+publishes the record under `refs/notes/evidence-input/<check>/<source_inputs>/<record id>`; the gate fetches only
+that prefix, and the ref is just an index: whatever it finds must still verify and carry the same signed key.
+Every other rule applies unchanged, and the latest record for the key decides, so a newer failure with the same
+key stops the skip by itself. Paths are literal and relative; an under-declared list is the dangerous direction
+(a stale pass), so each list is reviewed against a trace of what the check opens. `sample_one_in` (default 1)
+keeps running the real job for one run in N even when a note matches, chosen by a hash of the check, the key and
+the head, so a retry behaves the same; the gate prints `decision=run` with a reason starting `sampled`.
+
 Each kind has its own rule: the exact `command` the record must have run, an optional
 `runner_prefix`, optional per-kind `trust_levels`, the `required_inputs` it must carry (every one a nonempty string) and
 `bind_inputs`, which must equal the sha256 of a file as it is in the tree being verified. A kind's own
@@ -705,7 +718,7 @@ values and `-` for none:
 
 ```
 evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
-reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=… enforce=true|false
+reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=… enforce=true|false match=tree|inputs source_inputs=…
 tree=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
 ```
 
