@@ -12,5 +12,6 @@ export default pnpmWorkspaceYaml.root({
   repoName: 'smalltalk',
   extraMembers: workspaceMembers,
   ...pnpmPolicy,
+  minimumReleaseAgeExclude: ['@types/node'],
   nodeLinker: 'hoisted',
 })

@@ -1772,6 +1772,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "agent.retired",
+            &["agent"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            Some("agents"),
+            true,
+            &[],
+        ),
+        (
             "agent.presence",
             &["agent"],
             WritePolicy::SameSubjectActor,
@@ -2900,6 +2909,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ),
             ("anchor", reference_to(&["mission-run"])),
             ("reason", string()),
+        ],
+        "agent.retired" => &[
+            ("reason", required_string()),
+            ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
+            ("owner_host", required_string()),
+            ("declaration", required_string()),
+            ("successor", reference_to(&["agent"])),
+            ("transfer", string()),
         ],
         "agent.presence" => &[
             (
@@ -4183,6 +4200,7 @@ mod tests {
                 "agent.placement.source-offline",
                 "agent.presence",
                 "agent.queue.moved",
+                "agent.retired",
                 "arrangement.edited",
                 "attention.requested",
                 "attention.resolved",
