@@ -226,9 +226,9 @@ async fn progress_eta_survives_replay_and_is_replaced_by_the_next_note() {
         ])
         .await;
     let summary = updated["progress_summary"].as_str().unwrap().to_owned();
-    assert!(summary.starts_with("Review in progress\nETA (self-reported): "));
+    assert!(summary.starts_with(&format!("Review in progress\nETA (self-reported by {ALDER}): ")));
     assert!(summary.ends_with("Not a deadline."));
-    let eta = summary.split("ETA (self-reported): ").nth(1).unwrap()
+    let eta = summary.split(format!("ETA (self-reported by {ALDER}): ").as_str()).nth(1).unwrap()
         .split(';').next().unwrap();
     let reported = summary.split("reported at ").nth(1).unwrap()
         .strip_suffix(". Not a deadline.").unwrap();
@@ -236,26 +236,28 @@ async fn progress_eta_survives_replay_and_is_replaced_by_the_next_note() {
     let reported = chrono::DateTime::parse_from_rfc3339(reported).unwrap();
     assert_eq!((eta - reported).num_seconds(), 7200);
     daemon.restart().await;
-    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported)"));
-    assert!(daemon.ok(&["work", "ls", "--as", ALDER]).await.to_string().contains("ETA (self-reported)"));
+    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
+    assert!(daemon.ok(&["work", "ls", "--as", ALDER]).await.to_string().contains("ETA (self-reported by "));
     let human = daemon.cli_output(&["work", "show", step], false).await;
     assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
     let human = String::from_utf8_lossy(&human.stdout);
-    assert!(human.contains("Progress: Review in progress"));
-    assert!(human.contains("ETA (self-reported): "));
+    assert!(human.contains("Progress ("));
+    assert!(human.contains("just now") || human.contains(" ago"));
+    assert!(human.contains("Review in progress"));
+    assert!(human.contains(&format!("ETA (self-reported by {ALDER}): ")));
     assert!(human.contains("reported at "));
     assert!(human.contains("Not a deadline."));
     daemon
         .ok(&["work", "progress", step, "--as", ALDER, "--incarnation", "alder-one"])
         .await;
-    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported)"));
+    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
     daemon
         .ok(&[
             "work", "progress", step, "--as", ALDER, "--incarnation", "alder-one",
             "--summary", "Estimate withdrawn",
         ])
         .await;
-    assert!(!daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported)"));
+    assert!(!daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
 }
 
 #[tokio::test]
@@ -321,6 +323,8 @@ async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
             "alder-one",
             "--summary",
             "Current: fixture found",
+            "--eta",
+            "2h",
             "--evidence",
             "file:fixture",
         ])
@@ -360,9 +364,12 @@ async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
             "not the current live incarnation",
         )
         .await;
+    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
     let transferred = daemon.ok(&handoff).await;
     assert_eq!(transferred["assigned_to"], BIRCH);
     assert!(transferred["claimant"].is_null());
+    assert_eq!(transferred["progress_summary"], "Current: fixture found");
+    assert!(!daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
     assert_eq!(daemon.ok(&handoff).await["subject"], step);
     let note = daemon.note(BIRCH);
     daemon
@@ -401,6 +408,8 @@ async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
     assert_eq!(daemon.note(BIRCH), note);
     let shown = daemon.ok(&["work", "show", step]).await;
     assert!(shown.to_string().contains("Next: check the fixture"));
+    assert!(shown.to_string().contains("Current: fixture found"));
+    assert!(!shown.to_string().contains("ETA (self-reported by "));
     daemon
         .fails(
             &[

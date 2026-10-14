@@ -1507,7 +1507,35 @@ mission "person-work" state="ready" {{
     fn a_worker_asks_from_the_step_a_revision_moved_by_its_old_name() {
         for prepare_changes in [false, true] {
             let (store, origin, input) = fixture();
+            let eta = crate::work_eta::summary(
+                Some("Release preparation checkpoint"),
+                "2h",
+                "agent/alder.asker",
+                now_ms(),
+            )
+            .unwrap();
+            store
+                .work_action(
+                    &origin.subject,
+                    "progress",
+                    &crate::model::WorkRequest {
+                        wait_ms: None,
+                        actor: Some("agent/alder.asker".into()),
+                        incarnation: Some("asker-one".into()),
+                        summary: Some(eta.clone()),
+                        reason: None,
+                        evidence: Vec::new(),
+                        idempotency_key: "prepare-eta".into(),
+                    },
+                )
+                .unwrap();
             let moved = revise_fixture(&store, &origin, prepare_changes);
+            assert!(moved.progress_summary.is_none(), "revision must not carry the old estimate or note");
+            assert_eq!(
+                store.step_run(&origin.subject).unwrap().unwrap().progress_summary.as_deref(),
+                Some(eta.as_str()),
+                "the old subject retains its report as history"
+            );
             // The worker still names the step it claimed before the revision.
             assert_eq!(input.step.as_deref(), Some(origin.subject.as_str()));
             let ask = store

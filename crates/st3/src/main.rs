@@ -4641,6 +4641,7 @@ struct WorkProgressArgs {
     ///
     /// Adds a self-reported ETA to this progress note, not an execution deadline.
     /// The next nonempty summary replaces it. Use --summary without --eta to withdraw it.
+    /// Handoff clears it; revisions do not carry it. Work show prints its age and author.
     #[arg(long)]
     eta: Option<String>,
 }
@@ -11737,27 +11738,6 @@ fn outcome_time(value: &str, now: u128) -> Result<u128> {
     Ok(now.saturating_sub(ago.as_millis()))
 }
 
-/// Store an advisory estimate in the existing progress note. Older clients can read it too.
-fn progress_eta_summary(summary: Option<&str>, eta: &str, now: u128) -> Result<String> {
-    let at_ms = if let Ok(at) = chrono::DateTime::parse_from_rfc3339(eta) {
-        u128::try_from(at.timestamp_millis()).context("ETA must be after the Unix epoch")?
-    } else {
-        now.checked_add(u128::from(st3::graph::parse_duration(eta, true)?))
-            .context("ETA is outside the supported timestamp range")?
-    };
-    anyhow::ensure!(at_ms > now, "ETA must be in the future");
-    let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(i64::try_from(at_ms)?)
-        .context("ETA is outside the supported timestamp range")?
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let reported = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(i64::try_from(now)?)
-        .context("report time is outside the supported timestamp range")?
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let note = format!("ETA (self-reported): {at}; reported at {reported}. Not a deadline.");
-    Ok(match summary.filter(|summary| !summary.is_empty()) {
-        Some(summary) => format!("{summary}\n{note}"),
-        None => note,
-    })
-}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct OutcomeCursor {
@@ -17140,9 +17120,10 @@ async fn run_work(
         WorkCommand::Renew(args) => post_work(client, "renew", args, json_output).await,
         WorkCommand::Progress(mut args) => {
             if let Some(eta) = args.eta {
-                args.action.summary = Some(progress_eta_summary(
+                args.action.summary = Some(st3::work_eta::summary(
                     args.action.summary.as_deref(),
                     &eta,
+                    args.action.actor.as_deref().context("a work action needs explicit --as")?,
                     current_unix_ms()?,
                 )?);
             }
@@ -17364,7 +17345,10 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
         let _ = writeln!(output, "Blocker: {blocker}");
     }
     if let Some(progress) = &work.last_progress {
-        let _ = writeln!(output, "Progress: {progress}");
+        let age = work.progress_at.as_deref()
+            .map(|at| ago(at, st_drivers::message::now_ms()))
+            .unwrap_or_else(|| "age unknown".to_owned());
+        let _ = writeln!(output, "Progress ({age}): {progress}");
     }
     for goal in &work.goals {
         let _ = writeln!(output, "Goal: {goal}");
@@ -30934,25 +30918,6 @@ mod tests {
         assert_eq!(parse_timeout("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_timeout("0").unwrap(), Duration::ZERO);
         assert!(parse_timeout("forever").is_err());
-    }
-
-    #[test]
-    fn progress_eta_resolves_duration_and_normalizes_timestamp() {
-        let now = 1_800_000_000_000;
-        let duration = progress_eta_summary(Some("Review in progress"), "2h", now).unwrap();
-        let timestamp =
-            progress_eta_summary(Some("Review in progress"), "2027-01-15T12:00:00+02:00", now)
-                .unwrap();
-        assert_eq!(duration, timestamp);
-        assert_eq!(
-            duration,
-            "Review in progress\nETA (self-reported): 2027-01-15T10:00:00.000Z; reported at 2027-01-15T08:00:00.000Z. Not a deadline."
-        );
-        assert!(progress_eta_summary(None, "2h", now).unwrap().starts_with("ETA"));
-        for eta in ["0", "0h", "-1h", "forever", "2027-01-15T08:00:00Z"] {
-            assert!(progress_eta_summary(None, eta, now).is_err(), "{eta}");
-        }
-        assert!(progress_eta_summary(None, "1h", u128::MAX).is_err());
     }
 
     #[test]
