@@ -4299,6 +4299,14 @@ fn normalize_omp(
                 && value.get("customType").and_then(Value::as_str) == Some("session_exit") =>
         {
             push_omp_exit(items, sequence, &timestamp, &value["data"]);
+            let block = &mut items.last_mut().expect("exit item just pushed")["body"]["blocks"][0];
+            block["payload"] = json!({"body_ref": true, "raw": value});
+            if let Some((_, view, visibility)) = record_view {
+                block["view"] = view;
+                if let Some(visibility) = visibility {
+                    block["visibility"] = json!(visibility);
+                }
+            }
             return;
         }
         Some("custom") => {
@@ -5790,8 +5798,8 @@ mod tests {
         assert_eq!(items[0]["body"]["details"], data);
         assert_eq!(items[0]["body"]["blocks"][0]["kind"], "error");
         assert_eq!(
-            items[0]["body"]["blocks"][0]["payload"],
-            json!({"body_ref":true})
+            items[0]["body"]["blocks"][0]["payload"]["body_ref"],
+            true
         );
     }
 
@@ -5880,7 +5888,8 @@ mod tests {
             let entry = &items[0];
             assert_eq!(entry["role"], "system", "{data}");
             let block = &entry["body"]["blocks"][0];
-            assert_eq!(block["payload"], json!({"body_ref":true}), "{data}");
+            assert_eq!(block["payload"]["body_ref"], true, "{data}");
+            assert_eq!(block["payload"]["raw"]["data"], data);
             if let Some(code) = expected_code {
                 assert_eq!(entry["type"], "error", "{data}");
                 assert_eq!(entry["body"]["code"], code, "{data}");
