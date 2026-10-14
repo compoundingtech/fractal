@@ -25,7 +25,7 @@ and talks to st only through its CLI.
 | 2 | Durable execution as an st exec | [exp2-driver/](exp2-driver) | Works through st in a lab instance; survives SIGKILL and a crash between acting and recording. The clients see the ops as separate runs, without nesting, a status line or timers. [FINDINGS](exp2-driver/FINDINGS.md) |
 | 3 | Seeing the plan before it runs | [exp3-plan/](exp3-plan) | An outline, yes; an exact plan, no. [FINDINGS](exp3-plan/FINDINGS.md) |
 | 4 | Changing a running mission | [exp4-hmr/](exp4-hmr) | Works live: a run moves only if the new version replays its history, otherwise it keeps its own. Versions are content-addressed documents. [FINDINGS](exp4-hmr/FINDINGS.md) |
-| 5 | Our own Rust bridge | [exp5-bridge/](exp5-bridge) | See [FINDINGS](exp5-bridge/FINDINGS.md). |
+| 5 | Our own Rust bridge | [exp5-bridge/](exp5-bridge) | Works in QuickJS, Boa and V8: byte-identical to Node, stoppable, no I/O. QuickJS is the choice (1.7 MB, 9–20 ms start). A full replay per decision is too slow for the daemon; a live session costs tens of µs per event and belongs on a bridge thread the reconciler only notifies. The V8 snapshot crashes with Effect. [FINDINGS](exp5-bridge/FINDINGS.md) |
 | 6 | Two real missions ported | [exp6-port/](exp6-port) | Simple missions: keep KDL. The change path: the program wins, because KDL holds it only as prose. [COMPARISON](exp6-port/COMPARISON.md) |
 
 ## Running it
@@ -34,10 +34,10 @@ and talks to st only through its CLI.
 cd experiments/missions-as-code
 npm install                                   # Effect 4.0.4, esbuild, TypeScript
 npx tsc -p .                                  # typecheck everything
-node --test sdk/*.test.ts exp1-sdk/*.test.ts exp3-plan/*.test.ts exp4-hmr/*.test.ts exp6-port/*.test.ts
-node exp4-hmr/matrix.ts                       # the hot reload matrix
 exp5-bridge/build.sh                          # bundle + fixtures, checked in a bare V8 context
-(cd exp5-bridge && cargo run --release --features quickjs -- quickjs fixtures)
+node --test sdk/*.test.ts exp1-sdk/*.test.ts exp3-plan/*.test.ts exp4-hmr/*.test.ts exp6-port/*.test.ts exp6-port/demo/*.test.ts
+node exp4-hmr/matrix.ts                       # the hot reload matrix
+(cd exp5-bridge && cargo run --release --features quickjs,boa,v8 -- quickjs fixtures)   # or boa, v8
 ```
 
 Experiments 2 and 4 run against a throwaway st instance; their READMEs say how

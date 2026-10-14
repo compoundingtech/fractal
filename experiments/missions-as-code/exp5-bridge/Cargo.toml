@@ -10,13 +10,15 @@ publish = false
 [features]
 quickjs = ["dep:rquickjs"]
 boa = ["dep:boa_engine"]
-v8 = ["dep:deno_core"]
+v8 = ["dep:deno_core", "dep:tokio"]
 
 [dependencies]
 rquickjs = { version = "0.14.0", optional = true }
 boa_engine = { version = "0.22.0", optional = true }
 deno_core = { version = "0.412.0", optional = true }
 serde_json = "1"
+# deno_core posts delayed tasks to the tokio runtime it was created in.
+tokio = { version = "1.53", features = ["rt"], optional = true }
 
 [profile.release]
 debug = false

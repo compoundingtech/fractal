@@ -1,0 +1,148 @@
+{
+  "engine": "boa (boa_engine 0.22)",
+  "bundle_kb": 127,
+  "start_ms_p50": 195.39361599999998,
+  "rss_per_engine_kb": 4749,
+  "engine_heap_kb": null,
+  "process_rss_mb_at_start": 16,
+  "all_match_node": true,
+  "cases": [
+    {
+      "fixture": "long-10",
+      "events": 21,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 3.489953,
+      "p99_ms": 56.744273,
+      "per_event_us": 166.1882380952381
+    },
+    {
+      "fixture": "long-100",
+      "events": 201,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 42.12023,
+      "p99_ms": 156.36395,
+      "per_event_us": 209.5533830845771
+    },
+    {
+      "fixture": "long-1000",
+      "events": 2001,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 502.00007300000004,
+      "p99_ms": 799.360598,
+      "per_event_us": 250.8745992003998
+    },
+    {
+      "fixture": "ship-happy",
+      "events": 11,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 2.618251,
+      "p99_ms": 19.207241,
+      "per_event_us": 238.02281818181817
+    },
+    {
+      "fixture": "ship-messy",
+      "events": 27,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 5.447006,
+      "p99_ms": 46.049834999999995,
+      "per_event_us": 201.74096296296298
+    },
+    {
+      "fixture": "wide-10",
+      "events": 21,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 2.918172,
+      "p99_ms": 29.251332,
+      "per_event_us": 138.96057142857143
+    },
+    {
+      "fixture": "wide-100",
+      "events": 201,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 25.219515,
+      "p99_ms": 136.915916,
+      "per_event_us": 125.47022388059702
+    },
+    {
+      "fixture": "wide-1000",
+      "events": 2001,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 332.321972,
+      "p99_ms": 423.479148,
+      "per_event_us": 166.07794702648675
+    }
+  ],
+  "incremental": [
+    {
+      "fixture": "long-100",
+      "events": 201,
+      "calls": 200,
+      "matches_full_replay": true,
+      "open_ms": 0.7889470000000001,
+      "apply_p50_us": 267.992,
+      "apply_p99_us": 6484.076,
+      "apply_max_us": 13392.027,
+      "whole_run_ms": 82.472756
+    },
+    {
+      "fixture": "long-1000",
+      "events": 2001,
+      "calls": 2000,
+      "matches_full_replay": true,
+      "open_ms": 2.45244,
+      "apply_p50_us": 276.588,
+      "apply_p99_us": 3898.9379999999996,
+      "apply_max_us": 67948.655,
+      "whole_run_ms": 793.401235999999
+    },
+    {
+      "fixture": "ship-messy",
+      "events": 27,
+      "calls": 24,
+      "matches_full_replay": true,
+      "open_ms": 1.206969,
+      "apply_p50_us": 117.119,
+      "apply_p99_us": 804.6260000000001,
+      "apply_max_us": 804.6260000000001,
+      "whole_run_ms": 5.434492
+    },
+    {
+      "fixture": "wide-1000",
+      "events": 2001,
+      "calls": 1001,
+      "matches_full_replay": true,
+      "open_ms": 237.92266700000002,
+      "apply_p50_us": 84.87899999999999,
+      "apply_p99_us": 937.745,
+      "apply_max_us": 29739.225000000002,
+      "whole_run_ms": 164.61780300000012
+    }
+  ],
+  "session_of_2000_events": {
+    "heap_kb": null,
+    "rss_kb": 4440
+  },
+  "spin": {
+    "stopped": true,
+    "after_ms": 58.229381,
+    "engine_usable_after": true,
+    "error": "RuntimeLimitError: reached the maximum number of iteration loops on this execution\n    at <main> (unknown at :23:84795)\n    at next (native)\n    at <main> (unknown at :23:8281)\n    at <main> (unknown at :7:6247)\n    at <main> (unknown at :23:2531)\n    at <main> (unknown at :23:1668)\n    at <main> (unknown at :23:6176)\n    at <main> (unknown at :23:79270)\n    at <main> (unknown at :23:81316)\n    at lo (unknown at :23:81080)\n    at Zx (unknown at :23:82325)\n    at <main> (unknown at :23:85758)"
+  },
+  "reads_clock": "{\"status\":{\"state\":\"failed\",\"error\":{\"defect\":\"Error: Date.now is not available in a mission program; use Clock or Random from Effect\"}},\"open\":[],\"commands\":[],\"stats\":{\"events\":1,\"ops\":0,\"drains\":1}}"
+}

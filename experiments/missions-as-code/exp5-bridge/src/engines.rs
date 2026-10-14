@@ -43,6 +43,12 @@ pub mod quickjs {
             let runtime = Runtime::new().unwrap();
             runtime.set_memory_limit(256 << 20);
             runtime.set_max_stack_size(4 << 20);
+            // QuickJS frees most values by reference count and collects cycles in a full pass once
+            // memory grows by half since the last pass. The pass scans every live object, so a big
+            // live run makes each one slow. QUICKJS_GC_THRESHOLD (bytes) sets the first trigger.
+            if let Some(bytes) = std::env::var("QUICKJS_GC_THRESHOLD").ok().and_then(|v| v.parse().ok()) {
+                runtime.set_gc_threshold(bytes);
+            }
             let deadline = Arc::new(AtomicU64::new(0));
             let epoch = Instant::now();
             let d = deadline.clone();
@@ -146,7 +152,7 @@ pub mod v8 {
             runtime.execute_script("bundle.js", bundle.to_owned()).map_err(|e| e.to_string()).unwrap();
         }
         let mut functions = std::collections::HashMap::new();
-        for name in ["__decide", "__open", "__apply", "__close"] {
+        for name in ["__decide", "__open", "__apply", "__decision", "__close"] {
             let value = runtime.execute_script("lookup.js", format!("globalThis.{name}")).unwrap();
             scope!(scope, runtime);
             let local = v8::Local::new(scope, value);

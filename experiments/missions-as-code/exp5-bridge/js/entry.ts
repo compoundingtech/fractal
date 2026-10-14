@@ -22,7 +22,15 @@ const withoutStats = ({ stats: _, ...rest }: any) => rest
 ;(globalThis as any).__apply = (id: string, eventsJson: string): string => {
   const session = sessions.get(Number(id))
   if (!session) throw new Error(`no session ${id}`)
-  return JSON.stringify(withoutStats(session.apply(JSON.parse(eventsJson))))
+  // Only what the caller acts on: the status and the commands, found from the ops these events
+  // touched. The open list of a wide program is large and mostly unchanged, so __decision reads
+  // it when needed.
+  return JSON.stringify(session.step(JSON.parse(eventsJson)))
+}
+;(globalThis as any).__decision = (id: string): string => {
+  const session = sessions.get(Number(id))
+  if (!session) throw new Error(`no session ${id}`)
+  return JSON.stringify(withoutStats(session.decision()))
 }
 ;(globalThis as any).__close = (id: string): string => {
   sessions.delete(Number(id))

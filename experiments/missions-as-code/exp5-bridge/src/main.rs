@@ -17,6 +17,17 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let engine = args.get(1).map(String::as_str).unwrap_or("quickjs");
     let dir = PathBuf::from(args.get(2).map(String::as_str).unwrap_or("fixtures"));
+    // V8 (through deno_core) needs a tokio runtime entered before an isolate is created; the
+    // other engines need nothing. Nothing here is async: the runtime only receives V8's tasks.
+    // V8 flags for both the process that makes a snapshot and the one that loads it.
+    #[cfg(feature = "v8")]
+    if let Ok(flags) = std::env::var("V8_FLAGS") {
+        deno_core::v8::V8::set_flags_from_string(&flags);
+    }
+    #[cfg(feature = "v8")]
+    let tokio = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    #[cfg(feature = "v8")]
+    let _entered = tokio.enter();
     #[cfg(feature = "v8")]
     if engine == "v8-make-snapshot" {
         let bundle = fs::read_to_string(dir.join("bundle.js")).unwrap();
@@ -88,6 +99,7 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
     let bundle = fs::read_to_string(dir.join("bundle.js")).unwrap();
     let fixtures = fixtures(dir);
 
+    eprintln!("stage: start");
     // Start: a fresh engine with the bundle loaded, ready to decide.
     let rss_before = rss_bytes();
     let mut starts = Vec::new();
@@ -99,13 +111,18 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
     }
     let start_ms = percentile(&mut starts, 0.5);
 
+    eprintln!("stage: memory");
     // Memory: hold 20 loaded engines at once and divide.
     let base = rss_bytes();
     let mut held: Vec<E> = (0..20).map(|_| E::load(&bundle)).collect();
     let per_engine_rss = (rss_bytes().saturating_sub(base)) / 20;
     let engine_heap = held[0].heap_bytes();
-    drop(held);
+    // Last in, first out: V8 enters each isolate on creation and requires the reverse order.
+    while let Some(e) = held.pop() {
+        drop(e);
+    }
 
+    eprintln!("stage: cases");
     // Per-decision cost and determinism, on one warm engine.
     let mut engine = E::load(&bundle);
     let mut cases = Vec::new();
@@ -138,8 +155,10 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
         }));
     }
 
-    // Incremental: open a live run once, then feed one event at a time, as a driver or the daemon
-    // would after each result. The final decision must equal Node's full replay.
+    eprintln!("stage: incremental");
+    // Incremental: open a live run once, then feed events as a driver appends them: the scheduled
+    // events of one decision together, each result on its own. The final decision must equal
+    // Node's full replay.
     let mut incremental = Vec::new();
     for f in fixtures.iter().filter(|f| ["ship-messy", "long-100", "long-1000", "wide-1000"].contains(&f.name.as_str())) {
         let events: Vec<serde_json::Value> = serde_json::from_str(&f.history).unwrap();
@@ -148,13 +167,21 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
         let id = engine.call("__open", &[&f.program, &first]).expect("open");
         let open_ms = t.elapsed().as_secs_f64() * 1e3;
         let mut samples = Vec::with_capacity(events.len());
-        let mut last = String::new();
+        let mut batches: Vec<Vec<&serde_json::Value>> = Vec::new();
         for event in &events[1..] {
-            let one = serde_json::to_string(&[event]).unwrap();
+            let scheduled = event["type"] == "scheduled";
+            match batches.last_mut() {
+                Some(last) if scheduled && last[0]["type"] == "scheduled" => last.push(event),
+                _ => batches.push(vec![event]),
+            }
+        }
+        for batch in &batches {
+            let one = serde_json::to_string(batch).unwrap();
             let t = Instant::now();
-            last = engine.call("__apply", &[&id, &one]).expect("apply");
+            engine.call("__apply", &[&id, &one]).expect("apply");
             samples.push(t.elapsed());
         }
+        let last = engine.call("__decision", &[&id]).expect("decision");
         engine.call("__close", &[&id]).unwrap();
         let mut expected: serde_json::Value = serde_json::from_str(&f.decision).unwrap();
         expected.as_object_mut().unwrap().remove("stats");
@@ -163,6 +190,7 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
         incremental.push(serde_json::json!({
             "fixture": f.name,
             "events": f.events,
+            "calls": batches.len(),
             "matches_full_replay": got == expected,
             "open_ms": open_ms,
             "apply_p50_us": percentile(&mut samples, 0.5) * 1e3,
@@ -172,6 +200,7 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
         }));
     }
 
+    eprintln!("stage: sessions");
     // Live-run memory: hold 50 open sessions of the 1000-step run in one engine.
     let long = fixtures.iter().find(|f| f.name == "long-1000").unwrap();
     let mut holder = E::load(&bundle);
@@ -185,12 +214,24 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
     }
     drop(holder);
 
+    eprintln!("stage: spin");
     // Isolation: a program that never yields must be stopped by the bridge, not hang the caller.
-    let spin = r#"[{"type":"started","at":1,"program":"orchard/spin","version":"dev","input":null},{"type":"scheduled","at":1,"op":"first","kind":"step","hash":"x"},{"type":"completed","at":2,"op":"first","value":{"summary":"ok","evidence":[],"attempt":1}}]"#;
+    // The spin program loops forever once its first step completes. Take the op's real hash from a
+    // first decision, so the replay reaches the loop instead of diverging.
     let mut fresh = E::load(&bundle);
+    let started = r#"[{"type":"started","at":1,"program":"orchard/spin","version":"dev","input":null}]"#;
+    let first: serde_json::Value = serde_json::from_str(&fresh.decide("orchard/spin", started).unwrap()).unwrap();
+    let hash = first["commands"][0]["hash"].as_str().unwrap().to_owned();
+    let spin = format!(
+        r#"[{{"type":"started","at":1,"program":"orchard/spin","version":"dev","input":null}},{{"type":"scheduled","at":1,"op":"first","kind":"step","hash":"{hash}"}},{{"type":"completed","at":2,"op":"first","value":{{"summary":"ok","evidence":[],"attempt":1}}}}]"#
+    );
     let t = Instant::now();
-    let spin_result = fresh.decide_with_budget("orchard/spin", spin, Duration::from_millis(50));
+    let spin_result = fresh.decide_with_budget("orchard/spin", &spin, Duration::from_millis(50));
     let spin_stopped_ms = t.elapsed().as_secs_f64() * 1e3;
+    // After the stop, the same engine must still decide correctly, or a stopped program would
+    // cost the whole engine and every live run in it.
+    let happy = fixtures.iter().find(|f| f.name == "ship-happy").unwrap();
+    let usable_after_stop = fresh.decide(&happy.program, &happy.prefix).is_ok_and(|d| d == happy.prefix_decision);
     let clock = r#"[{"type":"started","at":1,"program":"orchard/reads-clock","version":"dev","input":null}]"#;
     let clock_result = E::load(&bundle).decide("orchard/reads-clock", clock);
 
@@ -205,7 +246,7 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
         "cases": cases,
         "incremental": incremental,
         "session_of_2000_events": { "heap_kb": session_heap_kb, "rss_kb": session_rss_kb },
-        "spin": { "stopped": spin_result.is_err(), "after_ms": spin_stopped_ms, "error": spin_result.err() },
+        "spin": { "stopped": spin_result.is_err(), "after_ms": spin_stopped_ms, "engine_usable_after": usable_after_stop, "error": spin_result.err() },
         "reads_clock": clock_result.map_err(|e| e).unwrap_or_else(|e| e),
     })
 }

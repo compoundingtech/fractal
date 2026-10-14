@@ -37,6 +37,7 @@ interface OpState {
   readonly kind: OpKind
   readonly spec: Json
   readonly hash: string
+  readonly index: number // registration order
   readonly resume: (effect: Effect.Effect<Json, unknown>) => void
   // open: the program waits on it. settled: a result reached the program.
   // abandoned: the program stopped waiting (interrupted by a race, a timeout or its end).
@@ -61,6 +62,8 @@ export class Engine {
   accepted = new Set<string>()
   readonly ops = new Map<string, OpState>()
   readonly order: Array<string> = []
+  // Ops whose state changed since a session last read its commands.
+  readonly touched = new Set<string>()
   private readonly counters = new Map<string, number>()
   private readonly queue: Array<() => void> = []
   private draining = false
@@ -147,9 +150,10 @@ export class Engine {
   }
 
   register(op: string, kind: OpKind, spec: Json, hash: string, resume: OpState["resume"]): void {
-    const state: OpState = { op, kind, spec, hash, resume, state: "open", scheduled: false, finished: false }
+    const state: OpState = { op, kind, spec, hash, index: this.order.length, resume, state: "open", scheduled: false, finished: false }
     this.ops.set(op, state)
     this.order.push(op)
+    this.touched.add(op)
     if (kind === "marker") {
       // A marker answers at once. True when the history recorded it, or when this is new
       // execution (the driver then records it); false while replaying a run that passed this
@@ -166,6 +170,7 @@ export class Engine {
   abandon(op: string): void {
     const state = this.ops.get(op)
     if (state && state.state === "open") state.state = "abandoned"
+    this.touched.add(op)
   }
 
   diverge(op: string, reason: string): void {
@@ -173,6 +178,7 @@ export class Engine {
   }
 
   apply(event: HistoryEvent): void {
+    if (event.type !== "started" && event.type !== "upgraded") this.touched.add(event.op)
     switch (event.type) {
       case "started":
       case "upgraded":
@@ -263,10 +269,20 @@ const toJson = (value: unknown): Json => {
 // A live run: the program stays suspended between events, so a new event costs only the work it
 // causes. open() replays the history once; apply() feeds what happened since. For any history,
 // open(h).decision() equals decide(h), and open(h).apply(e) equals decide(h ++ e).
+// What the driver must do about one op, if anything.
+const commandFor = (state: OpState): Command | undefined =>
+  (state.state === "open" || state.record) && !state.scheduled
+    ? { type: "schedule", op: state.op, kind: state.kind, spec: state.spec, hash: state.hash }
+    : state.state === "abandoned" && state.scheduled && !state.finished
+      ? { type: "cancel", op: state.op }
+      : undefined
+
 export class Session {
   private readonly engine: Engine
   private readonly fiber: { pollUnsafe(): Exit.Exit<unknown, unknown> | undefined }
   private readonly history: Array<HistoryEvent>
+  // Ops that need a command, kept up to date from the engine's touched set.
+  private readonly pending = new Map<string, OpState>()
 
   constructor(program: Program, history: ReadonlyArray<HistoryEvent>, options: DecideOptions = {}) {
     const start = history[0]
@@ -304,6 +320,24 @@ export class Session {
     return this.decision()
   }
 
+  // The cheap form of apply for a live run: the status and the commands only. It looks at the ops
+  // touched by these events, not at every op, so its cost does not grow with the open list.
+  step(events: ReadonlyArray<HistoryEvent>): Pick<Decision, "status" | "commands" | "divergence"> {
+    const from = this.history.length
+    this.history.push(...events)
+    this.feed(from)
+    const engine = this.engine
+    if (engine.divergence) return { status: { state: "running" }, commands: [], divergence: engine.divergence }
+    for (const op of engine.touched) {
+      const state = engine.ops.get(op)
+      if (state && commandFor(state)) this.pending.set(op, state)
+      else this.pending.delete(op)
+    }
+    engine.touched.clear()
+    const commands = [...this.pending.values()].sort((a, b) => a.index - b.index).map((s) => commandFor(s)!)
+    return { status: statusOf(this.fiber.pollUnsafe()), commands }
+  }
+
   decision(): Decision {
     const engine = this.engine
     const commands: Array<Command> = []
@@ -312,12 +346,9 @@ export class Session {
       const state = engine.ops.get(op)!
       if (state.state === "open") {
         open.push({ op, kind: state.kind, spec: state.spec, scheduled: state.scheduled })
-        if (!state.scheduled) commands.push({ type: "schedule", op, kind: state.kind, spec: state.spec, hash: state.hash })
-      } else if (state.record && !state.scheduled) {
-        commands.push({ type: "schedule", op, kind: state.kind, spec: state.spec, hash: state.hash })
-      } else if (state.state === "abandoned" && state.scheduled && !state.finished) {
-        commands.push({ type: "cancel", op })
       }
+      const command = commandFor(state)
+      if (command) commands.push(command)
     }
     const status = engine.divergence ? { state: "running" as const } : statusOf(this.fiber.pollUnsafe())
     return {

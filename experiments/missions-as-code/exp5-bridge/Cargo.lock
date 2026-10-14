@@ -1281,6 +1281,7 @@ dependencies = [
  "deno_core",
  "rquickjs",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

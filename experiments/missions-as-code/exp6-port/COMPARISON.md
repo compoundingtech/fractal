@@ -153,7 +153,7 @@ Some of this is still weak:
 
 ## 4. Demo scripts: the plain file wins, and the program is a good way to write one
 
-Nathan asked whether missions as code would make demo scripts easier. The demo-scripts mission
+The question here: would missions as code make demo scripts easier? The demo-scripts mission
 (`st demo play`) has a plain format: a seed of declarations, then beats, each after a delay or a
 key press. Its two example demos are snapshotted in [demo/](demo) (`release-day.kdl`,
 `an-alert-needs-an-answer.kdl`) and written as Effect programs beside them

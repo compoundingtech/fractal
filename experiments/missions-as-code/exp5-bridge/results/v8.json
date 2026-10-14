@@ -1,0 +1,148 @@
+{
+  "engine": "v8 (deno_core 0.412, no snapshot)",
+  "bundle_kb": 127,
+  "start_ms_p50": 40.574657,
+  "rss_per_engine_kb": 4253,
+  "engine_heap_kb": 2144,
+  "process_rss_mb_at_start": 16,
+  "all_match_node": true,
+  "cases": [
+    {
+      "fixture": "long-10",
+      "events": 21,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 0.08014,
+      "p99_ms": 17.234638999999998,
+      "per_event_us": 3.816190476190476
+    },
+    {
+      "fixture": "long-100",
+      "events": 201,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 0.6806139999999999,
+      "p99_ms": 13.140545999999999,
+      "per_event_us": 3.3861393034825866
+    },
+    {
+      "fixture": "long-1000",
+      "events": 2001,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 14.615868,
+      "p99_ms": 74.364293,
+      "per_event_us": 7.304281859070465
+    },
+    {
+      "fixture": "ship-happy",
+      "events": 11,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 0.104866,
+      "p99_ms": 0.215534,
+      "per_event_us": 9.533272727272728
+    },
+    {
+      "fixture": "ship-messy",
+      "events": 27,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 0.179425,
+      "p99_ms": 5.288279,
+      "per_event_us": 6.645370370370371
+    },
+    {
+      "fixture": "wide-10",
+      "events": 21,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 0.058149,
+      "p99_ms": 0.108182,
+      "per_event_us": 2.769
+    },
+    {
+      "fixture": "wide-100",
+      "events": 201,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 0.487102,
+      "p99_ms": 14.139586000000001,
+      "per_event_us": 2.4233930348258705
+    },
+    {
+      "fixture": "wide-1000",
+      "events": 2001,
+      "matches_node": true,
+      "repeatable": true,
+      "fresh_equals_warm": true,
+      "p50_ms": 6.429935,
+      "p99_ms": 25.560924,
+      "per_event_us": 3.2133608195902053
+    }
+  ],
+  "incremental": [
+    {
+      "fixture": "long-100",
+      "events": 201,
+      "calls": 200,
+      "matches_full_replay": true,
+      "open_ms": 0.183063,
+      "apply_p50_us": 8.274999999999999,
+      "apply_p99_us": 22.693,
+      "apply_max_us": 340.768,
+      "whole_run_ms": 1.7478320000000007
+    },
+    {
+      "fixture": "long-1000",
+      "events": 2001,
+      "calls": 2000,
+      "matches_full_replay": true,
+      "open_ms": 0.110707,
+      "apply_p50_us": 6.853000000000001,
+      "apply_p99_us": 25.899,
+      "apply_max_us": 6576.66,
+      "whole_run_ms": 22.683488999999952
+    },
+    {
+      "fixture": "ship-messy",
+      "events": 27,
+      "calls": 24,
+      "matches_full_replay": true,
+      "open_ms": 0.13794900000000002,
+      "apply_p50_us": 13.195,
+      "apply_p99_us": 2346.7129999999997,
+      "apply_max_us": 2346.7129999999997,
+      "whole_run_ms": 2.8494269999999986
+    },
+    {
+      "fixture": "wide-1000",
+      "events": 2001,
+      "calls": 1001,
+      "matches_full_replay": true,
+      "open_ms": 3.119589,
+      "apply_p50_us": 3.055,
+      "apply_p99_us": 7.744999999999999,
+      "apply_max_us": 1369.563,
+      "whole_run_ms": 5.2233690000000035
+    }
+  ],
+  "session_of_2000_events": {
+    "heap_kb": 1277,
+    "rss_kb": 1845
+  },
+  "spin": {
+    "stopped": true,
+    "after_ms": 53.786656,
+    "engine_usable_after": true,
+    "error": "null"
+  },
+  "reads_clock": "{\"status\":{\"state\":\"failed\",\"error\":{\"defect\":\"Error: Date.now is not available in a mission program; use Clock or Random from Effect\"}},\"open\":[],\"commands\":[],\"stats\":{\"events\":1,\"ops\":0,\"drains\":1}}"
+}
