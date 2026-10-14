@@ -9357,10 +9357,7 @@ async fn run_trace_to(
             .context("the daemon health response has no store index")?;
     }
     client.follow_recovered();
-    let mut event_feed = LocalEventFeed {
-        trace: true,
-        ..Default::default()
-    };
+    let mut event_feed = LocalEventFeed { trace: true };
     loop {
         if cli_output::closed() {
             return Ok(());
