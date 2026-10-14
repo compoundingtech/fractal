@@ -333,7 +333,7 @@ fn a_completed_round_terminalizes_its_missing_starting_gate_without_restarting_i
         idempotency_key: Some("ended-round-starting-gate".into()),
     }).unwrap();
     let owner = store.mission_run(gate.owner_run.as_deref().unwrap()).unwrap().unwrap();
-    store.set_mission_run_state(&owner.id, "completed", None).unwrap();
+    store.set_mission_run_state(&owner.id, "completed", "terminal", None).unwrap();
     let runtime = Arc::new(FakeRuntime::default());
     let restarted = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
