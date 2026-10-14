@@ -131,6 +131,8 @@ pub async fn run(
     let mut retries = BTreeMap::<String, Retry>::new();
     let mut unconfirmed_since = BTreeMap::<String, Instant>::new();
     let mut diagnostics = BTreeMap::<String, DiagnosticReport>::new();
+    let mut preparation_errors = BTreeMap::<String, String>::new();
+    let mut preparation_reports = BTreeMap::<String, PreparationReport>::new();
     loop {
         tokio::select! {
             result = &mut initialization, if state.initialized && initialization_pending => {
@@ -226,15 +228,26 @@ pub async fn run(
                                 transcript.body_available(state.attempted.contains(&message.subject) || message.status != "sent");
                                 content.insert(message.subject.clone(), envelope);
                                 retries.remove(&message.subject);
+                                preparation_errors.remove(&message.subject);
                             },
                             Ok(None) => {},
                             Err(error) => {
                                 retry_failed(&mut retries, &message.subject);
-                                diagnostic(client, &state.fence, &message.subject, "claude-message-unforwarded",
-                                    &format!("{message}: preparation failed; retrying with backoff up to 30s: {error:#}", message=message.subject),
-                                    &mut diagnostics).await;
+                                preparation_errors.insert(message.subject.clone(),
+                                    format!("{}: preparation failed; retrying with backoff up to 30s: {error:#}", message.subject));
                             },
                         }
+                    }
+                    let head = unprepared_fifo_head(&messages, &content, &state.attempted);
+                    for (index, message) in messages.iter().enumerate() {
+                        let reason = head.filter(|head| index >= *head).map(|head| {
+                                format!("{} is queued behind FIFO head {}; {}; later mail cannot overtake it",
+                                    message.subject, messages[head].subject,
+                                    preparation_errors.get(&messages[head].subject)
+                                        .map_or("waiting for preparation", String::as_str))
+                        }).or_else(|| preparation_errors.get(&message.subject).cloned());
+                        preparation_diagnostic(client, &state.fence, &message.subject, reason.as_deref(),
+                            &mut preparation_reports).await;
                     }
                     // User meta records and explicit mid-turn absorption are native
                     // consumption proof. An enqueue or writing stdout is not a receipt.
@@ -268,10 +281,10 @@ pub async fn run(
                             },
                         }
                     }
-                    for message in &tracked {
+                    for (index, message) in tracked.iter().enumerate() {
                         // An unprepared live FIFO head must not be overtaken.
+                        if head == Some(index) { break; }
                         let Some(envelope) = content.get(&message.subject) else {
-                            if live.contains(&message.subject) && !state.attempted.contains(&message.subject) { break; }
                             continue;
                         };
                         if state.attempted.contains(&message.subject) {
@@ -437,6 +450,60 @@ fn retry_delay(failures: u32) -> Duration {
 struct DiagnosticReport {
     reason: String,
     recorded: bool,
+}
+
+struct PreparationReport {
+    input: ClaimInput,
+    recorded: bool,
+}
+
+fn unprepared_fifo_head(
+    messages: &[MessageView],
+    content: &BTreeMap<String, String>,
+    attempted: &BTreeSet<String>,
+) -> Option<usize> {
+    messages.iter().position(|message| {
+        !attempted.contains(&message.subject) && !content.contains_key(&message.subject)
+    })
+}
+
+async fn preparation_diagnostic(
+    client: &Client,
+    fence: &Fence,
+    message: &str,
+    reason: Option<&str>,
+    reports: &mut BTreeMap<String, PreparationReport>,
+) {
+    // Finish a lost acknowledgement before changing the diagnostic, so a late
+    // retry cannot reinstate an old blocker after the successful preparation.
+    if let Some(report) = reports.get_mut(message) {
+        if !report.recorded {
+            if client.post::<_, ClaimRecord>("/v1/claims", &report.input).await.is_err() { return; }
+            report.recorded = true;
+        }
+        if report.input.fields.get("reason").and_then(Value::as_str) == Some(reason.unwrap_or("preparation succeeded; FIFO blocker cleared")) {
+            return;
+        }
+    }
+    // Publish a clear even after channel restart: a durable failure from
+    // this incarnation must not outlive successfully prepared content.
+    let input = ClaimInput {
+        subject: fence.subject.clone(),
+        kind: "harness.diagnostic".into(),
+        actor: Some(fence.subject.clone()),
+        fields: BTreeMap::from([
+            ("code".into(), json!("claude-message-unforwarded")),
+            ("severity".into(), json!("warning")),
+            ("status".into(), json!(if reason.is_some() { "waiting" } else { "ready" })),
+            ("reason".into(), json!(reason.unwrap_or("preparation succeeded; FIFO blocker cleared"))),
+            ("incarnation_id".into(), json!(fence.incarnation)),
+        ]),
+        evidence: vec![message.into()],
+        expected_subject: None,
+        idempotency_key: Some(format!("claude-preparation:{}", uuid::Uuid::now_v7())),
+    };
+    let recorded = client.post::<_, ClaimRecord>("/v1/claims", &input).await.is_ok();
+    reports.insert(message.into(), PreparationReport { input, recorded });
 }
 async fn diagnostic(
     client: &Client,
@@ -756,6 +823,91 @@ mod tests {
     use std::io::Write as _;
 
     #[tokio::test]
+    async fn claude_preparation_diagnostic_retries_lost_ack_before_clearing_recovered_body() {
+        use axum::{Json, Router, http::StatusCode, routing::post};
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+        let store = Arc::new(crate::store::Store::open_memory("claude-preparation-ack").unwrap());
+        let fail_ack = Arc::new(AtomicBool::new(true));
+        let app = Router::new().route("/v1/claims", post({
+            let store = Arc::clone(&store);
+            move |Json(input): Json<ClaimInput>| {
+                let store = Arc::clone(&store);
+                let fail_ack = Arc::clone(&fail_ack);
+                async move {
+                    let claim = store.append_client_claim(&input).unwrap();
+                    if fail_ack.swap(false, Ordering::SeqCst) {
+                        Err(StatusCode::INTERNAL_SERVER_ERROR)
+                    } else {
+                        Ok(Json(json!({"api_version":"st3.v1", "value":claim})))
+                    }
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(crate::client::Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let fence = Fence::new("agent/worker", "current", "delivery");
+        let mut message = MessageView {
+            subject: "message/head".into(), from: "person/sender".into(), to: fence.subject.clone(),
+            content: "doc/missing".into(), status: "staged".into(), title: None, in_reply_to: None,
+            tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
+            created_index: 1, attachments: Vec::new(),
+        };
+        let error = body(&client, &message).await.unwrap_err();
+        let reason = format!("FIFO head preparation failed; retrying: {error:#}");
+        let mut reports = BTreeMap::new();
+        preparation_diagnostic(&client, &fence, &message.subject, Some(&reason), &mut reports).await;
+        assert!(!reports[&message.subject].recorded);
+        let failure_key = reports[&message.subject].input.idempotency_key.clone();
+        message.content = "recovered body".into();
+        assert_eq!(body(&client, &message).await.unwrap(), "recovered body");
+        preparation_diagnostic(&client, &fence, &message.subject, None, &mut reports).await;
+        assert!(reports[&message.subject].recorded);
+        assert_ne!(reports[&message.subject].input.idempotency_key, failure_key);
+        let claims = store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap();
+        assert_eq!(claims.len(), 2, "lost acknowledgement retries the identical failure claim");
+        assert_eq!(claims[0].body["fields"]["status"], "waiting");
+        assert_eq!(claims[1].body["fields"]["status"], "ready");
+        assert!(claims.iter().all(|claim| claim.body["evidence"] == json!(["message/head"])));
+        preparation_diagnostic(&client, &fence, &message.subject, None, &mut reports).await;
+        assert_eq!(store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap().len(), 2);
+        server.abort();
+    }
+
+    #[test]
+    fn claude_unprepared_fifo_head_preserves_later_mail_until_recovery() {
+        let messages: Vec<MessageView> = ["head", "later", "last"].into_iter().enumerate().map(|(index, name)| MessageView {
+            subject: format!("message/{name}"), from: "person/sender".into(), to: "agent/worker".into(),
+            content: name.into(), status: "staged".into(), title: None, in_reply_to: None,
+            tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
+            created_index: index as u64 + 1, attachments: Vec::new(),
+        }).collect();
+        let mut content = BTreeMap::from([
+            ("message/later".into(), "later envelope".into()),
+            ("message/last".into(), "last envelope".into()),
+        ]);
+        let mut attempted = BTreeSet::new();
+        assert_eq!(unprepared_fifo_head(&messages, &content, &attempted), Some(0));
+        // Repeated permanent body/attachment errors neither consume nor reorder mail.
+        for _ in 0..40 {
+            let offers: Vec<_> = messages.iter().take(unprepared_fifo_head(&messages, &content, &attempted).unwrap())
+                .map(|message| message.subject.as_str()).collect();
+            assert!(offers.is_empty());
+            assert_eq!(content.len(), 2);
+        }
+        content.insert("message/head".into(), "recovered envelope".into());
+        assert_eq!(unprepared_fifo_head(&messages, &content, &attempted), None);
+        let offers: Vec<_> = messages.iter().filter(|message| !attempted.contains(&message.subject))
+            .map(|message| message.subject.clone()).collect();
+        assert_eq!(offers, ["message/head", "message/later", "message/last"]);
+        attempted.extend(offers);
+        // Receipt recovery for an already attempted head needs no new preparation.
+        content.remove("message/head");
+        assert_eq!(unprepared_fifo_head(&messages, &content, &attempted), None);
+    }
+
+    #[tokio::test]
     async fn claude_new_notification_gate_uses_current_prompt_resolution_and_fails_closed() {
         use axum::{Json, Router, routing::get};
         use crate::store::NativePromptState;
@@ -800,6 +952,16 @@ mod tests {
             prompt.send_replace(NativePromptState::Gone);
             assert_eq!(client.get::<NativePromptState>(&episode).await.unwrap(), NativePromptState::Gone);
             assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask:?}");
+            // Heartbeats are not new prompt episodes. More than the former
+            // 16-observation lookup window must not resurrect a closed prompt.
+            for _ in 0..20 {
+                writer.observe(Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)
+                    .with_ask(ask)).unwrap();
+                let heartbeat = st_drivers::harness_state::read(&path, None).unwrap();
+                assert_eq!(heartbeat.ownership_sequence, observed.ownership_sequence);
+                assert_eq!(heartbeat.transition_sequence, observed.transition_sequence);
+                assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask:?}");
+            }
         }
         for ask in ["none", "future-ask"] {
             std::fs::write(&path, serde_json::to_vec(&record(ask, "human", "current", now)).unwrap()).unwrap();

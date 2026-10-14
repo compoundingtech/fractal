@@ -83,6 +83,16 @@ that closes the prompt releases it on that same positive evidence; an ended sess
 leaves its mail for its successor. Stale or indeterminate observations never count
 as native closure, including after a fresh heartbeat restores the same episode.
 
+Esc dismissals do not need a remembered dialog: st reads the current native input
+box and idle shortcuts footer after observing the prompt, and checks that the
+runtime and prompt have not changed. This re-derives closure after a daemon restart
+or a dismissal between screen polls. A box shown while Claude is working is not
+idle evidence, and an unreadable screen cannot release the hold.
+
+A body or attachment preparation failure also holds that message and later mail
+in mailbox order. The sender's existing delivery reason names the failed head;
+st retains and retries the mail, clearing that reason when preparation succeeds.
+
 Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
 the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,
 and says when it changed a file. HEIC, AVIF, TIFF and PDF are refused with a way to convert them.

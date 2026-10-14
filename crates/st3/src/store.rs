@@ -7722,6 +7722,28 @@ impl Store {
         )
     }
 
+    /// Latest preparation outcome for one message and the recipient's current incarnation.
+    /// A delayed report from a retired channel cannot mask a current failure or recovery.
+    pub fn claude_preparation_diagnostic(
+        &self,
+        seat: &str,
+        message: &str,
+        incarnation: &str,
+    ) -> Result<Option<(Value, u128)>> {
+        let connection = self.readers.get();
+        let row = connection.prepare_cached(&canonical_sql(
+            "SELECT body, accepted_at_unix_ms
+             FROM claims WHERE subject=?1 AND actor=?1 AND kind='harness.diagnostic'
+               AND json_extract(body, '$.fields.code')='claude-message-unforwarded'
+               AND json_extract(body, '$.fields.incarnation_id')=?3
+               AND json_extract(body, '$.evidence[0]')=?2
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+        ))?.query_row(params![seat, message, incarnation], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }).optional()?;
+        row.map(|(body, at)| Ok((serde_json::from_str(&body)?, at as u128))).transpose()
+    }
+
     pub fn next_active_mission_deadline(&self, origin: &str) -> Result<Option<u128>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(
@@ -56997,6 +57019,48 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         assert_eq!(prompts().len(), 1);
         append("runtime.observed", json!({"status":"running", "incarnation_id":"two"}));
         assert!(prompts().is_empty());
+    }
+
+    #[test]
+    fn claude_native_prompt_lookup_window_never_infers_missing_episode_closure() {
+        let store = Store::open_memory("node").unwrap();
+        let seat = "agent/node.worker";
+        let observe = |ownership: u64, transition: u64, state: &str, blocked: &str, ask: &str| {
+            store.append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "harness.observed".into(),
+                actor: Some(seat.into()),
+                fields: serde_json::from_value(json!({
+                    "driver":"claude", "state":state, "incarnation_id":"one",
+                    "blocked_on":blocked, "ask":ask,
+                    "ownership_sequence":ownership, "transition_sequence":transition,
+                })).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        for _ in 0..20 {
+            observe(1, 1, "idle", "none", "none");
+        }
+        // The new writer can precede its publication even with a full retained window.
+        assert_eq!(store.native_prompt_state(seat, 1, 2).unwrap(), NativePromptState::Open);
+        for _ in 0..20 {
+            observe(1, 2, "indeterminate", "unknown", "unknown");
+        }
+        assert_eq!(store.native_prompt_state(seat, 1, 2).unwrap(), NativePromptState::Open);
+        observe(1, 2, "working", "human", "permission");
+        assert_eq!(store.native_prompt_state(seat, 1, 2).unwrap(), NativePromptState::Open);
+        for _ in 0..20 {
+            observe(1, 2, "working", "human", "permission");
+        }
+        assert_eq!(store.native_prompt_state(seat, 1, 2).unwrap(), NativePromptState::Open);
+        // Only positive successor evidence releases a record outside the bounded window.
+        for _ in 0..20 {
+            observe(1, 3, "idle", "none", "none");
+        }
+        assert_eq!(store.native_prompt_state(seat, 1, 2).unwrap(), NativePromptState::Gone);
+        assert_eq!(store.native_prompt_state(seat, 1, 4).unwrap(), NativePromptState::Open);
     }
 
     #[test]
