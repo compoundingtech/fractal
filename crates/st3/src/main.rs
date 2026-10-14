@@ -6938,6 +6938,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.isolation_pty_ms = phase_elapsed_ms();
     let recorder = install_recorder(&config, &login_environment);
     startup_phases.recorder_ms = phase_elapsed_ms();
+    store.configure_native_retention(&config.observations, config.checkpoint.enabled)?;
     if let Some(person) = &config.person {
         let _ = st3::sekrets::daemon::PERSON.set(person.clone());
     }

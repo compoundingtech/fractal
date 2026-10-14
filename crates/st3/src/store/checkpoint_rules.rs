@@ -321,7 +321,9 @@ pub(crate) fn harness_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
         }
     }
     if let Some(last_state) = claims.last().and_then(|claim| state(claim)) {
-        let start = claims.iter().rposition(|claim| state(claim).as_deref() != Some(last_state.as_str()))
+        let start = claims
+            .iter()
+            .rposition(|claim| state(claim).as_deref() != Some(last_state.as_str()))
             .map_or(0, |position| position + 1);
         keep.insert(start);
     }
@@ -980,8 +982,22 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
     }
     if subject.starts_with("arrangement/") {
         let person = st3_schema::arrangements::owner(subject).map_err(anyhow::Error::new)?;
-        answers.insert("arrangements".into(), json!(super::arrangements::arrangements_at(connection, person, i64::MAX as u64)?));
-        answers.insert("arrangement".into(), json!(super::arrangements::arrangement_at(connection, subject, i64::MAX as u64)?));
+        answers.insert(
+            "arrangements".into(),
+            json!(super::arrangements::arrangements_at(
+                connection,
+                person,
+                i64::MAX as u64
+            )?),
+        );
+        answers.insert(
+            "arrangement".into(),
+            json!(super::arrangements::arrangement_at(
+                connection,
+                subject,
+                i64::MAX as u64
+            )?),
+        );
     }
     answers.insert(
         "actual".into(),

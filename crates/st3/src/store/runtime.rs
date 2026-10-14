@@ -292,6 +292,7 @@ impl Runtime for SmalltalkRuntime {
         directive_notes::flush(transaction)?;
         agent_messages::open(transaction)?;
         arrangements::open(transaction)?;
+        native_sources::open(transaction)?;
         limits::open_limits(transaction)?;
         if shared_memory {
             rebuild_operations_tx(transaction)?;

@@ -1124,6 +1124,7 @@ fn paired_session() -> ClientSession {
         custom_forms: false,
         conversation_blocks: false,
         scopes: ["read.projections".into()].into_iter().collect(),
+        pairing_binding: None,
     }
 }
 

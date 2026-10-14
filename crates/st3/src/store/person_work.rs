@@ -1131,7 +1131,9 @@ pub(super) mod tests {
             completed
         });
         assert!(
-            !completed.expect("empty reconciliation submitted a writer job").unwrap(),
+            !completed
+                .expect("empty reconciliation submitted a writer job")
+                .unwrap(),
             "empty reconciliation must not report a change"
         );
     }
