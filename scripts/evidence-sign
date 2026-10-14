@@ -16,6 +16,9 @@ record states that this machine's wrapper reported it. That is the cooperative v
 
 Configuration, outside any checkout: $HOME/.config/st/evidence-sign.json
   {"signer": "fleet/dev", "ssh_key": "/abs/key", "scratch_repo": "/abs/bare.git"}
+There is no command-line argument, no --config and no environment variable that changes the key,
+the configuration path or the clock (EVIDENCE_SIGN_NOW counts only when the configuration itself
+says test_clock: true).
 
 stdout: {"record": ID, "tier": "full", "object_pack_base64": ...} (the notes commit, the
 source commit and its tree, as `git pack-objects` made them).
@@ -46,8 +49,12 @@ class Refused(Exception):
 
 
 def git(repo, *args, stdin=None, env=None):
-    done = subprocess.run(['git', '-C', str(repo), *args], input=stdin, capture_output=True, timeout=300,
-                          env=dict(os.environ, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C', **(env or {})))
+    # No GIT_* variable of the caller reaches git, and the caller's repository cannot name programs
+    # for it to run (fsmonitor, hooks, pager, external diff).
+    clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    done = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat',
+                           '-C', str(repo), *args], input=stdin, capture_output=True, timeout=300,
+                          env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C', **(env or {})))
     if done.returncode != 0:
         raise Refused(f'git {args[0]} failed: {done.stderr.decode(errors="replace").strip()[-500:]}')
     return done.stdout
@@ -85,8 +92,8 @@ def validate(request):
 
 def main():
     config = json.loads((Path.home() / '.config/st/evidence-sign.json').read_text())
-    if set(config) != {'signer', 'ssh_key', 'scratch_repo'}:
-        raise Refused('configuration must have exactly signer, ssh_key, scratch_repo')
+    if not {'signer', 'ssh_key', 'scratch_repo'} <= set(config) or set(config) - {'signer', 'ssh_key', 'scratch_repo', 'test_clock'}:
+        raise Refused('configuration must have signer, ssh_key, scratch_repo (and for tests only test_clock)')
     signer, key, scratch = config['signer'], Path(config['ssh_key']), Path(config['scratch_repo'])
     if not (re.fullmatch(r'\S+', signer) and key.is_absolute() and scratch.is_absolute()):
         raise Refused('invalid signer configuration')
@@ -114,7 +121,9 @@ def main():
             'schema_version': 1, 'change_id': request['change_id'], 'signer': signer, 'tier': 'full',
             're_attests': None,
             'producer_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            'observed_at': os.environ.get('EVIDENCE_SIGN_NOW') or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            # The clock is the signer's own. Only a test configuration (never a production one) may set it.
+            'observed_at': (os.environ.get('EVIDENCE_SIGN_NOW') if config.get('test_clock') is True else None)
+                           or datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             'observed': {
                 'kind': 'tests', 'runner': 'wrapper',
                 'checks': {request['check']: {'command': request['command'], 'exit_code': request['exit_code'],
