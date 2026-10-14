@@ -28618,6 +28618,7 @@ mod tests {
                 claude_attachment_reconciled: false,
                 claude_attachment_terminal: None,
                 claude_readiness_fallback: ClaudeReadinessFallback::default(),
+                settle: ResumeSettle::resumed(),
             },
         };
         let back: DriverResume =
@@ -28634,6 +28635,8 @@ mod tests {
         );
         // A predecessor's harness record is only a startup fence; it never crosses an exec.
         assert!(back.loop_state.predecessor_harness_record.is_none());
+        // Nor does a settle: the replacement image draws its own.
+        assert!(back.loop_state.settle.0.is_none());
     }
 
     #[test]
