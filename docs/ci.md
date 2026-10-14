@@ -1165,8 +1165,9 @@ it does not establish the cause of earlier digest mismatches or a measured speed
 
 `checks.st3` (the Nix build of the st3 workspace's tests) leaves out the tests named in
 `nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
-Today these are the 13 `setup::` integration tests, which need a login shell the sandbox user does
-not have. Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`
+Today these are 14 `setup::` and 12 `otel_export::` integration tests, which need a login shell the
+sandbox user does not have (the `otel_export` output says so in so many words; for the 14th `setup::`
+test the cause is inferred from the identical daemon exit status). Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`
 shards run every one of them, as do the wrapper path's runs, so nothing is dropped, only moved.
 The check fails if an entry no longer names exactly one test (the list has gone stale) and if any
 unlisted test fails. Do not add an entry to hide a failing test; add it only when the sandbox cannot

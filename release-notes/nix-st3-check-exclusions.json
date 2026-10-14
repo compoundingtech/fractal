@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Keep the 13 login-shell setup tests out of the sandboxed st3 check by name, with a recorded reason and owner",
+  "summary": "Keep the login-shell setup and otel_export tests out of the sandboxed st3 check by name, with a recorded reason and owner",
   "replay": {
     "status": "none",
     "detail": "Runtime claims and replay behavior are unchanged."
