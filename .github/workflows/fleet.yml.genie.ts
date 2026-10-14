@@ -432,8 +432,8 @@ done`,
     'evidence-note-linux-gate': {
       name: 'evidence-note-linux-gate',
       needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries', ...evidenceStepNames],
-      // Only the merge queue and main sign; a pull request, even from this repository, never gets the key.
-      if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}",
+      // Only the merge queue, main and manual runs on main sign; a pull request, even from this repository, never gets the key.
+      if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) }}",
       'runs-on': 'ubuntu-latest',
       environment: evidenceEnvironment,
       permissions: { contents: 'write' },

@@ -520,7 +520,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -639,7 +639,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     defaults:
       run:
         shell: bash
@@ -885,7 +885,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1060,7 +1060,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_secondary) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1232,7 +1232,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1404,7 +1404,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1576,7 +1576,7 @@ jobs:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1767,7 +1767,7 @@ jobs:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -1955,7 +1955,7 @@ jobs:
   mail-redelivery-canaries:
     name: mail-redelivery-canaries
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_mail) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     timeout-minutes: 120
     defaults:
       run:
@@ -2223,9 +2223,9 @@ jobs:
       - genie-freshness
       - typescript-client
       - isolation-vm
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))) }}
     runs-on: ubuntu-latest
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     permissions:
       contents: write
     timeout-minutes: 15
@@ -2471,7 +2471,7 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["namespace-profile-linux-x86-64;job.priority={1};github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
     timeout-minutes: 60
-    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
+    environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}
     defaults:
       run:
         shell: bash

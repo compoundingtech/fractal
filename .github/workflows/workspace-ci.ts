@@ -291,12 +291,12 @@ export const evidenceStageNames = [
 ] as const
 const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
 /**
- * Only the merge queue and main reach the `evidence-signing` environment (and so the key). On any other
+ * Only the merge queue, main and manual runs on main reach the `evidence-signing` environment (and so the key). On any other
  * event the expression is empty and the job runs without an environment, exactly as before. The
  * environment's own deployment-branch policy comes after this conditional exists.
  */
 export const evidenceEnvironment =
-  "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}"
+  "${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && 'evidence-signing' || '' }}"
 export const evidenceStageJob = (name: string) =>
   (evidenceStageNames as readonly string[]).includes(name) ? { environment: evidenceEnvironment } : {}
 
