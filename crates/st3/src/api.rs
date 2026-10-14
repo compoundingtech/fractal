@@ -13776,6 +13776,9 @@ fn accept_message_receipt_with_upload_owner(
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
             body_bytes: body.as_ref().map(|body| body.size),
             body_origin: body.map(|body| body.origin),
+            // Provenance markers never originate on the ordinary send path.
+            sender_class: None,
+            assistant_grant_id: None,
         },
         idempotency_key: request.idempotency_key,
         already_sent: !appended,

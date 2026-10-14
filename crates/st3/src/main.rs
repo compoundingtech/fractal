@@ -21391,7 +21391,7 @@ fn pi_family_message_frame(
     json!({
         "type": "message",
         "deliverAs": "steer",
-        "content": st_drivers::ding::with_tag_notices(st_drivers::ding::st3_notification_with_attachments(
+        "content": st_drivers::ding::with_tag_notices(st_drivers::ding::st3_notification_with_metadata(
             &message.subject,
             &message.from,
             &message.to,
@@ -21399,6 +21399,7 @@ fn pi_family_message_frame(
             body,
             &st_drivers::ding::st3_body_sha256(body),
             attachments,
+            message.assistant_metadata().as_ref(),
         ), &message.tags.iter().filter(|tag| tag.as_str() != st3::silent::SILENT_TAG || st3::silent::is_held(message)).cloned().collect::<Vec<_>>()),
         "meta": {
             "from": message.from,
@@ -27328,6 +27329,8 @@ mod tests {
             body_ref: None,
             body_bytes: None,
             body_origin: None,
+            sender_class: None,
+            assistant_grant_id: None,
             created_index: 1,
             attachments: Vec::new(),
         };
@@ -27364,6 +27367,8 @@ mod tests {
             body_ref: None,
             body_bytes: None,
             body_origin: None,
+            sender_class: None,
+            assistant_grant_id: None,
             created_index: 1,
         };
         let queued = native_queued_message(&view, "body".into(), &[]);
@@ -27631,6 +27636,8 @@ mod tests {
                 body_ref: None,
                 body_bytes: None,
                 body_origin: None,
+                sender_class: None,
+                assistant_grant_id: None,
                 created_index: 1,
                 attachments: Vec::new(),
             };
@@ -30873,6 +30880,8 @@ mod tests {
             body_ref: None,
             body_bytes: None,
             body_origin: None,
+            sender_class: None,
+            assistant_grant_id: None,
             created_index: 1,
             attachments: Vec::new(),
         };

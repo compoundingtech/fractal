@@ -5529,6 +5529,12 @@ fn session_message_body(state: &AppState, claim: &ClaimRecord) -> Value {
     if let Some(long) = crate::message_body::split_attachments(fields.get("attachments")).1 {
         body["body_bytes"] = long.size.into();
     }
+    if let Some(class) = fields.get("sender_class").and_then(Value::as_str) {
+        body["sender_class"] = Value::String(class.to_owned());
+    }
+    if let Some(grant) = fields.get("assistant_grant_id").and_then(Value::as_str) {
+        body["assistant_grant_id"] = Value::String(grant.to_owned());
+    }
     body
 }
 

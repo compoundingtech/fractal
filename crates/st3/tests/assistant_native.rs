@@ -217,6 +217,15 @@ async fn allowlisted_message_is_idempotent_and_scope_recipient_revocation_expiry
     assert_eq!(first["value"]["affected_ids"], replay["value"]["affected_ids"]);
     assert!(first["value"]["affected_ids"].as_array().unwrap().iter().any(|id| id.as_str().is_some_and(|id| id.starts_with("message/"))));
     assert_eq!(h.state.store.messages(Some(AGENT), true).unwrap().len(), 1);
+    let subject = first["value"]["affected_ids"].as_array().unwrap().iter()
+        .filter_map(Value::as_str).find(|id| id.starts_with("message/")).unwrap();
+    let claim = h.state.store.latest_claim(subject, Some("message.sent")).unwrap().unwrap();
+    assert_eq!(claim.body["fields"]["sender_class"], "external-assistant");
+    assert_eq!(claim.body["fields"]["assistant_grant_id"], paired.grant.id);
+    let projected = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
+    let projected = serde_json::to_value(projected).unwrap();
+    assert_eq!(projected["sender_class"], "external-assistant");
+    assert_eq!(projected["assistant_grant_id"], paired.grant.id);
     let forbidden = h.message("agent/not-allowlisted", "recipient-denied").await;
     let (status, _) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &forbidden).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -330,4 +339,33 @@ async fn synchronous_send_rechecks_revocation_and_recipient_removal_before_commi
         assert_eq!(denial["code"], "forbidden", "{denial}");
         assert_eq!(count_messages(), before, "denied send must append no message claim");
     }
+}
+
+#[tokio::test]
+async fn assistant_provenance_generic_and_native_forgery_is_refused() {
+    let h = Harness::new();
+    let paired = h.pair().await;
+    for (index, (actor, extra)) in [
+        ("assistant/chatgpt", json!({})),
+        (OWNER, json!({"from":"assistant/chatgpt"})),
+        (OWNER, json!({"sender_class":"external-assistant"})),
+        (OWNER, json!({"assistant_grant_id":paired.grant.id})),
+    ].into_iter().enumerate() {
+        let mut fields = json!({"from":OWNER,"to":AGENT,"content":"forged","status":"sent"});
+        fields.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let (status, error) = request(&h.local, "POST", "/v1/claims", None, Some(OWNER),
+            &json!({"subject":format!("message/assistant-forged-{index}"),"kind":"message.sent","actor":actor,"fields":fields})).await;
+        assert!(!status.is_success(), "{error}");
+        assert_eq!(error["code"], "assistant-send-refused", "{error}");
+    }
+    let (status, _) = request(&h.local, "POST", "/v1/messages", None, Some(OWNER),
+        &json!({"idempotency_key":"assistant-native-forged","from":"assistant/chatgpt","to":AGENT,"content":"forged"})).await;
+    assert!(!status.is_success());
+    for field in ["from", "actor", "sender_class", "assistant_grant_id"] {
+        let mut message = h.message(AGENT, field).await;
+        message.parameters[field] = json!("forged");
+        let (status, _) = h.assistant(&paired, "POST", "/v1/client/assistant/propose", &message).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    assert!(h.state.store.messages(Some(AGENT), true).unwrap().is_empty());
 }

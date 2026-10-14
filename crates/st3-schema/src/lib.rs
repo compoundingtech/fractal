@@ -3455,6 +3455,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("in_reply_to", reference()),
             ("tags", array()),
             ("attachments", array()),
+            ("sender_class", enumeration(&["external-assistant"])),
+            ("assistant_grant_id", string()),
         ],
         "message.staged" => &[
             ("status", required_enum(&["staged"])),

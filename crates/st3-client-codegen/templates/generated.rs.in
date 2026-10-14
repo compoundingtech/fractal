@@ -2137,6 +2137,12 @@ pub struct TimelineMessageBody {
     /// Who signed a message a person wrote, and whether it checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<MessageProvenance>,
+    /// Trusted sender class stamped only by the authorized external-assistant send path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_class: Option<String>,
+    /// The assistant grant that authorized the send, with `sender_class`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_grant_id: Option<String>,
 }
 
 /// Who signed a message a person wrote, and whether the signature checks: `verified`, `unsigned`,

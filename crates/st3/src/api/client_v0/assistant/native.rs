@@ -34,6 +34,9 @@ pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(sna
             return Err(forbidden("assistant writes cannot supply person signatures"));
         }
         if request.action_type == "message.send" {
+            if ["from", "actor", "sender_class", "assistant_grant_id"].iter().any(|field| request.parameters.get(*field).is_some()) {
+                return Err(forbidden("assistant message identity and provenance are server-owned"));
+            }
             let to = parameter_string(&request.parameters,"to")?;
             if !fields(&policy)?["recipient_allowlist"].as_array().is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&to))) {
                 return Err(forbidden("message recipient is not owner-allowlisted"));

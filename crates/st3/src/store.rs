@@ -11236,6 +11236,9 @@ impl Store {
         input: &ClaimInput,
         signature: &smallclaims::principal::ClaimSignature,
     ) -> Result<(ClaimRecord, bool), St3Error> {
+        assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
+            input.fields.get("from").and_then(Value::as_str),
+            input.fields.contains_key("sender_class") || input.fields.contains_key("assistant_grant_id"))?;
         if input.kind != "message.sent" || input.actor.is_none() {
             return Err(St3Error::new("invalid-signature", "a signed message names its actor"));
         }
@@ -11259,12 +11262,13 @@ impl Store {
     ) -> Result<(ClaimRecord, bool), St3Error> {
         if input.kind != "message.sent" || authorization.scope != "write.assistant.messages"
             || authorization.recipient.as_deref() != input.fields.get("to").and_then(Value::as_str)
+            || input.actor.as_deref() != Some(authorization.owner.as_str())
+            || input.fields.get("from").and_then(Value::as_str) != Some(authorization.owner.as_str())
         { return Err(St3Error::new("forbidden", "assistant authorization does not bind this message")); }
         #[cfg(feature = "test-support")]
         let _gate = assistant_write_gate::pause(&authorization.grant_subject)?;
-        let admission = |transaction: &Connection| assistant_write::authorize(transaction, &self.origin, authorization);
         append_claim_with_commit_context(&self.graph, input, None, None, None, None,
-            ClaimCommitContext { admission: Some(&admission), signature: None })
+            ClaimCommitContext { assistant: Some(authorization), ..Default::default() })
     }
 
     #[cfg(test)]
@@ -22364,6 +22368,24 @@ pub(crate) fn append_claim_tx(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    let fields = body.get("fields").unwrap_or(body);
+    assistant_write::refuse_unverified(kind, actor, fields.get("from").and_then(Value::as_str),
+        fields.get("sender_class").is_some() || fields.get("assistant_grant_id").is_some())
+        .map_err(anyhow::Error::new)?;
+    append_verified_claim_tx(transaction, origin, subject, kind, actor, body, predecessors, forced_batch)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_verified_claim_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    body: &Value,
+    predecessors: &[String],
+    forced_batch: Option<&str>,
+) -> Result<ClaimRecord> {
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
@@ -22864,6 +22886,10 @@ fn message_view_tx(
         subject: subject.into(),
         from,
         to,
+        sender_class: field("sender_class").filter(|class| class == "external-assistant"),
+        assistant_grant_id: if actual.get("sender_class").and_then(Value::as_str) == Some("external-assistant") {
+            field("assistant_grant_id")
+        } else { None },
         content: field("content")
             .or_else(|| child("content"))
             .unwrap_or_default(),
@@ -28884,6 +28910,7 @@ fn classify_replicated_claim_with_registry(
             ),
         ));
     }
+    assistant_write::validate_replicated(&claim.kind, claim.actor.as_deref(), claim.body.get("fields").unwrap_or(&claim.body))?;
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
     st3_schema::accountable::validate_claim(&claim.subject, &claim.kind, &claim.body, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
@@ -58704,12 +58731,10 @@ fn append_claim_with_subject_fences(
     append_claim_with_commit_context(graph, input, fence, event_runtime, expected_subjects, observer_completion, Default::default())
 }
 
-type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), St3Error> + Sync + 'a;
-
 #[derive(Default)]
 struct ClaimCommitContext<'a> {
-    admission: Option<&'a ClaimAdmission<'a>>,
     signature: Option<&'a str>,
+    assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
 }
 
 fn append_claim_with_commit_context(
@@ -58721,6 +58746,11 @@ fn append_claim_with_commit_context(
     observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), St3Error> {
+    if context.assistant.is_none() {
+        assistant_write::refuse_unverified(&input.kind, input.actor.as_deref(),
+            input.fields.get("from").and_then(Value::as_str),
+            input.fields.contains_key("sender_class") || input.fields.contains_key("assistant_grant_id"))?;
+    }
     validate_claim_input(input)?;
     if local_retention(&input.kind)
         || (input.actor.is_none() && system_local_retention(&input.kind))
@@ -58730,12 +58760,19 @@ fn append_claim_with_commit_context(
     if latest_retention(&input.kind) {
         return append_latest_observation_fenced(graph, input, now_ms(), event_runtime);
     }
-    let operation = claim_operation(input)?;
     // One claim in a savepoint of the writer's next batch; its caller hears back once that
     // batch commits.
     graph.connection
         .batched(|transaction| -> Result<(ClaimRecord, bool), St3Error> {
-            if let Some(admission) = context.admission { admission(transaction)?; }
+            let mut assistant_input;
+            let input = if let Some(authorization) = context.assistant {
+                let grant_id = assistant_write::authorize_grant(transaction, &graph.origin, authorization)?;
+                assistant_input = input.clone();
+                assistant_input.fields.insert("sender_class".into(), json!("external-assistant"));
+                assistant_input.fields.insert("assistant_grant_id".into(), json!(grant_id));
+                &assistant_input
+            } else { input };
+            let operation = claim_operation(input)?;
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }
@@ -58973,7 +59010,8 @@ fn append_claim_with_commit_context(
                         json!({ "id": operation_id, "request_digest": request_digest }),
                     );
             }
-            let record = append_claim_tx(
+            let append = if context.assistant.is_some() { append_verified_claim_tx } else { append_claim_tx };
+            let record = append(
                 transaction,
                 &graph.origin,
                 &input.subject,

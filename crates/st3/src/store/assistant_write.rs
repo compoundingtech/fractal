@@ -14,6 +14,16 @@ pub struct AssistantWriteAuthorization {
 
 /// The connection must be the writer transaction that commits the protected mutation.
 pub fn authorize(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<(), St3Error> {
+    authorized_grant(connection, origin, authorization).map(|_| ())
+}
+
+pub(super) fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, St3Error> {
+    let granted = authorized_grant(connection, origin, authorization)?;
+    granted.body["fields"]["grant_id"].as_str().filter(|id| id.starts_with("assistant-grant/") && id.len() > "assistant-grant/".len())
+        .map(str::to_owned).ok_or_else(|| St3Error::new("forbidden", "assistant grant identity is absent"))
+}
+
+fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, St3Error> {
     let denied = || St3Error::new("forbidden", "assistant write authorization changed or expired before commit");
     let claim = |kind: &str| -> Result<Option<ClaimRecord>, St3Error> {
         connection.query_row(&latest_claim_of_kind_query(),
@@ -41,6 +51,34 @@ pub fn authorize(connection: &Connection, origin: &str, authorization: &Assistan
         let approved: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='work.person-done' AND actor=?2 AND origin=?3 AND json_extract(body,'$.fields.answer.id')='approve' AND json_extract(body,'$.fields.acted_for') IS NULL)",
             params![subject,authorization.owner,origin],|row| row.get(0)).map_err(internal)?;
         if !approved { return Err(denied()); }
+    }
+    Ok(granted)
+}
+
+/// Local generic writers cannot assert assistant identity or server-owned provenance.
+pub(super) fn refuse_unverified(kind: &str, actor: Option<&str>, from: Option<&str>, has_provenance: bool) -> Result<(), St3Error> {
+    if kind == "message.sent"
+        && (actor.is_some_and(|actor| actor.starts_with("assistant/"))
+            || from.is_some_and(|from| from.starts_with("assistant/"))
+            || has_provenance)
+    {
+        return Err(St3Error::new("assistant-send-refused", "assistant messages require the authorized native assistant path"));
+    }
+    Ok(())
+}
+
+/// Replication already authenticates the originating writer. Do not reauthorize an old
+/// committed message against a receiver's missing, expired or revoked local grant.
+pub(super) fn validate_replicated(kind: &str, actor: Option<&str>, fields: &Value) -> Result<(), St3Error> {
+    if kind != "message.sent" { return Ok(()); }
+    if fields.get("sender_class").is_none() && fields.get("assistant_grant_id").is_none() {
+        return refuse_unverified(kind, actor, fields["from"].as_str(), false);
+    }
+    if fields["sender_class"] != "external-assistant"
+        || !fields["assistant_grant_id"].as_str().is_some_and(|id| id.starts_with("assistant-grant/") && id.len() > "assistant-grant/".len())
+        || actor.is_none() || actor != fields["from"].as_str()
+    {
+        return Err(St3Error::new("assistant-send-refused", "replicated assistant provenance is inconsistent"));
     }
     Ok(())
 }
