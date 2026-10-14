@@ -42,8 +42,8 @@ impl<'a> ClaimPurpose<'a> {
     }
 }
 
-fn idle_purpose() -> Result<AgentTraceRuntimeV1Why> {
-    Ok(AgentTraceRuntimeV1Why::Variant1(AgentTraceRuntimeV1WhyVariant1 {
+fn idle_purpose() -> Result<AgentProvenanceRuntimeV1Why> {
+    Ok(AgentProvenanceRuntimeV1Why::Variant1(AgentProvenanceRuntimeV1WhyVariant1 {
         r#_tag: "idle".to_owned().try_into()?,
     }))
 }
@@ -126,8 +126,8 @@ pub fn build(facts: &Facts, purpose: ClaimPurpose<'_>) -> Result<Runtime> {
     let (why, issuance) = purpose_context(&facts.agent, &facts.incarnation, purpose,
         facts.mission_name.as_deref(), now_ms()?)?;
     let mut runtime = Runtime {
-        r#type: "agent-trace-runtime/v1".to_owned().try_into()?,
-        who: AgentTraceRuntimeV1Who {
+        r#type: "agent-provenance-runtime/v1".to_owned().try_into()?,
+        who: AgentProvenanceRuntimeV1Who {
             agent: facts.agent.clone().try_into()?,
             principal: facts.principal.clone().try_into()?,
             actor: None,
@@ -135,8 +135,8 @@ pub fn build(facts: &Facts, purpose: ClaimPurpose<'_>) -> Result<Runtime> {
             supervisor: None,
         },
         why,
-        how: AgentTraceRuntimeV1How {
-            harness: AgentTraceRuntimeV1HowHarness {
+        how: AgentProvenanceRuntimeV1How {
+            harness: AgentProvenanceRuntimeV1HowHarness {
                 tool: facts.harness_tool.clone().try_into()?,
                 version: facts.harness_version.clone().map(TryInto::try_into).transpose()?,
             },
@@ -147,7 +147,7 @@ pub fn build(facts: &Facts, purpose: ClaimPurpose<'_>) -> Result<Runtime> {
             invocation_id: None,
             issuance,
         },
-        r#where: AgentTraceRuntimeV1Where {
+        r#where: AgentProvenanceRuntimeV1Where {
             session: facts.session.clone().map(TryInto::try_into).transpose()?,
             host: facts.host.clone().map(TryInto::try_into).transpose()?,
             worktree: facts.worktree.clone().map(TryInto::try_into).transpose()?,
@@ -185,9 +185,9 @@ fn purpose_context(
     purpose: ClaimPurpose<'_>,
     mission_name: Option<&str>,
     now_ms: u128,
-) -> Result<(AgentTraceRuntimeV1Why, Option<AgentTraceRuntimeV1HowIssuance>)> {
+) -> Result<(AgentProvenanceRuntimeV1Why, Option<AgentProvenanceRuntimeV1HowIssuance>)> {
     if matches!(purpose, ClaimPurpose::Ambiguous) {
-        return Ok((AgentTraceRuntimeV1Why::Variant2(AgentTraceRuntimeV1WhyVariant2 {
+        return Ok((AgentProvenanceRuntimeV1Why::Variant2(AgentProvenanceRuntimeV1WhyVariant2 {
             r#_tag: "ambiguous".to_owned().try_into()?,
         }), None));
     }
@@ -202,22 +202,22 @@ fn purpose_context(
     };
     let mission_run = &step.run;
     let step_run = step.generation.strip_prefix("run-generation/").context("lease has no step generation reference")?;
-    let mission_run = AgentTraceRuntimeV1WhyVariant0MissionRun::try_from(mission_run.to_owned())?;
-    let step_run = AgentTraceRuntimeV1WhyVariant0StepRun::try_from(step_run.to_owned())?;
-    let issued_step_run = AgentTraceRuntimeV1HowIssuanceVariant0StepRun::try_from(step.subject.clone())?;
-    let mission = AgentTraceRuntimeV1WhyVariant0Mission {
+    let mission_run = AgentProvenanceRuntimeV1WhyVariant0MissionRun::try_from(mission_run.to_owned())?;
+    let step_run = AgentProvenanceRuntimeV1WhyVariant0StepRun::try_from(step_run.to_owned())?;
+    let issued_step_run = AgentProvenanceRuntimeV1HowIssuanceVariant0StepRun::try_from(step.subject.clone())?;
+    let mission = AgentProvenanceRuntimeV1WhyVariant0Mission {
         name: mission_name.context("claimed lease requires its mission name")?.to_owned().try_into()?,
         run: Some(mission_run),
     };
-    let why_step = AgentTraceRuntimeV1WhyVariant0Step {
+    let why_step = AgentProvenanceRuntimeV1WhyVariant0Step {
         name: step.step.clone().try_into()?,
         run: Some(step_run),
     };
-    let issuance = AgentTraceRuntimeV1HowIssuance::Variant0(AgentTraceRuntimeV1HowIssuanceVariant0 {
+    let issuance = AgentProvenanceRuntimeV1HowIssuance::Variant0(AgentProvenanceRuntimeV1HowIssuanceVariant0 {
         r#_tag: "st-issued".to_owned().try_into()?,
         step_run: issued_step_run,
     });
-    Ok((AgentTraceRuntimeV1Why::Variant0(AgentTraceRuntimeV1WhyVariant0 {
+    Ok((AgentProvenanceRuntimeV1Why::Variant0(AgentProvenanceRuntimeV1WhyVariant0 {
         r#_tag: "bound".to_owned().try_into()?,
         mission,
         step: why_step,
@@ -258,7 +258,7 @@ pub fn update_principal(runtime: &mut Runtime, principal: String) -> Result<()> 
 /// and emits a structured diagnostic; trace metadata must not block execution.
 pub fn update_model(runtime: &mut Runtime, route: &str, effort: Option<&str>) {
     let model = (|| -> Result<_> {
-        Ok(AgentTraceRuntimeV1HowModel {
+        Ok(AgentProvenanceRuntimeV1HowModel {
             route: route.to_owned().try_into()?,
             effort: effort.map(str::to_owned).map(TryInto::try_into).transpose()?,
         })
@@ -267,7 +267,7 @@ pub fn update_model(runtime: &mut Runtime, route: &str, effort: Option<&str>) {
         Ok(model) => Some(model),
         Err(error) => {
             let diagnostic = serde_json::json!({
-                "event": "agent_trace_model_unrepresentable",
+                "event": "agent_provenance_model_unrepresentable",
                 "agent": runtime.who.agent.as_str(), "route": route, "effort": effort,
                 "error": format!("{error:#}"),
             });
@@ -284,7 +284,7 @@ pub fn update_model(runtime: &mut Runtime, route: &str, effort: Option<&str>) {
 /// Propagates serialization, temporary-file, permission, sync, and rename failures.
 pub fn write_atomic(path: &Path, runtime: &Runtime) -> Result<()> {
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    let mut temporary = tempfile::Builder::new().prefix(".agent-trace-").tempfile_in(parent)?;
+    let mut temporary = tempfile::Builder::new().prefix(".agent-provenance-").tempfile_in(parent)?;
     temporary.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?;
     serde_json::to_writer(&mut temporary, runtime)?;
     temporary.write_all(b"\n")?;
@@ -299,7 +299,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn agent_trace_rejected_model_diagnostic_reaches_private_log() {
+    fn agent_provenance_rejected_model_diagnostic_reaches_private_log() {
         const CHILD: &str = "ST3_TRACE_DIAGNOSTIC_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let mut runtime = build(&facts(), ClaimPurpose::Idle).unwrap();
@@ -311,7 +311,7 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "agent_trace::issuer::tests::agent_trace_rejected_model_diagnostic_reaches_private_log"])
+            .args(["--exact", "agent_provenance::issuer::tests::agent_provenance_rejected_model_diagnostic_reaches_private_log"])
             .env(CHILD, "1").env("XDG_STATE_HOME", root.path())
             .output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -321,7 +321,7 @@ mod tests {
             serde_json::from_str(line.splitn(3, ' ').nth(2).unwrap()).unwrap()).collect();
         assert_eq!(diagnostics.len(), 2);
         for diagnostic in &diagnostics {
-            assert_eq!(diagnostic["event"], "agent_trace_model_unrepresentable");
+            assert_eq!(diagnostic["event"], "agent_provenance_model_unrepresentable");
             assert_eq!(diagnostic["agent"], facts().agent);
             assert!(diagnostic["error"].as_str().is_some_and(|error| !error.is_empty()));
         }
@@ -396,7 +396,7 @@ mod tests {
             }
             let mut runtime = build(&facts, ClaimPurpose::Idle).unwrap();
             update_lease(&mut runtime, &facts.agent, &facts.incarnation, ClaimPurpose::Bound(&step), Some("example-mission"), 10).unwrap();
-            assert!(matches!(runtime.why, AgentTraceRuntimeV1Why::Variant1(_)));
+            assert!(matches!(runtime.why, AgentProvenanceRuntimeV1Why::Variant1(_)));
             assert!(runtime.how.issuance.is_none());
         }
     }
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(decoded, initial);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let claimed = refresh(&path, &facts.agent, &facts.incarnation, ClaimPurpose::Bound(&lease()), Some("example-mission")).unwrap();
-        assert!(matches!(claimed.why, AgentTraceRuntimeV1Why::Variant0(_)));
+        assert!(matches!(claimed.why, AgentProvenanceRuntimeV1Why::Variant0(_)));
         assert_eq!(claimed.how.model, initial.how.model);
         assert_eq!(claimed.how.harness, initial.how.harness);
         assert_eq!(claimed.r#where, initial.r#where);
@@ -571,7 +571,7 @@ mod tests {
         let mut facts = facts();
         facts.agent = "agent/demo.invalid seat".into();
         let error = build(&facts, ClaimPurpose::Idle).unwrap_err();
-        assert!(error.to_string().contains("AgentTraceRuntimeV1WhoAgent"));
+        assert!(error.to_string().contains("AgentProvenanceRuntimeV1WhoAgent"));
     }
 
     #[test]

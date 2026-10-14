@@ -246,7 +246,7 @@ async fn post_work_capture_does_not_inherit_daemon_outage_wait() {
 }
 
 async fn check_trace_claim_end(ad_hoc: bool, broken_trace: bool, end: TraceEnd) {
-    use st3::agent_trace::issuer::{self, Facts};
+    use st3::agent_provenance::issuer::{self, Facts};
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
     daemon.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
@@ -303,7 +303,7 @@ mission "trace-check" state="ready" {
     }
     let run_view = daemon.store.mission_run_steps(run, false).unwrap().unwrap();
     let step = run_view.steps[0].subject.as_str();
-    let path = root.path().join("agent-trace.json");
+    let path = root.path().join("agent-provenance.json");
     let runtime = issuer::build(&Facts {
         agent: ALDER.into(),
         principal: "person/avery".into(),
@@ -333,7 +333,7 @@ mission "trace-check" state="ready" {
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("XDG_STATE_HOME", root.path().join("state"))
             .env("ST_AGENT", ALDER)
-            .env("AGENT_TRACE_FILE", &path)
+            .env("AGENT_PROVENANCE_FILE", &path)
             .arg("--endpoint").arg(daemon.socket())
             .env("ST3_DAEMON_WAIT", "30")
             .args(["--json", "work", action, step,
@@ -353,7 +353,7 @@ mission "trace-check" state="ready" {
         if matches!(end, TraceEnd::Outage) {
             let log = std::fs::read_to_string(
                 root.path().join("state/st3/driver-api-warnings.log")).unwrap();
-            assert!(log.contains("agent_trace_omitted"), "{log}");
+            assert!(log.contains("agent_provenance_omitted"), "{log}");
             assert!(log.contains("connection refused"), "{log}");
             assert!(!path.exists(), "failed capture leaves no stale trace");
             continue;
@@ -363,14 +363,14 @@ mission "trace-check" state="ready" {
                 root.path().join("state/st3/driver-api-warnings.log")).unwrap();
             let diagnostic: Value = serde_json::from_str(
                 log.lines().next_back().unwrap().splitn(3, ' ').nth(2).unwrap()).unwrap();
-            assert_eq!(diagnostic["event"], "agent_trace_omitted");
+            assert_eq!(diagnostic["event"], "agent_provenance_omitted");
             assert_eq!(diagnostic["subject"], ALDER);
             assert!(diagnostic["error"].as_str().is_some_and(|error| !error.is_empty()));
             assert!(diagnostic["cleanup_error"].as_str().is_some_and(|error| !error.is_empty()));
             assert!(path.is_dir(), "a failed trace must not replace unrelated directory contents");
             continue;
         }
-        let runtime: st3::agent_trace::Runtime =
+        let runtime: st3::agent_provenance::Runtime =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let value = serde_json::to_value(&runtime).unwrap();
         if action == "claim" {

@@ -463,12 +463,12 @@ const PROBES: &[Probe] = &[
     })),
     get("GET /v1/client/notes", "/v1/client/notes"),
     get(
-        "GET /v1/agent-trace/principal/{*subject}",
-        "/v1/agent-trace/principal/{seat}",
+        "GET /v1/agent-provenance/principal/{*subject}",
+        "/v1/agent-provenance/principal/{seat}",
     ),
     get(
-        "GET /v1/agent-trace/mission/{*run}",
-        "/v1/agent-trace/mission/{run}",
+        "GET /v1/agent-provenance/mission/{*run}",
+        "/v1/agent-provenance/mission/{run}",
     ),
     get(
         "GET /v1/client/adapter/deliveries",
@@ -1442,7 +1442,7 @@ agent "cost/principal-bound" { harness "claude" { account "principal/bound" } }
         for _ in 0..4 {
             let before = work::total();
             let response = app.clone().oneshot(Request::builder()
-                .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-owned")
+                .uri("/v1/agent-provenance/principal/agent%2Fcost%2Fprincipal-owned")
                 .body(Body::empty()).unwrap()).await.unwrap();
             assert_eq!(response.status(), axum::http::StatusCode::OK);
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -1454,14 +1454,14 @@ agent "cost/principal-bound" { harness "claude" { account "principal/bound" } }
         measurements.push(samples.into_iter().skip(1).min_by_key(|work| work.vm_steps).unwrap());
         // A bound account is command ownership, not trace declaration evidence.
         let response = app.clone().oneshot(Request::builder()
-            .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-bound")
+            .uri("/v1/agent-provenance/principal/agent%2Fcost%2Fprincipal-bound")
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/reviewer"));
         // All seats follow the same verified declaring root, independent of mission ownership.
         let response = app.oneshot(Request::builder()
-            .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-authored")
+            .uri("/v1/agent-provenance/principal/agent%2Fcost%2Fprincipal-authored")
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();

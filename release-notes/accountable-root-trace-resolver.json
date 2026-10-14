@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "The Agent Trace runtime writer outside this repository must adopt the resolver and delete its issue #2440 host-level reviewed-principal fallback. This PR does not modify that external issuer or add an authorization input. The internal resolver can merge independently of #2390. Enabling the external trace writer's reliance on it depends on #2390 signature-candidate purity and safe pending/migration verdicts: older verdict selection can downgrade valid evidence, and migration reports Held, so attribution remains none. Provision the person signing authority before publication, then let normal sealing/judging verify the root. The resolver performs no writes, sealing or judging."
+    "detail": "The Agent Provenance runtime writer outside this repository must adopt the resolver and delete its issue #2440 host-level reviewed-principal fallback. This PR does not modify that external issuer or add an authorization input. The internal resolver can merge independently of #2390. Enabling the external trace writer's reliance on it depends on #2390 signature-candidate purity and safe pending/migration verdicts: older verdict selection can downgrade valid evidence, and migration reports Held, so attribution remains none. Provision the person signing authority before publication, then let normal sealing/judging verify the root. The resolver performs no writes, sealing or judging."
   },
   "recovery": {
     "status": "none",

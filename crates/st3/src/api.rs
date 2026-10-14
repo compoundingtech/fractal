@@ -690,8 +690,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/agents/resume", post(resume_agent))
         .route("/v1/internal/seat-snapshot", post(seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(report_native_session))
-        .route("/v1/agent-trace/principal/{*subject}", get(agent_trace_principal))
-        .route("/v1/agent-trace/mission/{*run}", get(agent_trace_mission))
+        .route("/v1/agent-provenance/principal/{*subject}", get(agent_provenance_principal))
+        .route("/v1/agent-provenance/mission/{*run}", get(agent_provenance_mission))
         .route("/v1/missions/{id}", get(get_mission))
         .route("/v1/missions/{id}/retire", post(retire_mission))
         .route("/v1/launches/{id}", get(get_planning_session))
@@ -15572,7 +15572,7 @@ fn normalized_agent_actor(actor: &str) -> Option<String> {
 }
 
 /// Resolve verified fleet-root declaration evidence only; never command authorization.
-async fn agent_trace_principal(
+async fn agent_provenance_principal(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<Option<String>>, ApiError> {
@@ -15581,7 +15581,7 @@ async fn agent_trace_principal(
 }
 
 /// Resolve one immutable mission name, without hydrating its run or step history.
-async fn agent_trace_mission(
+async fn agent_provenance_mission(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
 ) -> Result<Json<Option<String>>, ApiError> {

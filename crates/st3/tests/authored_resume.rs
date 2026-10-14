@@ -49,7 +49,7 @@ if [ -n "$ST_ADMISSION_TRACE" ]; then
   export STUB_HARNESS=omp
   exec "{node}" "{admission_host}" "$@"
 fi
-cat "$AGENT_TRACE_FILE" > "$RESUME_TEST_TRACE" || exit 1
+cat "$AGENT_PROVENANCE_FILE" > "$RESUME_TEST_TRACE" || exit 1
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--resume" ]; then shift; resume="$1"; fi
   shift
@@ -182,7 +182,7 @@ agent "garden/worker" {{
     let binding = store
         .latest_claim(subject, Some("harness.session-file"))
         .unwrap();
-    let launch_trace: st3::agent_trace::Runtime = serde_json::from_slice(
+    let launch_trace: st3::agent_provenance::Runtime = serde_json::from_slice(
         &std::fs::read(root.path().join("provider-launch-trace.json")).unwrap(),
     ).unwrap();
     assert_eq!(launch_trace.who.agent.as_str(), subject);
@@ -194,10 +194,10 @@ agent "garden/worker" {{
     assert!(launch_trace.how.model.is_none(), "launch must not invent an unknown model");
     let runtime_path = drivers
         .join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24])
-        .join("observations/agent-trace.json");
+        .join("observations/agent-provenance.json");
     let mut observed_route = None;
     for _ in 0..200 {
-        let runtime: st3::agent_trace::Runtime =
+        let runtime: st3::agent_provenance::Runtime =
             serde_json::from_slice(&std::fs::read(&runtime_path).unwrap()).unwrap();
         observed_route = runtime.how.model.map(|model| model.route.as_str().to_owned());
         if observed_route.as_deref() == Some("fixture-provider/fixture-model") {

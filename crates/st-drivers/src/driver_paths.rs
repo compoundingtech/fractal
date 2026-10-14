@@ -9,7 +9,7 @@ pub const ROOT_ENV: &str = "ST_DRIVER_ROOT";
 pub const AGENT_DIR_ENV: &str = "ST_DRIVER_AGENT_DIR";
 pub const SESSION_DIR_ENV: &str = "ST_DRIVER_SESSION_DIR";
 pub const IDENTITY_ENV: &str = "ST_DRIVER_IDENTITY";
-pub const AGENT_TRACE_FILE_ENV: &str = "AGENT_TRACE_FILE";
+pub const AGENT_PROVENANCE_FILE_ENV: &str = "AGENT_PROVENANCE_FILE";
 
 /// The host resolves these once, then carries them across provider/channel re-execution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,9 +30,9 @@ impl Paths {
             ),
             (IDENTITY_ENV, identity.to_owned()),
             (
-                AGENT_TRACE_FILE_ENV,
+                AGENT_PROVENANCE_FILE_ENV,
                 self.agent_dir
-                    .join("agent-trace.json")
+                    .join("agent-provenance.json")
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -92,11 +92,11 @@ mod tests {
         let mut env: BTreeMap<_, _> = paths.environment("example/seat").into_iter().collect();
         env.insert("CATALOG".into(), "/tmp/predecessor-catalog".into());
         assert_eq!(
-            env.get(AGENT_TRACE_FILE_ENV).map(String::as_str),
-            Some("/tmp/example-driver/observations/agent-trace.json")
+            env.get(AGENT_PROVENANCE_FILE_ENV).map(String::as_str),
+            Some("/tmp/example-driver/observations/agent-provenance.json")
         );
         // The trace file is an outbound child setting, not part of path resolution.
-        env.remove(AGENT_TRACE_FILE_ENV);
+        env.remove(AGENT_PROVENANCE_FILE_ENV);
         assert_eq!(
             Paths::from_environment("example/seat", &|key| env.get(key).cloned()).unwrap(),
             Some(paths)

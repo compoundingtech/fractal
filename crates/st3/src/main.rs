@@ -1,4 +1,4 @@
-use st3::agent_trace::issuer::write_driver_log;
+use st3::agent_provenance::issuer::write_driver_log;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal as _, Read as _, Write as _};
@@ -16559,11 +16559,11 @@ async fn post_work(
         }
     })?;
     if std::env::var("ST_AGENT").ok().as_deref() == Some(actor.as_str())
-        && let Some(path) = std::env::var_os("AGENT_TRACE_FILE")
+        && let Some(path) = std::env::var_os("AGENT_PROVENANCE_FILE")
         && matches!(action, "claim" | "complete" | "fail" | "release" | "submit")
     {
         let capture_client = client.clone().with_outage_wait(Duration::ZERO, false);
-        refresh_agent_trace(&capture_client, &actor, Path::new(&path), None, None).await;
+        refresh_agent_provenance(&capture_client, &actor, Path::new(&path), None, None).await;
     }
     if json_output {
         print_value(&response, true)
@@ -16586,14 +16586,14 @@ async fn post_work(
     }
 }
 
-fn agent_trace_path(subject: &str) -> Option<PathBuf> {
-    std::env::var_os("AGENT_TRACE_FILE").map(PathBuf::from).or_else(|| {
+fn agent_provenance_path(subject: &str) -> Option<PathBuf> {
+    std::env::var_os("AGENT_PROVENANCE_FILE").map(PathBuf::from).or_else(|| {
         std::env::var_os(st_drivers::driver_paths::AGENT_DIR_ENV)
-            .map(|dir| PathBuf::from(dir).join("agent-trace.json"))
+            .map(|dir| PathBuf::from(dir).join("agent-provenance.json"))
     }).or_else(|| {
         std::env::var_os("ST3_DRIVER_STATE_DIR").map(|root| {
             PathBuf::from(root).join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24])
-                .join("observations").join("agent-trace.json")
+                .join("observations").join("agent-provenance.json")
         })
     })
 }
@@ -16617,51 +16617,51 @@ fn trace_lease<'a>(
     work: &'a [StepRunView],
     subject: &str,
     incarnation: &str,
-) -> (st3::agent_trace::ClaimPurpose<'a>, Option<String>) {
+) -> (st3::agent_provenance::ClaimPurpose<'a>, Option<String>) {
     let now = u128::from(st_drivers::message::now_ms());
     let mut held = work.iter().filter(|step| {
         work_claim_is_held_by(step, subject)
             && step.claim_incarnation.as_deref() == Some(incarnation)
             && step.claim_expires_at_unix_ms.is_some_and(|expires| expires > now)
     });
-    let Some(lease) = held.next() else { return (st3::agent_trace::ClaimPurpose::Idle, None) };
-    let Some(second) = held.next() else { return (st3::agent_trace::ClaimPurpose::Bound(lease), None) };
+    let Some(lease) = held.next() else { return (st3::agent_provenance::ClaimPurpose::Idle, None) };
+    let Some(second) = held.next() else { return (st3::agent_provenance::ClaimPurpose::Bound(lease), None) };
     // Only ambiguity allocates a diagnostic; the common idle/single-lease paths do not.
     let subjects: Vec<&str> = std::iter::once(lease).chain(std::iter::once(second))
         .chain(held).map(|step| step.subject.as_str()).collect();
     let diagnostic = json!({
-        "type": "agent_trace_purpose_ambiguous",
+        "type": "agent_provenance_purpose_ambiguous",
         "claim_count": subjects.len(),
         "subjects": subjects,
     }).to_string();
-    (st3::agent_trace::ClaimPurpose::Ambiguous, Some(diagnostic))
+    (st3::agent_provenance::ClaimPurpose::Ambiguous, Some(diagnostic))
 }
 
-async fn lock_agent_trace(path: &Path) -> Result<std::fs::File> {
+async fn lock_agent_provenance(path: &Path) -> Result<std::fs::File> {
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || st3::agent_trace::issuer::lock(&path)).await?
+    tokio::task::spawn_blocking(move || st3::agent_provenance::issuer::lock(&path)).await?
 }
 
 async fn trace_mission_name(client: &Client, lease: Option<&StepRunView>) -> Result<Option<String>> {
     let Some(lease) = lease else { return Ok(None) };
     let mission: Option<String> = client
-        .get(&format!("/v1/agent-trace/mission/{}", urlencoding::encode(&lease.run)))
+        .get(&format!("/v1/agent-provenance/mission/{}", urlencoding::encode(&lease.run)))
         .await?;
     let mission = mission.context("claimed lease has no recorded mission")?;
     Ok(Some(mission.strip_prefix("mission/").unwrap_or(&mission).to_owned()))
 }
 
-fn omit_failed_agent_trace(subject: &str, path: &Path, error: &anyhow::Error, _lock: &std::fs::File) {
+fn omit_failed_agent_provenance(subject: &str, path: &Path, error: &anyhow::Error, _lock: &std::fs::File) {
     let cleanup_error = fs::remove_file(path).err()
         .filter(|error| error.kind() != std::io::ErrorKind::NotFound)
         .map(|error| error.to_string());
-    report_agent_trace_failure(subject, error, cleanup_error);
+    report_agent_provenance_failure(subject, error, cleanup_error);
 }
 
-fn report_agent_trace_failure(subject: &str, error: &anyhow::Error, cleanup_error: Option<String>) {
+fn report_agent_provenance_failure(subject: &str, error: &anyhow::Error, cleanup_error: Option<String>) {
     // The issuer owns advisory failures; never write them to the agent's terminal.
     let _ = write_driver_log(subject, &json!({
-        "event": "agent_trace_omitted", "subject": subject,
+        "event": "agent_provenance_omitted", "subject": subject,
         "error": format!("{error:#}"), "cleanup_error": cleanup_error,
     }).to_string());
 }
@@ -16674,29 +16674,29 @@ async fn trace_current_incarnation(client: &Client, subject: &str) -> Result<Opt
         .map(|harness| harness.incarnation_id.clone()))
 }
 
-async fn initialize_agent_trace(
+async fn initialize_agent_provenance(
     client: &Client, subject: &str, driver: &str, incarnation: &str, path: &Path,
     argv: &[String],
 ) {
-    let lock = match lock_agent_trace(path).await {
+    let lock = match lock_agent_provenance(path).await {
         Ok(lock) => lock,
         Err(error) => {
-            report_agent_trace_failure(subject, &error, None);
+            report_agent_provenance_failure(subject, &error, None);
             return;
         }
     };
-    if let Err(error) = try_initialize_agent_trace(client, subject, driver, incarnation, path, argv).await {
-        omit_failed_agent_trace(subject, path, &error, &lock);
+    if let Err(error) = try_initialize_agent_provenance(client, subject, driver, incarnation, path, argv).await {
+        omit_failed_agent_provenance(subject, path, &error, &lock);
     }
     drop(lock);
-    match st3::agent_trace::issuer::refresh_requested(path) {
-        Ok(true) => refresh_agent_trace(client, subject, path, None, None).await,
+    match st3::agent_provenance::issuer::refresh_requested(path) {
+        Ok(true) => refresh_agent_provenance(client, subject, path, None, None).await,
         Ok(false) => {}
-        Err(error) => report_agent_trace_failure(subject, &error, None),
+        Err(error) => report_agent_provenance_failure(subject, &error, None),
     }
 }
 
-async fn try_initialize_agent_trace(
+async fn try_initialize_agent_provenance(
     client: &Client,
     subject: &str,
     driver: &str,
@@ -16704,13 +16704,13 @@ async fn try_initialize_agent_trace(
     path: &Path,
     argv: &[String],
 ) -> Result<()> {
-    use st3::agent_trace::issuer;
+    use st3::agent_provenance::issuer;
     anyhow::ensure!(
         trace_current_incarnation(client, subject).await?.as_deref() == Some(incarnation),
         "the runtime changed before agent trace issuance",
     );
     let principal: Option<String> = client
-        .get(&format!("/v1/agent-trace/principal/{}", urlencoding::encode(subject)))
+        .get(&format!("/v1/agent-provenance/principal/{}", urlencoding::encode(subject)))
         .await?;
     let Some(principal) = principal else {
         match fs::remove_file(path) {
@@ -16741,7 +16741,7 @@ async fn trace_launch_facts(
     argv: &[String],
     principal: String,
     mission_name: Option<String>,
-) -> Result<st3::agent_trace::issuer::Facts> {
+) -> Result<st3::agent_provenance::issuer::Facts> {
     let status: StatusResponse = client
         .get(&format!("/v1/status?subject={}&harness_only=true", urlencoding::encode(subject))).await?;
     let seat = status.subjects.iter().find(|seat| seat.subject == subject)
@@ -16762,7 +16762,7 @@ async fn trace_launch_facts(
         .or_else(|| argv.iter().find_map(|arg| arg.strip_prefix("--model=").map(str::to_owned)));
     let model_route = declared("model").or(argv_model)
         .and_then(|model| trace_model_route(driver, &model, None));
-    Ok(st3::agent_trace::issuer::Facts {
+    Ok(st3::agent_provenance::issuer::Facts {
         agent: subject.into(),
         principal,
         incarnation: incarnation.into(),
@@ -16778,13 +16778,13 @@ async fn trace_launch_facts(
     })
 }
 
-async fn refresh_agent_trace(
+async fn refresh_agent_provenance(
     client: &Client, subject: &str, path: &Path, source_incarnation: Option<&str>,
     observed: Option<&st_drivers::harness_context::Observed>,
 ) {
-    use st3::agent_trace::issuer;
+    use st3::agent_provenance::issuer;
     if let Err(error) = issuer::request_refresh(path) {
-        report_agent_trace_failure(subject, &error, None);
+        report_agent_provenance_failure(subject, &error, None);
         return;
     }
     let mut source_incarnation = source_incarnation;
@@ -16796,19 +16796,19 @@ async fn refresh_agent_trace(
     // Contenders never wait: either they own the lock or this owner drains their
     // request. Checking after unlock closes the final-check/unlock handoff race.
     loop {
-        let lock = match lock_agent_trace(path).await {
+        let lock = match lock_agent_provenance(path).await {
             Ok(lock) => lock,
             Err(error) => {
-                report_agent_trace_failure(subject, &error, None);
+                report_agent_provenance_failure(subject, &error, None);
                 return;
             }
         };
         let result = async {
             issuer::consume_refresh(path)?;
-            try_refresh_agent_trace(client, subject, path, source_incarnation, observed).await
+            try_refresh_agent_provenance(client, subject, path, source_incarnation, observed).await
         }.await;
         if let Err(error) = result {
-            omit_failed_agent_trace(subject, path, &error, &lock);
+            omit_failed_agent_provenance(subject, path, &error, &lock);
         }
         drop(lock);
         match issuer::refresh_requested(path) {
@@ -16820,21 +16820,21 @@ async fn refresh_agent_trace(
             }
             Ok(false) => return,
             Err(error) => {
-                report_agent_trace_failure(subject, &error, None);
+                report_agent_provenance_failure(subject, &error, None);
                 return;
             }
         }
     }
 }
 
-async fn try_refresh_agent_trace(
+async fn try_refresh_agent_provenance(
     client: &Client,
     subject: &str,
     path: &Path,
     source_incarnation: Option<&str>,
     observed: Option<&st_drivers::harness_context::Observed>,
 ) -> Result<()> {
-    use st3::agent_trace::issuer;
+    use st3::agent_provenance::issuer;
     let work: Vec<StepRunView> = client
         .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
     let current_incarnation = trace_current_incarnation(client, subject).await?;
@@ -16848,7 +16848,7 @@ async fn try_refresh_agent_trace(
     }
     let incarnation = current_incarnation.as_deref().unwrap_or_default();
     let principal: Option<String> = client
-        .get(&format!("/v1/agent-trace/principal/{}", urlencoding::encode(subject))).await?;
+        .get(&format!("/v1/agent-provenance/principal/{}", urlencoding::encode(subject))).await?;
     let Some(principal) = principal else {
         match fs::remove_file(path) {
             Ok(()) => write_driver_log(subject,
@@ -18830,8 +18830,8 @@ async fn run_st2_native_driver(
         predecessor_harness_record: fs::read(&harness_state_path).ok(),
         ..NativeLoopState::default()
     };
-    initialize_agent_trace(client, subject, driver, &incarnation,
-        &paths.agent_dir.join("agent-trace.json"), &argv).await;
+    initialize_agent_provenance(client, subject, driver, &incarnation,
+        &paths.agent_dir.join("agent-provenance.json"), &argv).await;
     let task = spawn_st3_provider(
         driver,
         &paths,
@@ -20568,10 +20568,10 @@ async fn publish_harness_usage(
     observed: &st_drivers::harness_context::Observed,
     last_fingerprint: &mut Option<String>,
 ) -> Result<()> {
-    if let Some(path) = client.event.map(|(_, _, dir, _)| dir.join("agent-trace.json"))
-        .or_else(|| agent_trace_path(subject))
+    if let Some(path) = client.event.map(|(_, _, dir, _)| dir.join("agent-provenance.json"))
+        .or_else(|| agent_provenance_path(subject))
     {
-        refresh_agent_trace(client.client, subject, &path, Some(incarnation), Some(observed)).await;
+        refresh_agent_provenance(client.client, subject, &path, Some(incarnation), Some(observed)).await;
     }
     // A context-window occupancy reading and cumulative session spend are
     // different measurements. Publish them as distinct durable records; never
@@ -21302,10 +21302,10 @@ async fn run_pi_channel(
         std::env::var(name).ok()
     })?;
     if let Some(paths) = observation_paths.as_ref()
-        && !paths.agent_dir.join("agent-trace.json").exists()
+        && !paths.agent_dir.join("agent-provenance.json").exists()
     {
-        initialize_agent_trace(client, subject, driver, &incarnation,
-            &paths.agent_dir.join("agent-trace.json"), &[]).await;
+        initialize_agent_provenance(client, subject, driver, &incarnation,
+            &paths.agent_dir.join("agent-provenance.json"), &[]).await;
     }
     let mut observer = if let Some(paths) = observation_paths
         && st_drivers::harness_events::enabled(&paths.agent_dir)
@@ -22571,8 +22571,8 @@ async fn drive_codex_native(
         .then(|| codex_continued_thread(&argv))
         .flatten();
     if matches!(start, ProviderStart::Launch(_, _)) {
-        initialize_agent_trace(client, subject, "codex", &incarnation,
-            &paths.agent_dir.join("agent-trace.json"), &argv).await;
+        initialize_agent_provenance(client, subject, "codex", &incarnation,
+            &paths.agent_dir.join("agent-provenance.json"), &argv).await;
     }
     let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
     let mut reported_session = None;
@@ -23178,7 +23178,7 @@ fn work_incarnation_key(incarnation: Option<&str>) -> String {
 }
 
 async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Result<()> {
-    let path = agent_trace_path(subject);
+    let path = agent_provenance_path(subject);
     renew_claimed_work_with_trace(client, subject, minute, path.as_deref()).await
 }
 
@@ -23191,7 +23191,7 @@ async fn renew_claimed_work_with_trace(
     // that proves its harness incarnation is still live before renewing the lease.
     if !work.iter().any(|step| work_claim_is_held_by(step, subject)) {
         if let Some(path) = trace_path {
-            refresh_agent_trace(client, subject, path, None, None).await;
+            refresh_agent_provenance(client, subject, path, None, None).await;
         }
         return Ok(());
     }
@@ -23240,7 +23240,7 @@ async fn renew_claimed_work_with_trace(
         }
     }
     if let Some(path) = trace_path {
-        refresh_agent_trace(client, subject, path, None, None).await;
+        refresh_agent_provenance(client, subject, path, None, None).await;
     }
     failure.map_or(Ok(()), Err)
 }
@@ -26196,27 +26196,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_trace_completion_queued_behind_an_older_snapshot_finishes_idle() {
-        check_agent_trace_lifecycle_race(TraceRace::CompleteAfterFirstRead).await;
+    async fn agent_provenance_completion_queued_behind_an_older_snapshot_finishes_idle() {
+        check_agent_provenance_lifecycle_race(TraceRace::CompleteAfterFirstRead).await;
     }
 
     #[tokio::test]
-    async fn agent_trace_stale_observation_does_not_consume_queued_completion() {
-        check_agent_trace_lifecycle_race(TraceRace::CompleteBeforeStaleObservation).await;
+    async fn agent_provenance_stale_observation_does_not_consume_queued_completion() {
+        check_agent_provenance_lifecycle_race(TraceRace::CompleteBeforeStaleObservation).await;
     }
 
     #[tokio::test]
-    async fn agent_trace_release_after_the_second_snapshot_finishes_idle() {
-        check_agent_trace_lifecycle_race(TraceRace::ReleaseAfterSecondRead).await;
+    async fn agent_provenance_release_after_the_second_snapshot_finishes_idle() {
+        check_agent_provenance_lifecycle_race(TraceRace::ReleaseAfterSecondRead).await;
     }
 
     #[derive(Clone, Copy)]
     enum TraceRace { CompleteAfterFirstRead, CompleteBeforeStaleObservation, ReleaseAfterSecondRead }
 
-    async fn check_agent_trace_lifecycle_race(race: TraceRace) {
+    async fn check_agent_provenance_lifecycle_race(race: TraceRace) {
         use axum::{Json, Router, extract::OriginalUri};
         use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
-        use st3::agent_trace::{Runtime, issuer};
+        use st3::agent_provenance::{Runtime, issuer};
         let subject = "agent/example/seat";
         let step = json!({
             "subject":"step-run/0123456789abcdef0123456789abcdef/work",
@@ -26275,8 +26275,8 @@ mod tests {
                             "harness":{"state":"ready","driver":"omp","incarnation_id":"current",
                                 "claim":"claim/current","observed_at_unix_ms":0},
                         }]}),
-                        path if path.starts_with("/v1/agent-trace/principal/") => json!("person/avery"),
-                        path if path.starts_with("/v1/agent-trace/mission/") => json!("mission/example/repo/check"),
+                        path if path.starts_with("/v1/agent-provenance/principal/") => json!("person/avery"),
+                        path if path.starts_with("/v1/agent-provenance/mission/") => json!("mission/example/repo/check"),
                         _ => panic!("unexpected trace request: {uri}"),
                     };
                     Json(json!({"api_version":"st3.v1","value":value}))
@@ -26287,9 +26287,9 @@ mod tests {
         let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("agent-trace.json");
+        let path = root.path().join("agent-provenance.json");
         let runtime: Runtime = serde_json::from_value(json!({
-            "type":"agent-trace-runtime/v1","who":{"agent":subject,"principal":"person/avery"},
+            "type":"agent-provenance-runtime/v1","who":{"agent":subject,"principal":"person/avery"},
             "why":{"_tag":"bound",
                 "mission":{"name":"example/repo/check","run":"mission-run/example/repo/check/abcdef0123456789abcdef0123456789"},
                 "step":{"name":"work","run":"0123456789abcdef0123456789abcdef"}},
@@ -26304,7 +26304,7 @@ mod tests {
             // Queue completion behind a writer, then let the predecessor
             // observation acquire the lock and consume that queued request.
             let owner = issuer::lock(&path).unwrap();
-            refresh_agent_trace(&client, subject, &path, None, None).await;
+            refresh_agent_provenance(&client, subject, &path, None, None).await;
             assert!(issuer::refresh_requested(&path).unwrap());
             drop(owner);
             let observed = st_drivers::harness_context::Observed {
@@ -26316,7 +26316,7 @@ mod tests {
                 last_compaction_trigger: None, observed_at_ms: 0, age_ms: 0, stale: false,
             };
             tokio::time::timeout(Duration::from_secs(5),
-                refresh_agent_trace(&client, subject, &path, Some("previous"), Some(&observed)))
+                refresh_agent_provenance(&client, subject, &path, Some("previous"), Some(&observed)))
                 .await.unwrap();
         } else {
             let writer = tokio::spawn({
@@ -26325,7 +26325,7 @@ mod tests {
                 let incarnation = if matches!(race, TraceRace::ReleaseAfterSecondRead) {
                     "previous"
                 } else { "current" };
-                async move { refresh_agent_trace(&client, subject, &path, Some(incarnation), None).await }
+                async move { refresh_agent_provenance(&client, subject, &path, Some(incarnation), None).await }
             });
             snapshot_read.notified().await;
             let (endpoint, status) = if matches!(race, TraceRace::ReleaseAfterSecondRead) {
@@ -26333,7 +26333,7 @@ mod tests {
             } else { ("/v1/work/complete/fixture", "verifying") };
             let committed: StepRunView = client.post(endpoint, &json!({})).await.unwrap();
             assert_eq!(committed.status, status);
-            refresh_agent_trace(&client, subject, &path, None, None).await;
+            refresh_agent_provenance(&client, subject, &path, None, None).await;
             assert!(issuer::refresh_requested(&path).unwrap());
             resume.notify_one();
             tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap();
@@ -26351,13 +26351,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_trace_contending_writers_leave_the_owners_valid_file_intact() {
-        use st3::agent_trace::{Runtime, issuer};
+    async fn agent_provenance_contending_writers_leave_the_owners_valid_file_intact() {
+        use st3::agent_provenance::{Runtime, issuer};
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("agent-trace.json");
+        let path = root.path().join("agent-provenance.json");
         let subject = "agent/example/seat";
         let runtime: Runtime = serde_json::from_value(json!({
-            "type":"agent-trace-runtime/v1",
+            "type":"agent-provenance-runtime/v1",
             "who":{"agent":subject,"principal":"person/avery"},
             "why":{"_tag":"idle"},
             "how":{"harness":{"tool":"omp"}},
@@ -26368,9 +26368,9 @@ mod tests {
         let original = fs::read(&path).unwrap();
         // An unreachable API would fail either writer if it reached the locked transaction.
         let client = Client::new(Endpoint::Http("http://127.0.0.1:0".into()));
-        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        initialize_agent_provenance(&client, subject, "omp", "current", &path, &[]).await;
         assert_eq!(fs::read(&path).unwrap(), original);
-        refresh_agent_trace(&client, subject, &path, Some("current"), None).await;
+        refresh_agent_provenance(&client, subject, &path, Some("current"), None).await;
         assert_eq!(fs::read(&path).unwrap(), original);
         let decoded: Runtime = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(decoded, runtime);
@@ -26378,7 +26378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_trace_failures_do_not_block_launch_lease_renewal_or_event_publication() {
+    async fn agent_provenance_failures_do_not_block_launch_lease_renewal_or_event_publication() {
         use axum::{Json, Router, extract::OriginalUri};
         use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
         let subject = "agent/invalid whitespace";
@@ -26421,9 +26421,9 @@ mod tests {
                             "subject":subject,"kind":"harness.usage","origin":"fixture",
                             "body":{},"predecessors":[],"accepted_at_unix_ms":0})
                     }
-                    path if path.starts_with("/v1/agent-trace/principal/") =>
+                    path if path.starts_with("/v1/agent-provenance/principal/") =>
                         json!(present.load(Ordering::SeqCst).then_some("person/avery")),
-                    path if path.starts_with("/v1/agent-trace/mission/") => json!("mission/example/repo/check"),
+                    path if path.starts_with("/v1/agent-provenance/mission/") => json!("mission/example/repo/check"),
                     path if path.starts_with("/v1/desired/") => json!({
                         "subject":subject,"kind":"agent","desired":{"name":"agent","arguments":[subject]},
                         "revision":"revision","token":"token","sources":[],
@@ -26438,12 +26438,12 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = Client::new(Endpoint::Http(format!("http://{address}")));
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("agent-trace.json");
+        let path = root.path().join("agent-provenance.json");
         fs::write(&path, b"stale predecessor").unwrap();
-        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        initialize_agent_provenance(&client, subject, "omp", "current", &path, &[]).await;
         assert!(!path.exists(), "rejected identity must remove stale trace without aborting launch");
-        let unavailable = root.path().join("missing/agent-trace.json");
-        initialize_agent_trace(&client, subject, "omp", "current", &unavailable, &[]).await;
+        let unavailable = root.path().join("missing/agent-provenance.json");
+        initialize_agent_provenance(&client, subject, "omp", "current", &unavailable, &[]).await;
         renew_claimed_work_with_trace(&client, subject, 1, Some(&unavailable)).await.unwrap();
         assert_eq!(renewals.load(Ordering::SeqCst), 1);
         assert!(!unavailable.exists());
@@ -26472,7 +26472,7 @@ mod tests {
         principal_present.store(false, Ordering::SeqCst);
         if path.is_dir() { fs::remove_dir(&path).unwrap(); }
         fs::write(&path, b"stale predecessor").unwrap();
-        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        initialize_agent_provenance(&client, subject, "omp", "current", &path, &[]).await;
         assert!(!path.exists(), "an absent verified accountable root must not leave a trace");
         server.abort();
     }
@@ -26496,17 +26496,17 @@ mod tests {
         predecessor.claim_incarnation = Some("worker:old".into());
         work.push(predecessor);
         let (purpose, diagnostic) = trace_lease(&work, "agent/worker", "worker:1");
-        assert!(matches!(purpose, st3::agent_trace::ClaimPurpose::Ambiguous),
+        assert!(matches!(purpose, st3::agent_provenance::ClaimPurpose::Ambiguous),
             "ambiguity must not select an arbitrary lease");
         let diagnostic: Value = serde_json::from_str(&diagnostic.unwrap()).unwrap();
         assert_eq!(diagnostic, json!({
-            "type": "agent_trace_purpose_ambiguous", "claim_count": 3, "subjects": subjects,
+            "type": "agent_provenance_purpose_ambiguous", "claim_count": 3, "subjects": subjects,
         }));
         let (purpose, diagnostic) = trace_lease(&work[..1], "agent/worker", "worker:1");
         assert_eq!(purpose.lease().unwrap().subject, subjects[0]);
         assert!(diagnostic.is_none(), "a unique purpose needs no warning");
         let (purpose, diagnostic) = trace_lease(&[], "agent/worker", "worker:1");
-        assert!(matches!(purpose, st3::agent_trace::ClaimPurpose::Idle));
+        assert!(matches!(purpose, st3::agent_provenance::ClaimPurpose::Idle));
         assert!(diagnostic.is_none(), "an idle seat needs no warning");
     }
 
