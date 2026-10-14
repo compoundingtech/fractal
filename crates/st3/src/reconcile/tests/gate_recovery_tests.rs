@@ -21,6 +21,7 @@ mission "dotfiles/ui-design/recovery" state="ready" {{
   loop "refine" {{
     max-rounds 1
     round {{
+      completion {{ when "all-steps-exhausted" }}
       agent "gate" {{ harness "codex" {{}}; restart "{restart}" }}
       {preparation}
       step "judge" {{ {dependencies} assigned-to "gate"; goal "Judge this round." }}
