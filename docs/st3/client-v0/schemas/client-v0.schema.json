@@ -1764,7 +1764,7 @@
         "stop_reason": {"type": "string"}, "error_id": {"type": "integer"},
         "api": {"type": "string"}, "provider": {"type": "string"}, "model": {"type": "string"},
         "native": {
-          "type": "object", "additionalProperties": true,
+          "type": "object", "additionalProperties": {},
           "description": "Exact native assistant stop and retry diagnostics, without presentation coercion.",
           "properties": {
             "stopReason": {}, "errorMessage": {}, "errorStatus": {}, "errorId": {}, "retryRecovery": {}
