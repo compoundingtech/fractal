@@ -352,14 +352,58 @@ fn collection_ignores(collection: &str, kind: &str) -> bool {
         || (kind == "harness.usage" && collection != "agents")
 }
 
+/// Optional browser tracing and bundle context shared by all stream upgrades.
+pub(super) struct StreamUpgradeContext {
+    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
+    uri: axum::http::Uri,
+    web: Option<Extension<Arc<super::client_web::ClientWeb>>>,
+}
+
+impl axum::extract::FromRequestParts<AppState> for StreamUpgradeContext {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let (upgrade, uri, web) = <(
+            Option<Extension<crate::otel::UpgradeContext>>,
+            axum::http::Uri,
+            Option<Extension<Arc<super::client_web::ClientWeb>>>,
+        ) as axum::extract::FromRequestParts<AppState>>::from_request_parts(parts, state).await?;
+        Ok(Self { upgrade, uri, web })
+    }
+}
+
+/// Per-connection tracing, source adapters and admission limits travel together.
+struct CollectionStreamContext {
+    web: Option<Arc<super::client_web::ClientWeb>>,
+    socket_trace: Option<super::client_web::TraceParent>,
+    max_subscriptions: usize,
+    sources: Option<Arc<collection_ivm::Sources>>,
+    upgrade: Option<opentelemetry::trace::SpanContext>,
+}
+
+impl CollectionStreamContext {
+    fn new(
+        (web, socket_trace, max_subscriptions): (
+            Option<Arc<super::client_web::ClientWeb>>,
+            Option<super::client_web::TraceParent>,
+            usize,
+        ),
+        sources: Option<Arc<collection_ivm::Sources>>,
+        upgrade: Option<opentelemetry::trace::SpanContext>,
+    ) -> Self {
+        Self { web, socket_trace, max_subscriptions, sources, upgrade }
+    }
+}
+
 pub(super) async fn collection_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
-    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
+    StreamUpgradeContext { upgrade, uri, web }: StreamUpgradeContext,
     headers: HeaderMap,
-    uri: axum::http::Uri,
-    web: Option<Extension<Arc<super::client_web::ClientWeb>>>,
     limit: Option<Extension<super::ClientSubscriptionLimit>>,
 ) -> Result<Response, ApiError> {
     let started = super::client_web::unix_nanos();
@@ -387,7 +431,8 @@ pub(super) async fn collection_stream(
     Ok(websocket
         .protocols([COLLECTION_SUBPROTOCOL])
         .on_upgrade(move |socket| {
-            collection_stream_socket(socket, state, session, presence, web, trace, limit, upgrade)
+            collection_stream_socket(socket, state, session, presence,
+                CollectionStreamContext::new((web, trace, limit), None, upgrade))
         }))
 }
 
@@ -1698,10 +1743,7 @@ async fn collection_stream_socket(
     state: AppState,
     session: ClientSession,
     presence: super::client_presence::StreamGuard,
-    web: Option<Arc<super::client_web::ClientWeb>>,
-    socket_trace: Option<super::client_web::TraceParent>,
-    max_subscriptions: usize,
-    upgrade: Option<opentelemetry::trace::SpanContext>,
+    mut context: CollectionStreamContext,
 ) {
     let windows = collection_windows::Windows::attach(&state.store);
     // Complete source adapters are admitted explicitly, never inferred from partial view IDs.
@@ -1718,14 +1760,13 @@ async fn collection_stream_socket(
             }
         }
     };
+    context.sources = sources;
     collection_stream_socket_with_context(
         socket,
         state,
         session,
         Some(presence),
-        (web, socket_trace, max_subscriptions),
-        sources,
-        upgrade,
+        context,
         move |state, session, request, permit| {
             let windows = windows.clone();
             async move {
@@ -1760,7 +1801,8 @@ async fn collection_stream_socket_with_reader<F, Fut>(
         + 'static,
     Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
 {
-    collection_stream_socket_with_context(socket, state, session, presence, trace, None, None, read).await;
+    collection_stream_socket_with_context(socket, state, session, presence,
+        CollectionStreamContext::new(trace, None, None), read).await;
 }
 
 #[cfg(test)]
@@ -1778,7 +1820,8 @@ async fn collection_stream_socket_with_sources<F, Fut>(
         + 'static,
     Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
 {
-    collection_stream_socket_with_context(socket, state, session, presence, no_trace(), sources, None, read).await;
+    collection_stream_socket_with_context(socket, state, session, presence,
+        CollectionStreamContext::new(no_trace(), sources, None), read).await;
 }
 
 async fn collection_stream_socket_with_context<F, Fut>(
@@ -1786,9 +1829,7 @@ async fn collection_stream_socket_with_context<F, Fut>(
     state: AppState,
     session: ClientSession,
     presence: Option<super::client_presence::StreamGuard>,
-    trace: (Option<Arc<super::client_web::ClientWeb>>, Option<super::client_web::TraceParent>, usize),
-    sources: Option<Arc<collection_ivm::Sources>>,
-    upgrade: Option<opentelemetry::trace::SpanContext>,
+    context: CollectionStreamContext,
     read: F,
 ) where
     F: Fn(AppState, ClientSession, CollectionSubscribe, tokio::sync::OwnedSemaphorePermit) -> Fut
@@ -1798,7 +1839,7 @@ async fn collection_stream_socket_with_context<F, Fut>(
     Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
 {
     collection_stream_socket_with_admission(
-        socket, state, session, presence, (sources, upgrade), trace, read, open_conversation_subscription,
+        socket, state, session, presence, context, read, open_conversation_subscription,
     ).await;
 }
 
@@ -1807,12 +1848,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     state: AppState,
     session: ClientSession,
     presence: Option<super::client_presence::StreamGuard>,
-    (sources, upgrade): (Option<Arc<collection_ivm::Sources>>, Option<opentelemetry::trace::SpanContext>),
-    (web, socket_trace, max_subscriptions): (
-        Option<Arc<super::client_web::ClientWeb>>,
-        Option<super::client_web::TraceParent>,
-        usize,
-    ),
+    context: CollectionStreamContext,
     read: F,
     admit: A,
 ) where
@@ -1821,6 +1857,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     A: Fn(AppState, ClientSession, CollectionSubscribe, ConversationAdmissionPermits) -> Admission + Clone + Send + 'static,
     Admission: Future<Output = Result<(String, Option<String>), ApiError>> + Send + 'static,
 {
+    let CollectionStreamContext { web, socket_trace, max_subscriptions, sources, upgrade } = context;
     let mut traced = BTreeMap::<String, (super::client_web::TraceParent, u128)>::new();
     // Subscribe before the first snapshot, so a commit while building it wakes
     // the next loop and is reflected in a following change frame.
@@ -7712,14 +7749,10 @@ pub(super) async fn conversation_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
-    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
+    StreamUpgradeContext { upgrade, uri, web }: StreamUpgradeContext,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ConversationQuery>,
     headers: HeaderMap,
-    (uri, web): (
-        axum::http::Uri,
-        Option<Extension<Arc<super::client_web::ClientWeb>>>,
-    ),
 ) -> Result<Response, ApiError> {
     let started = super::client_web::unix_nanos();
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
@@ -9006,14 +9039,10 @@ pub(super) async fn terminal_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
-    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
+    StreamUpgradeContext { upgrade, uri, web }: StreamUpgradeContext,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<TerminalStreamQuery>,
     headers: HeaderMap,
-    (uri, web): (
-        axum::http::Uri,
-        Option<Extension<Arc<super::client_web::ClientWeb>>>,
-    ),
 ) -> Result<Response, ApiError> {
     let started = super::client_web::unix_nanos();
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
@@ -14134,8 +14163,8 @@ mission "queue-parity" state="ready" {
                 async move {
                     upgrade.on_upgrade(move |socket| {
                         collection_stream_socket_with_admission(
-                            socket, state, ClientSession::local(None).unwrap(), None, (None, None),
-                            no_trace(),
+                            socket, state, ClientSession::local(None).unwrap(), None,
+                            CollectionStreamContext::new(no_trace(), None, None),
                             |state, session, request, permit| async move {
                                 collection_items(&state, &session, &request, permit).await
                             },
@@ -14212,8 +14241,8 @@ mission "queue-parity" state="ready" {
                 async move {
                     upgrade.on_upgrade(move |socket| {
                         collection_stream_socket_with_admission(
-                            socket, state, ClientSession::local(None).unwrap(), None, (None, None),
-                            no_trace(),
+                            socket, state, ClientSession::local(None).unwrap(), None,
+                            CollectionStreamContext::new(no_trace(), None, None),
                             |state, session, request, permit| async move {
                                 collection_items(&state, &session, &request, permit).await
                             },
@@ -14295,8 +14324,8 @@ mission "queue-parity" state="ready" {
                     async move {
                         upgrade.on_upgrade(move |socket| {
                             collection_stream_socket_with_admission(
-                                socket, state, ClientSession::local(None).unwrap(), None, (None, None),
-                                no_trace(),
+                                socket, state, ClientSession::local(None).unwrap(), None,
+                                CollectionStreamContext::new(no_trace(), None, None),
                                 |state, session, request, permit| async move {
                                     collection_items(&state, &session, &request, permit).await
                                 },
