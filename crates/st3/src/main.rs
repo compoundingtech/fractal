@@ -19735,7 +19735,6 @@ async fn run_st2_native_driver(
         incarnation,
         loop_state,
         task,
-        ResumeSettle::none(),
     )
     .await
 }
@@ -20003,6 +20002,9 @@ struct NativeLoopState {
     claude_attachment_terminal: Option<ClaudeAttachmentTerminal>,
     #[serde(default)]
     claude_readiness_fallback: ClaudeReadinessFallback,
+    /// This image's own settle. A replacement image draws a new one, so it is never carried.
+    #[serde(skip)]
+    settle: ResumeSettle,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -20047,6 +20049,7 @@ async fn resume_native_driver(
         resume.subject
     );
     resume.loop_state.harness_record_started = true;
+    resume.loop_state.settle = ResumeSettle::resumed();
     let _ = write_driver_log(
         subject,
         &format!(
@@ -20064,7 +20067,6 @@ async fn resume_native_driver(
             resume.incarnation,
             ProviderStart::Adopt(resume.session),
             resume.loop_state,
-            ResumeSettle::resumed(),
         )
         .await;
     }
@@ -20082,7 +20084,6 @@ async fn resume_native_driver(
         resume.incarnation,
         resume.loop_state,
         task,
-        ResumeSettle::resumed(),
     )
     .await
 }
@@ -20092,7 +20093,7 @@ async fn resume_native_driver(
 /// A deploy re-executes every driver in the seconds it restarts the daemon. A resumed driver waits
 /// a random share of [`st3::client::RESUME_SETTLE`], so the drivers do not all reach the new
 /// daemon's writer at once. Mail, receipts, delivery control and the provider's exit never wait.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct ResumeSettle(Option<tokio::time::Instant>);
 
 impl ResumeSettle {
@@ -20245,8 +20246,8 @@ async fn drive_st2_native(
     incarnation: String,
     mut loop_state: NativeLoopState,
     mut task: tokio::task::JoinHandle<Result<()>>,
-    settle: ResumeSettle,
 ) -> Result<()> {
+    let settle = loop_state.settle;
     let NativePaths {
         session_dir,
         agent_dir,
@@ -23335,7 +23336,6 @@ async fn run_codex_native(client: &Client, subject: &str, argv: Vec<String>) -> 
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
         ),
         NativeLoopState::default(),
-        ResumeSettle::none(),
     )
     .await
 }
@@ -23450,8 +23450,8 @@ async fn drive_codex_native(
     incarnation: String,
     start: ProviderStart,
     mut loop_state: NativeLoopState,
-    settle: ResumeSettle,
 ) -> Result<()> {
+    let settle = loop_state.settle;
     let mut paths = if matches!(start, ProviderStart::Launch(
         _,
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
