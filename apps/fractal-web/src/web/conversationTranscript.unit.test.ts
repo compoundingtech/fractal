@@ -87,6 +87,16 @@ describe('kit transcript turn mapping', () => {
     expect(turns[0]!.items.map(item => item.id)).toEqual(['read', 'reasoning', 'answer', 'status'])
     expect(turns[1]!.items.map(item => item.id)).toEqual(['run'])
   })
+  it('preserves native event identity without adding text send state', () => {
+    const event: ConversationItem = {
+      _tag: 'Event', id: 'harness', kind: 'harness-message', title: 'Harness',
+      text: 'Ready', data: { native: true }, sender: { kind: 'system', label: 'Harness' },
+    }
+    const prepared = prepareTranscriptTurns([event], { firstTurnComplete: true })
+    expect(prepared[0]!.items[0]).toBe(event)
+    expect(prepared[0]!.items[0]).not.toHaveProperty('sendState')
+    expect(prepared[0]!.items[0]).toHaveProperty('data', event.data)
+  })
 
   it.each(['credential_pin', 'title_change', 'model_change', 'thinking_level_change'])('omits known internal kind %s', eventType => {
     const turns = transcriptTurnsForItems([
@@ -199,6 +209,15 @@ describe('kit transcript turn mapping', () => {
     const failed = prompt('p3', 'Retry me.', 12, { _tag: 'Failed', reason, detail: 'raw-send-diagnostic-sentinel' })
     const turns = transcriptTurnsForItems([failed], { firstTurnComplete: true })
     expect(turns[0]!.prompt?.sendState).toEqual({ _tag: 'Failed', reason: { _tag: tag }, detail })
+  })
+
+  it('maps an unconfirmed send to the kit Unconfirmed state with fixed human copy, not a failure', () => {
+    const unconfirmed = prompt('p3', 'Retry me.', 12, { _tag: 'Unconfirmed', detail: 'raw-send-diagnostic-sentinel' })
+    const turns = transcriptTurnsForItems([unconfirmed], { firstTurnComplete: true })
+    expect(turns[0]!.prompt?.sendState).toEqual({
+      _tag: 'Unconfirmed',
+      detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.',
+    })
   })
 
   it.each(['future-reason', 'constructor', '__proto__'])('maps unclassified send failure %s to the generic kit failure', reason => {

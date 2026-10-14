@@ -1,10 +1,10 @@
 # Talking to agents
 
-Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker from [getting started](getting-started.md), restarting it if you stopped it.
+Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat), starting it again if you stopped it.
 
 ## From the terminal UI or phone
 
-Run `stui`, open **Agents**, and select `garden/worker`. Click the conversation composer, type, and press **Enter** to send. In v0.3.4, **c** opens the composer from the conversation. **Ctrl+K** finds an agent or mission; **Ctrl+H** opens Home, and **Ctrl+Q** quits. The conversation shows your Smalltalk messages alongside the harness's transcript and tool calls.
+Run `st`, open **Agents**, and select `garden/worker`. Click the conversation composer, type, and press **Enter** to send. In v0.3.4, **c** opens the composer from the conversation. **Ctrl+K** finds an agent or mission; **Ctrl+H** opens Home, and **Ctrl+Q** quits. The conversation shows your Smalltalk messages alongside the harness's transcript and tool calls.
 
 On the phone, open **Agents**, select the worker, and use its composer. [Build and run the iOS app](ios-app.md) covers local installation first. A phone reads and acts through a paired member; it does not become a replica or run a seat. To begin pairing on your daemon machine:
 
@@ -66,7 +66,9 @@ st conversations ls person/ada
 
 `send` and `reply` safely recognize a retry with the same content. If a send times out, check its status or retry it; do not assume it failed. An agent's answer belongs in the conversation where you asked it.
 
-Attach an existing PNG, JPEG, GIF, or WebP image (up to four, at most 10 MiB each):
+Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
+the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,
+and says when it changed a file. HEIC, AVIF, TIFF and PDF are refused with a way to convert them.
 
 ```sh
 printf 'Path to an image to share with the worker: '
@@ -206,7 +208,7 @@ message may have landed: the error prints its key and the command that tells whe
 `st conversations status --idempotency-key KEY`. Running the same command again is safe.
 
 `st conversations sessions` lists harness sessions and `st conversations timeline SESSION`
-shows one conversation as stui shows it: messages, Smalltalk, and tool calls folded to a line
+shows one conversation as the terminal UI shows it: messages, Smalltalk, and tool calls folded to a line
 or two. `--raw` prints every stored entry instead (message boundaries, tool input and output in
 full), and `--json` prints the page.
 

@@ -13,6 +13,9 @@ pub struct Prefs {
     /// a setting, and the conversation stays the default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_first: Option<bool>,
+    /// Use the daemon after a failed direct attachment; absence means enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_fallback: Option<bool>,
 }
 
 /// `$XDG_STATE_HOME/st3/stui/prefs.json` (or under `~/.local/state`).
@@ -56,11 +59,13 @@ mod tests {
             &Prefs {
                 simple: Some(true),
                 terminal_first: Some(true),
+                terminal_fallback: Some(false),
             },
         )
         .unwrap();
         assert_eq!(load(&path).simple, Some(true));
         assert_eq!(load(&path).terminal_first, Some(true));
+        assert_eq!(load(&path).terminal_fallback, Some(false));
         // A file from before the setting reads as the default: the conversation.
         std::fs::write(&path, br#"{"simple": false}"#).unwrap();
         assert_eq!(load(&path).terminal_first, None);

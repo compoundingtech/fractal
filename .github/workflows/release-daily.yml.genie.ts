@@ -1,4 +1,4 @@
-import { linuxActionlintConfig, linuxRunner } from './workspace-ci.ts'
+import { linuxActionlintConfig } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
@@ -25,7 +25,7 @@ export default githubWorkflow(auditCaches({
   jobs: {
     release: {
       name: 'daily-release',
-      'runs-on': linuxRunner,
+      'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
       permissions: { contents: 'write', actions: 'read' },
       env: {

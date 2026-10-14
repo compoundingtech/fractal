@@ -1,5 +1,5 @@
-//! `st missions check`: run each exec gate of a mission file once, now, the way a run would, and
-//! report its answer.
+//! `st missions check`: check mission and step exec gates before a run, and report their answers.
+//! Loop `until` exec gates are listed as unchecked: they run after each round.
 //!
 //! A check runs on the daemon, in the gate's workspace and with the environment st gives a gate
 //! it runs: the captured login-shell environment, the recorder, the `st` variables and
@@ -60,9 +60,9 @@ struct Item {
     started: Option<Instant>,
 }
 
-/// Start checking every exec gate the intent's missions declare, with `workspace` standing for a
-/// run's workspace and `inputs` for its input values, and return the check as it starts. A gate
-/// that reads an input `inputs` does not give is unchecked.
+/// Start checking the intent's mission and step exec gates, with `workspace` standing for a
+/// run's workspace and `inputs` for its input values, and return the check as it starts. Loop
+/// `until` gates and gates that read an input `inputs` does not give are listed as unchecked.
 pub fn start(
     host: CheckHost<'_>,
     intent: &NormalizedIntent,
@@ -398,7 +398,7 @@ struct Scope<'a> {
 fn collect(mission: &MissionSpec, owner: String, scope: &Scope<'_>, items: &mut Vec<Item>) {
     let variables = scope.variables;
     for gate in &mission.gates {
-        push(mission, &owner, gate, scope, items);
+        push(mission, &owner, gate, scope, None, items);
     }
     for id in &mission.display_order {
         let Some(step) = mission.steps.get(id) else {
@@ -420,7 +420,7 @@ fn collect(mission: &MissionSpec, owner: String, scope: &Scope<'_>, items: &mut 
             ..*scope
         };
         for gate in &step.gates {
-            push(mission, &step_owner, gate, &step_scope, items);
+            push(mission, &step_owner, gate, &step_scope, None, items);
         }
         if let Some(nested) = step.nested_mission.as_deref() {
             collect(nested, step_owner.clone(), &step_scope, items);
@@ -428,7 +428,14 @@ fn collect(mission: &MissionSpec, owner: String, scope: &Scope<'_>, items: &mut 
         if let Some(spec) = step.loop_spec.as_deref() {
             let loop_owner = format!("loop {}", spec.path);
             for gate in &spec.until {
-                push(mission, &loop_owner, gate, &step_scope, items);
+                push(
+                    mission,
+                    &loop_owner,
+                    gate,
+                    &step_scope,
+                    Some("not checked, they run after each round"),
+                    items,
+                );
             }
             for round in [
                 Some(&spec.round),
@@ -449,6 +456,7 @@ fn push(
     owner: &str,
     gate: &GateSpec,
     scope: &Scope<'_>,
+    deferred_reason: Option<&str>,
     items: &mut Vec<Item>,
 ) {
     let GateSpec::Mechanical { .. } = gate else {
@@ -484,7 +492,10 @@ fn push(
         answer: "waiting".into(),
         ..GateCheckItemView::default()
     };
-    if !missing.is_empty() {
+    if let Some(reason) = deferred_reason {
+        view.answer = "unchecked".into();
+        view.reason = Some(reason.into());
+    } else if !missing.is_empty() {
         view.answer = "unchecked".into();
         view.reason = Some(format!(
             "it reads a mission input; give it with {}",

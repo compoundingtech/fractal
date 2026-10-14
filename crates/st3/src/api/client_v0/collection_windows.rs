@@ -9,7 +9,7 @@ const STORES: usize = 64;
 const WINDOWS: usize = 64;
 const SESSION_WINDOWS: usize = 16;
 const KIND_LIMIT: usize = 10_000;
-const COLLECTIONS: [&str; 8] = [
+pub(super) const COLLECTIONS: [&str; 14] = [
     "missions",
     "attention",
     "agents",
@@ -18,6 +18,7 @@ const COLLECTIONS: [&str; 8] = [
     "arrangements",
     "summary",
     "summary-missions",
+    "clients", "usage", "machines", "devices", "sessions", "terminals",
 ];
 
 #[derive(Default)]
@@ -25,7 +26,7 @@ struct Revisions {
     index: u64,
     commits: u64,
     local: u64,
-    values: [u64; 8],
+    values: [u64; COLLECTIONS.len()],
 }
 
 struct Cached {
@@ -253,7 +254,7 @@ impl Windows {
 
     /// Every collection's revision, when another socket already weighed the newest commit: then
     /// no snapshot or worker is needed. `None` means [`Self::changes`] must weigh it.
-    pub(super) fn current_changes(&self, store: &Store) -> Option<[u64; 8]> {
+    pub(super) fn current_changes(&self, store: &Store) -> Option<[u64; COLLECTIONS.len()]> {
         let commits = self.commits();
         let index = store.index().ok()?;
         let revisions = self
@@ -266,14 +267,14 @@ impl Windows {
     /// Weigh the commits since the last look, once for every socket on this store. Call it only
     /// from a socket's own blocking worker, never from a request path that holds a read budget:
     /// a waiter on `weighing` must not hold a reader the weigher needs (#2019's bounded pool).
-    pub(super) fn changes(&self, store: &Store) -> anyhow::Result<[u64; 8]> {
+    pub(super) fn changes(&self, store: &Store) -> anyhow::Result<[u64; COLLECTIONS.len()]> {
         let _weighing = self.weighing.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(revisions) = self.current_changes(store) {
             return Ok(revisions);
         }
         let commits = self.commits();
         store.read_snapshot(|index| {
-            let mut values = [0; 8];
+            let mut values = [0; COLLECTIONS.len()];
             for (position, collection) in COLLECTIONS.iter().enumerate() {
                 values[position] = self
                     .revision(store, index, collection, commits)?
@@ -285,7 +286,7 @@ impl Windows {
         })
     }
 
-    pub(super) fn changed(collection: &str, before: &[u64; 8], after: &[u64; 8]) -> bool {
+    pub(super) fn changed(collection: &str, before: &[u64; COLLECTIONS.len()], after: &[u64; COLLECTIONS.len()]) -> bool {
         COLLECTIONS
             .iter()
             .position(|name| *name == collection)
@@ -300,6 +301,7 @@ impl Windows {
             "scopes":session.scopes, "custom_forms":session.custom_forms,
             "conversation_blocks":session.conversation_blocks,
             "collection":request.collection, "limit":request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS),
+            "since_ms":request.since_ms, "until_ms":request.until_ms,
             "person":request.person, "subject":request.subject, "filter_actor":request.actor, "status":request.status,
         }).to_string()
     }
@@ -341,7 +343,7 @@ impl Windows {
             self.builds.fetch_add(1, Ordering::SeqCst);
             compute()
         };
-        if request.collection == "summary" { return compute(); }
+        if matches!(request.collection.as_str(), "summary" | "clients" | "usage" | "machines" | "devices" | "sessions") { return compute(); }
         // A published view is already the shared copy, and it can be published anew without a
         // commit (a deadline passing): caching it by commit revision would serve the older one.
         if state.store.collection_view_published(&request.collection) {

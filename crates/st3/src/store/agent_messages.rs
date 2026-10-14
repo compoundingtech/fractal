@@ -148,15 +148,20 @@ pub(super) fn synthetic(fields: &Value) -> bool {
 }
 
 pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
-    flush_with_coordination(transaction, true)
+    let synced = flush_with_coordination(transaction, true)?;
+    coordination::cover_synced_sends(transaction, &synced)
 }
 
-fn flush_with_coordination(transaction: &Transaction<'_>, coordination_live: bool) -> Result<()> {
+/// Returns the subjects it flushed.
+fn flush_with_coordination(
+    transaction: &Transaction<'_>,
+    coordination_live: bool,
+) -> Result<BTreeSet<String>> {
     let pending = transaction
         .prepare_cached("SELECT subject FROM local_agent_message_pending")?
         .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for subject in pending {
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    for subject in &pending {
         // Earliest send time is stable across replication order and duplicate send claims.
         let sent: Option<(u64, String)> = transaction
             .query_row(
@@ -168,13 +173,13 @@ fn flush_with_coordination(transaction: &Transaction<'_>, coordination_live: boo
             )
             .optional()?;
         if coordination_live && sent.is_none() {
-            coordination::sync(transaction, &subject, None)?;
+            coordination::sync(transaction, subject, None)?;
         }
         let desired = sent
             .map(|(at, body)| -> Result<_> {
                 let body: Value = serde_json::from_str(&body)?;
                 if coordination_live {
-                    coordination::sync(transaction, &subject, Some((at, &body["fields"])))?;
+                    coordination::sync(transaction, subject, Some((at, &body["fields"])))?;
                 }
                 Ok(eligible(&body["fields"])
                     .then(|| (at, body["fields"]["to"].as_str().unwrap().to_owned())))
@@ -205,7 +210,7 @@ fn flush_with_coordination(transaction: &Transaction<'_>, coordination_live: boo
             [&subject],
         )?;
     }
-    Ok(())
+    Ok(pending)
 }
 
 #[derive(Clone, Copy, Deserialize)]
