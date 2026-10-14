@@ -25,6 +25,7 @@ export function Tooltip({ label, placement = 'bottom', delay = 350, children }: 
   const id = React.useId()
   const scope = React.useRef<HTMLSpanElement>(null)
   const lastScroll = React.useRef(Number.NEGATIVE_INFINITY)
+  const reopenRequest = React.useRef(0)
   const [isOpen, setOpen] = React.useState(false)
   const [settling, setSettling] = React.useState(false)
   const keyboardFocused = () => {
@@ -47,26 +48,29 @@ export function Tooltip({ label, placement = 'bottom', delay = 350, children }: 
     return () => { window.clearTimeout(timer); window.removeEventListener('scroll', onScroll, true) }
   }, [isOpen, settling])
   React.useEffect(() => {
-    if (!isOpen) return
-    const onOtherOpen = (event: Event) => { if ((event as CustomEvent<string>).detail !== id) setOpen(false) }
+    if (!isOpen && !settling) return
+    const onOtherOpen = (event: Event) => { if ((event as CustomEvent<string>).detail !== id) { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }
     window.addEventListener(tooltipOpenEvent, onOtherOpen)
-    window.dispatchEvent(new CustomEvent(tooltipOpenEvent, { detail: id }))
+    if (isOpen) window.dispatchEvent(new CustomEvent(tooltipOpenEvent, { detail: id }))
     return () => window.removeEventListener(tooltipOpenEvent, onOtherOpen)
-  }, [isOpen, id])
+  }, [isOpen, settling, id])
   const onOpenChange = (open: boolean) => {
     setOpen(open)
     if (open) return
     const closedAt = performance.now()
     // Decide after the scroll dispatch finishes, whichever capture listener ran first.
-    window.setTimeout(() => { if (Math.abs(closedAt - lastScroll.current) < scrollSettleMs && keyboardFocused()) setSettling(true) })
+    const request = ++reopenRequest.current
+    window.setTimeout(() => { if (request === reopenRequest.current && Math.abs(closedAt - lastScroll.current) < scrollSettleMs && keyboardFocused()) setSettling(true) })
   }
-  return <ThemePortal><span ref={scope} onKeyDownCapture={event => { if (event.key === 'Escape') setSettling(false) }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={onOpenChange}>{children}<AriaTooltip placement={placement} offset={geometryNumbers.tooltipOffset} {...stylex.props(styles.tooltip)}>{label}</AriaTooltip></TooltipTrigger></span></ThemePortal>
+  return <ThemePortal><span ref={scope} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={onOpenChange}>{children}<AriaTooltip placement={placement} offset={geometryNumbers.tooltipOffset} {...stylex.props(tooltipStyles.tooltip)}>{label}</AriaTooltip></TooltipTrigger></span></ThemePortal>
 }
 const styles = stylex.create({
   button: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: s.xs, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', flexShrink: 0, ':hover': { backgroundColor: surface.rowHover, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.hairline }, ':disabled': { opacity: 0.64, cursor: 'default' } },
   sm: { minWidth: g.controlSm, height: g.controlSm }, md: { minWidth: g.controlMd, height: g.controlMd }, lg: { minWidth: g.controlLg, height: g.controlLg },
   outline: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: text.fg },
   tooltipScope: { display: 'contents' },
-  // The portal host is a 0×0 fixed box, so shrink-to-fit would collapse the card to its min-content width; size it to its text up to tooltipMax.
-  tooltip: { zIndex: 50, borderRadius: r.control, backgroundColor: text.fg, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, color: surface.raised, boxShadow: elevation.popover, width: 'max-content', maxWidth: g.tooltipMax, whiteSpace: 'normal', overflowWrap: 'break-word', textAlign: 'start' },
+})
+/** Shared tooltip surface; portal ownership and trigger behavior stay with each caller. */
+export const tooltipStyles = stylex.create({
+  tooltip: { zIndex: 50, borderRadius: r.control, backgroundColor: text.fg, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, color: surface.raised, boxShadow: elevation.popover, maxWidth: g.tooltipMax },
 })

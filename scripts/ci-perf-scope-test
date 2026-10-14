@@ -30,7 +30,7 @@ for name in ('crates/st3/src/api/client_v0.rs', 'crates/st3/src/store.rs',
              'crates/st3-schema/src/registry.rs', 'crates/st3-client/src/lib.rs',
              'crates/st-runtime/src/lib.rs', 'crates/st-drivers/src/lib.rs',
              'crates/st3-conversation-ui/src/lib.rs', 'crates/new-daemon-dependency/src/lib.rs', 'vendor/component/src/lib.rs',
-             'build.rs', 'crates/st3/build.rs', 'scripts/ci-test-paths.rs', 'nix/package.nix'):
+             'crates/st-drivers/build.rs', 'crates/st3/build.rs', 'scripts/ci-test-paths.rs', 'nix/package.nix'):
     assert module.decision('pull_request', event, [name])[0], name
 for name in ('docs/other.md', 'apps/ios/App.tsx'):
     assert not module.decision('pull_request', event, [name])[0], name
@@ -142,3 +142,5 @@ for action in ['labeled', 'unlabeled']:
         assert admits(job, action=action, label='ci-perf', output='true')
 assert 'nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3' in workflow
 print('Performance scope controls passed: every main/nightly/manual, labels, read paths, renames and uncertain lookup fail-open')
+
+subprocess.run(['python3', str(ROOT / 'scripts/ci-perf-evidence-test')], check=True)

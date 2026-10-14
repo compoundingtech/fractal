@@ -6,14 +6,14 @@ set -Eeuo pipefail
   echo 'invalid idle preflight start epoch' >&2
   exit 2
 }
-now=${ST3_IDLE_REPORT_NOW_UNIX:-$(/bin/date -u +%s)}
+now=${ST3_IDLE_REPORT_NOW_UNIX:-$(date -u +%s)}
 [[ $now =~ ^[0-9]+$ ]] || { echo 'invalid idle preflight now epoch' >&2; exit 2; }
 (( now >= ST3_IDLE_PREFLIGHT_START_UNIX )) || {
   echo 'idle preflight start is in the future' >&2
   exit 2
 }
 
-report="$(/usr/bin/dirname "$0")/st3-idle-soak-report"
+report="$(dirname "$0")/st3-idle-soak-report"
 duration=$((now - ST3_IDLE_PREFLIGHT_START_UNIX))
 (( duration > 0 )) || duration=1
 # The release report is intentionally still allowed to fail for insufficient
@@ -22,9 +22,9 @@ duration=$((now - ST3_IDLE_PREFLIGHT_START_UNIX))
 result=$(ST3_IDLE_REPORT_DURATION_SECONDS="$duration" \
   ST3_IDLE_REPORT_MIN_SAMPLES=1 ST3_IDLE_REPORT_MIN_QUIET=0 \
   "$report" 2>&1) || :
-summary=$(/usr/bin/jq -cr '{hosts:[.hosts[]|{host,samples,errors,pid_count,
+summary=$(jq -cr '{hosts:[.hosts[]|{host,samples,errors,pid_count,
   first_at,last_at,max_sample_gap}]}' <<<"$result" 2>/dev/null) || summary=$result
-if ! /usr/bin/jq -e --argjson now "$now" \
+if ! jq -e --argjson now "$now" \
   --argjson start "$ST3_IDLE_PREFLIGHT_START_UNIX" '
     (.hosts | length) == 2 and
     all(.hosts[];
@@ -33,7 +33,7 @@ if ! /usr/bin/jq -e --argjson now "$now" \
       .last_at != null and .last_at >= ($now - 180) and
       (.max_sample_gap // 0) <= 180)
   ' <<<"$result" >/dev/null 2>&1; then
-  /usr/bin/printf 'FAIL: post-rollout idle evidence is missing, stale, discontinuous, or unhealthy: %.600s\n' "$summary"
+  printf 'FAIL: post-rollout idle evidence is missing, stale, discontinuous, or unhealthy: %.600s\n' "$summary"
   exit 1
 fi
-/usr/bin/printf 'PASS: post-rollout idle evidence is continuous and healthy: %.600s\n' "$summary"
+printf 'PASS: post-rollout idle evidence is continuous and healthy: %.600s\n' "$summary"

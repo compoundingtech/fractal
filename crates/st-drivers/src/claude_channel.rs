@@ -238,7 +238,23 @@ pub fn status_st3() -> Result<()> {
 }
 
 pub fn uninstall_st3(keep_policy: bool) -> Result<()> {
+    remove_st3_channel(keep_policy)?;
+    println!("uninstalled");
+    Ok(())
+}
+
+/// Unregister st's Claude plugin and marketplace and delete the marketplace files, saying nothing.
+pub fn remove_st3_channel(keep_policy: bool) -> Result<()> {
     let marketplace = st3_marketplace_root()?;
+    // Asking Claude about its plugins creates its own state files, so a machine that has never
+    // registered st's channel (no marketplace files and no Claude user config) is not asked.
+    if !marketplace.exists() && !claude_user_config_exists() {
+        let policy = st3_policy_path()?;
+        if !keep_policy && policy.exists() {
+            remove_st3_policy_with_elevation(&policy)?;
+        }
+        return Ok(());
+    }
     let owns_marketplace = st3_marketplace_registration()?
         .is_some_and(|entry| marketplace_entry_matches(&entry, &marketplace));
     if st3_plugin_is_installed()? {
@@ -266,8 +282,16 @@ pub fn uninstall_st3(keep_policy: bool) -> Result<()> {
     if !keep_policy && policy.exists() {
         remove_st3_policy_with_elevation(&policy)?;
     }
-    println!("uninstalled");
     Ok(())
+}
+
+/// Claude's user config file, which exists once Claude has run for this account.
+fn claude_user_config_exists() -> bool {
+    let directory = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    directory.is_some_and(|directory| directory.join(".claude.json").exists())
 }
 
 pub fn install_st3_policy() -> Result<PathBuf> {
@@ -300,7 +324,7 @@ fn marketplace_root() -> Result<PathBuf> {
     Ok(data_home()?.join("st2/claude-channel/marketplace"))
 }
 
-fn st3_marketplace_root() -> Result<PathBuf> {
+pub fn st3_marketplace_root() -> Result<PathBuf> {
     Ok(data_home()?.join("st/plugins/claude/marketplace"))
 }
 
