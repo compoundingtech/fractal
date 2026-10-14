@@ -369,5 +369,11 @@ by the tree they name with one `git cat-file --batch-check`, so the cost grows w
 number of evidence refs; pack refs, or add a per-tree index, before they reach the
 thousands.
 
+A check that calls the script must pass `--command` with the argument vector it
+expects; without it, any command a trusted signer recorded under that check name
+satisfies the check, and the recorded output hash is not compared. A record whose
+`observed_at` has no time zone is not evidence, because naive and aware times cannot
+be ordered against each other.
+
 This slice verifies SSH-signed `tests` records. The raw Nix output-path signature
 check for the typed `nix` observation is a later slice, agreed with the Nix producer.

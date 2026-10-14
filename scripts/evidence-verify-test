@@ -59,7 +59,7 @@ class Fixture:
         return self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'HEAD^{tree}')
 
     def note(self, commit, tree, key, signer, check='unit', command=('make', 'test'), exit_code=0,
-             runner='nix', tier='full', seconds=0, sign=True):
+             runner='nix', tier='full', seconds=0, sign=True, naive=False):
         statement = {
             '_type': 'https://in-toto.io/Statement/v1',
             'subject': [{'name': commit, 'digest': {'gitTree': tree}}],
@@ -67,7 +67,7 @@ class Fixture:
             'predicate': {
                 'schema_version': 1, 'change_id': 'change-1', 'signer': signer, 'tier': tier,
                 're_attests': None, 'producer_sha256': 'a' * 64,
-                'observed_at': (NOW + timedelta(seconds=seconds)).isoformat(),
+                'observed_at': (NOW + timedelta(seconds=seconds)).replace(tzinfo=None if naive else timezone.utc).isoformat(),
                 'observed': {'kind': 'tests', 'runner': runner, 'inputs': {},
                              'checks': {check: {'command': list(command), 'exit_code': exit_code,
                                                 'output_sha256': 'b' * 64}}},
@@ -164,6 +164,14 @@ class Verifier(unittest.TestCase):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=1)
         self.assertEqual(self.reason(self.tree), 'check_failed')
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=2)
+        self.assertEqual(self.f.verify(self.tree)[0], 0)
+
+    def test_a_time_without_a_zone_is_not_evidence_and_cannot_crash_the_ordering(self):
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', naive=True)
+        self.assertEqual(self.reason(self.tree), 'no_record')
+        # Beside a well-formed record the naive one is ignored, not compared against it.
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=1)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=2, naive=True)
         self.assertEqual(self.f.verify(self.tree)[0], 0)
 
     def test_only_full_tier_counts(self):

@@ -78,7 +78,9 @@ def statement_of(blob, tree):
                 or not isinstance(observed.get('runner'), str)
                 or not isinstance(observed.get('checks'), dict)):
             return None
-        parse_time(predicate['observed_at'])
+        # A zone is required: naive and aware times cannot be ordered against each other.
+        if parse_time(predicate['observed_at']).tzinfo is None:
+            return None
         for name, check in observed['checks'].items():
             if (not isinstance(name, str) or not name.strip()
                     or not isinstance(check['command'], list) or not check['command']
