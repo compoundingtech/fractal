@@ -79,8 +79,16 @@ def configure(root):
     subprocess.run(['git', 'init', '--quiet', '--bare', str(scratch)], check=True)
     config_path = home / '.config/st/evidence-sign.json'
     descriptor = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    config = {'signer': env('EVIDENCE_SIGNER', 'fleet/ci'), 'ssh_key': str(key_path), 'scratch_repo': str(scratch)}
+    tool_path = env('EVIDENCE_TOOL_PATH')
+    if tool_path:
+        # Where this host keeps git and ssh-keygen when it is not in a standard system directory
+        # (a Nix sandbox, for instance). The signer never uses the caller's PATH; this is its own.
+        if not all(part.startswith('/') for part in tool_path.split(':')):
+            raise Refused('EVIDENCE_TOOL_PATH must list absolute directories')
+        config['path'] = tool_path
     with os.fdopen(descriptor, 'w') as stream:
-        json.dump({'signer': env('EVIDENCE_SIGNER', 'fleet/ci'), 'ssh_key': str(key_path), 'scratch_repo': str(scratch)}, stream)
+        json.dump(config, stream)
     return home
 
 

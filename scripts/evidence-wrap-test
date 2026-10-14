@@ -35,6 +35,18 @@ def run(command, cwd, home, **extra):
     return subprocess.run(command, cwd=cwd, capture_output=True, env=env)
 
 
+def tool_path():
+    """Directories of the real git and ssh-keygen on this machine, as the signer's own path. A Nix
+    sandbox keeps them in /nix/store, outside the signer's fixed system directories."""
+    found = []
+    for tool in ('git', 'ssh-keygen'):
+        for directory in os.environ['PATH'].split(':'):
+            if 'recorder' not in directory and (Path(directory) / tool).exists():
+                found.append(directory)
+                break
+    return ':'.join(dict.fromkeys(found))
+
+
 def main(argv):
     write_fixture = Path(argv[argv.index('--write-fixture') + 1]) if '--write-fixture' in argv else None
     with tempfile.TemporaryDirectory() as directory:
@@ -47,7 +59,7 @@ def main(argv):
         home = tmp / 'home'
         (home / '.config/st').mkdir(parents=True)
         (home / '.config/st/evidence-sign.json').write_text(json.dumps(
-            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'scratch.git'), 'test_clock': True}))
+            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'scratch.git'), 'test_clock': True, 'path': tool_path()}))
         repo = tmp / 'repo'
         git(tmp, 'init', '-q', str(repo))
         (repo / 'flake.lock').write_text('{"nodes":{}}\n')
@@ -126,6 +138,15 @@ def main(argv):
                         '--aggregate', str(stage_facts), '--out', str(tmp / 'notes-modified')], repo, home)
         assert modified.returncode == 1 and b'tracked files differ' in modified.stderr and not (tmp / 'notes-modified').exists()
         git(repo, 'checkout', '--', 'a')
+        # git can be told to hide a tracked change: the index flags are read too.
+        for flag in ('--assume-unchanged', '--skip-worktree'):
+            (repo / 'a').write_text('hidden change\n')
+            git(repo, 'update-index', flag, 'a')
+            hidden = run([sys.executable, str(WRAP), '--check', 'linux-tests', '--toolchain-sha256', toolchain, '--signer', signer,
+                          '--aggregate', str(stage_facts), '--out', str(tmp / 'notes-hidden')], repo, home)
+            assert hidden.returncode == 1 and b'hide changes' in hidden.stderr and not (tmp / 'notes-hidden').exists(), flag
+            git(repo, 'update-index', '--no-assume-unchanged' if flag == '--assume-unchanged' else '--no-skip-worktree', 'a')
+            git(repo, 'checkout', '--', 'a')
         (repo / 'untracked-build-output').unlink()
         facts.write_text(json.dumps({'command': ['x'], 'exit_code': 0, 'output': 1, 'output_sha256': 'a' * 64}))
         assert run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
@@ -198,7 +219,7 @@ def main(argv):
         production = tmp / 'production-home'
         (production / '.config/st').mkdir(parents=True)
         (production / '.config/st/evidence-sign.json').write_text(json.dumps(
-            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'production.git')}))
+            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'production.git'), 'path': tool_path()}))
         marker = tmp / 'ran'
         shims = tmp / 'shims'
         shims.mkdir()
@@ -235,7 +256,7 @@ def main(argv):
             config_dir = fixture_home / '.config/st'
             config_dir.mkdir(parents=True)
             (config_dir / 'evidence-sign.json').write_text(json.dumps(
-                {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'fixture.git'), 'test_clock': True}))
+                {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'fixture.git'), 'test_clock': True, 'path': tool_path()}))
             made = subprocess.run([sys.executable, str(SIGN)], cwd=repo, input=json.dumps(good).encode(), capture_output=True,
                                   env=dict(ENV, HOME=str(fixture_home), EVIDENCE_SIGN_NOW=DATE))
             answer = json.loads(made.stdout)

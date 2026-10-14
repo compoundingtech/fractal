@@ -31,6 +31,16 @@ def git(repo, *args):
     return done.stdout.decode().strip()
 
 
+def tool_path():
+    found = []
+    for tool in ('git', 'ssh-keygen'):
+        for directory in os.environ['PATH'].split(':'):
+            if 'recorder' not in directory and (Path(directory) / tool).exists():
+                found.append(directory)
+                break
+    return ':'.join(dict.fromkeys(found))
+
+
 def mode(path):
     return stat.S_IMODE(os.stat(path).st_mode)
 
@@ -68,7 +78,7 @@ with tempfile.TemporaryDirectory() as directory:
     # --- configure: mode, masking, nothing printed but mask commands
     runner = tmp / 'runner'
     runner.mkdir()
-    done = helper('configure', env=dict(RUNNER_TEMP=str(runner), EVIDENCE_SIGNING_KEY=key))
+    done = helper('configure', env=dict(RUNNER_TEMP=str(runner), EVIDENCE_SIGNING_KEY=key, EVIDENCE_TOOL_PATH=tool_path()))
     assert done.returncode == 0, done.stderr
     home = Path(done.stdout.strip().splitlines()[-1])
     assert mode(home / 'signing-key') == 0o600 and mode(home / '.config/st/evidence-sign.json') == 0o600
@@ -79,7 +89,8 @@ with tempfile.TemporaryDirectory() as directory:
     leaked = [line for line in (done.stdout + done.stderr).splitlines() if not line.startswith('::add-mask::') and any(k in line for k in key.splitlines() if len(k) > 20)]
     assert not leaked, 'the key appears outside mask commands'
     config = json.loads((home / '.config/st/evidence-sign.json').read_text())
-    assert config['signer'] == 'fleet/ci' and config['ssh_key'] == str(home / 'signing-key')
+    assert config['signer'] == 'fleet/ci' and config['ssh_key'] == str(home / 'signing-key') and config['path'] == tool_path()
+    assert helper('configure', env=dict(RUNNER_TEMP=str(tmp / 'rel'), EVIDENCE_SIGNING_KEY=key, EVIDENCE_TOOL_PATH='relative/bin')).returncode == 1, 'a relative tool path is refused'
     again = helper('configure', env=dict(RUNNER_TEMP=str(runner), EVIDENCE_SIGNING_KEY=key))
     assert again.returncode == 1, 'configure never overwrites an existing key file'
     empty = helper('configure', env=dict(RUNNER_TEMP=str(tmp / 'other'), EVIDENCE_SIGNING_KEY='  \n'))

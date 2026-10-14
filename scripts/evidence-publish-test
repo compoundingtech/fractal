@@ -25,6 +25,18 @@ def keygen(path, comment):
     return path.with_suffix('.pub').read_text().split()
 
 
+def tool_path():
+    """Directories of the real git and ssh-keygen on this machine, as the signer's own path. A Nix
+    sandbox keeps them in /nix/store, outside the signer's fixed system directories."""
+    found = []
+    for tool in ('git', 'ssh-keygen'):
+        for directory in os.environ['PATH'].split(':'):
+            if 'recorder' not in directory and (Path(directory) / tool).exists():
+                found.append(directory)
+                break
+    return ':'.join(dict.fromkeys(found))
+
+
 with tempfile.TemporaryDirectory() as directory:
     tmp = Path(directory)
     good_key, rogue_key = tmp / 'good', tmp / 'rogue'
@@ -37,7 +49,7 @@ with tempfile.TemporaryDirectory() as directory:
         h = tmp / name
         (h / '.config/st').mkdir(parents=True)
         (h / '.config/st/evidence-sign.json').write_text(json.dumps(
-            {'signer': 'fleet/ci', 'ssh_key': str(key), 'scratch_repo': str(h / 'scratch.git')}))
+            {'signer': 'fleet/ci', 'ssh_key': str(key), 'scratch_repo': str(h / 'scratch.git'), 'path': tool_path()}))
         return h
 
     homes = {'good': home('h-good', good_key), 'rogue': home('h-rogue', rogue_key)}

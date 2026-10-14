@@ -67,8 +67,15 @@ def dirty():
 
 
 def tracked_dirty():
-    """Tracked files that differ from the commit. Untracked build output does not count."""
-    return git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
+    """Tracked files that differ from the commit. Untracked and ignored files do not count (by design:
+    build output lives there, so the note says 'tested' about a state that can differ from the tree it names
+    only by files outside the tree).
+
+    `git status` can be told to ignore a tracked file (assume-unchanged, skip-worktree), so the index flags
+    are read too: every tracked file must be tagged `H`."""
+    changed = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
+    hidden = [line for line in git('ls-files', '-v').stdout.decode().splitlines() if line[:2] != 'H ']
+    return changed or ('index flags hide changes: ' + ', '.join(hidden[:3]) if hidden else '')
 
 
 def toolchain_digest(override):
@@ -142,8 +149,10 @@ def main(argv):
             inputs.update(facts.get('inputs', {}))
             # The job ran code under test in this checkout and the note names HEAD's tree. If that code
             # changed a tracked file, the tree that was tested is not the tree being signed.
-            if tracked_dirty():
-                raise Failure('tracked files differ from the commit, so the tree that was tested is not the one named; nothing was signed')
+            detail = tracked_dirty()
+            if detail:
+                raise Failure('tracked files differ from the commit, so the tree that was tested is not the one named; nothing was signed ('
+                              + detail.splitlines()[0][:200] + ')')
             inputs['workspace_clean'] = 'true'  # tracked files are exactly the commit's
             inputs['untracked_files'] = 'false' if clean else 'true'
         else:

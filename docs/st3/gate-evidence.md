@@ -391,7 +391,14 @@ deployment-branch policy comes only after this conditional is on main (a policy 
 refs would otherwise fail those jobs at start). Signing jobs also refuse to sign when tracked files
 differ from the commit (`git status --porcelain --untracked-files=no`): the code under test ran in that
 checkout, and the note names `HEAD`'s tree. Untracked build output is recorded (`untracked_files`) and
-does not stop the note.
+does not stop the note. `git status` can be told to ignore a tracked file (`--assume-unchanged`,
+`--skip-worktree`), so the index flags are read too (`git ls-files -v`: every tracked file must be tagged
+`H`). Untracked and ignored files are not refused, by design, because build output lives there; the note
+therefore says "tested" about a checkout whose tracked files equal the tree it names, plus whatever
+untracked or ignored files the job had. The signer finds `git` and `ssh-keygen` only in its own path: the
+standard system directories, or the `path` in its configuration (`EVIDENCE_TOOL_PATH` when
+`ci-evidence-signing configure` writes it), which is how the Nix sandbox, where they live in
+`/nix/store`, supplies them without trusting the caller's PATH.
 
 ## Fresh CI re-attestation
 
