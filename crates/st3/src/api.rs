@@ -2871,7 +2871,10 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
 /// without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     let mut running = BTreeMap::<String, Vec<Value>>::new();
-    for subagent in store.running_subagents(client_now_ms() as u64)? {
+    let subagents = crate::otel::roster_phase("subagent_leases", || {
+        store.running_subagents(client_now_ms() as u64)
+    })?;
+    for subagent in subagents {
         running
             .entry(subagent.agent.clone())
             .or_default()
