@@ -1719,29 +1719,25 @@ mod tests {
 
         fn assert_bounded_outcomes(items: &[Value], negotiated: bool) -> Vec<&Value> {
             let mut outcomes = Vec::new();
-            for (entry_type, code) in [
-                ("error", Some("native_provider_error")),
-                ("status", None),
-            ] {
+            for entry_type in ["content", "status"] {
                 let item = items
                     .iter()
                     .find(|item| {
                         item["type"] == entry_type
-                            && code.is_none_or(|code| item["body"]["code"] == code)
+                            && (entry_type != "content" || item["role"] == "assistant")
                     })
                     .unwrap();
-                assert_eq!(item["role"], "system");
+                assert_eq!(item["role"], if entry_type == "content" { "assistant" } else { "system" });
                 assert!(serde_json::to_vec(item).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
                 let body = &item["body"];
-                if code == Some("native_provider_error") {
-                    for value in [&body["message"], &body["details"]["errorMessage"]] {
-                        assert!(
-                            value.as_str().unwrap().contains(
-                                "[st truncated this native timeline value: size limit; 614400 bytes]"
-                            )
-                        );
+                if entry_type == "content" {
+                    assert!(body["text"].as_str().unwrap().contains("[st truncated"));
+                    if negotiated {
+                        let view = &body["blocks"][0]["view"];
+                        assert!(view["message"].as_str().unwrap().contains("[st truncated"));
+                        assert!(view["native"]["errorMessage"].as_str().unwrap().contains("[st truncated"));
+                        assert_eq!(view["native"]["errorStatus"], 429);
                     }
-                    assert_eq!(body["details"]["errorStatus"], 429);
                 } else {
                     assert_eq!(body["status"], "cancelled");
                     let detail = &body["detail"];
@@ -1753,7 +1749,7 @@ mod tests {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .find(|block| block["kind"] == entry_type)
+                        .find(|block| block["kind"] == if entry_type == "content" { "error" } else { "status" })
                         .unwrap();
                     assert_eq!(block["continuation"]["reason"], "size-limit");
                 } else {
@@ -1830,7 +1826,7 @@ mod tests {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .find(|block| block["kind"] == item["type"])
+                        .find(|block| block["kind"] == if item["type"] == "content" { "error" } else { "status" })
                         .unwrap();
                     let token = block["continuation"]["ref"].as_str().unwrap();
                     assert_eq!(locator(token, &native.id).unwrap().pointer, "/body");
@@ -1839,9 +1835,10 @@ mod tests {
                     assert_eq!(full, source["body"]);
                     match index {
                         0 => {
-                            assert_eq!(full["message"], provider_message["errorMessage"]);
-                            assert_eq!(full["details"]["errorMessage"], provider_message["errorMessage"]);
-                            assert_eq!(full["details"]["retryRecovery"], provider_message["retryRecovery"]);
+                            let view = &full["blocks"][0]["view"];
+                            assert_eq!(view["message"], provider_message["errorMessage"]);
+                            assert_eq!(view["native"]["errorMessage"], provider_message["errorMessage"]);
+                            assert_eq!(view["native"]["retryRecovery"], provider_message["retryRecovery"]);
                         }
                         _ => {
                             let detail: Value = serde_json::from_str(full["detail"].as_str().unwrap()).unwrap();

@@ -188,16 +188,16 @@ recovery stub.
 
 Native exceptional assistant stop metadata is retained independently of content, including empty
 turns. Routine `stop` and `toolUse` do not add redundant completion/waiting entries.
-`length` produces `native_output_truncated`: hitting an output limit means the answer may be
-incomplete, not that the assistant is waiting. Provider failures (`native_provider_error`),
-aborts (`native_turn_aborted`) and unsupported stops (`native_stop_unknown`) use the existing
-error entry with an `error` block whose `{body_ref:true}` payload refers to its body.
-The body's `details` retains exact native `stopReason`, `errorMessage`, `errorStatus`, `errorId`
-and `retryRecovery` values whenever supplied, including future values and structured fields.
-The error body's `message` is the provider's exact `errorMessage` string when present; otherwise
-it is a structural explanation. Replay does not infer retry success or terminal failure:
-`willContinue` belongs to the live `agent_end` event, not persisted assistant messages.
-An abort does not imply a user cancellation.
+Assistant outcomes use the shared `assistant_error` block on an assistant content entry,
+not a second system error entry. Its view applies the harness's presentation rules:
+superseded attempts, silent aborts and user interrupts render nothing; recovered attempts
+show a compact note; terminal failures render in full. `length` reports a possibly
+incomplete answer, and unknown stop reasons remain visible even without an error message.
+The view's `native` object retains exact `stopReason`, `errorMessage`, `errorStatus`,
+`errorId` and `retryRecovery` values whenever supplied, including future structured fields.
+The presentation `message` keeps the original diagnostic, while `label` supplies the
+resolved display text. Persisted retry markers determine presentation; replay does not
+infer retry continuation from messages or process exits.
 
 Native `custom/session_exit` checkpoints are classified from their `data.kind` and
 `data.reason`, without inferring the outcome of a turn or pending tools:
@@ -227,15 +227,14 @@ Both retain exact kind, reason, pending-tool arguments/intent and future fields.
 A process exit proves neither user cancellation, tool completion nor the outcome of
 the next process.
 
-The normalizer passes through the provider's outcome without withholding or truncating
-diagnostics, pending-tool arguments/intent or unknown fields. Parsed records also retain the
-complete native record in an internal `source_record` block; malformed input retains its
-original bytes as `raw_text`. Only transport size and paging limits bound responses; size
-truncation is visibly marked, and owner continuations recover the exact full values.
-These outcomes are read from the owner machine per request, not stored in the database.
-Presentation filters belong to shared renderers; show-everything mode exposes the unchanged
-normalized data. A `cancelled` exit status describes process lifecycle, not a successfully
-finished turn.
+Visible assistant views and session exits preserve diagnostics, pending-tool arguments/intent
+and unknown fields. Parsed records also retain the complete native record in an internal
+`source_record` block; malformed input retains its original bytes as `raw_text`.
+Transport size and paging limits bound responses; size truncation is visibly marked,
+and owner continuations recover the exact full values. These outcomes are read from the
+owner machine, not stored in the database. Assistant visibility follows the harness rules
+above in the normalizer; source records remain available through owner reads.
+A `cancelled` exit status describes process lifecycle, not a successfully finished turn.
 
 ## Interrupted ask bridge
 

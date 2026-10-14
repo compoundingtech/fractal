@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use shared assistant error presentation for native stop outcomes",
+  "replay": {"status": "none", "detail": "Native transcript outcomes remain normalized on owner reads; no replay trigger changes."},
+  "schema": {"status": "none", "detail": "No database migration or stored transcript class changes."},
+  "rules": {"status": "none", "detail": "No claim, checkpoint or fleet coordination changes."},
+  "compatibility": {"status": "changed", "detail": "Supersedes the push_omp_stop description in native-outcomes.json: assistant stops use main's existing assistant_error view, not separate system errors. Exact stopReason, errorMessage, errorStatus, errorId and retryRecovery fields are retained under view.native. Superseded attempts, silent aborts and user interrupts keep main's hidden presentation; length and unknown stops remain visible. Session exits retain the previously described cancelled status or fatal/unknown diagnostic errors. Existing timeline kinds and client schemas are unchanged. This applies directly from main or from earlier native-outcomes branch builds, with no intermediate migration required."},
+  "downtime": {"status": "none", "detail": "No extra service interruption beyond normal binary restart."},
+  "manual": {"status": "none", "detail": "No manual data or configuration changes."},
+  "recovery": {"status": "none", "detail": "Preserve owner-local native transcripts; no additional recovery procedure."}
+}
