@@ -699,11 +699,22 @@ pub fn play(
     instance: &str,
     show: impl FnOnce(stui::playback::Playback) -> Result<()>,
 ) -> Result<()> {
+    use std::io::IsTerminal as _;
+    ensure!(
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        "a demo plays in the terminal interface: run it in a terminal"
+    );
     let exe = std::env::current_exe().context("cannot find this st executable")?;
     let dir = demo_dir();
     fs::create_dir_all(&dir)?;
     stop_daemon(&dir)?;
     let config = crate::config::Config::default();
+    // A daemon this player did not start (the instance's service) owns the graph: leave it be.
+    ensure!(
+        std::os::unix::net::UnixStream::connect(&config.socket).is_err(),
+        "the {instance} instance's daemon is running and a demo runs its own: stop it with \
+         st --instance {instance} service stop, or play the demo in another instance"
+    );
     reset_state(&config)?;
     write_config(&demo)?;
     println!("Resetting the {instance} instance and starting its daemon…");

@@ -17,7 +17,8 @@ A demo always plays in an [instance](instances.md), so your own fleet is never t
 play erases that instance's graph, starts its daemon, seeds the demo and opens the interface. To
 start over, quit with **Ctrl+Q** and run the same command again. The instance needs no setup
 first: the play writes its config (the demo's person and machine name) and leaves its services
-alone. Use an instance you keep only for demos, because a play replaces its config and its graph.
+alone. Use an instance you keep only for demos, because a play replaces its config and its graph. A
+play runs its own daemon; if the instance's service is running, it says so and changes nothing.
 
 Two examples are in [`examples/demos`](../../examples/demos):
 
