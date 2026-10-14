@@ -261,9 +261,10 @@ A note kind registration includes:
 - **DQ5 Structure beyond text:** "Structured" may mean an optional tag
   (for example `retire`, `watch`, `context`) that clients can filter and
   render. Not in the draft; resolved by the interview.
-- **DQ6 Shared subject-ref shape with annotations:** Whether notes and git/PR
-  annotations share one target-reference schema. Resolved with
-  `agent/dotfiles/annotations`.
+- **DQ6 Shared subject-ref shape with annotations:** Resolved with
+  `agent/dotfiles/annotations`: Agent Provenance reuses the st graph ref shape
+  for st subjects, as notes do; artifacts outside st use typed sha256
+  references owned by that spec. No second subject-ref shape exists.
 - **DQ7 Text limit:** 1024 bytes (CR06) versus the directive note's 4096.
 - **DQ8 Replicated target restrictions:** Must replicated admission enforce
   agent target/assignment restrictions too? This requires

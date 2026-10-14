@@ -25,8 +25,12 @@ with `agent/dotfiles/annotations`.
 - **Person directive note**: The existing `person.directive-note-set` record:
   one current note per person, read by the agents that work for that person.
   It has no target. It stays a separate concept (see spec `DQ1`).
-- **Annotation**: Machine or agent metadata attached to git and pull-request
-  objects. Owned by `agent/dotfiles/annotations`. Not a note.
+- **Annotation**: Umbrella term, owned by `agent/dotfiles/annotations`, for
+  structured metadata attached to artifacts. Its record is **Agent
+  Provenance** (`agent-provenance`): who/why/where facts about agent-made
+  artifacts (git trailers, PR footers, receipts, st claims). Artifacts are
+  addressed by typed sha256 references; st subjects use st graph refs as-is.
+  Not a note.
 
 ## Structure
 
@@ -36,7 +40,7 @@ person/… ─┐                  ┌─ agent/<org>/<name> [session scope?]
 agent/… ──┘        (audience)        ├─ mission-run/<id>
                                      └─ step-run/<gen>/<path>
 
-annotation ─ target ─ git/PR object      (separate system, shared subject-ref shape)
+agent provenance ─ target ─ artifact (typed sha256 ref) or st graph ref
 ```
 
 Leitwort: a note is *about* its target and *for* its audience.
