@@ -2744,15 +2744,18 @@ fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyh
             let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
             // Freshness is approximate presentation. Use the card's already reduced observation;
             // querying diagnostic and local-observation history here made every read grow with it.
-            let observation = match harness {
+            let report_age_ms = harness
+                .as_ref()
+                .map(|harness| {
+                    u64::try_from(client_now_ms().saturating_sub(harness.observed_at_unix_ms))
+                        .unwrap_or(u64::MAX)
+                });
+            let observation = match report_age_ms {
                 None => "missing",
-                Some(harness)
-                    if client_now_ms().saturating_sub(harness.observed_at_unix_ms) > 90_000 =>
-                {
-                    "stale"
-                }
+                Some(age) if age > 90_000 => "stale",
                 Some(_) => "current",
             };
+            let reported = item["harness_state"].as_str().map(str::to_owned);
             item["observation"] = json!(observation);
             // A turn can run for hours without a new harness claim, so only a claim that says the
             // seat is waiting for input lapses; a `working` one stays until the harness says otherwise.
@@ -2763,7 +2766,7 @@ fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyh
                 }
             }
             overlay_declaration_restart(item, client_now_ms());
-            overlay_down(item, launch_since, observation, client_now_ms() as u64);
+            overlay_down(item, launch_since, report_age_ms, reported.as_deref(), client_now_ms() as u64);
             overlay_delivery_presence(item, &local_host);
         }
         overlay_subagents(store, items)?;
@@ -2797,19 +2800,40 @@ fn overlay_declaration_restart(item: &mut Value, now: u128) {
 /// How long a declared seat may take to show a running session before it is called down.
 const LAUNCH_WINDOW_MS: u64 = 120_000;
 
+/// How old a harness report may be and still show that the seat's driver is alive. A driver at an
+/// empty prompt reports every five minutes, so its report is older than the 90 s freshness window
+/// for most of every interval; two intervals and a minute of slack never call such a seat down.
+const HEARTBEAT_MS: u64 = 661_000;
+
 /// Settles a seat whose runtime row says it is not running yet. Every app shows the result and
 /// none re-derives it.
 ///
-/// A harness that reported within the freshness window is running, whatever a runtime row stuck at
-/// `pending` says: a seat can outlive its row. With no such report, a seat with a declaration and
-/// no session after its launch window is `down`, since the moment it began waiting, and the steps
-/// it holds say so (their progress was written by a holder that is not running).
-fn overlay_down(item: &mut Value, launch_since: Option<u64>, observation: &str, now_ms: u64) {
+/// A harness that reported within a heartbeat is alive, whatever a runtime row stuck at `pending`
+/// says: a seat can outlive its row. It reads as any other live seat (running, or waiting when its
+/// idle report has lapsed). With no such report, a seat with a declaration and no session after its
+/// launch window is `down`, since the moment it began waiting, and the steps it holds say so
+/// (their progress was written by a holder that is not running).
+fn overlay_down(
+    item: &mut Value,
+    launch_since: Option<u64>,
+    report_age_ms: Option<u64>,
+    reported: Option<&str>,
+    now_ms: u64,
+) {
     if !matches!(item["state"].as_str(), Some("desired" | "starting")) {
         return;
     }
-    if observation == "current" && matches!(item["harness_state"].as_str(), Some("ready" | "idle" | "working")) {
-        item["state"] = json!("running");
+    // A `starting` report is written at launch and proves nothing about a session; `ended` and
+    // `failed` say the harness is gone. Any other report comes from a driver that is up.
+    if report_age_ms.is_some_and(|age| age <= HEARTBEAT_MS)
+        && !matches!(reported, None | Some("starting" | "ended" | "failed"))
+    {
+        let lapsed = report_age_ms.is_some_and(|age| age > 90_000);
+        item["state"] = json!(match reported {
+            Some("working") => "running",
+            Some("ready" | "idle") if !lapsed => "running",
+            _ => "waiting",
+        });
         return;
     }
     let Some(since) = launch_since.filter(|since| now_ms.saturating_sub(*since) > LAUNCH_WINDOW_MS) else {

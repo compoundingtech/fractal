@@ -9,3 +9,4 @@ export const createRendererExtensions: CreateExtensions = (_host) => Object.free
 })
 
 export { createExtensions } from './public.ts'
+export { changelogSources, changelogDeployment } from '../../.changelog/mod.ts'
