@@ -100,42 +100,42 @@ describe('sidebar machine query', () => {
   it.each([
     ['', '', []],
     ['  compiler  sidebar ', 'compiler sidebar', []],
-    ['machine:dev3', '', [['dev3']]],
-    ['machine:dev3,,dev5,', '', [['dev3', 'dev5']]],
-    ['HOST:DEV machine:dev3', '', [['dev'], ['dev3']]],
+    ['machine:build3', '', [['build3']]],
+    ['machine:build3,,build5,', '', [['build3', 'build5']]],
+    ['HOST:BUILD machine:build3', '', [['build'], ['build3']]],
     ['machine: host:,, compiler', 'compiler', []],
-    ['compiler machine:dev3 sidebar host:DEV', 'compiler sidebar', [['dev3'], ['dev']]],
-    ['other:dev3 compiler-machine:dev3', 'other:dev3 compiler-machine:dev3', []],
+    ['compiler machine:build3 sidebar host:BUILD', 'compiler sidebar', [['build3'], ['build']]],
+    ['other:build3 compiler-machine:build3', 'other:build3 compiler-machine:build3', []],
   ] as const)('parses %j without highlighting facets', (input, query, machines) => {
     expect(parseSidebarQuery(input)).toEqual({ query, machines })
   })
 
   it('shares row host namespace stripping without rewriting query values', () => {
-    expect(matchesSidebarHost('HOST/DEV3', parseSidebarQuery('machine:dev').machines)).toBe(true)
-    expect(matchesSidebarHost('host/dev3', parseSidebarQuery('machine:host/dev3').machines)).toBe(false)
-    expect(parseSidebarQuery('machine:HOST/DEV3').machines).toEqual([['host/dev3']])
+    expect(matchesSidebarHost('HOST/BUILD3', parseSidebarQuery('machine:build').machines)).toBe(true)
+    expect(matchesSidebarHost('host/build3', parseSidebarQuery('machine:host/build3').machines)).toBe(false)
+    expect(parseSidebarQuery('machine:HOST/BUILD3').machines).toEqual([['host/build3']])
   })
 
   const machineRows = [
-    row('dev3', 'Compiler', 'idle', 'host/dev3', 0),
-    row('dev5', 'Sidebar', 'idle', 'DEV5', 0),
+    row('build3', 'Compiler', 'idle', 'host/build3', 0),
+    row('build5', 'Sidebar', 'idle', 'BUILD5', 0),
     row('other', 'Compiler', 'idle', 'host/laptop24', 0),
   ]
   it.each([
-    ['machine:dev3', '', ['dev3']],
-    ['machine:dev3,dev5', '', ['dev3', 'dev5']],
-    ['HOST:DEV', '', ['dev3', 'dev5']],
-    ['machine:dev machine:dev3', '', ['dev3']],
-    ['machine:dev3 host:dev5', '', []],
-    ['machine:dev9', '', []],
-    ['machine:', '', ['dev3', 'dev5', 'other']],
-    ['machine:,,', '', ['dev3', 'dev5', 'other']],
-    ['machine:dev3,,', '', ['dev3']],
-    ['compiler machine:dev', '', ['dev3']],
-    ['laptop machine:dev', '', []],
-    ['machine:dev', 'host/dev3', ['dev3']],
-    ['machine:dev3', 'DEV5', []],
-    ['machine:dev', 'dev3', []],
+    ['machine:build3', '', ['build3']],
+    ['machine:build3,build5', '', ['build3', 'build5']],
+    ['HOST:BUILD', '', ['build3', 'build5']],
+    ['machine:build machine:build3', '', ['build3']],
+    ['machine:build3 host:build5', '', []],
+    ['machine:build9', '', []],
+    ['machine:', '', ['build3', 'build5', 'other']],
+    ['machine:,,', '', ['build3', 'build5', 'other']],
+    ['machine:build3,,', '', ['build3']],
+    ['compiler machine:build', '', ['build3']],
+    ['laptop machine:build', '', []],
+    ['machine:build', 'host/build3', ['build3']],
+    ['machine:build3', 'BUILD5', []],
+    ['machine:build', 'build3', []],
   ] as const)('matches %j AND the exact menu host %j', (query, host, expected) => {
     expect(machineRows.filter((candidate) =>
       matchesRow({ row: candidate, filters: { ...defaultFilters, query, host }, context: '' }),
@@ -164,6 +164,6 @@ describe('sidebar machine query', () => {
     applyOp(doc, createFolder('empty', 'Empty', null, 'V', [1, 0, 't']))
     const folders = project(doc, []).folders
     expect(filterFolders({ folders, rows, filters: { ...defaultFilters, query: 'machine: host:,, ' }, sort: 'manual' })).toEqual(folders)
-    expect(filterFolders({ folders, rows, filters: { ...defaultFilters, query: 'machine:dev9' }, sort: 'manual' })).toEqual([])
+    expect(filterFolders({ folders, rows, filters: { ...defaultFilters, query: 'machine:build9' }, sort: 'manual' })).toEqual([])
   })
 })

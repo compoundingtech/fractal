@@ -27,7 +27,7 @@ async fn terminal_route_phone_client_isolated_owner_pair() -> Result<()> {
     let fabric = std::env::var("FABRIC_BIN")?;
     let bridge = std::env::var("OWNER_BRIDGE_BIN")?;
     let version = Command::new(&fabric).arg("--version").output()?;
-    assert_eq!(String::from_utf8(version.stdout)?.trim(), "0.2.32+e31e53b");
+    assert_eq!(String::from_utf8(version.stdout)?.trim(), "0.2.41+84c3208");
     let root = tempfile::Builder::new()
         .prefix("ios-owner-pair-")
         .tempdir()?;
@@ -76,7 +76,7 @@ async fn terminal_route_phone_client_isolated_owner_pair() -> Result<()> {
     let node = command(&["id"])?.trim().to_owned();
     let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     let service = format!("st3/client/{fleet}");
-    command(&["add", &phone, "demo-phone", "--allow", &service])?;
+    command(&["add", &phone, "demo-phone", "--inbound-only", "--allow", &service])?;
     let _fabric = Process(
         Command::new(&fabric)
             .arg("--home")

@@ -103,7 +103,7 @@ all active endpoints. No tunnel resumption or mutation replay is added.
 The Linux `owner_bridge` example drives the exact Swift FFI as JSON lines for the
 isolated daemon-pair proof. Build it with `cargo build --example owner_bridge` in
 this crate. The daemon test `terminal_route_phone_client_isolated_owner_pair` is
-ignored by default and requires `FABRIC_BIN` pinned to `0.2.32+e31e53b`,
+ignored by default and requires `FABRIC_BIN` pinned to `0.2.41+84c3208`,
 `OWNER_BRIDGE_BIN`, Node with the app's dependencies, and `pty`. It creates private
 stores, a terminal, pairing and grants, runs the phone's TypeScript routing class,
 and prints attachment-open and first streamed screen times for cold/warm owner and
