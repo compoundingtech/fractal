@@ -577,9 +577,10 @@ fn validate_model(
                 .as_str()
                 .and_then(|reference| reference.rsplit('/').next())
                 .with_context(|| format!("union `{definition}` requires named reference branches"))?;
-            if !rust_block.contains(&format!("({member})"))
-                || !swift_block.contains(&format!("({member})"))
-            {
+            // Large Rust members are boxed to keep the enum small.
+            let rust_member = rust_block.contains(&format!("({member})"))
+                || rust_block.contains(&format!("(Box<{member}>)"));
+            if !rust_member || !swift_block.contains(&format!("({member})")) {
                 bail!("union `{definition}` omits member `{member}`");
             }
             validate_model(schema, member, member, member, rust, swift)?;
