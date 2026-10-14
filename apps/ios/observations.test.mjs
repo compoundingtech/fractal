@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { BUCKETS_PER_DOUBLING, KEEP_MS, MAX_INTERVALS_PER_REPORT, MAX_KEPT_INTERVALS, MINUTE_MS, Observations, TARGETS, bucketEdge, bucketOf } from './observations.ts';
+import { BUCKETS_PER_DOUBLING, KEEP_MS, MAX_INTERVALS_PER_REPORT, MAX_KEPT_INTERVALS, MINUTE_MS, Observations, TARGETS, bucketEdge, bucketOf, toObservationReport } from './observations.ts';
 
 const T0 = Date.UTC(2026, 9, 10, 12, 0, 0); // a minute boundary
 function make(options = {}) {
@@ -186,4 +186,43 @@ for (const ms of [1, 3, 58, 89, 300, 1000, 2500, 9999]) {
   for (let i = 0; i < 100; i++) observations.begin('ios-recover');
   state.now = T0 + MINUTE_MS + 1;
   assert.equal(observations.nextReport(), null);
+}
+
+// ---- A report is what the member takes: flat samples (at most 32), each naming its minute; an unknown carrier is left out.
+{
+  const { observations, state } = make({ context: { carrier: 'tailscale' } });
+  const token = observations.begin('ios-message-ack');
+  state.now += 120;
+  observations.end(token);
+  observations.observe('ios-open-to-live', 900, { carrier: 'https' });
+  observations.setForeground(true);
+  observations.setLive(true);
+  state.now += 20_000;
+  observations.setLive(false);
+  state.now = T0 + 2 * MINUTE_MS + 100;
+  const batch = observations.nextReport();
+  const report = toObservationReport(batch);
+  assert.equal(report.report_id, batch.report_id);
+  assert.ok(report.samples.length >= 1 && report.samples.length <= 32);
+  const latency = report.samples.find(sample => sample.kind === 'latency');
+  assert.equal(latency.target, 'ios-message-ack');
+  assert.equal(latency.carrier, 'tailscale');
+  assert.equal(latency.interval_start, new Date(T0).toISOString());
+  assert.equal(latency.count, 1);
+  assert.ok(!report.samples.some(sample => sample.carrier === 'https'), 'a carrier the member does not know is not reported');
+  for (const sample of report.samples.filter(sample => sample.kind === 'live-share')) {
+    assert.equal(sample.target, 'ios-live-share');
+    assert.ok(sample.foreground_ms >= 1 && sample.foreground_ms <= 60_000 && sample.live_ms <= sample.foreground_ms);
+  }
+}
+{
+  // Many targets in one minute never make a report over the member's 32 samples.
+  const { observations, state } = make();
+  for (let minute = 0; minute < 12; minute++) {
+    state.now = T0 + minute * MINUTE_MS + 100;
+    for (const target of Object.keys(TARGETS)) for (const carrier of ['fabric', 'tailscale', 'lan']) observations.observe(target, 100, { carrier });
+  }
+  state.now += 2 * MINUTE_MS;
+  const report = toObservationReport(observations.nextReport());
+  assert.ok(report.samples.length <= 32, `${report.samples.length}`);
 }

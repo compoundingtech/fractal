@@ -20,7 +20,7 @@ output directory; `--keep` therefore retains potentially sensitive data. Reports
 contain only kind/view/source-type labels, counts, timings, and synthetic proof.
 
 Dependencies: bash, curl, jq, Node with native TypeScript support (Node 22.18+ or
-24+), tmux, realpath, mktemp, and the usual Unix core utilities. Run the renderer
+24+), tmux, the `pty` executable on PATH, realpath, mktemp, and the usual Unix core utilities. Run the renderer
 alone with `node scripts/omp-parity-e2e/render.mjs tmp/omp-parity-e2e/page.json`.
 `OMP_E2E_TIMEOUT` controls each polling/HTTP timeout in seconds (default 45).
 `TMPDIR` controls temporary runtime and tmux socket placement. HOME and all XDG

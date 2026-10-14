@@ -9,6 +9,7 @@ mod version;
 mod voice;
 
 pub use ui::screens::HOME_IDLE_TEXT;
+pub use ui::checklist;
 pub use version::display_version;
 
 use st3_feed as feed;
@@ -887,6 +888,7 @@ pub fn run(options: Args) -> Result<()> {
         process_started,
         initial_subject: options.initial_subject.filter(|_| profile.is_none()),
     })
+    .inspect_err(|error| ui::lastrun_note_exit(format!("error: {error:#}")))
 }
 
 #[cfg(test)]

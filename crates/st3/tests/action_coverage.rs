@@ -21,6 +21,305 @@ const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use st3::changes::config::{Config, Repository};
+    use st3::changes::service::Registry;
+    use st3::changes::{Record, Revision, State, TrailerStatus};
+
+    let mut daemon = Daemon::new().await;
+    let id = format!("I{}", "4".repeat(40));
+    let revision = Revision {
+        oid: "a".repeat(40),
+        record: Record {
+            schema_version: 1,
+            change_id: id.clone(),
+            generation: 1,
+            previous_record: None,
+            source_commit: "1".repeat(40),
+            source_tree: "2".repeat(40),
+            base_commit: "3".repeat(40),
+            trailer_status: TrailerStatus::Present,
+            state: State::Draft,
+            next: None,
+            depends_on: vec![],
+            actor: WORKER.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            claim: None,
+            mirror: None,
+        },
+    };
+    for _ in 0..2 {
+        // A disabled registry leaves every offered command with the PR fallback.
+        for args in [
+            vec![
+                "changes",
+                "list",
+                "--repository",
+                "fixture/garden",
+                "--offline",
+            ],
+            vec![
+                "changes",
+                "show",
+                &id,
+                "--repository",
+                "fixture/garden",
+                "--offline",
+            ],
+            vec!["changes", "sync", "--repository", "fixture/garden"],
+        ] {
+            let output = daemon.cli(PERSON, &args).await;
+            assert!(!output.status.success());
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(text.contains("use the PR path"), "{text}");
+        }
+        let configuration = Config {
+            enabled: true,
+            repositories: vec![Repository {
+                name: "fixture/garden".into(),
+                reader_node: "fixture-owner".into(),
+                transport_directory: daemon.root.path().join("never-opened.git"),
+                remote: "origin".into(),
+                remote_url: "https://github.com/fixture/garden.git".into(),
+                pilot_started_at: "2026-01-01T00:00:00Z".into(),
+                ..Default::default()
+            }],
+        };
+        daemon
+            .store()
+            .install_git_change_registry(Arc::new(Registry::new(&configuration, NODE).unwrap()))
+            .unwrap();
+        daemon
+            .store()
+            .index_git_change("fixture/garden", &revision)
+            .unwrap();
+        let index = daemon.store().index().unwrap();
+        let list = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &[
+                        "changes",
+                        "list",
+                        "--repository",
+                        "fixture/garden",
+                        "--offline",
+                        "--limit",
+                        "1",
+                    ],
+                )
+                .await,
+        );
+        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        assert_eq!(list["items"][0]["change_id"], id);
+        assert_eq!(list["items"][0]["status"], "offline");
+        assert!(
+            list["observation"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("fixture-owner")
+        );
+        let detail = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &[
+                        "changes",
+                        "show",
+                        &id,
+                        "--repository",
+                        "fixture/garden",
+                        "--offline",
+                    ],
+                )
+                .await,
+        );
+        assert_eq!(
+            detail["item"]["last_indexed"]["revision"]["record"]["source_commit"],
+            revision.record.source_commit
+        );
+        let sync = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &["changes", "sync", "--repository", "fixture/garden"],
+                )
+                .await,
+        );
+        assert_eq!(sync["sync"]["status"], "unavailable");
+        assert_eq!(sync["sync"]["reader_node"], "fixture-owner");
+        for value in [&list, &detail, &sync] {
+            assert_eq!(value["fallback"], "pull_request");
+        }
+        assert_eq!(daemon.store().index().unwrap(), index);
+        daemon.restart().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_git_change_owner_sync_imports_real_objects_and_preserves_receipts_across_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use st3::changes::config::{Config, Repository as RepositoryConfig};
+    use st3::changes::service::Registry;
+    use st3::changes::transport::{Authentication, Repository};
+    use st3::changes::{Record, State, TrailerStatus, new_change_id};
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = st3::test_support::command("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+    let mut daemon = Daemon::new().await;
+    let source = daemon.root.path().join("source");
+    let remote = daemon.root.path().join("remote.git");
+    let reader = daemon.root.path().join("reader");
+    for directory in [&source, &remote, &reader] {
+        std::fs::create_dir(directory).unwrap();
+    }
+    git(&source, &["init", "-q"]);
+    git(&remote, &["init", "--bare", "-q"]);
+    git(&reader, &["init", "-q"]);
+    let destination = remote.to_str().unwrap();
+    git(&source, &["remote", "add", "origin", destination]);
+    git(&reader, &["remote", "add", "origin", destination]);
+    git(
+        &source,
+        &["commit", "--allow-empty", "-qm", "Synthetic base"],
+    );
+    let base = git(&source, &["rev-parse", "HEAD"]);
+    let id = new_change_id().unwrap();
+    git(
+        &source,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            &format!("Synthetic change\n\nChange-Id: {id}"),
+        ],
+    );
+    let repository = Repository::open(&source, Authentication::default()).unwrap();
+    let (source_commit, source_tree) = repository.source("HEAD").unwrap();
+    let revision = repository
+        .prepare(Record {
+            schema_version: 1,
+            change_id: id.clone(),
+            generation: 1,
+            previous_record: None,
+            source_commit,
+            source_tree,
+            base_commit: base,
+            trailer_status: TrailerStatus::Present,
+            state: State::Draft,
+            next: None,
+            depends_on: vec![],
+            actor: WORKER.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            claim: None,
+            mirror: None,
+        })
+        .unwrap();
+    repository.publish("origin", None, &revision).unwrap();
+    let configuration = Config {
+        enabled: true,
+        repositories: vec![RepositoryConfig {
+            name: "fixture/garden".into(),
+            reader_node: NODE.into(),
+            transport_directory: reader,
+            remote: "origin".into(),
+            remote_url: destination.into(),
+            pilot_started_at: "2026-01-01T00:00:00Z".into(),
+            ..Default::default()
+        }],
+    };
+    assert!(
+        daemon
+            .store()
+            .latest_indexed_git_change("fixture/garden", &id)
+            .unwrap()
+            .is_none()
+    );
+    for expected_imports in [1, 0] {
+        daemon
+            .store()
+            .install_git_change_registry(Arc::new(Registry::new(&configuration, NODE).unwrap()))
+            .unwrap();
+        let index = daemon.store().index().unwrap();
+        let sync = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &["changes", "sync", "--repository", "fixture/garden"],
+                )
+                .await,
+        );
+        assert_eq!(sync["sync"]["status"], "completed");
+        assert_eq!(sync["sync"]["import"]["indexed_objects"], expected_imports);
+        let indexed = daemon
+            .store()
+            .latest_indexed_git_change("fixture/garden", &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(indexed.revision, revision);
+        let detail = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &[
+                        "changes",
+                        "show",
+                        &id,
+                        "--repository",
+                        "fixture/garden",
+                        "--offline",
+                    ],
+                )
+                .await,
+        );
+        assert_eq!(
+            detail["item"]["last_indexed"]["revision"]["oid"],
+            revision.oid
+        );
+        assert_eq!(detail["fallback"], "pull_request");
+        assert_eq!(daemon.store().index().unwrap(), index);
+        daemon.restart().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
     if st3::test_support::supervise_test() {
         return;
@@ -466,7 +765,7 @@ async fn dispatch(
     actions! {
         "agent.create" => agent_create, "agent.queue-move" => agent_queue_move,
         "agent.resume" => agent_resume, "agent.start" => agent_start,
-        "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
+        "agent.retire" => agent_retire, "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
         "arrangement.edit" => arrangement_edit,
         "attention.resolve" => attention_resolve,
@@ -1737,6 +2036,10 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["work", "revision", "generations", &run.subject],
         vec!["work", "revision", "generation", &run.generation],
         vec!["usage"],
+        vec!["slo"],
+        vec!["slo", "ls"],
+        vec!["slo", "explain", "cpu"],
+        vec!["slo", "chart", "cpu", "--over", "1h", "--width", "20"],
         vec!["terminals", "ls"],
         vec!["machines"],
         vec!["launch", "ls"],
@@ -5376,4 +5679,119 @@ async fn onepassword_field_reference_manifest_registers_validates_replicates_and
         vec![json!({"locator":format!("{boundary}a")})],
     )
     .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.apply(
+        "version 2\nagent \"example/worker\" { command \"true\"; workspace \"/tmp\"; }\n",
+        "retirement-declaration",
+    );
+    let parameters = json!({"to":WORKER,"content":"An invented note.","kind":"wake"});
+    let accepted = dispatch(
+        &daemon.client(PERSON),
+        "message.send",
+        "retirement-accepted-message",
+        daemon.fence(PERSON).await,
+        parameters.clone(),
+    )
+    .await
+    .unwrap();
+    let key = "terminal-retirement-operation";
+    let args = [
+        "agents",
+        "retire",
+        WORKER,
+        "--as",
+        PERSON,
+        "--reason",
+        "Work finished",
+        "--idempotency-key",
+        key,
+    ];
+    let retired = cli_value(daemon.cli(PERSON, &args).await);
+    daemon.restart().await;
+    let repeated = cli_value(daemon.cli(PERSON, &args).await);
+    assert_eq!(
+        retired["value"]["action_id"],
+        repeated["value"]["action_id"]
+    );
+    assert_eq!(
+        daemon
+            .store()
+            .claims_for_subject_kind_at(WORKER, "agent.retired", None, false, 10)
+            .unwrap()
+            .claims
+            .len(),
+        1
+    );
+    let retry = dispatch(
+        &daemon.client(PERSON),
+        "message.send",
+        "retirement-accepted-message",
+        daemon.fence(PERSON).await,
+        parameters.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.value.operation_id, accepted.value.operation_id);
+    assert_eq!(retry.value.affected_ids, accepted.value.affected_ids);
+    let before = daemon.store().index().unwrap();
+    let error = dispatch(
+        &daemon.client(PERSON),
+        "message.send",
+        "retirement-fresh-message",
+        daemon.fence(PERSON).await,
+        parameters,
+    )
+    .await
+    .unwrap_err();
+    match error {
+        ClientError::Api(code, _, error) => {
+            assert_eq!(code, ErrorCode::RecipientRetired);
+            assert_eq!(error.details["applied"], "none");
+            assert_eq!(error.details["refusal"]["variant"], "Retired");
+            assert_eq!(error.details["refusal"]["recipient"], WORKER);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(before, daemon.store().index().unwrap());
+    let refused = daemon
+        .cli(
+            PERSON,
+            &[
+                "conversations",
+                "send",
+                WORKER,
+                "--from",
+                PERSON,
+                "--body",
+                "A fresh note.",
+            ],
+        )
+        .await;
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("Retired") && stderr.contains(WORKER),
+        "{stderr}"
+    );
+    let raw = daemon.transport().post::<_,Value>("/v1/messages",&json!({"to":WORKER,"from":PERSON,"content":"An adapter note","idempotency_key":"retirement-adapter-message"})).await.unwrap_err();
+    let (status,code,_,details)=st3::client::api_error_parts(&raw).unwrap();
+    assert_eq!(status,409);assert_eq!(code,"recipient-retired");assert_eq!(details["applied"],"none");
+    let restarted = daemon
+        .cli(PERSON, &["agents", "start", WORKER, "--as", PERSON])
+        .await;
+    assert!(!restarted.status.success());
+    assert!(
+        daemon
+            .store()
+            .desired_subjects()
+            .unwrap()
+            .iter()
+            .all(|subject| subject.subject != WORKER || subject.member.is_none())
+    );
 }

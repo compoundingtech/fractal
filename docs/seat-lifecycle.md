@@ -2,7 +2,7 @@
 
 A seat's declaration, work, messages, and decisions live in the graph. A running harness also has its own native session. Restarting a process does not erase the plan; preserving the **exact native conversation** is what suspend/resume is for.
 
-Use the worker from [getting started](getting-started.md). Check it before changing anything:
+Use the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat). Check it before changing anything:
 
 ```sh
 st agents show agent/garden/worker
@@ -24,7 +24,7 @@ st agents restart agent/garden/worker --as person/ada
 st agents show agent/garden/worker
 ```
 
-When repeated failed starts have parked a seat, a person's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the seat parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
+When repeated failed starts have parked a seat, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the seat parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
@@ -38,6 +38,13 @@ exact harness incarnation remains live, including an idle or blocked harness. Se
 held claims do not read full subject status for lease maintenance. Checking work before
 status keeps resident seats cheap without extending the renewal period or weakening the
 incarnation check.
+
+A restart of a seat that is up and ready first asks it for its handoff and waits at most two minutes
+(`--now` skips the wait); see [seat handoff](st3/seat-continuity.md).
+
+A restarted seat that cannot continue its conversation (another account, another model, a crash)
+gets a first message with the handoff it left and the live state of its work. See
+[seat handoff](st3/seat-continuity.md); a seat writes its handoff with `st agents handoff write`.
 
 To preserve the exact conversation, wait until the seat has finished its turn and holds no claim:
 
@@ -254,10 +261,14 @@ native startup argument. With no message, the seat starts idle. The Rust `st3-cl
 Ctrl+\\ detaches and leaves the agent running. `st terminals attach agent/builder.site` attaches
 again later, from any machine in the fleet. A terminal on another host is attached PTY to PTY over
 Fabric when that host runs `st terminals expose-fabric` and grants your machine the protocol it
-prints; no st daemon carries the bytes. Otherwise it goes through the client gateway as your
-person, the same path the apps use. `stui` on a machine with its own st daemon attaches a terminal on this host to its PTY session, and one
+prints; the owner's st daemon routes each tunnel straight to the PTY session. While that daemon is
+stopped or restarting, as during every deploy, it refuses new tunnels and its live remote attaches
+drop; `st terminals attach` reconnects once it is back. A host that needs attaches to work without
+its daemon runs `st terminals expose-fabric --exec`, which has Fabric start a process per attach.
+Otherwise it goes through the client gateway as your person, the same path the apps use. `st ui`
+on a machine with its own st daemon attaches a terminal on this host to its PTY session, and one
 on another fleet host over Fabric when Fabric reaches the owner; the daemon only says where it lives.
-When Fabric cannot reach the owner, stui goes through the client gateway and the terminal header
+When Fabric cannot reach the owner, `st ui` goes through the client gateway and the terminal header
 says so with Fabric's reason. An owner that refuses the incarnation is never worked around. A paired
 device with no daemon of its own, such as the phone, uses the gateway.
 

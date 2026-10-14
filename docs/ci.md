@@ -5,7 +5,7 @@
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
 exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle ci1 runners with Namespace overflow; required merge stages use ci1-priority;
+(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
 public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
@@ -28,6 +28,16 @@ existing PR concurrency group and cancels obsolete ready-head work while skippin
 Keep a PR draft while iterating and testing locally, then mark its final head ready for Intake.
 A later push to a ready PR still validates the replacement head and cancels its superseded run;
 this policy reduces iteration demand, rather than enforcing a lifetime one-run limit.
+A stacked PR can retain workflow files from an older base that lacks these job guards.
+`Draft CI admission` therefore observes requested PR workflows using main's `workflow_run`
+code. It reads the target run and current PR metadata, rechecks readiness before requesting
+cancellation, and never checks out PR code or downloads its artifacts. Ready PRs and
+merge-group/main/manual runs are preserved. Its token has only Actions write and PR read.
+Cancellation is asynchronous: the request summary is not terminal cancellation proof,
+and scheduling can start a legacy job before the observer runs. The one-day observation
+records actual build/test job starts as well as accepted requests and final cancellations.
+GitHub does not emit the requested activity for reruns; do not rerun drafts.
+
 GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run is the
 final safety gate and runs every required stage regardless of PR draft payload. Do not arm
 auto-merge before the fresh ready-head checks register. Re-running an old draft run retains its
@@ -53,8 +63,8 @@ tested source rather than a later `origin/main` fetch;
 unrelated unreleased main changes do not block a new PR's check. It does not download dependencies
 or compile. Manual dispatch runs the safety tests without inventing a PR delta.
 
-The Linux gate runs two test partitions plus Clippy and fleet compatibility on separate runners.
-`linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, the four stage jobs and the named mail redelivery
+The Linux gate runs four test partitions for merge groups and two for other events, plus Clippy and fleet compatibility on separate runners. The extra merge partitions use the common merge role on either host, including ci2-merge-1, or the same Namespace overflow choice. Each uses the one exact-source producer archive. Before shard 1 executes, actual nextest lists must prove the selected inventory is a disjoint, complete union of all four (or both) shards. The unchanged linux-gate requires genuine success from every applicable shard; skipped merge shards fail it. No test filter, retry cap, timeout or required context is changed.
+`linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, all applicable stage jobs and the named mail redelivery
 check, and passes only when every one succeeded (a skipped or cancelled stage fails it). The stage jobs use the shape label
 `nscloud-ubuntu-24.04-amd64-8x16-with-features`; `isolation-vm` uses
 `namespace-profile-linux-x86-64` when it overflows. `genie-freshness` and `typescript-client`
@@ -63,9 +73,10 @@ use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build
 until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
 limit of about five runners at once.
 
-Required merge-group Rust, test, canary and VM jobs use `ci1-priority` unconditionally,
-even if the picker is disabled, the status token is absent or all local runners are busy.
-They wait for owned capacity and never overflow to Namespace.
+By default, required merge-group producers, the first two test shards, supporting Rust jobs, canaries and VM jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common `ci1-merge` role. An overflowed group uses its one selected Namespace profile for all these jobs.
+A GitHub-hosted picker reads the common group3 role census; unavailable metadata retains the
+existing priority role. GitHub chooses the physical host. The PR opt-in variable never disables merge picking.
+With `CI_MERGE_OVERFLOW` unset or off, they wait for owned capacity. Overflow uses the existing Namespace profile only when that switch is on and the qualified census is below its admission minimum.
 Main, tag and manual Linux releases use the same owned priority lane; release PR validation
 uses Namespace priority 2, preserving the self-hosted fork boundary. Native Mac releases and
 installer checks use standard GitHub-hosted `macos-15` (ARM64); Linux installer/assembly/publish
@@ -185,15 +196,15 @@ failure, cancellation or skipping either shard fails the gate. Each shard retain
 durations in its logs, and the primary saves `ci-logs/test-partitions.json` with the tested SHA
 and all three inventories.
 
-The Linux `linux-test-build` job compiles the existing two selected Cargo groups once and
-publishes nextest archives. Both shards, the zero-retry mail job and isolation VM require that
+The Linux `linux-test-build` job compiles the workspace into one nextest archive
+and preserves the existing executed test selection. Both shards, the zero-retry mail job and isolation VM require that
 successful producer and download its exact artifact ID. They check the manifest SHA, source/tree,
-run, the successful producer attempt, architecture, nextest/rustc versions and each archive digest before extracting.
+run, the successful producer attempt, architecture, nextest/rustc versions, target-selection recipe and archive/gateway file digests before extracting.
 A failed-jobs-only rerun can inherit the earlier successful producer output; its attempt and
 manifest remain explicitly pinned, with the same run/source/tree/tool identities required. Cargo
 target caches remain on the producer; consumers restore only runtime/Nix fixtures. The producer also runs the unchanged standalone conversation-model tests (including doctests)
 and dependency boundary, and builds the gateway binary with its standalone production features.
-Its Cargo JSON and binary hash are retained alongside the archives; the VM does not substitute
+Its Cargo JSON and binary hash are retained alongside the archive; the VM does not substitute
 the workspace-unified test binary. A failed producer explicitly fails consumer checks and the gate.
 
 Tests resolve archived executables through nextest's runtime binary paths. A source guard rejects raw compiled binary, manifest and temporary-directory lookups in test code.
@@ -202,7 +213,8 @@ map each compiled package beneath the recorded producer root to the consumer che
 library fixtures launched by another package. Outside archives the original compiled path remains
 the fallback. Archive mode rejects missing or mismatched roots/binaries. Tests, assertions,
 partitions, retries, eight test threads, real VM checks and required contexts are unchanged.
-Local and macOS runs still use the existing build selection unless `CI_TEST_PARTITION` is set.
+Local and macOS runs use the same metadata-derived binary selection and CI profile;
+`CI_TEST_PARTITION` selects the shard.
 
 New test files and paths are checked automatically by `genie-freshness` on each PR and
 merge group. A guard failure names each file and line and points its author to `test_env!`
@@ -325,6 +337,12 @@ requires both the daemon and a double-forked child in a new session to disappear
 five seconds, and separately injects an evidence-collection error to prove `node.stop()`
 still runs. Existing canary assertions, phase bounds and zero retries remain unchanged.
 
+`boot_canaries::interrupted_tests_keep_logs_and_pending_observations` kills an isolated
+fixture controller and checks the guardian keeps daemon/driver logs, pending outbox sequences,
+and an interrupted verdict. `daemon_restart` and `daemon_environment` also register their
+short socket/runtime roots with that guardian; failures keep diagnostics in
+`target/boot-canaries/` before the roots are removed. Capture errors are explicit artifacts.
+
 The Codex stand-in's schema files are generated from the protocol gate's own fixture; when the
 required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p st-drivers
 the_boot_canary_codex_stub_schemas` rewrites them.
@@ -382,16 +400,15 @@ st3), the st-drivers `catalog*`, `resync` and `resource_profile_supervisor` modu
 and `resource_profile_supervisor_e2e` tests. No CI job runs these. Clippy still checks the whole
 workspace. List the selection with `bash scripts/ci-nextest list`.
 
-`scripts/ci-nextest` supplies Cargo's target selection for both the build-only step
-(`bash scripts/ci-nextest run --no-run`) and execution, on Linux and macOS. It runs two groups:
-the workspace excluding st2, then st2's `integration`, `agent_resource` and `driver_expansion`
-test targets. Both use the unchanged `ci` profile, and both run even if the first fails; any
-failure fails the stage. This avoids compiling st2's entirely excluded lib/bin unit-test
-targets, `event_e2e` and `resource_profile_supervisor_e2e`. Nextest filters alone do not avoid
-compiling them. Partially selected binaries (st2 `integration` and st-drivers' library tests)
-still compile in full, and the retained st2 tests still build the st2 executable they need.
-When adding a st2 test target or changing binary-level exclusions, update the script's
-retained target list alongside `.config/nextest.toml`.
+`scripts/ci-nextest` uses workspace metadata for binary selection
+(`bash scripts/ci-nextest run --no-run`) and execution on Linux and macOS. One workspace
+invocation retains every non-st2 binary and, while st2 remains a workspace member, its
+`integration`, `agent_resource` and `driver_expansion` test targets. Caller filtersets intersect
+that binary selection. The unchanged `ci` profile keeps fail-fast disabled and any test failure
+fails the stage. Collection compiles workspace targets, including excluded legacy binaries
+while st2 remains a member; the filters preserve execution coverage rather than avoid compilation.
+Matching rendered hooks are installed by a CI binary that calls the driver
+library directly, rather than by the legacy runner CLI.
 
 The old trusted fleet runner and st merge train are retired; there is no operations installation
 handoff. Namespace workflows use this script from the checkout and land through GitHub's merge
@@ -430,7 +447,8 @@ image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) i
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
-2. `cargo nextest archive -p st2 --test integration` builds the integration test binary and st2.
+2. The producer prebuilds the preserved workspace selection into one archive, including the
+   existing st2 integration test binary and its executable for these three VM tests.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive, extracts it at the checkout's path (the
    test binary has st2's path compiled in) and runs both cascade tests and
@@ -455,7 +473,7 @@ The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Nod
 After the root frozen install, `bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
 `tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
-6.0.3 and Effect 4.0.0-rc.118. The iOS project allows explicit TypeScript import extensions
+6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
 ### Fractal web
@@ -474,9 +492,10 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
-  without a changed generated client file; root flake-only changes also do not trigger it.
+  without a changed generated client file; root `flake.nix` changes also do not trigger it.
   Other relevant paths are
   root `package.json*`, `pnpm-workspace.yaml*`, `pnpm-lock.yaml`,
+  `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
   `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
@@ -492,8 +511,14 @@ workflow-level path filters. `linux-gate` does not depend on them.
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
-  execution job; build output is not cached. App, UI kit, Storybook, browser and
-  performance lanes join the script with the packages that add them.
+  execution job; build output is not cached. The config's `fractalCssAssets` plugin
+  (`apps/fractal-web/scripts/vite-css-assets.mjs`) fails every production build that
+  emits a stylesheet without rules, or a chunk that loads a font file no `@font-face`
+  in its loaded stylesheets declares. The preceding CSS asset guard lane builds
+  fixtures that must trip both failures, and controls (quoted URLs with parentheses,
+  faces declared by the entry's stylesheet) that must pass.
+  App, UI kit, Storybook, browser and performance lanes join the script with the
+  packages that add them.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
   either no relevant paths changed and execution was skipped, or execution succeeded.
@@ -546,12 +571,22 @@ the profile has no capacity, jobs queue with no matching runner. A queued requir
 a pass. Apart from the ci1 choice below, which is made once per run before any job starts, do not
 fall back to hosted or fleet runners.
 
-### ci1: our own runners, with PR overflow to Namespace
+### ci1 and ci2: owned pool and Namespace admission
 
-All required merge-group stages select `ci1-priority`, without consulting idle counts or
-`CI1_RUNNERS`. This is the standing merge-first lane. Existing running work is not preempted;
+All required merge-group stages share the picker's pool selection, independent
+of `CI1_RUNNERS`; by default this is `ci1-priority` on either physical host.
+Existing running work is not preempted;
 the host controller must retain its release/merge-first classification and bounded reservations.
 `CI_MERGE_CI1` and `CI_MERGE_NAMESPACE_PROFILE` no longer redirect required merge jobs.
+`CI_MERGE_OVERFLOW=on` lets a merge group use the existing Linux Namespace
+profile when a valid group-3 census has fewer than `CI_MERGE_MIN_IDLE` idle
+priority runners (default three, for the initial producer, Clippy and fleet
+compatibility jobs). All required jobs follow the same picker output, with
+Namespace priority 1 and affinity to that run. An unset switch keeps the owned
+priority lane. Invalid metadata, an invalid minimum or run ID, and missing
+credentials retain that lane; they do not establish saturation. Priority PRs
+and releases keep their reservations. This changes admission capacity, not
+tests, required contexts, timeouts, cache provenance or resource caps.
 Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
 The declared ci1 pool is five general workers (including one reserved priority worker) and one
 merge worker, with dynamic label lending. The current source run used `ci1-5` with
@@ -562,14 +597,23 @@ hosted queue observer warns once when an owned job has no assigned runner for fi
 minutes after its actual workflow dependencies complete. It preserves current work; it does
 not repair offline runners or guarantee starts. Watch the first merge after this lands.
 
-For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker. Trusted `ci-priority`
-PRs select that label for their producer and primary consumer. Ordinary trusted PRs may use an
-idle general `ci1` slot; second-shard and mail outputs account separately for remaining slots.
-Supporting PR jobs retain Namespace. Missing status or insufficient general capacity keeps
-ordinary PRs on Namespace. Fork PR code never runs on self-hosted capacity or receives the
-runner-status token. The token is `CI1_RUNNERS_READ_TOKEN`, read-only runner metadata.
-The picker takes a snapshot, not an atomic reservation; concurrent selections can still queue.
-Required collectors retain failure/skip handling and all partitions/canaries remain selected.
+For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker over the shared
+runner group3 (existing name `ci1`). Both physical hosts share `ci1`, `ci1-merge` and
+`ci1-priority` as role labels; `ci-host-ci1` / `ci-host-ci2` are only for deliberate host
+selection. The picker chooses a role, and GitHub assigns any eligible idle worker on either host.
+Ordinary primary, second-shard and mail slots consume distinct idle general runner IDs; a
+priority/general dual-labelled worker cannot be offered twice. Fork PRs never query the token
+or use self-hosted capacity. Main/tag/manual Linux releases use the common priority role;
+release PR builds stay on Namespace and Mac builds stay on GitHub-hosted macOS.
+
+The existing `CI1_RUNNERS_READ_TOKEN` already saw all six ci2 runners in a real hosted census
+before migration; the common-group census and an actual ci2 job assignment must qualify the
+migration. Temporary role-equivalent `ci2` aliases preserve frozen legacy cohorts, not host
+selection. One controller writer owns the shared group and both hosts' reservations. Its
+source-qualified current-job scope must be installed before Operations moves ci2 into group3:
+a one-cohort restriction can otherwise exclude a ready PR despite a matching idle member.
+A metadata snapshot is not an atomic reservation. All partitions, canaries and failure/skip
+handling remain required; source controls and extra workers do not establish wait p90.
 
 On ci1 each runner is ephemeral: it takes one job, runs it as its own user in a fresh work directory
 with its own `/tmp`, and nothing the job started outlives it. The runner names a Cargo home in
@@ -642,6 +686,13 @@ Two jobs check the daemon's rules that reads are instant, writes are short, and 
 grows with the whole store. Neither is part of `linux-gate`; making one required is a decision
 for the repository's owner. Both run `scripts/ci-perf`, and `.config/nextest.toml` keeps their
 tests out of `linux-tests`.
+
+The isolated `link_minutes` case writes its preserved daemon, link-event, trace and
+replication evidence under `RUNNER_TEMP/perf/link-minutes-evidence`. Its supervised
+child inherits the explicit evidence parent, including when `CI_RUN_ID` is absent.
+The existing `perf-cost-logs` upload runs on failure and includes this visible tree;
+its oracle, one-attempt policy and exit status are unchanged. Interrupted runs may
+leave partial evidence; an uploaded directory is not a completed-test verdict.
 
 `perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every pull request and
 `main` push, on the stages' runner. It skips
@@ -749,6 +800,36 @@ cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads
 ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
 
+#### The daemon beside a seat-priority hog
+
+`daemon_load::a_seat_priority_hog_leaves_the_request_latency_targets_reported` runs the steady load
+twice on one generated store: alone, then beside a CPU and disk hog at the priority seats get by
+default. On Linux that is nice 10 and best-effort IO priority 7; on macOS, `taskpolicy -b`
+(background QoS). The test process may itself run niced (cargo's tests run in `builds.slice` on
+hetz2, which a host timer renices to 10), so the hog runs 10 nice levels below the test process, at
+most 19, and the report names both. The hog is twice the online CPUs in busy loops and two writers
+that `fsync` 128 MiB files; the timed load starts once the 1-minute load average is past the
+core count (`ST_LOAD_HOG_RAMP_SECONDS`, 180 by default), and the run fails if the load average was
+not past it at the start, at its lowest 5-second sample or at the end.
+
+Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
+agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
+every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
+`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
+not, until `ST_LOAD_HOG_STRICT=1`.
+
+```sh
+ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo test --release \
+  -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
+```
+
+It is a step of its own and no required check until its numbers are stable. "Without the hog" is
+the host's load as it was: on a shared host that is not an idle machine, and the report gives the
+load average. Keep a Mac's load average under 10 outside the test window.
+
 #### Measuring a change on hetz2: the perf slot
 
 A builder measures a change with `nix develop .#perf -c bash scripts/ci-perf load`. Outside CI on
@@ -767,7 +848,7 @@ the machine.
 - A run past its timeout is stopped (SIGTERM, then SIGKILL after 10 s) and frees the slot. The
   timeout is two hours unless the run asks for less with `--timeout`; time in line does not
   count. A run stopped by it exits 124.
-- Only `load` is slotted, and only on hetz2. Anywhere else nothing shares the machine.
+- Only `load` and `load-hog` are slotted, and only on hetz2. Anywhere else nothing shares the machine.
   `scripts/ci-perf-slot-test` proves turns, order, kill, signals and timeout.
 
 The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
@@ -882,7 +963,6 @@ repo-settings changes have merged.
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
 | `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
-| `release-portable.yml` | Preserve dispatch inputs, accepted-source verification, packaging, publishing and fresh-download execution proof. Move Linux to Namespace. |
 | `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
 
 The content guard still rejects real machine/home identities and private fleet configuration
@@ -1004,7 +1084,7 @@ gh run rerun RUN_ID
 ```
 
 A queued Namespace job is never a pass. Do not fall back to another runner by hand; only
-`pick-runner` chooses between ci1 and Namespace, before a run's jobs start.
+`pick-runner` chooses between ci1, ci2 and Namespace, before a run's jobs start.
 
 ## Inspect a failure
 
@@ -1025,7 +1105,7 @@ configuration, not proof of CI p90 <20 minutes, runner wait <5 minutes or queue-
 p90 <45 minutes.
 
 The 2026-10-12 standing rule supersedes whole/partial Namespace merge overflow:
-required merge stages wait on `ci1-priority` regardless of the old override variables.
+required merge stages wait on the selected owned priority pool regardless of the old override variables.
 No job migrates after it starts. If a selected local job waits, qualify the named live runner
 and registration; preserve running work and do not reopen an isolated worker or blind-retry.
 
@@ -1111,3 +1191,15 @@ requests retain their signal status. No compiler or test is retried. Source, run
 producer attempt, toolchain and individual file hashes are still checked before extraction.
 The job logs the ZIP size/digest and transfer attempt. This protects the transfer boundary;
 it does not establish the cause of earlier digest mismatches or a measured speedup.
+
+## Tests the sandboxed st3 check does not run
+
+`checks.st3` (the Nix build of the st3 workspace's tests) leaves out the tests named in
+`nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
+Today these are 14 `setup::` and 12 `otel_export::` integration tests, which need a login shell the
+sandbox user does not have (the `otel_export` output says so in so many words; for the 14th `setup::`
+test the cause is inferred from the identical daemon exit status). Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`
+shards run every one of them, as do the wrapper path's runs, so nothing is dropped, only moved.
+The check fails if an entry no longer names exactly one test (the list has gone stale) and if any
+unlisted test fails. Do not add an entry to hide a failing test; add it only when the sandbox cannot
+provide what the test needs, and say what.
