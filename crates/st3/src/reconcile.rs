@@ -17572,6 +17572,7 @@ mod tests {
     mod doctor_eligibility_tests;
     mod first_readiness_tests;
     mod gate_on_demand;
+    mod gate_recovery_tests;
     mod github_watch_selection;
     mod incremental_deadlines;
     mod ownership_guard_tests;
