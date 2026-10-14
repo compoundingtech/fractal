@@ -224,13 +224,14 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
                       attempts=attempts)
     if runner_prefix is not None and not observed['runner'].startswith(runner_prefix):
         raise Failure('wrong_runner', 'record is for a different repository or producer', attempts=attempts)
-    if max_age is not None:
-        moment = parse_time(predicate['observed_at'])
-        current = now or datetime.now(timezone.utc)
-        if moment > current + FUTURE_SKEW:
-            raise Failure('future_dated', 'record claims to be observed in the future', attempts=attempts)
-        if current - moment > timedelta(seconds=max_age):
-            raise Failure('too_old', f'record is older than {max_age} seconds', attempts=attempts)
+    # A future-dated record is refused whether or not an age limit is set: otherwise a trusted
+    # signer's future-dated pass would stay the latest record and hide every later real failure.
+    moment = parse_time(predicate['observed_at'])
+    current = now or datetime.now(timezone.utc)
+    if moment > current + FUTURE_SKEW:
+        raise Failure('future_dated', 'record claims to be observed in the future', attempts=attempts)
+    if max_age is not None and current - moment > timedelta(seconds=max_age):
+        raise Failure('too_old', f'record is older than {max_age} seconds', attempts=attempts)
     if result['exit_code'] != 0:
         raise Failure('check_failed', f'latest record for check {check} exited {result["exit_code"]}',
                       attempts=attempts)

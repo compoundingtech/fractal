@@ -281,6 +281,8 @@ class Verifier(unittest.TestCase):
         self.assertEqual(self.f.verify(self.tree, max_age=week)[0], 0)
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=3600)
         self.assertEqual(self.reason(self.tree, max_age=week), 'future_dated')
+        # ...and with no age limit at all: a future-dated pass must not become the latest record.
+        self.assertEqual(self.reason(self.tree), 'future_dated')
         # A little clock skew is tolerated.
         other = Fixture()
         self.addCleanup(other.tmp.cleanup)

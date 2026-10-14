@@ -384,7 +384,11 @@ more than two minutes ahead (`future_dated`). `--runner-prefix github:ORG/REPO/`
 to come from this repository's runs (`wrong_runner`; keep the trailing slash, it is what stops `repo`
 matching `repo2`). `--trust-levels fleet,machine` limits which signer trust levels a check accepts
 (`untrusted_level`); a newer failure from a level the check does not accept still stops a skip.
-Any unexpected exception is a JSON refusal with reason `error`, never a traceback and never a pass.
+A record claiming a time more than two minutes ahead is always `future_dated`, with or without
+`--max-age`. Every one of these options defaults to permissive, so **a check that skips on an
+observed record must pass `--kinds`, `--command`, `--runner-prefix`, `--trust-levels` and
+`--max-age` explicitly** (or, better, `--policy-from`). Any unexpected exception is a JSON
+refusal with reason `error`, never a traceback and never a pass.
 
 `--bind-input KEY=PATH`
 (repeatable) requires the record's input `KEY` to equal the sha256 of `PATH` as it is in
