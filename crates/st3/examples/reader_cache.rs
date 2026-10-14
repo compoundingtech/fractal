@@ -57,20 +57,16 @@ async fn main() -> anyhow::Result<()> {
         daemon_bench::NODE,
     )?);
     let socket = root.join("st3.sock");
-    let state = AppState {
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: daemon_bench::NODE.into(),
-        state_dir,
-        pty_root: root.join("pty"),
-        pty_binary: daemon_bench::stub_pty(root),
-        fleet_id: Some(daemon_bench::FLEET.into()),
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: Some(root.join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
-    };
+    let state = AppState { store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: daemon_bench::NODE.into(),
+    state_dir,
+    pty_root: root.join("pty"),
+    pty_binary: daemon_bench::stub_pty(root),
+    fleet_id: Some(daemon_bench::FLEET.into()),
+    configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: Some(root.join("home")),
+    planner_default: st3::model::PlannerSpec::default(), };
     let server_socket = socket.clone();
     let server =
         tokio::spawn(

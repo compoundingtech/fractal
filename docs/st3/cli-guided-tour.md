@@ -317,6 +317,22 @@ terminal on this host and once to one on another fleet host: the remote attach g
 client gateway as the configured person and should feel the same. `send` and `signal`
 are control mutations and are not aimed at arbitrary live work.
 
+### 8a. `harness-questions` — metadata and position-only answers
+
+```sh
+st harness-questions --help
+st harness-questions list --as ada
+st harness-questions show QUESTION --as ada
+st harness-questions answer --help
+```
+
+Check that list and detail contain no question text or option labels. Answering requires an
+explicit person, a JSON answers file and a reusable idempotency key. The CLI derives the action
+identity from the key and question id and reads both freshness fences from the question.
+Without a wired settle adapter, the action reports typed `adapter_missing` and writes nothing.
+With an adapter fixture, verify identical retries, changed-parameter conflicts, stale runtime
+refusal and `already_resolved` for a new key; never target arbitrary live work.
+
 ### 9. `import` — adopt native Codex, Claude, Pi, OMP, and OpenCode sessions
 
 Why: useful pre-st sessions should be readable before import and resumable under durable st

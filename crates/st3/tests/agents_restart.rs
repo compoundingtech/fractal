@@ -244,20 +244,16 @@ impl Fixture {
         };
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
-        let state = AppState {
-            store: store.clone(),
-            notify,
-            event_notify: watch::channel(0).0,
-            node: "restart-test".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-        };
+        let state = AppState { store: store.clone(),
+        notify,
+        event_notify: watch::channel(0).0,
+        node: "restart-test".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: Default::default(), };
         let socket = root.path().join("st3.sock");
         let router = make_router(state.clone());
         let server = tokio::spawn(async move { st3::api::serve_unix(&socket, router).await });

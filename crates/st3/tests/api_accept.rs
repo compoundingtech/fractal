@@ -62,20 +62,16 @@ async fn descriptor_exhaustion_child() {
     }
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let state = AppState {
-        store: Arc::new(Store::open_memory("accept-node").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "accept-node".into(),
-        state_dir: root.path().join("daemon"),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
-    };
+    let state = AppState { store: Arc::new(Store::open_memory("accept-node").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "accept-node".into(),
+    state_dir: root.path().join("daemon"),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: st3::model::PlannerSpec::default(), };
     let server_socket = socket.clone();
     let server =
         tokio::spawn(

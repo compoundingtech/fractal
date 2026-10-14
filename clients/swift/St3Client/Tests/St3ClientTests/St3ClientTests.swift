@@ -6,6 +6,50 @@ import FoundationNetworking
 @testable import St3Client
 
 final class St3ClientTests: XCTestCase {
+    func testHarnessQuestionMetadataAndPositionsRoundTrip() throws {
+        let wire = Data(#"{"kind":"harness-question","id":"harness-question/ada/native-1","revision":"claim/question","updated_at":"2026-10-14T10:00:00.000Z","agent":"agent/ada","session":"session/ada","native_id":"native-1","runtime_incarnation":"incarnation/ada","observed_at":1791972000000,"questions":[{"id":"q1","options":3,"multi":true,"required":true}],"resolution":{"status":"answered_elsewhere","revision":"claim/resolved","answers":{"q1":{"positions":[0,2],"timed_out":false}},"resolved_at":1791972001000},"answer":{"state":"unavailable","reason":"resolved"}}"#.utf8)
+        let resource = try JSONDecoder().decode(Resource.self, from: wire)
+        guard case .harnessQuestion(let question) = resource else { return XCTFail("Expected known harness question") }
+        XCTAssertEqual(resource.id, "harness-question/ada/native-1")
+        XCTAssertEqual(question.questions[0].options, 3)
+        XCTAssertEqual(question.answer.reason, .resolved)
+        XCTAssertEqual(question.resolution?.status, .answeredElsewhere)
+        XCTAssertEqual(question.resolution?.answers["q1"]?.positions, [0, 2])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(resource)) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: wire) as? NSDictionary)
+        let parameters = HarnessAnswerParameters(question: question.id,
+            answers: ["q1": HarnessAnswerInput(positions: [0, 2])])
+        let fence = Fence(snapshotID: "snapshot/tester", subjectRevisions: [question.id: question.revision],
+            runtimeIncarnation: question.runtimeIncarnation)
+        let action = try ActionRequest.harnessAnswer(id: "action/tester", idempotencyKey: "tester-answer-key",
+            fence: fence, parameters: parameters)
+        XCTAssertEqual(action.parameters["answers"], .object(["q1": .object(["positions": .array([.number(0), .number(2)])])]))
+        let encoded = try JSONEncoder().encode(action)
+        let decoded = try JSONDecoder().decode(ActionRequest.self, from: encoded)
+        XCTAssertEqual(decoded.parameters, action.parameters)
+        let resolution = try XCTUnwrap(question.resolution)
+        for status in ["accepted", "already_resolved"] {
+            let resolutionObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(resolution))
+            let resultData = try JSONSerialization.data(withJSONObject: ["kind": "action-result", "action_id": "action/tester",
+                "operation_id": "operation/tester", "status": "completed", "affected_ids": [question.id],
+                "snapshot_id": "snapshot/tester", "harness_answer": ["status": status, "resolution": resolutionObject]])
+            let result = try JSONDecoder().decode(ActionResult.self, from: resultData)
+            XCTAssertEqual(result.harnessAnswer?.status.rawValue, status)
+            XCTAssertEqual(result.harnessAnswer?.resolution.answers["q1"]?.positions, [0, 2])
+        }
+        for reason in ["unknown_option", "too_many", "required_missing", "empty_single", "too_long",
+            "unknown_question", "other_not_allowed", "note_not_allowed"] {
+            let data = try JSONSerialization.data(withJSONObject: ["reason": reason])
+            let details = try JSONDecoder().decode(HarnessInvalidAnswerDetails.self, from: data)
+            XCTAssertEqual(details.reason.rawValue, reason)
+        }
+        for reason in ["adapter_missing", "adapter_unavailable", "resolved"] {
+            let data = try JSONSerialization.data(withJSONObject: ["reason": reason])
+            let details = try JSONDecoder().decode(HarnessNotAnswerableDetails.self, from: data)
+            XCTAssertEqual(details.reason.rawValue, reason)
+        }
+    }
+
     func testDirectiveNoteFixturePreservesCurrentAdvisoryMetadata() throws {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }

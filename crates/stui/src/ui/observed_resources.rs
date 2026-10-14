@@ -141,20 +141,16 @@ mod socket_tests {
         let store = Arc::new(
             st3::store::Store::open(&root.path().join("graph.db"), "resource-read-test").unwrap(),
         );
-        let state = st3::api::AppState {
-            store: store.clone(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "resource-read-test".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-        };
+        let state = st3::api::AppState { store: store.clone(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "resource-read-test".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: Default::default(), };
         for (id, kind, facts) in [
             (
                 "resource/github/acme/garden/issue/9",

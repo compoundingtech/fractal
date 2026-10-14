@@ -14,20 +14,16 @@ impl Drop for ScratchRawPty {
 }
 
 fn raw_app(root: &Path, node: &str) -> crate::api::AppState {
-    crate::api::AppState {
-        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: crate::model::PlannerSpec::default(),
-    }
+    crate::api::AppState { store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+    notify: Arc::new(tokio::sync::Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: node.into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: crate::model::PlannerSpec::default(), }
 }
 
 async fn raw_packet(stream: &mut tokio::net::UnixStream) -> pty_core::protocol::Packet {

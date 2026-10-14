@@ -126,20 +126,16 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
-    let state = st3::api::AppState {
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "orchid".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = st3::api::AppState { store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "orchid".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: Default::default(), };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         st3::api::serve_unix_bound(&server_socket, &server_socket, st3::api::router(state))

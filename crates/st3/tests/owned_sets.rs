@@ -42,20 +42,16 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
         json!({"status":"running","features":{"owned_sets":1}}),
     );
     let socket = root.join("st3.sock");
-    let state = AppState {
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: name.into(),
-        state_dir: root.clone(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = AppState { store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: name.into(),
+    state_dir: root.clone(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: Default::default(), };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         st3::api::serve_unix(&server_socket, st3::api::router(state))

@@ -12,20 +12,16 @@ use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
 fn state(root: &Path) -> AppState {
-    AppState {
-        store: Arc::new(Store::open_memory("glasses-test").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "glasses-test".into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    }
+    AppState { store: Arc::new(Store::open_memory("glasses-test").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "glasses-test".into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: Default::default(), }
 }
 async fn request(
     app: axum::Router,

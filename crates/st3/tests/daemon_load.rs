@@ -1292,20 +1292,16 @@ fn run(
     let pty = stub_pty(root);
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
-    let state = AppState {
-        store: store.clone(),
-        notify: notify.clone(),
-        event_notify: event_notify.clone(),
-        node: NODE.into(),
-        state_dir: root.join("state"),
-        pty_root: root.join("pty"),
-        pty_binary: pty.clone(),
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![PEER.into()],
-        client_relay: None,
-        native_session_home: Some(root.join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
-    };
+    let state = AppState { store: store.clone(),
+    notify: notify.clone(),
+    event_notify: event_notify.clone(),
+    node: NODE.into(),
+    state_dir: root.join("state"),
+    pty_root: root.join("pty"),
+    pty_binary: pty.clone(),
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![PEER.into()], client_relay: None, harness_question_sink: None, native_session_home: Some(root.join("home")),
+    planner_default: st3::model::PlannerSpec::default(), };
     let subjects = {
         let _entered = daemon.enter();
         st3::api::start_operation_report(&state);

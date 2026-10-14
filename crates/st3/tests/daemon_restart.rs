@@ -53,20 +53,16 @@ impl Daemon {
     }
 
     fn state(&self) -> AppState {
-        AppState {
-            store: self.store.clone(),
-            notify: Arc::new(Notify::new()),
-            event_notify: self.event_notify.clone(),
-            node: "restart-node".into(),
-            state_dir: self.root.join("daemon"),
-            pty_root: self.root.join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
-        }
+        AppState { store: self.store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: self.event_notify.clone(),
+        node: "restart-node".into(),
+        state_dir: self.root.join("daemon"),
+        pty_root: self.root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: st3::model::PlannerSpec::default(), }
     }
 
     // Dropping this runtime also closes upgraded WebSocket connections, just as exiting

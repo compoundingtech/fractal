@@ -3133,20 +3133,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("daemon.sock");
         let store = Arc::new(st3::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
-        let state = st3::api::AppState {
-            store: store.clone(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "ui-hint".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-        };
+        let state = st3::api::AppState { store: store.clone(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "ui-hint".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: Default::default(), };
         let path = socket.clone();
         let server = tokio::spawn(async move {
             st3::api::serve_unix(&path, st3::api::router(state)).await.unwrap();
@@ -3187,11 +3183,9 @@ mod tests {
         let socket = root.path().join("sidebar.sock");
         async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<st3::store::Store>, tokio::task::JoinHandle<()>) {
             let store = Arc::new(st3::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
-            let state = st3::api::AppState {
-                store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
-                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
-            };
+            let state = st3::api::AppState { store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
+            fleet_id: None, configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None, planner_default: Default::default(), };
             let path = socket.to_owned();
             let server = tokio::spawn(async move { st3::api::serve_unix(&path, st3::api::router(state)).await.unwrap(); });
             for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
@@ -3238,20 +3232,16 @@ mod tests {
         ) -> (Arc<st3::store::Store>, tokio::task::JoinHandle<()>) {
             let store =
                 Arc::new(st3::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
-            let state = st3::api::AppState {
-                store: store.clone(),
-                notify: Arc::new(tokio::sync::Notify::new()),
-                event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: "ui-actions".into(),
-                state_dir: root.into(),
-                pty_root: root.join("pty"),
-                pty_binary: "pty".into(),
-                fleet_id: None,
-                configured_peers: vec![],
-                client_relay: None,
-                native_session_home: None,
-                planner_default: Default::default(),
-            };
+            let state = st3::api::AppState { store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "ui-actions".into(),
+            state_dir: root.into(),
+            pty_root: root.join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+            planner_default: Default::default(), };
             let path = socket.to_owned();
             let server = tokio::spawn(async move {
                 st3::api::serve_unix(&path, st3::api::router(state))
@@ -3661,20 +3651,16 @@ mod tests {
                 })
                 .unwrap();
         }
-        let state = st3::api::AppState {
-            store: store.clone(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "person-read".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: root.path().join("unused-pty"),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
-        };
+        let state = st3::api::AppState { store: store.clone(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "person-read".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: root.path().join("unused-pty"),
+        fleet_id: None,
+        configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: st3::model::PlannerSpec::default(), };
         let socket = root.path().join("daemon.sock");
         let server_path = socket.clone();
         let server = tokio::spawn(async move {

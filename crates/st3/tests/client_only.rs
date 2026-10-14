@@ -136,20 +136,16 @@ fn state(root: &Path, node: &str) -> AppState {
             smallclaims::fleet::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
-    AppState {
-        store: Arc::new(store),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: node.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    }
+    AppState { store: Arc::new(store),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: node.into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: root.join("unused-pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: Default::default(), }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
     let intent = st3::graph::parse_intent(

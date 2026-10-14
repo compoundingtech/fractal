@@ -7,6 +7,14 @@
   ],
   "typed_actions": [
     {
+      "action": "harness.answer",
+      "tests": [
+        "crates/st3/src/api/client_v0/harness_questions.rs::harness_answer_authority_fences_replays_and_resolution_order",
+        "crates/st3/src/api/client_v0/harness_questions.rs::harness_answer_without_adapter_is_unavailable_and_writes_nothing"
+      ],
+      "behavior": "person-only live-runtime authority and snapshot provenance before replay; content and incarnation fences; identical receipt replay; changed action id or parameters conflict; new key after resolution returns already_resolved before availability or answer validation; absent adapter refuses without claims or receipts"
+    },
+    {
       "action": "agent.create",
       "tests": [
         "crates/st3/tests/action_coverage.rs::creation_and_declaration_actions_survive_stale_fences_and_restarts"
@@ -407,6 +415,31 @@
     }
   ],
   "cli": [
+    {
+      "command": "st harness-questions answer",
+      "description": "Answer a native harness question with option positions and a reusable key",
+      "tests": [
+        "crates/st3/src/main.rs::harness_answer_cli_accepts_positions_file_and_explicit_person_and_key",
+        "crates/st3/src/main.rs::harness_answer_action_identity_is_retryable_and_question_scoped"
+      ],
+      "verification": "CLI argument contract and deterministic question-scoped action identity; action behavior proved through daemon API tests"
+    },
+    {
+      "command": "st harness-questions list",
+      "description": "List native harness question metadata without text",
+      "tests": [
+        "crates/st3/src/main.rs::harness_question_cli_reads_require_an_explicit_person"
+      ],
+      "verification": "CLI command graph contract; metadata-only reads proved through daemon API tests"
+    },
+    {
+      "command": "st harness-questions show",
+      "description": "Read one native harness question's metadata",
+      "tests": [
+        "crates/st3/src/main.rs::harness_question_cli_reads_require_an_explicit_person"
+      ],
+      "verification": "CLI command graph contract; metadata-only reads proved through daemon API tests"
+    },
     {
       "command": "st activity",
       "description": "Read bounded changes since a stable cursor",

@@ -1199,20 +1199,16 @@ mission "release" state="ready" {
                     idempotency_key: "release-run".into(),
                 })
                 .unwrap();
-            let state = st3::api::AppState {
-                store: store.clone(),
-                notify: Arc::new(tokio::sync::Notify::new()),
-                event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: node.into(),
-                state_dir: root.path().into(),
-                pty_root: root.path().join("pty"),
-                pty_binary: root.path().join("unused-pty"),
-                fleet_id: None,
-                configured_peers: vec![],
-                client_relay: None,
-                native_session_home: None,
-                planner_default: st3::model::PlannerSpec::default(),
-            };
+            let state = st3::api::AppState { store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: root.path().join("unused-pty"),
+            fleet_id: None,
+            configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+            planner_default: st3::model::PlannerSpec::default(), };
             let socket = root.path().join("st3.sock");
             let server_socket = socket.clone();
             let served_state = state.clone();

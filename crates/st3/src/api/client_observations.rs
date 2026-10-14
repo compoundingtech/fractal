@@ -631,22 +631,18 @@ mod tests {
     #[tokio::test]
     async fn observation_paired_session_transport_reader_doctor_and_body_limits() {
         let root = tempfile::tempdir().unwrap();
-        let state = AppState {
-            store: Arc::new(
-                Store::open(&root.path().join("graph.db"), "observations-test").unwrap(),
-            ),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0u64).0,
-            node: "observations-test".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: root.path().join("unused"),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-        };
+        let state = AppState { store: Arc::new(
+            Store::open(&root.path().join("graph.db"), "observations-test").unwrap(),
+        ),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0u64).0,
+        node: "observations-test".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: root.path().join("unused"),
+        fleet_id: None,
+        configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: Default::default(), };
         let grant = "custom/client/observation-pairing";
         let credential = "observation-credential";
         state

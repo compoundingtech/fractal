@@ -886,9 +886,10 @@ or checkpoint authority. Existing canonical claims and checkpoint rules are unch
 
 Asks, attention actions, message sends and held effects are not pinned by this local-response
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
-Client actions keep their durable `custom.client.action-result` receipt; normal claim append
-uses its existing operation identity and checkpoint tombstones. Cleanup never deletes these
-claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
+Client actions keep their durable `custom.client.action-result` receipt, except `harness.answer`,
+whose receipt lives inside its resolved question and expires with that question after 24 hours.
+Normal claim append uses its existing operation identity and checkpoint tombstones. Local-response
+cleanup never deletes these claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
 follow `retryable`, and this new code is terminal. TypeScript/phone `isTransient` and
 `retryTransient` likewise stop on this code; the phone's fresh-fence `notApplied` retry list
 contains only stale-fence/rate-limited. Swift preserves unknown codes and `retryable: false`.
@@ -976,6 +977,7 @@ The v0 action discriminators are:
 | Runtimes | `runtime.stop`, `runtime.restart`, `runtime.reset`, `runtime.context-clear`, `runtime.signal` | runtime incarnation; stop, restart, and reset also require `runtime_desired_revision` from the runtime resource |
 | Agent desired state | `agent.stop`, `agent.start` | snapshot and `runtime_desired_revision`, the agent's selected desired claim ID; no runtime incarnation required |
 | Terminals | `terminal.input`, `terminal.resize`, `terminal.attach`, `terminal.detach` | runtime incarnation; resize and a line of input (`mode` `line`) also require the screen sequence; raw and key input do not |
+| Native harness questions | `harness.answer` | question content revision in `subject_revisions[question]` and runtime incarnation; person-only `terminal.control` |
 | Pairing | `pairing.begin`, `pairing.complete`, `pairing.revoke` | pairing/device revision where applicable |
 
 After authentication and snapshot admission, `message.send` waits at most three seconds
@@ -1166,6 +1168,20 @@ desired state, not a recovery of authored whitespace or comments.
 Read-only scope permits snapshots, details, timelines, and event feeds. `terminal.control` adds
 terminal input and resize; other control scopes are action-family-specific. A capabilities response
 must distinguish unavailable, ungranted, and unsupported features.
+
+Native harness questions use metadata-only `harness-questions.list` and `harness-questions.get`
+reads. `harness.answer` carries ids and option positions only and requires a concrete person's
+live-runtime authority; all agent actors, including Unix free-mode agents, are refused. The
+question's stable content revision and runtime incarnation fence the native settlement. Before
+receipt replay, the daemon checks snapshot provenance and authority. A new key after resolution
+returns `already_resolved` before capability or answer validation; retained-key changes to action
+identity or parameters return `idempotency-conflict`. Invalid answers return the typed
+`invalid-answer` reason enum; malformed envelopes remain `validation-failed`.
+
+The daemon has an injectable settle sink, but no adapter is wired by default: the action
+capability and question resource report typed `adapter_missing`, and invoking the action refuses
+before a claim or receipt is written. See [Harness questions](../harness-questions.md) for the
+complete positions-only, timeout, retry and retention contract.
 
 ## Conversation stream
 

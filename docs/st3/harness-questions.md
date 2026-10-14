@@ -57,3 +57,51 @@ question.
 A question stays pending until the harness writes its end. The harness adapter writes `expired`
 or `cancelled` when the harness gives up on or withdraws a question; st does not end a pending
 question by itself.
+
+## Client reads and answering
+
+`harness-questions.list` and `harness-questions.get` expose question metadata and the resolution,
+without question text, option labels or the internal receipt. The web view joins text from the raw
+timeline. Each resource has `answer.state` and, when unavailable, a typed reason:
+`adapter_missing`, `adapter_unavailable` or `resolved`.
+
+`harness.answer` takes `{question, answers}`, where `answers` maps question ids to
+`{positions: [0, 2]}`. Positions are zero-based. No text, Other value or note is accepted.
+The action requires `terminal.control` and the authenticated person's authority over the
+agent's live runtime. Every agent actor is refused, including agents in Unix free mode.
+
+The fence carries the question's content revision in `subject_revisions[question]` and its
+`runtime_incarnation`. Snapshot provenance and live-runtime authority are checked before
+replaying a receipt. The content and incarnation fences prevent an answer from reaching a
+changed question or restarted runtime.
+
+An accepted answer returns `harness_answer.status: accepted` and the resolution, including the
+harness's native `timed_out` for every answer. An identical retry uses the same action id,
+idempotency key and parameters. Reusing a key with another action id or different parameters
+returns `idempotency-conflict`. An unknown key is new; a new key for a resolved question returns
+`already_resolved` before adapter availability or answer validation. Receipts live only inside
+the resolution claim and expire with it, not in the generic action receipt store.
+
+Invalid answers return `invalid-answer` with typed `details.reason`: `unknown_option`,
+`too_many`, `required_missing`, `empty_single`, `too_long`, `unknown_question`,
+`other_not_allowed` or `note_not_allowed`. Malformed action envelopes continue to return
+`validation-failed`. This is an additive client contract.
+
+The daemon's settle sink is injectable at its boundary. No harness adapter is wired by this
+contract: by default availability reports `adapter_missing` and answering returns that typed
+`not-answerable` refusal before any claim or receipt is written.
+
+## CLI
+
+Read metadata with `st harness-questions list --as ada` or
+`st harness-questions show QUESTION --as ada`. To answer:
+
+```sh
+st harness-questions answer QUESTION --as ada \
+  --answers-file answers.json --idempotency-key harness-answer-retry-key
+```
+
+`answers.json` contains a map such as `{"q1":{"positions":[0]}}`. Keep the same file and key
+for retries. The CLI derives the action id from the length-prefixed key and question id, so the
+printed or recorded key is sufficient to recover the action identity; it reads the current
+question metadata to populate the content and incarnation fences.

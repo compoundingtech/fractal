@@ -3,6 +3,62 @@ const assert = require('node:assert/strict');
 
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
+test('harness questions and answers round-trip only ids, positions, and resolution metadata', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = {
+        kind: 'harness-question', id: 'harness-question/ada/native-1', revision: 'claim/question',
+        updated_at: '2026-10-14T10:00:00.000Z', agent: 'agent/ada', session: 'session/ada',
+        native_id: 'native-1', runtime_incarnation: 'incarnation/ada', observed_at: 1791972000000,
+        questions: [{ id: 'q1', options: 3, multi: true, required: true }],
+        resolution: { status: 'answered_elsewhere', revision: 'claim/resolved',
+            answers: { q1: { positions: [0, 2], timed_out: false } }, resolved_at: 1791972001000 },
+        answer: { state: 'unavailable', reason: 'resolved' },
+    };
+    const decode = Rich.decodeUnknownSync(Rich.Resource, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.Resource)(decode(wire)), wire);
+    const open = { ...wire, resolution: null, answer: { state: 'available' } };
+    assert.deepEqual(Schema.encodeSync(Rich.Resource)(decode(open)), open);
+    assert.throws(() => decode({ ...wire, questions: [{ ...wire.questions[0], options: 4294967296 }] }));
+    const action = { api_version: 'st3.client.v0', id: 'action/tester', type: 'harness.answer',
+        idempotency_key: 'tester-answer-key', fence: { snapshot_id: 'snapshot/tester',
+            subject_revisions: { [wire.id]: wire.revision }, runtime_incarnation: wire.runtime_incarnation },
+        parameters: { question: wire.id, answers: { q1: { positions: [0, 2] } } } };
+    const decodeAction = Rich.decodeUnknownSync(Rich.ActionRequest, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.ActionRequest)(decodeAction(action)), action);
+    assert.throws(() => decodeAction({ ...action, fence: { snapshot_id: 'snapshot/tester', subject_revisions: {} } }));
+    for (const invalid of [
+        { positions: [4294967296] }, { positions: [-1] }, { positions: [0.5] },
+        { positions: [0], note: '' }, { positions: [0], other: '' },
+    ]) assert.throws(() => Rich.decodeUnknownSync(Rich.HarnessAnswerInput, 'strict')(invalid));
+    for (const status of ['accepted', 'already_resolved']) {
+        const result = { status, resolution: wire.resolution };
+        assert.deepEqual(Schema.encodeSync(Rich.HarnessAnswerResult)(Rich.decodeUnknownSync(Rich.HarnessAnswerResult, 'strict')(result)), result);
+    }
+});
+
+test('harness refusal errors discriminate their reason domain and retain future errors', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.ErrorEnvelope, 'strict');
+    const base = { api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+        request_id: 'request/tester', message: '', retryable: false };
+    for (const [code, reasons] of [
+        ['invalid-answer', ['unknown_option', 'too_many', 'required_missing', 'empty_single',
+            'too_long', 'unknown_question', 'other_not_allowed', 'note_not_allowed']],
+        ['not-answerable', ['adapter_missing', 'adapter_unavailable', 'resolved']],
+    ]) {
+        for (const reason of reasons) {
+            const wire = { ...base, code, details: { reason } };
+            assert.deepEqual(Schema.encodeSync(Rich.ErrorEnvelope)(decode(wire)), wire);
+        }
+        assert.throws(() => decode({ ...base, code, details: {} }));
+        assert.throws(() => decode({ ...base, code, details: { reason: 'future_reason' } }));
+    }
+    assert.throws(() => decode({ ...base, code: 'invalid-answer', details: { reason: 'resolved' } }));
+    assert.throws(() => decode({ ...base, code: 'not-answerable', details: { reason: 'unknown_option' } }));
+    const future = { ...base, code: 'future-error', details: { future: 1 } };
+    assert.deepEqual(Schema.encodeSync(Rich.ErrorEnvelope)(Rich.decodeUnknownSync(Rich.ErrorEnvelope)(future)), future);
+});
+
 
 test('directive notes decode metadata and expiry without becoming gate evidence', async () => {
     const [{ Schema }, Rich] = await modules;

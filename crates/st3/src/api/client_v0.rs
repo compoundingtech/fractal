@@ -93,6 +93,7 @@ pub(super) mod arrangements;
 pub(super) mod conversation_blocks;
 mod collection_windows;
 mod inventory;
+pub(super) mod harness_questions;
 #[cfg(test)]
 mod conversation_follow_tests;
 mod collection_ivm;
@@ -2570,6 +2571,7 @@ const ACTIONS: &[&str] = &[
     "runtime.context-clear",
     "runtime.signal",
     "terminal.input",
+    "harness.answer",
     "terminal.resize",
     "terminal.attach",
     "terminal.detach",
@@ -2624,6 +2626,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "runtime.context-clear",
     "runtime.signal",
     "terminal.input",
+    "harness.answer",
     "terminal.resize",
     "terminal.attach",
     "terminal.detach",
@@ -2748,7 +2751,7 @@ fn session_claim_actor(session: &ClientSession) -> String {
     }
 }
 
-pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
+pub(super) fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     let mut capabilities = ALL_SCOPES
         .iter()
         .map(|scope| {
@@ -2771,6 +2774,9 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"arrangements", "version":1, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
         let scope = action_scope(action).expect("registered client action has a scope");
+        if *action == "harness.answer" {
+            return harness_questions::capability(state, session);
+        }
         let state = if !AVAILABLE_ACTIONS.contains(action) {
             "unavailable"
         } else if session.allows(scope)
@@ -9773,6 +9779,9 @@ fn action_scope(action: &str) -> Option<&'static str> {
     ) {
         return Some("control.runtimes");
     }
+    if action == "harness.answer" {
+        return Some("terminal.control");
+    }
     if matches!(action, "work.done" | "custom.reply" | "prompt.respond") {
         return Some("control.attention");
     }
@@ -10244,6 +10253,10 @@ fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
                 .into_iter()
                 .find(|item| item["id"] == *subject)
                 .and_then(|item| item["revision"].as_str().map(str::to_owned))
+        } else if subject.starts_with("harness-question/") {
+            state.store.harness_question(subject, unix_ms())
+                .map_err(ApiError::internal)?
+                .map(|question| question.revision)
         } else if let Some(id) = subject.strip_prefix("launch/") {
             state
                 .store
@@ -11733,6 +11746,9 @@ async fn action_inner(
     Json(request): Json<ActionRequest>,
     reserved_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Json<Value>, ApiError> {
+    if request.action_type == "harness.answer" {
+        return harness_questions::answer(&state, &session, &request).await;
+    }
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
     if reserved_gate.is_none() {
@@ -12334,8 +12350,10 @@ mission "queue-parity" state="ready" {
     #[tokio::test]
     async fn collections_socket_keeps_sixteen_windows_and_refuses_the_seventeenth() {
         use futures_util::{SinkExt as _, StreamExt as _};
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
         assert!(
-            capabilities(&ClientSession::local(None).unwrap())
+            capabilities(&state, &ClientSession::local(None).unwrap())
                 .iter()
                 .any(|capability| {
                     capability["id"] == "collections"
@@ -12343,8 +12361,6 @@ mission "queue-parity" state="ready" {
                         && capability["state"] == "granted"
                 })
         );
-        let root = tempfile::tempdir().unwrap();
-        let state = test_state(root.path());
         let app = axum::Router::new().route(
             "/stream",
             axum::routing::get(move |upgrade: WebSocketUpgrade| {
@@ -14897,6 +14913,7 @@ mission "queue-parity" state="ready" {
             client_relay: None,
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
+            harness_question_sink: None,
         }
     }
 

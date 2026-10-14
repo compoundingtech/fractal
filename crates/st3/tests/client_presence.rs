@@ -4,20 +4,16 @@ use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::{Notify, watch};
 
 fn state(root: &Path) -> AppState {
-    AppState {
-        store: Arc::new(Store::open_memory("presence-test").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "presence-test".into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    }
+    AppState { store: Arc::new(Store::open_memory("presence-test").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "presence-test".into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: Default::default(), }
 }
 
 /// The clients st lists: a client that names itself and one that does not, a stream that

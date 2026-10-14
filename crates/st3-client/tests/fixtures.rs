@@ -16,6 +16,65 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
 }
 #[test]
+fn harness_questions_round_trip_positions_and_typed_resolution_without_text() {
+    let wire = serde_json::json!({
+        "kind": "harness-question", "id": "harness-question/ada/native-1",
+        "revision": "claim/question", "updated_at": "2026-10-14T10:00:00.000Z",
+        "operational": null,
+        "agent": "agent/ada", "session": "session/ada", "native_id": "native-1",
+        "runtime_incarnation": "incarnation/ada", "observed_at": 1791972000000_u64,
+        "questions": [{"id":"q1","options":3,"multi":true,"required":true}],
+        "resolution": {"status":"answered_elsewhere","revision":"claim/resolved",
+            "answers":{"q1":{"positions":[0,2],"timed_out":false}},
+            "resolved_at":1791972001000_u64},
+        "answer":{"state":"unavailable","reason":"resolved"}
+    });
+    let resource: Resource = serde_json::from_value(wire.clone()).unwrap();
+    let Resource::HarnessQuestion(question) = &resource else { panic!("known harness question") };
+    assert_eq!(question.questions[0].options, 3);
+    assert_eq!(question.header.revision, "claim/question");
+    assert_eq!(resource.header().id, "harness-question/ada/native-1");
+    assert_eq!(question.answer.reason, Some(HarnessQuestionAnswerabilityReason::Resolved));
+    let resolution = question.resolution.as_ref().unwrap();
+    assert_eq!(resolution.status, HarnessQuestionResolutionStatus::AnsweredElsewhere);
+    assert_eq!(resolution.answers["q1"].positions, vec![0, 2]);
+    assert_eq!(serde_json::to_value(&resource).unwrap(), wire);
+    let mut malformed = wire.clone();
+    malformed["questions"][0]["options"] = serde_json::json!(4294967296_u64);
+    assert!(serde_json::from_value::<Resource>(malformed).is_err());
+    let mut open = wire;
+    open["resolution"] = serde_json::Value::Null;
+    open["answer"] = serde_json::json!({"state":"available"});
+    let question: HarnessQuestion = serde_json::from_value(open).unwrap();
+    assert!(question.resolution.is_none());
+    let parameters = HarnessAnswerParameters {
+        question: question.header.id.clone(),
+        answers: [("q1".to_owned(), HarnessAnswerInput { positions: vec![0, 2] })].into(),
+    };
+    let fence = Fence { snapshot_id: "snapshot/tester".into(),
+        subject_revisions: [(question.header.id, question.header.revision)].into(),
+        runtime_incarnation: Some(question.runtime_incarnation), ..Fence::default() };
+    let request = ActionRequest::harness_answer("action/tester", "tester-answer-key", fence, parameters).unwrap();
+    assert_eq!(request.action_type(), &ActionType::HarnessAnswer);
+    let encoded = serde_json::to_value(&request).unwrap();
+    assert_eq!(encoded["parameters"]["answers"], serde_json::json!({"q1":{"positions":[0,2]}}));
+    let decoded: ActionRequest = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, request);
+    let result: ActionResult = serde_json::from_value(serde_json::json!({
+        "kind":"action-result","action_id":"action/tester","operation_id":"operation/tester",
+        "status":"completed","affected_ids":[],"snapshot_id":"snapshot/tester",
+        "harness_answer":{"status":"already_resolved","resolution":resolution}
+    })).unwrap();
+    assert_eq!(result.harness_answer.unwrap().status, HarnessAnswerStatus::AlreadyResolved);
+    for reason in ["unknown_option", "too_many", "required_missing", "empty_single", "too_long",
+        "unknown_question", "other_not_allowed", "note_not_allowed"] {
+        let details: HarnessInvalidAnswerDetails = serde_json::from_value(serde_json::json!({"reason":reason})).unwrap();
+        assert_eq!(serde_json::to_value(details).unwrap(), serde_json::json!({"reason":reason}));
+    }
+    assert!(serde_json::from_value::<HarnessAnswerInput>(serde_json::json!({"positions":[0],"note":""})).is_err());
+}
+
+#[test]
 fn directive_notes_preserve_author_time_expiry_and_clear_as_empty() {
     let wire: Envelope<DirectiveNotes> = decode("directive-notes.json");
     let note = &wire.value.notes[0];

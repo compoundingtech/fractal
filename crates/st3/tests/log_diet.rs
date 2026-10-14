@@ -152,20 +152,16 @@ impl Daemon {
         let notify = Arc::new(Notify::new());
         let state_dir = root.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
-        let state = AppState {
-            store: store.clone(),
-            notify: notify.clone(),
-            event_notify: watch::channel(0_u64).0,
-            node: NODE.into(),
-            state_dir,
-            pty_root: root.join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
-        };
+        let state = AppState { store: store.clone(),
+        notify: notify.clone(),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir,
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: st3::model::PlannerSpec::default(), };
         let socket = root.join("st3.sock");
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose metadata-only native harness questions and a person-authorized positions-only harness.answer contract with typed refusals and question-scoped retry receipts",
+  "replay": {"status": "none", "detail": "No replay or startup projection rebuild."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes, triggers, schema version or additional claim fields. Reuses the harness-question observation and resolution claims."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change beyond the prerequisite harness-question claims release."},
+  "compatibility": {"status": "changed", "detail": "Additive client-v0 metadata resource, list/get reads, harness.answer action and typed invalid-answer/not-answerable details. Stored and transmitted answers contain ids and positions only, never question text, option labels, Other text or notes. Older clients retain the unknown-resource fallback; older daemons do not advertise the new action. No additional claim fields or replication digest change beyond the prerequisite."},
+  "downtime": {"status": "none", "detail": "Ordinary daemon deployment only."},
+  "manual": {"status": "none", "detail": "No adapter is wired by this release. Availability reports adapter_missing, and answering refuses before any durable write until a settle adapter is supplied."},
+  "recovery": {"status": "none", "detail": "Answer receipts expire with resolved questions after 24 hours. Retry the same question, action identity, idempotency key and parameters; a new key after resolution returns already_resolved."}
+}

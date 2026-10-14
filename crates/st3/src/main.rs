@@ -248,6 +248,11 @@ enum Command {
         #[command(subcommand)]
         command: SubjectCommand,
     },
+    /// Inspect native harness question metadata or answer with option positions.
+    HarnessQuestions {
+        #[command(subcommand)]
+        command: HarnessQuestionsCommand,
+    },
     /// Watch GitHub issues and pull requests: each comment, review, required-check result and
     /// close wakes this seat once.
     Gh {
@@ -2951,6 +2956,32 @@ struct DevicesArgs {
     limit: usize,
     #[command(subcommand)]
     command: Option<DevicesCommand>,
+}
+
+#[derive(Subcommand)]
+enum HarnessQuestionsCommand {
+    /// List native question metadata without question or option text.
+    List {
+        #[arg(long = "as", value_parser = parse_person_subject)]
+        person: String,
+    },
+    /// Read one native question's metadata.
+    Show {
+        question: String,
+        #[arg(long = "as", value_parser = parse_person_subject)]
+        person: String,
+    },
+    /// Answer with a JSON file mapping question ids to {positions: [zero-based indexes]}.
+    Answer {
+        question: String,
+        #[arg(long = "as", value_parser = parse_person_subject)]
+        person: String,
+        #[arg(long)]
+        answers_file: PathBuf,
+        /// Reuse this key and the identical answer file when retrying.
+        #[arg(long)]
+        idempotency_key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -5888,6 +5919,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
+        Command::HarnessQuestions { command } => {
+            run_harness_questions(&endpoint, command, cli.json).await
+        }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
@@ -6803,21 +6837,17 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.state_dir.clone(),
         st3::sekrets::client::socket_path(),
     );
-    let state = AppState {
-        store: store.clone(),
-        notify: notify.clone(),
-        event_notify: event_notify.clone(),
-        node: config.node.clone(),
-        state_dir: config.state_dir.clone(),
-        pty_root: pty_root.clone(),
-        pty_binary: pty_binary.clone(),
-        fleet_id: config.fleet_id.clone(),
-        configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
-        client_relay: st3::peer::ClientRelay::from_config(&config)?
-            .map(|relay| relay.with_links(store.clone())),
-        native_session_home: std::env::var_os("HOME").map(PathBuf::from),
-        planner_default: config.planner.clone(),
-    };
+    let state = AppState { store: store.clone(),
+    notify: notify.clone(),
+    event_notify: event_notify.clone(),
+    node: config.node.clone(),
+    state_dir: config.state_dir.clone(),
+    pty_root: pty_root.clone(),
+    pty_binary: pty_binary.clone(),
+    fleet_id: config.fleet_id.clone(),
+    configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(), client_relay: st3::peer::ClientRelay::from_config(&config)?
+        .map(|relay| relay.with_links(store.clone())), harness_question_sink: None, native_session_home: std::env::var_os("HOME").map(PathBuf::from),
+    planner_default: config.planner.clone(), };
     st3::gate_check::set_endpoint(config.socket.display().to_string());
     let reconciler = Arc::new(Reconciler::native(
         store.clone(),
@@ -11203,6 +11233,63 @@ async fn follow_conversation(
                 }
             }
             Some(_) => {}
+        }
+    }
+}
+
+fn harness_answer_action_id(key: &str, question: &str) -> String {
+    let mut digest = Sha256::new();
+    for value in [key, question] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("action/harness-answer-{}", hex::encode(digest.finalize()))
+}
+
+async fn run_harness_questions(
+    endpoint: &Endpoint,
+    command: HarnessQuestionsCommand,
+    json_output: bool,
+) -> Result<()> {
+    match command {
+        HarnessQuestionsCommand::List { person } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_questions()
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Show { question, person } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_question(&question)
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Answer {
+            question,
+            person,
+            answers_file,
+            idempotency_key,
+        } => {
+            let generated = generated_client(endpoint, Some(&person))?;
+            let current = generated.harness_question(&question).await?;
+            let answers = serde_json::from_slice(&fs::read(answers_file)?)?;
+            let result = generated
+                .harness_answer(
+                    harness_answer_action_id(&idempotency_key, &question),
+                    idempotency_key,
+                    ClientFence {
+                        snapshot_id: current.snapshot.id,
+                        subject_revisions: BTreeMap::from([(
+                            question.clone(),
+                            current.value.revision,
+                        )]),
+                        runtime_incarnation: Some(current.value.runtime_incarnation),
+                        ..ClientFence::default()
+                    },
+                    st3_client::HarnessAnswerParameters { question, answers },
+                )
+                .await?;
+            print_client_value(&result, json_output)
         }
     }
 }
@@ -26887,14 +26974,11 @@ mod tests {
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
         };
-        let state = st3::api::AppState {
-            store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0).0,
-            node: "todo-liveness".into(), state_dir: root.path().into(),
-            pty_root: root.path().join("pty"), pty_binary: "pty".into(),
-            fleet_id: None, configured_peers: vec![], client_relay: None,
-            native_session_home: None, planner_default: Default::default(),
-        };
+        let state = st3::api::AppState { store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0).0,
+        node: "todo-liveness".into(), state_dir: root.path().into(),
+        pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+        fleet_id: None, configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None, planner_default: Default::default(), };
         let path = root.path().join("api.sock");
         let socket = path.clone();
         let server = tokio::spawn(async move {
@@ -28409,20 +28493,16 @@ mod tests {
                 ))
                 .unwrap();
         }
-        let state = AppState {
-            store: store.clone(),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: "pi-delivery-test".into(),
-            state_dir: root.path().to_path_buf(),
-            pty_root: root.path().join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: PlannerSpec::default(),
-        };
+        let state = AppState { store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "pi-delivery-test".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: PlannerSpec::default(), };
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
             serve_unix(&server_socket, router(state)).await.unwrap();
@@ -28501,20 +28581,16 @@ mod tests {
                     .store_index
             })
             .collect::<Vec<_>>();
-        let state = AppState {
-            store,
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: "trace-cursor-test".into(),
-            state_dir: root.path().to_path_buf(),
-            pty_root: root.path().join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: PlannerSpec::default(),
-        };
+        let state = AppState { store,
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "trace-cursor-test".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: PlannerSpec::default(), };
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
             serve_unix(&server_socket, router(state)).await.unwrap();
@@ -28576,20 +28652,16 @@ mod tests {
                 .unwrap()
                 .store_index;
         }
-        let state = AppState {
-            store,
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: "wait-cursor-test".into(),
-            state_dir: root.path().to_path_buf(),
-            pty_root: root.path().join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: PlannerSpec::default(),
-        };
+        let state = AppState { store,
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "wait-cursor-test".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: PlannerSpec::default(), };
         let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
         let app = router(state).layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -31213,20 +31285,16 @@ mod tests {
     async fn message_read_returns_the_committed_lifecycle_state() {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("st3.sock");
-        let state = AppState {
-            store: Arc::new(Store::open_memory("message-read-state").unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: "message-read-state".into(),
-            state_dir: root.path().to_path_buf(),
-            pty_root: root.path().join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: PlannerSpec::default(),
-        };
+        let state = AppState { store: Arc::new(Store::open_memory("message-read-state").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "message-read-state".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: PlannerSpec::default(), };
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
             serve_unix(&server_socket, router(state)).await.unwrap();
@@ -33000,20 +33068,16 @@ mission "review" state="ready" {
         node: &str,
     ) -> (Client, tokio::task::JoinHandle<()>) {
         let socket = root.join("st3.sock");
-        let state = AppState {
-            store,
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.to_path_buf(),
-            pty_root: root.join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: PlannerSpec::default(),
-        };
+        let state = AppState { store,
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: PlannerSpec::default(), };
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
             serve_unix(&server_socket, router(state)).await.unwrap();
@@ -33655,5 +33719,69 @@ mod instance_uninstall_tests {
             names(instance_removals(root.path(), elsewhere.path())),
             ["bin", "state", "work"]
         );
+    }
+}
+
+#[cfg(test)]
+mod harness_question_cli_tests {
+    use super::*;
+
+    #[test]
+    fn harness_question_cli_reads_require_an_explicit_person() {
+        for arguments in [
+            vec!["st", "harness-questions", "list", "--as", "ada"],
+            vec!["st", "harness-questions", "show", "harness-question/ada", "--as", "ada"],
+        ] {
+            assert!(matches!(
+                Cli::try_parse_from(arguments).unwrap().command,
+                Command::HarnessQuestions { .. }
+            ));
+        }
+        assert!(Cli::try_parse_from(["st", "harness-questions", "list"]).is_err());
+        assert!(
+            Cli::try_parse_from(["st", "harness-questions", "show", "harness-question/ada"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn harness_answer_action_identity_is_retryable_and_question_scoped() {
+        let key = "harness-answer-retry-key";
+        let question = "harness-question/ada";
+        assert_eq!(
+            harness_answer_action_id(key, question),
+            harness_answer_action_id(key, question)
+        );
+        assert_ne!(
+            harness_answer_action_id(key, question),
+            harness_answer_action_id(key, "harness-question/alex")
+        );
+        assert_ne!(
+            harness_answer_action_id("ab", "c"),
+            harness_answer_action_id("a", "bc")
+        );
+    }
+
+    #[test]
+    fn harness_answer_cli_accepts_positions_file_and_explicit_person_and_key() {
+        let cli = Cli::try_parse_from([
+            "st",
+            "harness-questions",
+            "answer",
+            "harness-question/ada",
+            "--as",
+            "ada",
+            "--answers-file",
+            "answers.json",
+            "--idempotency-key",
+            "harness-answer-retry-key",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::HarnessQuestions {
+                command: HarnessQuestionsCommand::Answer { .. }
+            }
+        ));
     }
 }

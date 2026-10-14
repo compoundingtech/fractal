@@ -25,20 +25,16 @@ async fn serve(
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
     let store = Arc::new(Store::open(&root.join("graph.db"), "publisher-test").unwrap());
-    let state = AppState {
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "publisher-test".into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = AppState { store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "publisher-test".into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: Default::default(), };
     let socket = root.join("st3.sock");
     let path = socket.clone();
     let server =

@@ -533,6 +533,11 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
     ),
+    get("GET /v1/client/harness-questions", "/v1/client/harness-questions"),
+    get(
+        "GET /v1/client/harness-questions/{*id}",
+        "/v1/client/harness-questions/{harness_question}",
+    ),
     post("POST /v1/sets/preview", "/v1/sets/preview", |_, attempt| {
         owned_set_request(&format!("preview-{attempt}"))
     }),
@@ -1389,18 +1394,15 @@ mission "cost/history" state="ready" {
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = st3::api::router(AppState {
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.path().join("state"),
-        pty_root: root.path().join("pty"),
-        pty_binary: stub_pty(root.path()),
-        fleet_id: None, configured_peers: Vec::new(), client_relay: None,
-        native_session_home: Some(root.path().join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
-    });
+    let app = st3::api::router(AppState { store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: NODE.into(),
+    state_dir: root.path().join("state"),
+    pty_root: root.path().join("pty"),
+    pty_binary: stub_pty(root.path()),
+    fleet_id: None, configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: Some(root.path().join("home")),
+    planner_default: st3::model::PlannerSpec::default(), });
     let mut measurements = Vec::new();
     for run in 0..100 {
         let view = store.create_mission_run(&st3::model::MissionRunRequest {
@@ -1904,6 +1906,39 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
             .await
             .unwrap()
     };
+    let harness_question = {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "agent/ada".into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some("agent/ada".into()),
+                    fields: serde_json::from_value(json!({
+                        "status": "running", "runtime_id": "tester",
+                        "incarnation_id": "tester", "terminal": true,
+                    }))
+                    .unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            store
+                .observe_harness_question(&st3::store::harness_questions::QuestionObservation {
+                    agent: "agent/ada".into(),
+                    session: "tester".into(),
+                    native_id: "tester".into(),
+                    runtime_incarnation: "tester".into(),
+                    questions: vec![st3_schema::harness_questions::Question {
+                        id: "tester".into(), options: 2, multi: false, required: true,
+                    }],
+                })
+                .unwrap()
+        })
+        .await
+        .unwrap()
+    };
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -1932,20 +1967,16 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
         ..Default::default()
     })
     .unwrap();
-    let state = AppState {
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.join("state"),
-        pty_root: root.join("pty"),
-        pty_binary: pty,
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![PEER.into()],
-        client_relay: relay,
-        native_session_home: Some(root.join("home")),
-        planner_default: st3::model::PlannerSpec::default(),
-    };
+    let state = AppState { store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: NODE.into(),
+    state_dir: root.join("state"),
+    pty_root: root.join("pty"),
+    pty_binary: pty,
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![PEER.into()], client_relay: relay, harness_question_sink: None, native_session_home: Some(root.join("home")),
+    planner_default: st3::model::PlannerSpec::default(), };
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
@@ -1984,6 +2015,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
+    fixture.items.insert(
+        "harness_question",
+        urlencoding::encode(&harness_question.id).into_owned(),
+    );
     fixture.items.insert(
         "event_after",
         store.event_bounds().unwrap().0.saturating_sub(1).to_string(),
@@ -2247,6 +2282,47 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
         }
     }
     costs.insert(COLD_AGENTS.to_owned(), Cost::least(&samples));
+
+    // Measure the real answering authority/fence checks and unwired adapter refusal.
+    let mut samples = Vec::new();
+    for attempt in 0..4 {
+        let snapshot = st3_client::Client::unix_as(&socket, ARRANGEMENT_OWNER)
+            .capabilities()
+            .await
+            .unwrap()
+            .snapshot;
+        let request = json!({
+            "api_version": "st3.client.v0",
+            "id": format!("action/harness-answer-cost-{attempt}"),
+            "type": "harness.answer",
+            "idempotency_key": format!("harness-answer-cost-key-{attempt}"),
+            "fence": {
+                "snapshot_id": snapshot.id,
+                "subject_revisions": {harness_question.id.clone(): harness_question.revision},
+                "runtime_incarnation": harness_question.runtime_incarnation,
+            },
+            "parameters": {
+                "question": harness_question.id,
+                "answers": {"tester": {"positions": [1]}},
+            },
+        });
+        let cost = counted(|| async {
+            let error = arrangement_person
+                .post::<_, Value>("/v1/client/actions", &request)
+                .await
+                .expect_err("the unwired harness settle must refuse");
+            assert_eq!(st3::client::api_error_code(&error), Some("not-answerable"));
+            Ok(json!({"reason": "adapter_missing"}))
+        })
+        .await;
+        if attempt > 0 {
+            samples.push(cost);
+        }
+    }
+    costs.insert(
+        "POST /v1/client/actions (harness.answer adapter refusal)".into(),
+        Cost::least(&samples),
+    );
 
     // The summary a peer asks for before each exchange, after the daemon wrote a few claims.
     let mut samples = Vec::new();

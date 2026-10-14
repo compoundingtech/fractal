@@ -346,20 +346,16 @@ mod tests {
     }
 
     fn state(root: &Path) -> st3::api::AppState {
-        st3::api::AppState {
-            store: Arc::new(st3::store::Store::open_memory("attach-node").unwrap()),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "attach-node".into(),
-            state_dir: root.join("daemon"),
-            pty_root: root.join("pty"),
-            pty_binary: root.join("bin/pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
-        }
+        st3::api::AppState { store: Arc::new(st3::store::Store::open_memory("attach-node").unwrap()),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "attach-node".into(),
+        state_dir: root.join("daemon"),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("bin/pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: st3::model::PlannerSpec::default(), }
     }
 
     fn observe_terminal(store: &st3::store::Store, incarnation: &str) {

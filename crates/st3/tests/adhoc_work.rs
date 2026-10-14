@@ -77,20 +77,16 @@ impl Daemon {
         self.root.join("api.sock")
     }
     async fn start(&mut self) {
-        let state = AppState {
-            store: self.store.clone(),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: "example".into(),
-            state_dir: self.root.clone(),
-            pty_root: self.root.join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
-        };
+        let state = AppState { store: self.store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "example".into(),
+        state_dir: self.root.clone(),
+        pty_root: self.root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![], client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: st3::model::PlannerSpec::default(), };
         let socket = self.socket();
         self.server = Some(tokio::spawn(async move {
             st3::api::serve_unix(&socket, st3::api::router(state))

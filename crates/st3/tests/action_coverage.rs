@@ -177,20 +177,16 @@ impl Daemon {
     }
 
     fn state(root: &Path, node: &str) -> AppState {
-        AppState {
-            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.into(),
-            pty_root: root.join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: Some(root.join("native")),
-            planner_default: Default::default(),
-        }
+        AppState { store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: Some(root.join("native")),
+        planner_default: Default::default(), }
     }
 
     fn socket(&self) -> PathBuf {
@@ -468,6 +464,7 @@ async fn dispatch(
         "agent.resume" => agent_resume, "agent.start" => agent_start,
         "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
+        "harness.answer" => harness_answer,
         "arrangement.edit" => arrangement_edit,
         "attention.resolve" => attention_resolve,
         "lane.approve" => lane_approve, "lane.join" => lane_join, "lane.leave" => lane_leave,

@@ -106,6 +106,8 @@ pub(crate) fn claude_channel_attached(store: &Store, subject: &str, incarnation:
         .is_some_and(|fence| store.check_mailbox(&fence).is_ok())
 }
 
+pub use client_v0::harness_questions::{HarnessQuestion, HarnessQuestionAdapterError, HarnessQuestionSettleSink};
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Store>,
@@ -120,6 +122,7 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    pub harness_question_sink: Option<Arc<dyn HarnessQuestionSettleSink>>,
 }
 
 const CLIENT_API_VERSION: &str = "st3.client.v0";
@@ -607,6 +610,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         )
         .route("/v1/client/sessions", get(client_sessions))
         .route("/v1/client/sessions/{*id}", get(client_sessions_detail))
+        .route("/v1/client/harness-questions", get(client_v0::harness_questions::list))
+        .route("/v1/client/harness-questions/{*id}", get(client_v0::harness_questions::get))
         .route(
             "/v1/client/conversations/{id}/changes",
             get(client_v0::conversation_changes),
@@ -2184,7 +2189,7 @@ async fn client_capabilities(
         blocking_store(move || store.read_snapshot(|_| store.event_bounds())).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
-    let capabilities = client_v0::capabilities(&session);
+    let capabilities = client_v0::capabilities(&state, &session);
     // The longest message body this daemon takes, so a composer shows a limit only when told.
     let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
@@ -16076,6 +16081,17 @@ fn live_session(
     })
 }
 
+/// Terminal input and native answers share the same selected, live, local runtime authority.
+fn live_input_session(state: &AppState, subject: &str, incarnation: &str) -> Result<LiveSession, ApiError> {
+    let session = live_session(state, subject, Some(incarnation))?;
+    if !session.terminal {
+        return Err(ApiError::bad(St3Error::new(
+            "unsupported-capability", "session input requires a terminal session",
+        )));
+    }
+    Ok(session)
+}
+
 #[derive(Deserialize)]
 struct SessionLogQuery {
     #[serde(default)]
@@ -16240,13 +16256,7 @@ async fn input_session_as(
     {
         return Ok(Json(session_control_response(&subject, &result)));
     }
-    let session = live_session(state, &subject, Some(&request.expected_incarnation))?;
-    if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
-            "unsupported-capability",
-            "session input requires a terminal session",
-        )));
-    }
+    let session = live_input_session(state, &subject, &request.expected_incarnation)?;
     let bytes = match request.mode {
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)
@@ -18504,6 +18514,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             client_relay: None,
             native_session_home: None,
             planner_default: PlannerSpec::default(),
+            harness_question_sink: None,
         }
     }
 

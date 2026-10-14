@@ -204,6 +204,14 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
             continue;
         }
+        if id == "harness-questions.list" {
+            writeln!(out, "    pub async fn harness_questions(&self) -> Result<Envelope<Page>, ClientError> {{ self.get(\"/v1/client/harness-questions\").await }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    pub async fn harness_question(&self, id: &str) -> Result<Envelope<HarnessQuestion>, ClientError> {{ self.get(&format!(\"/v1/client/harness-questions/{{}}\", percent_encode(id))).await }}")?;
+            continue;
+        }
         if id == "capabilities.get" {
             writeln!(
                 out,
@@ -362,6 +370,14 @@ fn swift_operation_methods(
         }
         if id == "arrangements.get" {
             writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
+            continue;
+        }
+        if id == "harness-questions.list" {
+            writeln!(out, "    public func harnessQuestions() async throws -> Envelope<ResourcePage> {{ try await get(\"v1/client/harness-questions\") }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> {{ try await get(\"v1/client/harness-questions/\\(Self.routedSessionID(id))\") }}")?;
             continue;
         }
         if matches!(
@@ -639,6 +655,7 @@ fn validate_surfaces(
         bail!("KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}", known.len());
     }
     for definition in [
+        "Capability",
         "DirectiveNote",
         "DirectiveNotes",
         "ResourceObservation",
@@ -714,11 +731,22 @@ fn validate_surfaces(
         "PersonAnswerInput",
         "PersonAnswer",
         "PersonAnswerRecord",
+        "HarnessQuestionItem",
+        "HarnessAnswerInput",
+        "HarnessResolvedAnswer",
+        "HarnessQuestionResolution",
+        "HarnessQuestionAnswerability",
+        "HarnessAnswerParameters",
+        "HarnessAnswerResult",
+        "HarnessInvalidAnswerDetails",
+        "HarnessNotAnswerableDetails",
     ] {
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
     for token in [
         "pub async fn observations_report",
+        "pub async fn harness_questions(",
+        "pub async fn harness_question(",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
         "pub async fn terminal_stream",
@@ -732,6 +760,8 @@ fn validate_surfaces(
     }
     for token in [
         "func capabilities(",
+        "func harnessQuestions(",
+        "func harnessQuestion(",
         "func timeline(",
         "cursor: String?",
         "func events(",
@@ -763,6 +793,8 @@ fn validate_surfaces(
             "events.list" => "events".into(),
             "terminal.screen" => "terminal_screen".into(),
             "agent-queue.get" => "agent_queue".into(),
+            "harness-questions.list" => "harness_questions".into(),
+            "harness-questions.get" => "harness_question".into(),
             id => action_method(id),
         };
         let swift_method = lower_camel(&pascal(read["id"].as_str().unwrap()));
@@ -773,6 +805,8 @@ fn validate_surfaces(
             "events.list" => "events".into(),
             "terminal.screen" => "terminalScreen".into(),
             "agent-queue.get" => "agentQueue".into(),
+            "harness-questions.list" => "harnessQuestions".into(),
+            "harness-questions.get" => "harnessQuestion".into(),
             _ => swift_method,
         };
         if !rust_client.contains(&format!("pub async fn {rust_method}("))
@@ -1221,6 +1255,14 @@ fn typescript_operation_methods(
         }
         if id == "arrangements.get" {
             writeln!(out, "    async arrangementsGet(personName: string, uuid: string): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`); }}")?;
+            continue;
+        }
+        if id == "harness-questions.list" {
+            writeln!(out, "    async harnessQuestions(): Promise<EnvelopeOf<Page>> {{ return this.get('/v1/client/harness-questions'); }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    async harnessQuestion(id: string): Promise<EnvelopeOf<HarnessQuestion>> {{ return this.get(`/v1/client/harness-questions/${{encodeURIComponent(id)}}`); }}")?;
             continue;
         }
         if id == "conversation.search" {

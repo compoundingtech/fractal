@@ -1088,23 +1088,19 @@ fn event_feeds_are_contiguous_and_terminal_streams_replace_whole_screens() {
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState {
-        // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
-        store: Arc::new(
-            Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
-        ),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "client-v0-baseline".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
-    }
+    AppState { // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
+    store: Arc::new(
+        Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
+    ),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "client-v0-baseline".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: st3::model::PlannerSpec::default(), }
 }
 
 #[tokio::test]

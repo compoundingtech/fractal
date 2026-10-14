@@ -21,6 +21,40 @@ function response(value, status = 200) { return { ok: status < 400, status, json
 const capabilityFixture = require('../../../docs/st3/client-v0/fixtures/capabilities.json');
 const cursorGapFixture = require('../../../docs/st3/client-v0/fixtures/cursor-gap-error.json');
 const capabilities = { ...capabilityFixture.value, limits: { ...capabilityFixture.value.limits, max_page_items: 2, max_event_items: 3, max_wait_ms: 10 } };
+test('harness question clients use typed read routes and send only positional answers', async () => {
+    const calls = [];
+    const question = { kind: 'harness-question', id: 'harness-question/ada/native-1', revision: 'claim/question',
+        updated_at: '2026-10-14T10:00:00.000Z', agent: 'agent/ada', session: 'session/ada', native_id: 'native-1',
+        runtime_incarnation: 'incarnation/ada', observed_at: 1791972000000,
+        questions: [{ id: 'q1', options: 3, multi: true, required: true }],
+        resolution: null, answer: { state: 'unavailable', reason: 'adapter_missing' } };
+    const resolved = { status: 'answered', revision: 'claim/resolved',
+        answers: { q1: { positions: [0, 2], timed_out: false } }, resolved_at: 1791972001000 };
+    const client = new St3Client({ baseUrl: 'https://example.test', fetchImpl: async (url, init) => {
+        const path = new URL(url).pathname;
+        calls.push([path, init]);
+        if (path.endsWith('/capabilities')) return response(capabilityFixture);
+        if (path.endsWith('/harness-questions')) return response(envelope({ kind: 'page', collection: 'harness-questions',
+            filters: {}, items: [question], page: { limit: 50, has_more: false } }));
+        if (path.endsWith('/actions')) return response(envelope({ kind: 'action-result', action_id: 'action/tester',
+            operation_id: 'operation/tester', status: 'completed', affected_ids: [question.id], snapshot_id: 'snapshot/test',
+            harness_answer: { status: 'accepted', resolution: resolved } }));
+        return response(envelope(question));
+    } });
+    assert.deepEqual((await client.harnessQuestions()).value.items, [question]);
+    assert.deepEqual((await client.harnessQuestion(question.id)).value, question);
+    const fence = { snapshot_id: 'snapshot/test', subject_revisions: { [question.id]: question.revision },
+        runtime_incarnation: question.runtime_incarnation };
+    const result = await client.harnessAnswer({ id: 'action/tester', idempotency_key: 'tester-answer-key', fence,
+        parameters: { question: question.id, answers: { q1: { positions: [0, 2] } } } });
+    assert.deepEqual(result.value.harness_answer, { status: 'accepted', resolution: resolved });
+    assert.equal(calls[2][0], '/v1/client/harness-questions/harness-question%2Fada%2Fnative-1');
+    const request = JSON.parse(calls[3][1].body);
+    assert.equal(request.type, 'harness.answer');
+    assert.deepEqual(request.fence, fence);
+    assert.deepEqual(request.parameters, { question: question.id, answers: { q1: { positions: [0, 2] } } });
+});
+
 
 test('notesList reads the typed advisory current notes endpoint', async () => {
     const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json');
