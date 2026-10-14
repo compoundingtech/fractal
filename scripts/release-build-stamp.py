@@ -13,7 +13,7 @@ def git(*args):
 
 if git('status', '--porcelain'):
     raise SystemExit('release build requires a clean source checkout')
-base = tomllib.load(open('Cargo.toml', 'rb'))['package']['version']
+base = tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version']
 tag = os.environ.get('RELEASE_TAG', '')
 if tag:
     match = re.fullmatch(r'v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)', tag)

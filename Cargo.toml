@@ -1,6 +1,6 @@
-# The root stays a real package (not a virtual manifest): `flake.nix` reads
-# `package.version` out of this file as the single source of truth for the
-# build, and a virtual root has no `[package]` to read.
+# The root remains a package while the legacy st2 runner is present.
+# Shared release identity lives in workspace.package so retiring st2 does not
+# change the current binaries' release stamps.
 [workspace]
 members = [
   "examples/client-tui",
@@ -51,6 +51,9 @@ default-members = [
 
 exclude = ["vendor/libghostty-vt-sys"]
 
+[workspace.package]
+version = "0.1.0"
+
 [workspace.dependencies]
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 
@@ -73,7 +76,7 @@ debug = 0
 
 [package]
 name = "st2"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 build = "crates/st-drivers/build.rs"
 description = "Harness-agnostic runner: reconcile a unified catalog+inbox folder of rendered agent specs, keep their ptys running, and deliver messages by moving inbox files."

@@ -20,8 +20,9 @@ pub use isolate::{
     signal_scope, systemd_user_available, warn_if_degraded, wrap as wrap_isolated,
 };
 pub use priority::{
-    LIVE_WEIGHT, ServerPlacement, protect_server, protect_servers, report as priority_report,
-    server_unit, work_prefix,
+    BACKGROUND_IO_LEVEL, BACKGROUND_NICE, LIVE_WEIGHT, PRIORITY_ENV, SeatPriority, ServerPlacement,
+    protect_server, protect_servers, report as priority_report, server_unit,
+    set_configured as set_configured_seat_priority, work_prefix,
 };
 pub use process::{
     ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,

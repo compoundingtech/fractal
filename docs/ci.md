@@ -336,6 +336,12 @@ requires both the daemon and a double-forked child in a new session to disappear
 five seconds, and separately injects an evidence-collection error to prove `node.stop()`
 still runs. Existing canary assertions, phase bounds and zero retries remain unchanged.
 
+`boot_canaries::interrupted_tests_keep_logs_and_pending_observations` kills an isolated
+fixture controller and checks the guardian keeps daemon/driver logs, pending outbox sequences,
+and an interrupted verdict. `daemon_restart` and `daemon_environment` also register their
+short socket/runtime roots with that guardian; failures keep diagnostics in
+`target/boot-canaries/` before the roots are removed. Capture errors are explicit artifacts.
+
 The Codex stand-in's schema files are generated from the protocol gate's own fixture; when the
 required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p st-drivers
 the_boot_canary_codex_stub_schemas` rewrites them.
@@ -679,6 +685,13 @@ grows with the whole store. Neither is part of `linux-gate`; making one required
 for the repository's owner. Both run `scripts/ci-perf`, and `.config/nextest.toml` keeps their
 tests out of `linux-tests`.
 
+The isolated `link_minutes` case writes its preserved daemon, link-event, trace and
+replication evidence under `RUNNER_TEMP/perf/link-minutes-evidence`. Its supervised
+child inherits the explicit evidence parent, including when `CI_RUN_ID` is absent.
+The existing `perf-cost-logs` upload runs on failure and includes this visible tree;
+its oracle, one-attempt policy and exit status are unchanged. Interrupted runs may
+leave partial evidence; an uploaded directory is not a completed-test verdict.
+
 `perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every pull request and
 `main` push, on the stages' runner. It skips
 merge-queue entries, which wait only for required checks, so a queued entry needs no more runners
@@ -918,7 +931,6 @@ repo-settings changes have merged.
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
 | `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
-| `release-portable.yml` | Preserve dispatch inputs, accepted-source verification, packaging, publishing and fresh-download execution proof. Move Linux to Namespace. |
 | `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
 
 The content guard still rejects real machine/home identities and private fleet configuration

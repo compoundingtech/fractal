@@ -66,7 +66,9 @@ st conversations ls person/ada
 
 `send` and `reply` safely recognize a retry with the same content. If a send times out, check its status or retry it; do not assume it failed. An agent's answer belongs in the conversation where you asked it.
 
-Attach an existing PNG, JPEG, GIF, or WebP image (up to four, at most 10 MiB each):
+Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
+the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,
+and says when it changed a file. HEIC, AVIF, TIFF and PDF are refused with a way to convert them.
 
 ```sh
 printf 'Path to an image to share with the worker: '

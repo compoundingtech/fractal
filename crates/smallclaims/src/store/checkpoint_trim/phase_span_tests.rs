@@ -16,7 +16,7 @@ fn interrupted_trim() -> Store {
 
 fn resumed(store: &Store) -> Vec<CheckpointAction> {
     let mut actions = Vec::new();
-    assert!(store.apply_stable_checkpoints(&[], &mut actions).unwrap().is_none());
+    assert!(store.apply_stable_checkpoints(&[], std::path::Path::new("unused-checkpoint-scratch"), &mut actions).unwrap().is_none());
     actions
 }
 

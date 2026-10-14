@@ -1167,6 +1167,7 @@ fn start_event_migration(
 
 #[test]
 fn load_fixture_starts_the_shared_worker_and_steady_waits_for_completion() {
+    let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = tempfile::tempdir().unwrap();
     let daemon = tokio::runtime::Builder::new_current_thread()
         .enable_all()
