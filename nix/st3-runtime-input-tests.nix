@@ -25,10 +25,10 @@ let
     name = "${old.name}-check-input-successor";
   });
   varyBaseline = derivation: derivation.overrideAttrs (old: {
-    # stdenv has folded enabled nativeCheckInputs into nativeBuildInputs here.
-    nativeBuildInputs = map
+    # overrideAttrs receives original inputs, before stdenv folds them.
+    nativeCheckInputs = map
       (input: if input.outPath == baseline.outPath then baselineSuccessor else input)
-      old.nativeBuildInputs;
+      old.nativeCheckInputs;
   });
   runtime = result: result.packages.${system}.st3;
   checked = result: result.checks.${system}.st3;
