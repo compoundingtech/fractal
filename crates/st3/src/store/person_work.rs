@@ -980,10 +980,10 @@ pub(super) fn reassign_person_steps_tx(
             continue;
         }
         let ask = request(tx, &subject).map_err(internal)?;
-        if let Some(ask) = &ask {
-            if !current(tx, ask, as_of).map_err(internal)? {
-                continue;
-            }
+        if let Some(ask) = &ask
+            && !current(tx, ask, as_of).map_err(internal)?
+        {
+            continue;
         }
         let episode = ask.as_ref().map(|ask| ask.id.clone()).unwrap_or_else(|| {
             format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch)
