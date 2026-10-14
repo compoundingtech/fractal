@@ -167,6 +167,12 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='../x')).returncode == 1
     print('passed: a stage note carries the stage command, its real exit status and the digest of its exact log; a missing or garbled timing is a failure')
 
+    # --- a job whose gate said skip makes no note even if its logs and steps look like a success
+    assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='false')).returncode == 0
+    gated = helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='true'))
+    assert gated.returncode == 1 and 'evidence gate skipped' in gated.stdout
+    print('passed: a job whose own evidence gate said skip makes no note, whatever its logs or steps show')
+
     # --- cleanup: key overwritten and removed
     alias = tmp / 'alias'
     os.link(home / 'signing-key', alias)

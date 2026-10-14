@@ -139,6 +139,13 @@ def aggregate(path):
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 
 
+def gate_skipped():
+    """GATE_SKIP is the job's own evidence gate output. When it says skip, the job took the step-level
+    skip and ended in success without doing its work: no note, whatever its steps' outcomes say."""
+    if env('GATE_SKIP').lower() == 'true':
+        raise Refused('the evidence gate skipped this job\'s work, so it did not test anything itself; no note is made')
+
+
 def stage_facts(path):
     """What a stage job honestly knows: the command it ran, its exit status, the digest of its log.
 
@@ -146,6 +153,7 @@ def stage_facts(path):
     ("SECONDS STATUS"). A missing timing file means the stage did not finish: that is recorded as
     a failure, never inferred as success.
     """
+    gate_skipped()
     stage = env('STAGE')
     if not stage or '/' in stage:
         raise Refused('STAGE must name the ci-linux stage this job ran')
