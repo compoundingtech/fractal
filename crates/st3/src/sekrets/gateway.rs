@@ -2023,6 +2023,7 @@ command = ["evidence-sign"]
         assert!(gateway.choose(&caller, &request).unwrap().is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn program_checkout_walk_is_descriptor_relative_and_refuses_symlinks_and_other_owners() {
         use std::os::unix::fs::symlink;
