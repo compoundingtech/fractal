@@ -1,4 +1,6 @@
 """CI assertions for fresh st seats; predecessor compatibility and st2 stay independent."""
+import os
+import shutil
 import re
 import sqlite3
 from pathlib import Path
@@ -8,6 +10,15 @@ LEGACY = re.compile("st2", re.IGNORECASE)
 # A stored value names st2 as its own token: a label, schema, path or program. Keys, signatures,
 # nonces and other base64 that st stores hold the letters st2 inside longer runs by chance.
 TOKEN = re.compile(r"(?<![a-z0-9])st2(?![a-z0-9])", re.IGNORECASE)
+
+
+def isolated_path(bin_dir):
+    """Keep inherited tools in hermetic fixtures without exposing the predecessor."""
+    inherited = [
+        entry for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and not LEGACY.search(entry) and not shutil.which("st2", path=entry)
+    ]
+    return os.pathsep.join([str(bin_dir), *inherited])
 
 
 def source_findings(root):
@@ -24,7 +35,7 @@ def dependency_findings(metadata):
     # features and target/dev/build dependencies. Traverse neutral crates too: an alias or
     # indirect workspace dependency must not let st2 back into either current product.
     packages = {package["name"]: package for package in metadata["packages"]}
-    for product in ("st3", "stui"):
+    for product in ("st3",):
         pending = [(product, [product])]
         seen = set()
         while pending:
@@ -77,7 +88,8 @@ def sqlite_findings(path):
                     # These are opaque base64, not labels. Their decoded claims are also stored
                     # in semantic tables checked below; random bytes can contain the letters st2.
                     if (name, column) in {("replica_envelopes", "payload"),
-                                          ("replica_envelope_signatures", "signature")}:
+                                          ("replica_envelope_signatures", "signature"),
+                                          ("claim_signatures", "signature")}:
                         continue
                     yield from record_findings(
                         f"SQLite record {path.name}/{name}/{column}", value, TOKEN

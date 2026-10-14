@@ -1,3 +1,4 @@
+import type { ConversationHeader } from './conversationView.ts';
 import type { Page, Session } from '@smalltalk/st3-client';
 
 // The gateway's discovery fields are additional properties on the generated
@@ -88,13 +89,20 @@ export type Older = {
   /** Why the last page could not be read; scrolling up tries again. */
   failed?: string;
 };
-export type Conversation<T extends Entry> = { entries: T[]; hasOlder: boolean; newestSequence: number; sessionId?: string; older: Older };
+export type Conversation<T extends Entry> = { entries: T[]; hasOlder: boolean; newestSequence: number; sessionId?: string; /** The conversation header st last sent (`conversation-blocks.v1`), register fields first. */ header?: ConversationHeader; older: Older };
 const noOlder: Older = { paged: false, start: false, loading: false };
 
 // Everything a person reads in a conversation: the harness's turns, tool calls and results, Small
 // Talk st joins in, and st's diagnostics. Status heartbeats and usage are not conversation.
 export function isConversational(entry: Entry): boolean {
   return entry.type !== 'status' && entry.type !== 'usage';
+}
+
+// Session-stable availability notices are not evidence that two history windows overlap.
+function isProjectionNotice(entry: Entry): boolean {
+  return entry.type === 'error' && typeof entry.body === 'object' && entry.body !== null
+    && 'code' in entry.body
+    && (entry.body.code === 'timeline-query-limited' || entry.body.code === 'timeline-history-incomplete');
 }
 
 /** st's order: by time, then by sequence. */
@@ -114,11 +122,12 @@ function moreBefore(older: Older, live: boolean): boolean {
 // back are never dropped. A new newest page keeps those pages while it still meets them.
 export function applyConversation<T extends Entry>(
   previous: Conversation<T> | undefined,
-  frame: { replace: boolean; items: T[]; hasMore: boolean; sessionId?: string },
+  frame: { replace: boolean; items: T[]; hasMore: boolean; sessionId?: string; header?: ConversationHeader },
   want = 1000,
 ): Conversation<T> {
   const otherSession = !!frame.sessionId && !!previous?.sessionId && frame.sessionId !== previous.sessionId;
   const sessionId = frame.sessionId ?? previous?.sessionId;
+  const header = frame.header ?? (otherSession ? undefined : previous?.header);
   let older = previous && !otherSession ? previous.older : noOlder;
   let base: T[] = [];
   let live = previous?.hasOlder ?? frame.hasMore;
@@ -126,9 +135,9 @@ export function applyConversation<T extends Entry>(
   else if (frame.replace) {
     live = frame.hasMore;
     const held = previous && !otherSession ? previous.entries : [];
-    const meets = frame.items.some(item => held.some(entry => entry.id === item.id));
-    const oldest = [...frame.items].sort(before)[0];
-    if (older.paged && (meets || !frame.hasMore)) base = held.filter(entry => oldest && before(entry, oldest) < 0);
+    const meets = frame.items.some(item => !isProjectionNotice(item) && held.some(entry => !isProjectionNotice(entry) && entry.id === item.id));
+    const oldest = frame.items.filter(item => !isProjectionNotice(item)).sort(before)[0];
+    if (older.paged && (meets || !frame.hasMore)) base = held.filter(entry => !isProjectionNotice(entry) && oldest && before(entry, oldest) < 0);
     else older = noOlder;
   }
   const found = new Map<string, T>(base.map(entry => [entry.id, entry]));
@@ -143,7 +152,7 @@ export function applyConversation<T extends Entry>(
     entries = entries.slice(-want);
     live = true;
   }
-  return { entries, hasOlder: moreBefore(older, live), newestSequence, sessionId, older };
+  return { entries, hasOlder: moreBefore(older, live), newestSequence, sessionId, ...(header ? { header } : {}), older };
 }
 
 /** An earlier page of `sessionId`'s timeline; entries already held win. A page for another

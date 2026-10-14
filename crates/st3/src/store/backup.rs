@@ -76,6 +76,39 @@ impl Store {
 
     /// Run on a blocking read worker, never the writer queue. No page query scans the full log.
     pub fn write_backup(&self, output: &mut impl Write) -> Result<Header> {
+        self.write_backup_with_bodies(output, None)
+    }
+
+    /// The same archive, with the texts of the long messages this member owns after its claims.
+    pub fn write_backup_with_bodies(
+        &self,
+        output: &mut impl Write,
+        bodies: Option<&crate::message_body::Bodies>,
+    ) -> Result<Header> {
+        // The bodies this member owns that its claims name, checked once here so the header can
+        // say whether the archive carries any, and written again below inside the snapshot.
+        let mut owned: Vec<(String, String, String)> = Vec::new();
+        if let Some(bodies) = bodies {
+            for file in bodies
+                .files()
+                .into_iter()
+                .filter(|file| !file.temporary && !file.expired) {
+                let subject = format!("message/{}", file.id);
+                let Some(message) = self.message(&subject)? else {
+                    continue;
+                };
+                let (Some(named), true) = (message.body_attachment(), bodies.holds(&message.from, &file))
+                else {
+                    continue;
+                };
+                let Some(bytes) = bodies.read(&message.from, &subject)? else {
+                    continue;
+                };
+                if hex::encode(Sha256::digest(&bytes)) == named.sha256 {
+                    owned.push((subject, message.from, named.sha256));
+                }
+            }
+        }
         loop {
             self.seal_local_batches()?;
             // Capture before pinning: another sealer may advance this atomic after our reader
@@ -101,7 +134,10 @@ impl Store {
                     health.map_or(admitted == 0, |(status, through)| status == "healthy" && through >= admitted),
                     "backup requires a healthy, fully projected graph; retry after replication catches up"
                 );
-                let header = self.backup_header()?;
+                let mut header = self.backup_header()?;
+                if !owned.is_empty() {
+                    header.version = crate::backup::VERSION_WITH_BODIES;
+                }
                 let mut hash = Sha256::new();
                 write_record(output, &mut hash, &Record::Header(header.clone()))?;
                 let mut after = (String::new(), 0_u64, String::new());
@@ -173,6 +209,29 @@ impl Store {
                         if after.is_none() {
                             break;
                         }
+                    }
+                }
+                if let Some(bodies) = bodies {
+                    use base64::Engine as _;
+                    for (subject, actor, sha256) in &owned {
+                        // A body that vanished or changed since it was checked is left out, and
+                        // the restore report counts it as not returned.
+                        let Some(bytes) = bodies.read(actor, subject)? else {
+                            continue;
+                        };
+                        if hex::encode(Sha256::digest(&bytes)) != *sha256 {
+                            continue;
+                        }
+                        write_record(
+                            output,
+                            &mut hash,
+                            &Record::MessageBody(crate::backup::MessageBodyRecord {
+                                message: subject.clone(),
+                                actor: actor.clone(),
+                                sha256: sha256.clone(),
+                                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                            }),
+                        )?;
                     }
                 }
                 self.check_backup_chains()?;
@@ -368,7 +427,21 @@ impl Store {
             log_digest: actual.log_digest,
             projections_match,
             tables: actual.tables,
+            message_bodies_restored: 0,
+            message_bodies_unmatched: 0,
+            message_bodies_referenced: 0,
         })
+    }
+
+    /// How many long messages the claims here name, by the `text/plain` entry in their
+    /// `attachments`. A restore reads it once, offline, to say how many texts it could not return.
+    pub(crate) fn message_body_references(&self) -> Result<u64> {
+        Ok(self.readers.get().query_row(
+            "SELECT COUNT(*) FROM claims WHERE kind='message.sent'
+               AND json_extract(body,'$.fields.attachments') LIKE '%\"text/plain\"%'",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     fn check_backup_chains(&self) -> Result<()> {
@@ -755,7 +828,6 @@ mod tests {
 
     #[test]
     fn a_backup_preserves_multiple_wire_envelopes_for_the_same_batch() {
-        use base64::Engine as _;
         let root = tempfile::tempdir().unwrap();
         let source = Store::open_memory("alder").unwrap();
         diagnostic(&source, "note");
@@ -763,13 +835,8 @@ mod tests {
             .export_replication_exchange("test-fleet", &ReplicationInventory::default())
             .unwrap();
         let mut variant = exchange.envelopes[0].clone();
-        let mut payload: smallclaims::claim::ReplicaEnvelopePayload = ciborium::from_reader(
-            base64::engine::general_purpose::STANDARD
-                .decode(&variant.payload)
-                .unwrap()
-                .as_slice(),
-        )
-        .unwrap();
+        let mut payload: smallclaims::claim::ReplicaEnvelopePayload =
+            ciborium::from_reader(variant.payload.bytes().unwrap()).unwrap();
         let blob = b"another wire representation".to_vec();
         payload
             .blobs
@@ -783,7 +850,7 @@ mod tests {
             variant.accepted_at_unix_ms,
             &bytes,
         );
-        variant.payload = base64::engine::general_purpose::STANDARD.encode(bytes);
+        variant.payload = bytes.into();
         exchange.envelopes.push(variant);
         let receiver = Store::open_memory("birch").unwrap();
         receiver

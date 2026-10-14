@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { isSystemMission, missionRows, missionSections, missionTitle, missionWord, stepStyle } from './missionsView.ts';
+import { filterMissionRows, isSystemMission, missionRows, missionSections, missionTitle, missionWord, stepStyle } from './missionsView.ts';
 
 const step = (id, state, extra = {}) => ({ id: `step-run/${id}`, path: id, state, attempt: 1, since: '2026-09-30T11:00:00Z', ...extra });
 const mission = (id, state, steps = [], extra = {}) => ({ id: `mission/${id}`, kind: 'mission', title: id, state, runs: ['r'], run_details: [{ id: 'mission-run/r', status: state, steps }], updated_at: '2026-09-30T11:00:00Z', ...extra });
@@ -49,3 +49,20 @@ assert.equal(missionRows(missions, [], [], true).rows.length, 3);
   assert.equal(hidden, 1);
   assert.equal(missionRows([yesterday, today], [], [], true, now).rows.length, 2);
 }
+
+// A run in progress shows what its step last reported (Nathan, 2026-10-06).
+{
+  const busy = mission('busy', 'running', [step('s', 'running', { last_progress: ' Tests pass;\n opening the PR ' }), step('t', 'ready')]);
+  const quiet = mission('quiet', 'running', [step('s', 'running')]);
+  const done = mission('done', 'completed', [step('s', 'completed', { last_progress: 'Finished' })]);
+  const { rows } = missionRows([busy, quiet, done], [], [], true, Date.parse('2026-09-30T12:00:00Z'));
+  const byId = Object.fromEntries(rows.map(row => [row.mission.id, row.progress]));
+  assert.deepEqual(byId, { 'mission/busy': 'Tests pass; opening the PR', 'mission/quiet': undefined, 'mission/done': undefined });
+}
+
+// Resources keeps mission search usable across names, paths, status and current progress.
+const searchable = missionRows([mission('demo/ship', 'running', [step('build', 'claimed', { last_progress: 'Checking package' })]), mission('demo/idle', 'standing')], [], [], true).rows;
+assert.deepEqual(filterMissionRows(searchable, 'DEMO checking').map(row => row.mission.id), ['mission/demo/ship']);
+assert.deepEqual(filterMissionRows(searchable, 'working ship').map(row => row.mission.id), ['mission/demo/ship']);
+assert.deepEqual(filterMissionRows(searchable, 'ship idle'), []);
+assert.deepEqual(filterMissionRows(searchable, '  '), searchable);

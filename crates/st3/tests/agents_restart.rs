@@ -5,12 +5,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
 use serde_json::{Value, json};
 use st3::api::AppState;
-use st3::model::{ClaimRecord, MemberSpec, MissionRunRequest};
+use st3::model::{ClaimInput, ClaimRecord, MemberSpec, MissionRunRequest};
 use st3::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use st3::store::Store;
 use tokio::sync::{Notify, watch};
+
+/// How long a planned restart waits for a handoff in this process. The deadline tests keep it short;
+/// the acknowledgement tests set it long so a slow pass cannot reach it.
+static PREPARE_DEADLINE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(400);
 
 /// Only this fixture's runtimes exist here; no shared seats or daemons are touched.
 #[derive(Default)]
@@ -19,9 +24,21 @@ struct Runtime {
     starts: Mutex<Vec<MemberSpec>>,
     stops: Mutex<Vec<String>>,
     refuse_start: Mutex<bool>,
+    attempts: Mutex<Vec<MemberSpec>>,
+    exit_on_start: Mutex<bool>,
+    before_start: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     snapshot_unavailable: Mutex<bool>,
 }
 impl RuntimeControl for Runtime {
+    fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.starts.lock().unwrap().iter().enumerate()
+            .find(|(index, member)| member.runtime_id == id && incarnation == format!("fixture:{}", index + 1))
+            .and_then(|(_, member)| member.tags.get("st3.start-operation").cloned()))
+    }
+    fn start_operation_closed(&self, _: &MemberSpec) -> anyhow::Result<bool> {
+        // Rejected fixture starts create neither a runtime nor a detached producer.
+        Ok(true)
+    }
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<RuntimeObservation>> {
         anyhow::ensure!(!*self.snapshot_unavailable.lock().unwrap(), "fixture snapshot unavailable");
         Ok(self
@@ -35,7 +52,20 @@ impl RuntimeControl for Runtime {
     fn observe_exec(&self, id: &str) -> anyhow::Result<Option<RuntimeObservation>> {
         Ok(self.observations.lock().unwrap().get(id).cloned())
     }
+    fn start_guarded(
+        &self,
+        member: &MemberSpec,
+        guard: &dyn Fn() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        guard()?;
+        if let Some(before) = self.before_start.lock().unwrap().take() {
+            before();
+        }
+        guard()?;
+        self.start(member)
+    }
     fn start(&self, member: &MemberSpec) -> anyhow::Result<()> {
+        self.attempts.lock().unwrap().push(member.clone());
         anyhow::ensure!(
             !*self.refuse_start.lock().unwrap(),
             "fixture rejected launch"
@@ -47,8 +77,17 @@ impl RuntimeControl for Runtime {
             RuntimeObservation {
                 runtime_id: member.runtime_id.clone(),
                 terminal: member.terminal,
-                status: "running".into(),
-                exit_code: None,
+                status: if *self.exit_on_start.lock().unwrap() {
+                    "exited"
+                } else {
+                    "running"
+                }
+                .into(),
+                exit_code: if *self.exit_on_start.lock().unwrap() {
+                    Some(1)
+                } else {
+                    None
+                },
                 incarnation_id: Some(format!("fixture:{}", starts.len())),
             },
         );
@@ -93,6 +132,7 @@ struct Fixture {
 #[derive(Clone, Copy, PartialEq)]
 enum Shape {
     TopLevel,
+    Owned,
     /// In the mission body, materialized once per generation.
     Mission,
     /// Inside the step it works, materialized on every pass while the step is active.
@@ -124,17 +164,34 @@ impl Fixture {
     }
 
     async fn launching(shape: Shape, launch: &str, restart: &str) -> (Self, String) {
-        let mission = shape != Shape::TopLevel;
+        Self::launching_with_router(shape, launch, restart, st3::api::router).await
+    }
+
+    async fn launching_with_router(
+        shape: Shape,
+        launch: &str,
+        restart: &str,
+        make_router: impl FnOnce(AppState) -> axum::Router,
+    ) -> (Self, String) {
+        let mission = matches!(shape, Shape::Mission | Shape::Step);
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), "restart-test").unwrap());
         let notify = Arc::new(Notify::new());
         let runtime = Arc::new(Runtime::default());
-        let reconciler = Arc::new(Reconciler::new(
-            store.clone(),
-            runtime.clone(),
-            "restart-test".into(),
-            notify.clone(),
-        ));
+        // The API publishes concurrently with drive(), as it does in the daemon. Use
+        // the daemon's incremental path; full-pass correction audits require stable inputs.
+        let reconciler = Arc::new(
+            Reconciler::new(
+                store.clone(),
+                runtime.clone(),
+                "restart-test".into(),
+                notify.clone(),
+            )
+            .skipping_unneeded(true)
+            .with_restart_prepare_deadline(Duration::from_millis(
+                PREPARE_DEADLINE_MS.load(std::sync::atomic::Ordering::SeqCst),
+            )),
+        );
         let member = format!(
             r#"agent "example/worker" {{
             workspace {:?}
@@ -156,7 +213,7 @@ impl Fixture {
                 "version 2\nmission \"example/restart\" state=\"ready\" {{\ngoal \"Exercise a seat restart.\"\nstep \"work\" {{\nassigned-to \"agent/${{ST_MISSION_RUN}}/worker\"\ngoal \"Keep the run open.\"\n{}\n}}\n}}",
                 member.replace("example/worker", "worker")
             ),
-            Shape::TopLevel => format!("version 2\n{member}"),
+            Shape::TopLevel | Shape::Owned => format!("version 2\n{member}"),
         };
         let intent = st3::parse_intent(&source, "restart-test").unwrap();
         let preview = store
@@ -176,6 +233,18 @@ impl Fixture {
                 Some("person/avery"),
             )
             .unwrap();
+        if shape == Shape::Owned {
+            use st3::store::owned_sets::{Options, Source};
+            let mut options = Options {
+                set: "example/runtime".into(),
+                source: Source { repository: "acme/example".into(), r#ref: "refs/heads/main".into(), sha: "a".repeat(40), sequence: 1 },
+                expected_set: "absent".into(), rollout: None,
+                adopt: std::collections::BTreeSet::from(["agent/example/worker".into()]),
+                allow_empty: false, confirm_retire: None, expected_subjects: Default::default(),
+            };
+            options.expected_subjects = store.owned_set_preview(&intent, &options).unwrap().expected_subjects;
+            store.apply_owned_set(&intent, &options, "own-fixture", "person/avery").unwrap();
+        }
         let subject = if mission {
             let run = store
                 .create_mission_run(&MissionRunRequest {
@@ -210,7 +279,7 @@ impl Fixture {
             planner_default: Default::default(),
         };
         let socket = root.path().join("st3.sock");
-        let router = st3::api::router(state.clone());
+        let router = make_router(state.clone());
         let server = tokio::spawn(async move { st3::api::serve_unix(&socket, router).await });
         for _ in 0..100 {
             if root.path().join("st3.sock").exists() {
@@ -243,10 +312,13 @@ impl Fixture {
         })
     }
     async fn request(&self, subject: &str, key: &str) -> ClaimRecord {
+        self.request_as(subject, key, "person/avery").await
+    }
+    async fn request_as(&self, subject: &str, key: &str, actor: &str) -> ClaimRecord {
         self.client()
             .post(
                 "/v1/agents/restart",
-                &json!({"subject": subject, "actor":"person/avery", "idempotency_key":key}),
+                &json!({"subject": subject, "actor":actor, "idempotency_key":key}),
             )
             .await
             .unwrap()
@@ -261,7 +333,7 @@ async fn st(socket: &Path, args: &[&str]) -> std::process::Output {
     let socket = socket.to_owned();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+        st3::test_support::command(test_bin!("st3-fixture"))
             .env_remove("ST_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args(["--endpoint", socket.to_str().unwrap()])
@@ -278,7 +350,7 @@ async fn cli(socket: &Path, subject: &str, actor: &str, timeout: &str) -> std::p
     let actor = actor.to_owned();
     let timeout = timeout.to_owned();
     tokio::task::spawn_blocking(move || {
-        st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+        st3::test_support::command(test_bin!("st3-fixture"))
             .env_remove("ST_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args([
@@ -364,15 +436,172 @@ async fn restarts_preserving_declaration(mission: bool) {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restarts_top_level_seat_on_a_new_incarnation() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     restarts_preserving_declaration(false).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restarts_mission_seat_without_redeclaring_it() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     restarts_preserving_declaration(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_waits_for_replacement_after_mailbox_disconnect() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let old_card_read = Arc::new(Notify::new());
+    let observed = old_card_read.clone();
+    let old_card = Arc::new(Mutex::new(None));
+    let captured = old_card.clone();
+    let (fixture, subject) = Fixture::launching_with_router(
+        Shape::TopLevel,
+        r#"command "sleep 1000""#,
+        "never",
+        move |state| {
+            st3::test_support::synthetic_mailbox_protocol_router(state, "agent/example/worker")
+                .layer(axum::middleware::from_fn(
+                    move |request: axum::extract::Request, next: axum::middleware::Next| {
+                        let observed = observed.clone();
+                        let captured = captured.clone();
+                        async move {
+                            let card = request.uri().path().starts_with("/v1/client/agents/");
+                            let response = next.run(request).await;
+                            if card && captured.lock().unwrap().is_none() {
+                                let (parts, body) = response.into_parts();
+                                let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                                *captured.lock().unwrap() =
+                                    Some(serde_json::from_slice::<Value>(&bytes).unwrap());
+                                observed.notify_one();
+                                axum::response::Response::from_parts(
+                                    parts,
+                                    axum::body::Body::from(bytes),
+                                )
+                            } else {
+                                response
+                            }
+                        }
+                    },
+                ))
+        },
+    )
+    .await;
+    let token = fixture.store.selected_desired_token(&subject).unwrap();
+    let fence = st3::test_support::bind_fixture_mailbox(
+        &fixture.store,
+        &st3::mailbox::Fence::new(&subject, "fixture:1", "delivery"),
+    )
+    .unwrap();
+    let mut socket = fixture.client().open_mailbox(&fence).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let frame = socket.next().await.unwrap().unwrap();
+            if let tokio_tungstenite::tungstenite::Message::Text(raw) = frame
+                && matches!(
+                    serde_json::from_str::<st3::mailbox::Frame>(&raw).unwrap(),
+                    st3::mailbox::Frame::Mailbox { .. }
+                )
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    socket.close(None).await.unwrap();
+    drop(socket);
+    // The synthetic transport has no physical provider authority to publish a loss.
+    // Install the same durable loss observation after disconnecting its real socket.
+    let failure = fixture.store.append_claim(&st3::model::ClaimInput {
+        subject: subject.clone(), kind: "operational.failure".into(),
+        actor: Some("daemon/runtime".into()),
+        fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
+            "incarnation":"fixture:1", "reason":"admitted mailbox channel disconnected",
+            "reviewer":"person/avery", "title":"Mailbox lost", "severity":"error", "targets":[subject]})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    st3::test_support::check_fixture_mailbox(&fixture.store, &fence).unwrap();
+
+    let socket_path = fixture.root.path().join("st3.sock");
+    let command = cli(
+        &socket_path,
+        &subject,
+        "agent/example/operator",
+        "3s",
+    );
+    let mut driver = None;
+    let drive_after_old_card = async {
+        // No reconciliation can replace the runtime until the CLI has received an
+        // actual card response containing the old incarnation's loss fault.
+        old_card_read.notified().await;
+        let card = old_card.lock().unwrap().as_ref().unwrap().clone();
+        assert_eq!(card["value"]["incarnation_id"], "fixture:1");
+        assert_eq!(
+            card["value"]["fault"],
+            "admitted mailbox channel disconnected"
+        );
+        // An unrelated restart outcome must not settle this accepted request.
+        fixture
+            .store
+            .append_claim(&st3::model::ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.action.failed".into(),
+                actor: Some("agent/example/operator".into()),
+                fields: serde_json::from_value(
+                    json!({"action":"restart", "reason":"unrelated restart failure"}),
+                )
+                .unwrap(),
+                evidence: vec![failure.id.clone()],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        driver = Some(fixture.drive());
+    };
+    let (output, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(command, drive_after_old_card)
+    })
+    .await
+    .unwrap();
+    let driver = driver.unwrap();
+    driver.abort();
+    let _ = driver.await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let agent: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(agent["incarnation_id"], "fixture:2");
+    assert_eq!(agent["state"], "running");
+    assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:1"]);
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
+    assert_eq!(
+        token,
+        fixture.store.selected_desired_token(&subject).unwrap()
+    );
+    assert!(st3::test_support::check_fixture_mailbox(&fixture.store, &fence).is_err());
+    let events = fixture
+        .store
+        .events_after(failure.store_index, Some(&subject))
+        .unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.kind == "operational.recovered"),
+        "a restart must not manufacture recovery of the old channel"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_reports_timeout_and_launch_failure() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::new(false).await;
     let output = cli(
         &fixture.root.path().join("st3.sock"),
@@ -405,6 +634,9 @@ async fn restart_reports_timeout_and_launch_failure() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_is_idempotent_and_cannot_revive_a_later_stop() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::new(false).await;
     let first = fixture.request(&subject, "same").await;
     assert_eq!(first.id, fixture.request(&subject, "same").await.id);
@@ -459,6 +691,9 @@ async fn restart_is_idempotent_and_cannot_revive_a_later_stop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delayed_restart_does_not_stop_a_newer_incarnation() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::new(false).await;
     let request = fixture.request(&subject, "delayed").await;
     let member = fixture.runtime.starts.lock().unwrap()[0].clone();
@@ -473,7 +708,10 @@ async fn a_delayed_restart_does_not_stop_a_newer_incarnation() {
 
 #[test]
 fn restart_help_explains_seats_and_the_new_incarnation() {
-    let output = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
         .env_remove("ST_AGENT")
         .args(["agents", "--help"])
         .output()
@@ -512,12 +750,16 @@ fn restarted_daemon(fixture: &Fixture) -> Reconciler<Runtime> {
         "restart-test".into(),
         Arc::new(Notify::new()),
     )
+    .skipping_unneeded(true)
 }
 
 /// Exercise the daemon's exit path, not a launcher's post-exit cleanup. The API socket,
 /// database, workspace and runtime all belong to this fixture.
 #[tokio::test]
 async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     for (shape, status, exit_code) in [
         (Shape::TopLevel, "exited", Some(0)),
         (Shape::TopLevel, "exited", Some(17)),
@@ -613,6 +855,9 @@ async fn one_shot_exit_retires_keeps_history_and_can_start_again() {
 
 #[tokio::test]
 async fn one_shot_exit_found_after_daemon_restart_retires_without_a_pty_record() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::launching(
         Shape::TopLevel,
         r#"command "sleep 1000"; one-shot"#,
@@ -636,6 +881,9 @@ async fn one_shot_exit_found_after_daemon_restart_retires_without_a_pty_record()
 
 #[tokio::test]
 async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::launching(
         Shape::TopLevel,
         r#"command "sleep 1000"; one-shot"#,
@@ -674,6 +922,11 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
         .store
         .apply_owned_set(&intent, &options, "adopt-one-shot", "person/avery")
         .unwrap();
+    let declaration_token = fixture
+        .store
+        .selected_desired_token(&subject)
+        .unwrap()
+        .unwrap();
     hang_up(&fixture);
     for _ in 0..3 {
         fixture.reconciler.reconcile_once().unwrap();
@@ -697,10 +950,23 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
     assert!(!succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
     assert!(succeeded(&st(&socket, &["agents", "ls", "--all"]).await).contains(&subject));
     succeeded(&st(&socket, &["agents", "show", &subject, "--all"]).await);
+    let workspace: serde_json::Value = serde_json::from_str(&succeeded(
+        &st(&socket, &["agents", "workspace", &subject, "--json"]).await,
+    ))
+    .unwrap();
+    assert_eq!(workspace["value"]["agent_id"], subject);
+    assert_eq!(
+        workspace["value"]["workspace"],
+        original.member.as_ref().unwrap().workspace
+    );
+    assert_eq!(workspace["value"]["declaration_token"], declaration_token);
 }
 
 #[tokio::test]
 async fn one_shot_unknown_snapshot_keeps_the_seat_live_until_exit_is_known() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::launching(
         Shape::TopLevel,
         r#"command "sleep 1000"; one-shot"#,
@@ -746,6 +1012,9 @@ async fn one_shot_unknown_snapshot_keeps_the_seat_live_until_exit_is_known() {
 
 #[tokio::test]
 async fn seats_without_one_shot_keep_their_exit_and_restart_behaviour() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     for restart in ["never", "always", "on-failure"] {
         for exit_code in [0, 17] {
             let (fixture, subject) =
@@ -781,6 +1050,9 @@ async fn seats_without_one_shot_keep_their_exit_and_restart_behaviour() {
 
 #[tokio::test]
 async fn explicit_restart_of_one_shot_replaces_the_process_without_retiring_the_seat() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::launching(
         Shape::TopLevel,
         r#"command "sleep 1000"; one-shot"#,
@@ -803,6 +1075,9 @@ async fn explicit_restart_of_one_shot_replaces_the_process_without_retiring_the_
 
 #[tokio::test]
 async fn one_shot_start_after_retirement_continues_the_same_native_session() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::launching(
         Shape::TopLevel,
         r#"harness "claude" { model "example-model"; }; one-shot"#,
@@ -873,11 +1148,17 @@ async fn stopped_mission_seat_stays_stopped(shape: Shape) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_mission_seat_stays_stopped_when_the_daemon_restarts() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     stopped_mission_seat_stays_stopped(Shape::Mission).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_step_seat_stays_stopped() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     stopped_mission_seat_stays_stopped(Shape::Step).await;
 }
 
@@ -962,7 +1243,20 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     let starts = fixture.runtime.starts.lock().unwrap().clone();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[0].workspace, starts[1].workspace);
-    assert_eq!(starts[0].environment, starts[1].environment);
+    let environments: Vec<_> = starts
+        .iter()
+        .map(|member| {
+            let mut environment = member.environment.clone();
+            let operation = environment.remove("ST3_START_OPERATION").unwrap();
+            assert_eq!(member.tags.get("st3.start-operation"), Some(&operation));
+            environment
+        })
+        .collect();
+    assert_ne!(
+        starts[0].environment["ST3_START_OPERATION"], starts[1].environment["ST3_START_OPERATION"],
+        "each physical launch must retain its own operation identity"
+    );
+    assert_eq!(environments[0], environments[1]);
     // Once started again, the seat is the run's own: a restarted daemon keeps it running.
     let daemon = restarted_daemon(&fixture);
     for _ in 0..3 {
@@ -973,11 +1267,17 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn starting_a_stopped_mission_seat_restores_its_declaration_and_creates_nothing_else() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     starts_a_stopped_mission_seat_on_its_own_declaration(Shape::Mission).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn starting_a_stopped_step_seat_restores_its_declaration() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     starts_a_stopped_mission_seat_on_its_own_declaration(Shape::Step).await;
 }
 
@@ -991,6 +1291,9 @@ fn github_observer_running(store: &Store, thread: &st3::github_watch::ThreadRef)
 /// The native mailbox stream proof lives beside its authenticated API in api/mailbox.rs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stop_then_start_keeps_a_github_watch_and_its_queued_wake() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     // A mission seat also exercises restoring its original owning declaration.
     let (fixture, subject) = Fixture::new(true).await;
     let thread = st3::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
@@ -1013,22 +1316,12 @@ async fn stop_then_start_keeps_a_github_watch_and_its_queued_wake() {
             })
             .collect::<Vec<_>>();
         fixture
+            .store.record_resource_observation(&thread.observer(), &fixture
             .store
-            .record_resource_observation(
-                &thread.observer(),
-                &fixture
-                    .store
-                    .selected_desired_revision(&thread.observer())
-                    .unwrap()
-                    .unwrap(),
-                None,
-                &thread.resource(),
-                None,
-                &json!({"repository_id": 7, "issues": [{"number": 12, "new": false,
-                "state": "open", "title": "Example thread", "recent_comments": comments}]}),
-                0,
-                &subscriptions,
-            )
+            .selected_desired_revision(&thread.observer())
+            .unwrap()
+            .unwrap(), None, &thread.resource(), None, &json!({"repository_id": 7, "issues": [{"number": 12, "new": false,
+        "state": "open", "title": "Example thread", "recent_comments": comments}]}), 0, &subscriptions, None)
             .unwrap();
     };
     observe(json!([]));
@@ -1093,6 +1386,9 @@ async fn stop_then_start_keeps_a_github_watch_and_its_queued_wake() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_a_retired_seats_declaration_ends_its_watch_and_stops_the_last_observer() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::new(true).await;
     let thread = st3::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
     fixture
@@ -1148,6 +1444,9 @@ async fn removing_a_retired_seats_declaration_ends_its_watch_and_stops_the_last_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_finished_run_cannot_start_its_seat_again() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::new(true).await;
     let socket = fixture.root.path().join("st3.sock");
     succeeded(
@@ -1240,6 +1539,9 @@ async fn client_action(fixture: &Fixture, kind: &str, agent: &str, key: &str) ->
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_stops_and_starts_a_mission_seat_on_its_own_declaration() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::new(true).await;
     let before = fixture
         .store
@@ -1334,6 +1636,9 @@ fn hang_up(fixture: &Fixture) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declared_workspace_change_restarts_a_running_seat() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::new(false).await;
     let socket = fixture.root.path().join("st3.sock");
     let elsewhere = fixture.root.path().join("elsewhere");
@@ -1425,6 +1730,9 @@ async fn a_declared_workspace_change_restarts_a_running_seat() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_restart_continues_the_seats_last_native_session() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
     let socket = fixture.root.path().join("st3.sock");
     // A first launch has no session to continue.
@@ -1519,6 +1827,9 @@ async fn every_restart_continues_the_seats_last_native_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_the_driver_could_not_continue_is_not_tried_again() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
     bind_session(&fixture, &subject, "fixture:1", "session-one").await;
     // The driver started a new session instead, and said so once for that session.
@@ -1550,4 +1861,984 @@ async fn a_session_the_driver_could_not_continue_is_not_tried_again() {
     let starts = fixture.runtime.starts.lock().unwrap().clone();
     assert_eq!(starts.len(), 2);
     assert_eq!(continued(&starts[1]), None);
+}
+
+/// Persist the same hold the automatic three-failure guard writes, without changing the
+/// declaration. The fixture launcher and all graph/runtime state remain private to this test.
+fn park(fixture: &Fixture, subject: &str, driver: &str) {
+    let token = fixture
+        .store
+        .selected_desired_token(subject)
+        .unwrap()
+        .unwrap();
+    let prefix = if driver == "codex" {
+        "codex-crash-loop"
+    } else {
+        "runtime-crash-loop"
+    };
+    fixture
+        .store
+        .append_claim(&st3::model::ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: std::collections::BTreeMap::from([
+                ("key".into(), json!(format!("{prefix}:{token}"))),
+                ("decision".into(), json!("raise")),
+                (
+                    "reason".into(),
+                    json!("fixture automatic failed-start park"),
+                ),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("fixture-park".into()),
+        })
+        .unwrap();
+}
+
+fn restart_result(fixture: &Fixture, request: &ClaimRecord) -> ClaimRecord {
+    fixture
+        .store
+        .operation_claim(&format!("agent-restart-completed:{}", request.id))
+        .unwrap()
+        .expect("restart must have a durable result")
+}
+
+/// The stand-in reports native readiness just as a working provider would. Failed starts
+/// and exited wrappers report nothing, so they cannot turn a launcher receipt into success.
+fn reconcile_ready(fixture: &Fixture, daemon: &Reconciler<Runtime>, subject: &str) {
+    for _ in 0..4 {
+        daemon.reconcile_once().unwrap();
+        let member = fixture
+            .runtime
+            .starts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        if let Some(driver) = member.driver.as_deref()
+            && let Some(observation) = fixture
+                .runtime
+                .observations
+                .lock()
+                .unwrap()
+                .get(&member.runtime_id)
+            && observation.status == "running"
+        {
+            fixture
+                .store
+                .append_claim(&st3::model::ClaimInput {
+                    subject: subject.into(),
+                    kind: "harness.observed".into(),
+                    actor: Some(subject.into()),
+                    fields: std::collections::BTreeMap::from([
+                        ("state".into(), json!("ready")),
+                        ("driver".into(), json!(driver)),
+                        ("incarnation_id".into(), json!(observation.incarnation_id)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: Some(format!(
+                        "fixture-ready:{}",
+                        observation.incarnation_id.as_deref().unwrap()
+                    )),
+                })
+                .unwrap();
+        }
+    }
+}
+
+async fn parked_retry_succeeds(driver: &str, actor: &str) {
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        &format!("harness {driver:?} {{ model \"example-model\"; }}"),
+        "always",
+    )
+    .await;
+    let declaration = fixture.store.desired_subject_with_writer(&subject).unwrap();
+    if driver == "claude" {
+        bind_session(&fixture, &subject, "fixture:1", "session-one").await;
+    }
+    hang_up(&fixture);
+    park(&fixture, &subject, driver);
+    // Ordinary reconciliation, including a new daemon, cannot break the automatic hold.
+    let daemon = restarted_daemon(&fixture);
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1);
+    let first = fixture.request_as(&subject, "parked-first", actor).await;
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    let result = restart_result(&fixture, &first);
+    assert_eq!(result.kind, "runtime.action.succeeded");
+    assert_eq!(result.actor, first.actor);
+    assert_eq!(result.body["evidence"][0], first.id);
+    assert!(
+        result.body["fields"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("replacement")
+    );
+    if driver == "claude" {
+        assert_eq!(
+            continued(&fixture.runtime.starts.lock().unwrap()[1]),
+            Some("session-one")
+        );
+    }
+    // Neither API replay nor another daemon grants the first request a second attempt.
+    assert_eq!(fixture.request_as(&subject, "parked-first", actor).await.id, first.id);
+    hang_up(&fixture);
+    let daemon = restarted_daemon(&fixture);
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    let second = fixture.request_as(&subject, "parked-second", actor).await;
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 3);
+    assert_eq!(
+        restart_result(&fixture, &second).kind,
+        "runtime.action.succeeded"
+    );
+    assert_eq!(
+        serde_json::to_value(declaration).unwrap(),
+        serde_json::to_value(fixture.store.desired_subject_with_writer(&subject).unwrap()).unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_person_restart_retries_a_parked_omp_seat_once() {
+    parked_retry_succeeds("omp", "person/avery").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_restart_keeps_the_native_session() {
+    parked_retry_succeeds("claude", "person/avery").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_person_restart_retries_a_parked_codex_seat_once() {
+    parked_retry_succeeds("codex", "person/avery").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_explicit_retry_is_completed_parked_and_visible_until_a_new_request() {
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        r#"harness "omp" { model "example-model"; }"#,
+        "always",
+    )
+    .await;
+    hang_up(&fixture);
+    park(&fixture, &subject, "omp");
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    for (index, key) in ["failed-first", "failed-second"].into_iter().enumerate() {
+        let request = fixture.request(&subject, key).await;
+        let daemon = restarted_daemon(&fixture);
+        for _ in 0..4 {
+            daemon.reconcile_once().unwrap();
+        }
+        assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), index + 2);
+        let result = restart_result(&fixture, &request);
+        assert_eq!(result.kind, "runtime.action.failed");
+        assert_eq!(result.actor, request.actor);
+        assert_eq!(result.body["evidence"][0], request.id);
+        let reason = result.body["fields"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("parked again") && reason.contains("fixture rejected launch"),
+            "{reason}"
+        );
+        // `st agents show` and clients consume the same agents read, including this fault.
+        let agents: Value = fixture.client().get("/v1/client/agents?fresh=true").await.unwrap();
+        let agent = agents["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|agent| agent["id"] == subject)
+            .unwrap_or_else(|| panic!("missing {subject} in {agents}"));
+        assert_eq!(agent["state"], "failed");
+        assert_eq!(agent["fault"], reason);
+        let show = st(
+            &fixture.root.path().join("st3.sock"),
+            &["agents", "show", &subject],
+        )
+        .await;
+        assert!(succeeded(&show).contains("fixture rejected launch"));
+        assert_eq!(fixture.request(&subject, key).await.id, request.id);
+    }
+    // Restoring the launcher alone cannot reattempt a completed failure.
+    *fixture.runtime.refuse_start.lock().unwrap() = false;
+    let daemon = restarted_daemon(&fixture);
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 3);
+    let recovery = fixture.request(&subject, "recovered").await;
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 4);
+    assert_eq!(
+        restart_result(&fixture, &recovery).kind,
+        "runtime.action.succeeded"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .member_reconcile_fault(&subject, None)
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn distinct_failed_agent_restarts_each_spend_one_attempt_and_stay_parked() {
+    for driver in ["codex", "omp"] {
+        for actor in ["agent/example/operator", "agent/example/worker"] {
+            let (fixture, subject) = Fixture::launching(
+                Shape::TopLevel,
+                &format!("harness {driver:?} {{ model \"example-model\"; }}"),
+                "always",
+            )
+            .await;
+            hang_up(&fixture);
+            park(&fixture, &subject, driver);
+            *fixture.runtime.refuse_start.lock().unwrap() = true;
+            for attempt in 1..=3 {
+                let key = format!("agent-refused-{attempt}");
+                let request = fixture.request_as(&subject, &key, actor).await;
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                let failed = restart_result(&fixture, &request);
+                assert_eq!(failed.kind, "runtime.action.failed");
+                assert_eq!(failed.actor.as_deref(), Some(actor));
+                assert_eq!(failed.body["evidence"][0], request.id);
+                assert!(
+                    failed.body["fields"]["reason"]
+                        .as_str()
+                        .unwrap()
+                        .contains("parked again")
+                );
+                assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempt + 1);
+                assert!(
+                    fixture
+                        .store
+                        .member_reconcile_fault(&subject, None)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    fixture
+                        .store
+                        .fault_snapshot(smallclaims::store::now_ms())
+                        .unwrap()
+                        .iter()
+                        .any(|fault| fault.item.subject == subject),
+                    "a failed retry must retain its actionable parked-seat fault"
+                );
+                // Quiet passes and replay have no new operation identity to spend.
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                assert_eq!(
+                    fixture.request_as(&subject, &key, actor).await.id,
+                    request.id
+                );
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                let daemon = restarted_daemon(&fixture);
+                reconcile_ready(&fixture, &daemon, &subject);
+                assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempt + 1);
+                assert_eq!(restart_result(&fixture, &request).id, failed.id);
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_agent_can_explicitly_retry_itself_once() {
+    parked_retry_succeeds("codex", "agent/example/worker").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_agent_restart_retries_a_parked_omp_seat_once() {
+    parked_retry_succeeds("omp", "agent/example/operator").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_agent_restart_retries_a_parked_codex_seat_once() {
+    parked_retry_succeeds("codex", "agent/example/operator").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_agent_restart_keeps_the_parked_native_session() {
+    parked_retry_succeeds("claude", "agent/example/operator").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_agent_restart_reports_refusal_promptly_and_retries_after_correction() {
+    for driver in ["codex", "omp"] {
+        let (fixture, subject) = Fixture::launching(
+            Shape::TopLevel,
+            &format!("harness {driver:?} {{ model \"example-model\"; }}"),
+            "always",
+        )
+        .await;
+        let declaration = fixture.store.desired_subject_with_writer(&subject).unwrap();
+        hang_up(&fixture);
+        park(&fixture, &subject, driver);
+        *fixture.runtime.refuse_start.lock().unwrap() = true;
+        let drive = fixture.drive();
+        // A refused explicit operation must settle by its own outcome, not by the
+        // long caller timeout or an old incarnation's fault. All paths are private.
+        let output = tokio::time::timeout(
+            Duration::from_secs(5),
+            cli(
+                &fixture.root.path().join("st3.sock"),
+                &subject,
+                "agent/example/operator",
+                "30s",
+            ),
+        )
+        .await
+        .expect("the refused restart waited for its 30-second timeout");
+        drive.abort();
+        let _ = drive.await;
+        assert!(!output.status.success(), "{output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("fixture rejected launch"), "{error}");
+        assert!(!error.contains("within 30s"), "{error}");
+        let request = fixture
+            .store
+            .claims_for(&subject, Some("runtime.action.requested"))
+            .unwrap()
+            .into_iter()
+            .rev()
+            .find(|claim| claim.body["fields"]["action"] == "restart")
+            .unwrap();
+        let failed = restart_result(&fixture, &request);
+        assert_eq!(failed.kind, "runtime.action.failed");
+        assert_eq!(failed.actor, request.actor);
+        assert_eq!(failed.body["evidence"][0], request.id);
+        assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+        *fixture.runtime.refuse_start.lock().unwrap() = false;
+        // Repairing setup alone is not an automatic retry or a second attempt.
+        reconcile_ready(&fixture, &fixture.reconciler, &subject);
+        assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+        let retry = fixture
+            .request_as(&subject, "fixed", "agent/example/operator")
+            .await;
+        reconcile_ready(&fixture, &fixture.reconciler, &subject);
+        assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 3);
+        assert_eq!(
+            restart_result(&fixture, &retry).kind,
+            "runtime.action.succeeded"
+        );
+        assert_eq!(
+            serde_json::to_value(declaration).unwrap(),
+            serde_json::to_value(fixture.store.desired_subject_with_writer(&subject).unwrap())
+                .unwrap()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_explicit_attempt_is_not_launched_again_after_daemon_restart() {
+    let (fixture, subject) = Fixture::new(false).await;
+    hang_up(&fixture);
+    let request = fixture.request(&subject, "interrupted").await;
+    fixture
+        .store
+        .append_claim(&st3::model::ClaimInput {
+            subject: subject.clone(),
+            kind: "runtime.action.requested".into(),
+            actor: request.actor.clone(),
+            fields: std::collections::BTreeMap::from([("action".into(), json!("start"))]),
+            evidence: vec![request.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(format!("agent-restart-attempt:{}", request.id)),
+        })
+        .unwrap();
+    let daemon = restarted_daemon(&fixture);
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 1);
+    let result = restart_result(&fixture, &request);
+    assert_eq!(result.kind, "runtime.action.failed");
+    assert!(
+        result.body["fields"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted"),
+        "{result:?}"
+    );
+    let next = fixture.request(&subject, "after-interruption").await;
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    assert_eq!(
+        restart_result(&fixture, &next).kind,
+        "runtime.action.succeeded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replacement_that_exits_during_startup_completes_as_failed_and_stays_parked() {
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        r#"harness "omp" { model "example-model"; }"#,
+        "always",
+    )
+    .await;
+    hang_up(&fixture);
+    park(&fixture, &subject, "omp");
+    *fixture.runtime.exit_on_start.lock().unwrap() = true;
+    let request = fixture.request(&subject, "exited-at-startup").await;
+    let daemon = restarted_daemon(&fixture);
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    let result = restart_result(&fixture, &request);
+    assert_eq!(result.kind, "runtime.action.failed");
+    assert!(
+        result.body["fields"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("exit code 1")
+    );
+    *fixture.runtime.exit_on_start.lock().unwrap() = false;
+    let next = fixture.request(&subject, "working-replacement").await;
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 3);
+    assert_eq!(
+        restart_result(&fixture, &next).kind,
+        "runtime.action.succeeded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_retry_that_exits_before_readiness_is_failed_even_after_observing_its_wrapper() {
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        r#"harness "omp" { model "example-model"; }"#,
+        "always",
+    )
+    .await;
+    hang_up(&fixture);
+    park(&fixture, &subject, "omp");
+    let request = fixture.request(&subject, "refused-after-spawn").await;
+    fixture.reconciler.reconcile_once().unwrap();
+    fixture.reconciler.reconcile_once().unwrap();
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    assert!(
+        fixture
+            .store
+            .operation_claim(&format!("agent-restart-completed:{}", request.id))
+            .unwrap()
+            .is_none(),
+        "a live wrapper has not yet proved native readiness"
+    );
+    hang_up(&fixture);
+    let daemon = restarted_daemon(&fixture);
+    for _ in 0..4 {
+        daemon.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    assert_eq!(
+        restart_result(&fixture, &request).kind,
+        "runtime.action.failed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_superseded_explicit_attempt_cannot_park_the_new_declaration() {
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        r#"harness "omp" { model "example-model"; }"#,
+        "always",
+    )
+    .await;
+    hang_up(&fixture);
+    park(&fixture, &subject, "omp");
+    let request = fixture.request(&subject, "superseded-at-spawn").await;
+    let source = format!(
+        r#"version 2
+agent "example/worker" {{
+    workspace {:?}
+    harness "omp" {{ model "replacement-model"; }}
+    restart always
+}}"#,
+        fixture.root.path().to_str().unwrap()
+    );
+    let store = fixture.store.clone();
+    *fixture.runtime.before_start.lock().unwrap() = Some(Box::new(move || {
+        let intent = st3::parse_intent(&source, "restart-test").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                st3::model::IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(
+                &intent,
+                &preview.subject_tokens,
+                "replace-at-spawn",
+                Some("person/avery"),
+            )
+            .unwrap();
+    }));
+    let daemon = restarted_daemon(&fixture);
+    reconcile_ready(&fixture, &daemon, &subject);
+    // The stale explicit launch is fenced out; only the healthy new declaration launches.
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+    let result = restart_result(&fixture, &request);
+    assert_eq!(result.kind, "runtime.action.failed");
+    assert!(
+        result.body["fields"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("superseded")
+    );
+    let token = fixture
+        .store
+        .launch_lineage(&subject)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        !fixture
+            .store
+            .observations_for(&subject, "runtime.reconcile-decision")
+            .unwrap()
+            .iter()
+            .any(|claim| claim.body["fields"]["key"] == format!("runtime-crash-loop:{token}")),
+        "an old restart failure must not park a new declaration"
+    );
+    assert_eq!(
+        fixture
+            .store
+            .member_reconcile_fault(&subject, None)
+            .unwrap(),
+        None
+    );
+}
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_retirement_stops_running_root_and_mission_seats_without_rematerializing() {
+    for shape in [Shape::TopLevel, Shape::Owned, Shape::Mission, Shape::Step] {
+        let (fixture,subject)=Fixture::shaped(shape).await;
+        assert_eq!(fixture.runtime.starts.lock().unwrap().len(),1);
+        let output=st(&fixture.root.path().join("st3.sock"),&["agents","retire",&subject,"--as","person/avery","--reason","Work finished","--idempotency-key","runtime-retirement-operation"]).await;
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+        fixture.reconciler.reconcile_once().unwrap();
+        fixture.reconciler.reconcile_once().unwrap();
+        fixture.reconciler.reconcile_once().unwrap();
+        assert_eq!(fixture.runtime.stops.lock().unwrap().len(),1);
+        assert_eq!(fixture.runtime.starts.lock().unwrap().len(),1,"retirement must survive mission materialization");
+        assert!(fixture.store.desired_subjects().unwrap().iter().all(|desired|desired.subject!=subject || desired.member.is_none()));
+    }
+}
+
+/// A seat writes its handoff and reads it back through the CLI; a later write replaces it and the
+/// first version stays in the document's history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_writes_and_reads_its_handoff_through_the_cli() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::new(false).await;
+    let socket = fixture.root.path().join("st3.sock");
+    let none = st(&socket, &["agents", "handoff", "show", &subject]).await;
+    assert!(!none.status.success());
+    assert!(String::from_utf8_lossy(&none.stderr).contains("has written no handoff"));
+
+    let file = fixture.root.path().join("handoff.md");
+    std::fs::write(&file, "PR 12 is open.\n").unwrap();
+    let written = succeeded(
+        &st(
+            &socket,
+            &["agents", "handoff", "write", file.to_str().unwrap(), "--as", &subject],
+        )
+        .await,
+    );
+    assert!(written.starts_with("doc/agents/example/worker/handoff@"), "{written}");
+    assert_eq!(
+        succeeded(&st(&socket, &["agents", "handoff", "show", &subject]).await),
+        "PR 12 is open.\n"
+    );
+
+    std::fs::write(&file, "PR 12 merged.\n").unwrap();
+    succeeded(
+        &st(
+            &socket,
+            &["agents", "handoff", "write", file.to_str().unwrap(), "--as", &subject],
+        )
+        .await,
+    );
+    assert_eq!(
+        succeeded(&st(&socket, &["agents", "handoff", "show", &subject]).await),
+        "PR 12 merged.\n"
+    );
+    let versions = fixture
+        .store
+        .list_documents(Some("doc/agents/example/worker/handoff"), true, 10)
+        .unwrap();
+    assert_eq!(versions.len(), 2, "{versions:?}");
+}
+
+/// The seat's harness is up and ready on `incarnation`, so a planned restart has someone to ask.
+fn mark_ready(fixture: &Fixture, subject: &str, incarnation: &str) {
+    fixture
+        .store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: std::collections::BTreeMap::from([
+                ("state".into(), json!("ready")),
+                ("driver".into(), json!("claude")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some(format!("ready:{subject}:{incarnation}")),
+        })
+        .unwrap();
+}
+
+fn pass(fixture: &Fixture, passes: usize) {
+    for _ in 0..passes {
+        fixture.reconciler.reconcile_once().unwrap();
+    }
+}
+
+fn prepare_messages(fixture: &Fixture, subject: &str) -> Vec<st3::model::MessageView> {
+    fixture
+        .store
+        .messages(Some(subject), true)
+        .unwrap()
+        .into_iter()
+        .filter(|message| {
+            message
+                .tags
+                .iter()
+                .any(|tag| tag.starts_with(st3::handoff::PREPARE_TAG_PREFIX))
+        })
+        .collect()
+}
+
+fn prepare_decisions(fixture: &Fixture, subject: &str) -> Vec<String> {
+    fixture
+        .store
+        .claims_for(subject, Some("runtime.reconcile-decision"))
+        .unwrap()
+        .into_iter()
+        .filter(|claim| claim.body["fields"]["key"] == "restart-prepare")
+        .map(|claim| claim.body["fields"]["decision"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requested_restart_waits_for_the_seats_handoff() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    PREPARE_DEADLINE_MS.store(600_000, std::sync::atomic::Ordering::SeqCst);
+    let (fixture, subject) = Fixture::new(false).await;
+    let handoff = st3::handoff::document_name(&subject).unwrap();
+    // A handoff from before the request does not acknowledge it.
+    fixture
+        .store
+        .put_document(&handoff, b"An old handoff.", &None, "old")
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    mark_ready(&fixture, &subject, "fixture:1");
+    fixture.request(&subject, "restart-1").await;
+    pass(&fixture, 4);
+    assert!(fixture.runtime.stops.lock().unwrap().is_empty());
+    let messages = prepare_messages(&fixture, &subject);
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].from, "daemon/runtime");
+    assert_eq!(messages[0].title.as_deref(), Some("Prepare for restart"));
+    assert!(messages[0].content.contains("st agents handoff write"));
+    assert!(st3::silent::always_wakes(&messages[0].from, &messages[0].tags));
+
+    // Writing the handoff acknowledges it, and the seat is restarted.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let current = fixture
+        .store
+        .list_documents(Some(&handoff), false, 1)
+        .unwrap()
+        .first()
+        .map(|version| version.binding_claim_id.clone());
+    fixture
+        .store
+        .put_document(&handoff, b"PR 12 is open; wait for review.", &current, "new")
+        .unwrap();
+    pass(&fixture, 4);
+    assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:1"]);
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
+    assert_eq!(prepare_decisions(&fixture, &subject), ["prepare", "ready"]);
+    assert_eq!(prepare_messages(&fixture, &subject).len(), 1, "one request, one message");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_that_never_answers_is_restarted_at_the_deadline() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::new(false).await;
+    mark_ready(&fixture, &subject, "fixture:1");
+    fixture.request(&subject, "restart-1").await;
+    pass(&fixture, 3);
+    assert!(fixture.runtime.stops.lock().unwrap().is_empty());
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    pass(&fixture, 4);
+    assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:1"]);
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
+    assert_eq!(
+        prepare_decisions(&fixture, &subject),
+        ["prepare", "deadline-passed"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ready_acknowledges_a_handoff_that_is_already_current() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    PREPARE_DEADLINE_MS.store(600_000, std::sync::atomic::Ordering::SeqCst);
+    let (fixture, subject) = Fixture::new(false).await;
+    mark_ready(&fixture, &subject, "fixture:1");
+    fixture.request(&subject, "restart-1").await;
+    pass(&fixture, 3);
+    assert!(fixture.runtime.stops.lock().unwrap().is_empty());
+    // Another seat saying this one is ready does not cut its wait short.
+    fixture
+        .store
+        .append_claim(&ClaimInput {
+            subject: st3::handoff::ready_subject(&subject),
+            kind: st3::handoff::READY_KIND.into(),
+            actor: Some("agent/example/other".into()),
+            fields: std::collections::BTreeMap::from([("agent".into(), json!(subject))]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("restart-ready:forged".into()),
+        })
+        .unwrap();
+    pass(&fixture, 3);
+    assert!(
+        fixture.runtime.stops.lock().unwrap().is_empty(),
+        "another seat's readiness claim is not this seat's"
+    );
+    let socket = fixture.root.path().join("st3.sock");
+    let said = succeeded(
+        &st(&socket, &["agents", "handoff", "ready", "--as", &subject]).await,
+    );
+    assert!(said.contains("is ready to restart"), "{said}");
+    pass(&fixture, 4);
+    assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:1"]);
+    assert_eq!(prepare_decisions(&fixture, &subject), ["prepare", "ready"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declaration_change_prepares_a_running_seat_before_restarting_it() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::new(false).await;
+    let socket = fixture.root.path().join("st3.sock");
+    mark_ready(&fixture, &subject, "fixture:1");
+    let elsewhere = fixture.root.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    succeeded(
+        &st(
+            &socket,
+            &[
+                "agents",
+                "start",
+                &subject,
+                "--workspace",
+                elsewhere.to_str().unwrap(),
+                "--as",
+                "person/avery",
+            ],
+        )
+        .await,
+    );
+    pass(&fixture, 4);
+    assert!(
+        fixture.runtime.stops.lock().unwrap().is_empty(),
+        "the seat is asked before it is stopped"
+    );
+    let messages = prepare_messages(&fixture, &subject);
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].content.contains("workspace"), "{}", messages[0].content);
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    pass(&fixture, 4);
+    assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:1"]);
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[1].workspace, elsewhere.to_str().unwrap());
+}
+
+/// The seat opens a piece of work, claims it on `incarnation`, and records how far it got.
+async fn work_in_progress(fixture: &Fixture, subject: &str, incarnation: &str) -> String {
+    let socket = fixture.root.path().join("st3.sock");
+    let opened: Value = serde_json::from_str(&succeeded(
+        &st(
+            &socket,
+            &[
+                "--json",
+                "work",
+                "start",
+                "Port the parser",
+                "--as",
+                subject,
+                "--idempotency-key",
+                "port-the-parser",
+            ],
+        )
+        .await,
+    ))
+    .unwrap();
+    let step = opened["subject"].as_str().unwrap().to_owned();
+    for args in [
+        vec!["work", "claim", &step, "--as", subject, "--incarnation", incarnation],
+        vec![
+            "work",
+            "progress",
+            &step,
+            "--as",
+            subject,
+            "--incarnation",
+            incarnation,
+            "--summary",
+            "Halfway: the lexer is ported, the retry test is next",
+            "--evidence",
+            "file:fixture",
+        ],
+    ] {
+        succeeded(&st(&socket, &args).await);
+    }
+    step
+}
+
+fn write_handoff(fixture: &Fixture, subject: &str, text: &str, key: &str) {
+    let name = st3::handoff::document_name(subject).unwrap();
+    let current = fixture
+        .store
+        .list_documents(Some(&name), false, 1)
+        .unwrap()
+        .first()
+        .map(|version| version.binding_claim_id.clone());
+    fixture
+        .store
+        .put_document(&name, text.as_bytes(), &current, key)
+        .unwrap();
+}
+
+/// The first message the session after a restart sees, and what it must hold for the session to
+/// carry on without anyone pointing it at its work.
+fn session_start(fixture: &Fixture, subject: &str, incarnation: &str) -> st3::model::MessageView {
+    let tag = format!("{}{incarnation}", st3::handoff::SESSION_START_TAG_PREFIX);
+    let mut found = fixture
+        .store
+        .messages(Some(subject), true)
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.tags.contains(&tag))
+        .collect::<Vec<_>>();
+    assert_eq!(found.len(), 1, "one session-start message for {incarnation}: {found:?}");
+    let message = found.remove(0);
+    assert_eq!(message.from, "daemon/runtime");
+    assert!(st3::silent::always_wakes(&message.from, &message.tags));
+    message
+}
+
+/// A seat moved to another model mid-step is asked for its handoff first, and the session after it
+/// starts with the handoff and the step it was in the middle of.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_moved_to_another_model_mid_step_resumes_from_its_handoff() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    PREPARE_DEADLINE_MS.store(600_000, std::sync::atomic::Ordering::SeqCst);
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    let socket = fixture.root.path().join("st3.sock");
+    mark_ready(&fixture, &subject, "fixture:1");
+    pass(&fixture, 3);
+    let step = work_in_progress(&fixture, &subject, "fixture:1").await;
+
+    succeeded(
+        &st(
+            &socket,
+            &["agents", "start", &subject, "--model", "another-model", "--as", "person/avery"],
+        )
+        .await,
+    );
+    pass(&fixture, 4);
+    assert!(
+        fixture.runtime.stops.lock().unwrap().is_empty(),
+        "the seat is asked for its handoff before it is stopped"
+    );
+    assert_eq!(prepare_messages(&fixture, &subject).len(), 1);
+
+    write_handoff(
+        &fixture,
+        &subject,
+        "Branch agent/parser, PR 12 open and waiting on review. Next: the retry test.",
+        "handoff-model-move",
+    );
+    pass(&fixture, 4);
+    assert_eq!(*fixture.runtime.stops.lock().unwrap(), ["fixture:1"]);
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
+    assert_eq!(prepare_decisions(&fixture, &subject), ["prepare", "ready"]);
+
+    // The replacement session becomes ready and is sent where its predecessor was.
+    mark_ready(&fixture, &subject, "fixture:2");
+    pass(&fixture, 3);
+    let message = session_start(&fixture, &subject, "fixture:2");
+    for expected in [
+        "Branch agent/parser, PR 12 open and waiting on review. Next: the retry test.",
+        step.as_str(),
+        "Port the parser",
+        "Halfway: the lexer is ported, the retry test is next",
+    ] {
+        assert!(message.content.contains(expected), "{expected}\n{}", message.content);
+    }
+}
+
+/// A seat killed without warning is never asked, so the session after it starts with the last
+/// handoff it wrote and the step as the graph holds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_killed_without_warning_resumes_from_what_it_wrote_before() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    mark_ready(&fixture, &subject, "fixture:1");
+    pass(&fixture, 3);
+    let step = work_in_progress(&fixture, &subject, "fixture:1").await;
+    write_handoff(
+        &fixture,
+        &subject,
+        "Branch agent/parser, PR 12 open and waiting on review. Next: the retry test.",
+        "handoff-before-kill",
+    );
+
+    hang_up(&fixture);
+    pass(&fixture, 4);
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
+    assert!(
+        prepare_messages(&fixture, &subject).is_empty(),
+        "nobody was asked: the seat was gone"
+    );
+
+    mark_ready(&fixture, &subject, "fixture:2");
+    pass(&fixture, 3);
+    let message = session_start(&fixture, &subject, "fixture:2");
+    for expected in [
+        "Branch agent/parser, PR 12 open and waiting on review. Next: the retry test.",
+        step.as_str(),
+        "Halfway: the lexer is ported, the retry test is next",
+    ] {
+        assert!(message.content.contains(expected), "{expected}\n{}", message.content);
+    }
+    // Replays and further passes send nothing more.
+    pass(&fixture, 3);
+    session_start(&fixture, &subject, "fixture:2");
 }

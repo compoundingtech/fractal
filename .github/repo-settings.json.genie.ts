@@ -50,15 +50,15 @@ export default githubRepoSettings({
           // The repository merges with merge commits today (the st train did).
           merge_method: 'MERGE',
           grouping_strategy: 'ALLGREEN',
-          // Namespace's measured Linux limit is 320 vCPU / 640 GiB. Each full Workspace CI group
-          // initially requests 40 vCPU / 80 GiB, so five groups fit; PR and main jobs share capacity.
-          max_entries_to_build: 5,
+          // Start three groups with Namespace overflow; retain shared capacity for PRs.
+          // Live tuning changes only this field, preserving the live grouping strategy.
+          max_entries_to_build: 3,
           max_entries_to_merge: 5,
           min_entries_to_merge: 1,
           min_entries_to_merge_wait_minutes: 5,
-          // A required check that never reports (a lost Namespace job) fails the entry after this
-          // long instead of blocking the queue for the default hour.
-          check_response_timeout_minutes: 30,
+          // Preserve the incident's hour-long response window: a finished stage must not expire
+          // merely because its dependent gate was waiting for a runner.
+          check_response_timeout_minutes: 60,
         },
       },
     ],

@@ -4,8 +4,207 @@ use crate::model::LoopSpec;
 
 /// How long a run whose cleanup failed shows that fault after it finishes.
 const FINAL_STEP_FAULT_MS: u128 = 24 * 60 * 60 * 1000;
+/// How long a declared seat may go without any runtime observation before that is a fault. A seat
+/// that never starts parks nothing and fails nothing, so nobody finds it by looking.
+const SEAT_NOT_STARTED_MS: u128 = 10 * 60 * 1000;
+
+/// The open steps assigned to a person (`?1` NULL for any person). A range on the assignee index,
+/// not `LIKE 'person/%'`: SQLite does not use an index for a case-insensitive LIKE, so that read
+/// every step run in the store. Assignees are written in lower case; the range also drops an
+/// upper-case `Person/` spelling that LIKE would have matched. A test pins the plan.
+const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
+    WHERE assignee>='person/' AND assignee<'person0'
+    AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
 impl Store {
+    /// The mission context of a person ask a mission step made: its mission, and the step that
+    /// waits on the answer with its goal. `None` for a standalone ask or an update, which belong
+    /// to no mission of their own.
+    pub(crate) fn person_ask_context(&self, subject: &str) -> Result<Option<Value>> {
+        let connection = self.readers.get();
+        let Some(ask) = person_work::request(&connection, subject)? else {
+            return Ok(None);
+        };
+        let fields = &ask.body["fields"];
+        let (Some(origin), Some(view)) = (
+            fields["origin_step"].as_str(),
+            person_work::step(&connection, subject)?,
+        ) else {
+            return Ok(None);
+        };
+        let Some(blocked) = person_work::step(&connection, origin)? else {
+            return Ok(None);
+        };
+        // Runs are stored without their `mission-run/` prefix, and missions without `mission/`.
+        let mission: Option<String> = connection
+            .query_row(
+                "SELECT mission_id FROM mission_runs WHERE id=?1",
+                [view.run.strip_prefix("mission-run/").unwrap_or(&view.run)],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|id| {
+                if id.starts_with("mission/") {
+                    id
+                } else {
+                    format!("mission/{id}")
+                }
+            });
+        Ok(Some(json!({
+            "mission_id": mission,
+            "blocked": {
+                "step_run_id": origin,
+                "step": blocked.step,
+                "goal": blocked.goals.join("\n"),
+                "attempt": blocked.attempt,
+            },
+        })))
+    }
+
+    /// One alert per seat whose harness waits on a person at a native prompt: a permission, a
+    /// question or a review it shows in its terminal. It lives in the seat's conversation and
+    /// clears when the harness reports the prompt gone, however it was answered, or when the
+    /// seat's runtime ends. Each seat costs one indexed read of its newest harness observation,
+    /// and only a blocked seat reads its runtime and owner.
+    pub(super) fn harness_prompt_attention_items(
+        &self,
+        person: Option<&str>,
+    ) -> Result<Vec<AttentionItemView>> {
+        let connection = self.readers.get();
+        let seats = connection
+            .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let newest = |subject: &str, kind: &str| -> Result<Option<(String, u128, Value)>> {
+            let row = connection
+                .prepare_cached(&format!(
+                    "{} LIMIT 1",
+                    newest_claims_of_kind_query(
+                        "claims.id, claims.accepted_at_unix_ms, claims.body",
+                        kind
+                    )
+                ))?
+                .query_row(params![subject, i64::MAX], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .optional()?;
+            row.map(|(id, at, body)| -> Result<(String, u128, Value)> {
+                let body: Value = serde_json::from_str(&body)?;
+                let fields = body.get("fields").cloned().unwrap_or(body);
+                Ok((id, at.parse()?, fields))
+            })
+            .transpose()
+        };
+        let mut items = Vec::new();
+        for seat in seats {
+            if let Some(item) = self.screen_prompt_item(&connection, &seat, person)? {
+                items.push(item);
+            }
+            let Some((claim, at, harness)) = newest(&seat, "harness.observed")? else {
+                continue;
+            };
+            if harness["blocked_on"] != "human" {
+                continue;
+            }
+            // The prompt was refused in the terminal, which its harness did not report: the
+            // reconciler recorded that once, keyed by this observation.
+            let gone: bool = connection
+                .prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+                       WHERE json_extract(body, '$._operation.id') IS NOT NULL
+                         AND json_extract(body, '$._operation.id')=?1)",
+                )?
+                .query_row([native_prompt_gone_operation(&claim)], |row| row.get(0))?;
+            if gone || native_prompt_answer(&connection, &claim)?.is_some() {
+                continue;
+            }
+            // Only the running incarnation's prompt waits: a restarted seat's old prompt is gone.
+            let Some((_, _, runtime)) = newest(&seat, "runtime.observed")? else {
+                continue;
+            };
+            if runtime["status"] != "running"
+                || runtime["incarnation_id"] != harness["incarnation_id"]
+                || !person_work::declaration_live(&connection, &seat)?
+            {
+                continue;
+            }
+            let Some(owner) = self.agent_person(&seat)? else {
+                continue;
+            };
+            if person.is_some_and(|person| person != owner) {
+                continue;
+            }
+            let ask = harness["ask"].as_str().unwrap_or("unknown");
+            let what = match ask {
+                "permission" => "permission",
+                "question" => "an answer",
+                "review" => "a review",
+                _ => "you",
+            };
+            let prompt = harness["reason"]
+                .as_str()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or("its terminal shows a prompt");
+            items.push(AttentionItemView {
+                episode: claim,
+                priority: "high".into(),
+                kind: "harness-prompt".into(),
+                review_mode: None,
+                subject: seat.clone(),
+                person: owner,
+                requester_id: None,
+                launch_id: None,
+                variant_id: None,
+                message_id: None,
+                answers: prompt_answers(&harness),
+                conversation: Some(seat.clone()),
+                title: format!("{seat} is waiting for {what}"),
+                // Codex names what its request asks to do, not the call: that is the pending
+                // request in the seat's conversation.
+                detail: if answerable(&harness) && harness["driver"] == "codex" {
+                    format!(
+                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.",
+                        codex_approval_words(prompt)
+                    )
+                } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
+                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
+                } else if answerable(&harness) && subagent_prompt(&harness) {
+                    format!(
+                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (Ctrl+] in stui), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
+                        prompt.trim_start_matches(st_drivers::claude_prompts::SUBAGENT_PREFIX)
+                    )
+                } else if answerable(&harness) && plan_approval(&harness) {
+                    "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
+                } else if answerable(&harness) && ask == "question" {
+                    "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
+                } else if answerable(&harness) {
+                    format!(
+                        "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
+                    )
+                } else {
+                    format!(
+                        "{prompt}\n\nAnswer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
+                    )
+                },
+                request: None,
+                mission: None,
+                mission_run: None,
+                step: None,
+                targets: vec![seat.clone()],
+                requested_at_unix_ms: at,
+                actions: vec![attention_action(
+                    "Attach to answer",
+                    &["st", "terminals", "attach", &seat],
+                )],
+            });
+        }
+        Ok(items)
+    }
+
     pub(super) fn person_attention_items(
         &self,
         person: Option<&str>,
@@ -13,100 +212,25 @@ impl Store {
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let mut items = Vec::new();
-        let mut query = connection.prepare(
-            "SELECT subject FROM step_runs WHERE assignee LIKE 'person/%'
-            AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject",
-        )?;
+        let mut query = connection.prepare(PERSON_STEPS_QUERY)?;
         let subjects = query
             .query_map([person], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for subject in subjects {
-            let Some(view) = person_work::step(&connection, &subject)? else {
-                continue;
-            };
-            let ask = person_work::request(&connection, &subject)?;
-            if let Some(ask) = &ask {
-                if !person_work::current(&connection, ask, as_of)? {
-                    continue;
-                }
-            } else if view.status != "ready"
-                || !person_work::run_live(&connection, &view.run, Some(&view.generation), false)?
-            {
-                continue;
+            if let Some(item) = person_attention_item(&connection, &subject, as_of)? {
+                items.push(item);
             }
-            let person = view.assigned_to.as_deref().unwrap_or_default();
-            let episode = ask.as_ref().map(|ask| ask.id.clone()).unwrap_or_else(|| {
-                format!(
-                    "{}:{}:{}",
-                    view.generation, view.attempt, view.readiness_epoch
-                )
-            });
-            let activated: Option<String> = connection.query_row(
-                "SELECT activated_at_unix_ms FROM step_runs WHERE subject=?1",
-                [&subject],
-                |row| row.get(0),
-            )?;
-            let since = ask.as_ref().map_or(
-                activated
-                    .and_then(|at| at.parse().ok())
-                    .unwrap_or(view.created_at_unix_ms),
-                |ask| {
-                    ask.body["fields"]["waiting_since"]
-                        .as_str()
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(ask.accepted_at_unix_ms)
-                },
-            );
-            let request = ask
-                .as_ref()
-                .and_then(|ask| ask.body["fields"].get("request"))
-                .filter(|request| request.is_object())
-                .cloned();
-            let (label, response): (&str, &[&str]) =
-                match request.as_ref().and_then(|r| r["type"].as_str()) {
-                    Some("decision" | "choice") => ("done", &["--answer", "ANSWER_ID"]),
-                    // An update clears when the person opens it or presses read.
-                    Some("update") => ("read", &["--answer", "read"]),
-                    Some(_) => ("done", &["--text", "FEEDBACK"]),
-                    None => ("done", &["--summary", "RESPONSE"]),
-                };
-            items.push(AttentionItemView {
-                episode,
-                priority: "normal".into(),
-                kind: "person-step".into(),
-                review_mode: None,
-                subject: subject.clone(),
-                person: person.into(),
-                requester_id: ask.and_then(|ask| ask.actor),
-                launch_id: None,
-                variant_id: None,
-                message_id: None,
-                title: view
-                    .title
-                    .unwrap_or_else(|| "A step needs your response".into()),
-                detail: view.goals.join("\n"),
-                mission: None,
-                mission_run: Some(view.run),
-                step: Some(subject.clone()),
-                targets: vec![subject.clone()],
-                requested_at_unix_ms: since,
-                actions: vec![attention_action(
-                    label,
-                    &[
-                        "st",
-                        "work",
-                        "done",
-                        &subject,
-                        "--as",
-                        person,
-                        response[0],
-                        response[1],
-                    ],
-                )],
-                request,
-            });
         }
         Ok(items)
+    }
+
+    /// Whether `agent` is declared and not stopped or retired: the same test that lets an agent
+    /// own a fault.
+    pub(crate) fn agent_is_live(&self, agent: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        Ok(agent.starts_with("agent/")
+            && current_desired_row(&connection, agent)?.is_some_and(|row| row.kind == "agent")
+            && person_work::declaration_live(&connection, agent)?)
     }
 
     /// The fleet's fault agent: the first live agent, by subject, whose declaration carries
@@ -414,7 +538,10 @@ impl Store {
         }
         let mut items = Vec::new();
         for ((source, scope, _origin), claim) in latest {
-            if claim.body["fields"]["status"] != "faulted"
+            // A restart can diagnose many late admissions in one pass. Keep these visible in
+            // mission views and doctor without creating an operator item for each run.
+            if scope == crate::reconcile::FIRST_READINESS_FAULT_SCOPE
+                || claim.body["fields"]["status"] != "faulted"
                 || as_of.saturating_sub(claim.accepted_at_unix_ms) < 120_000
             {
                 continue;
@@ -424,6 +551,10 @@ impl Store {
                     continue;
                 };
                 if !person_work::run_live(&connection, &step.run, Some(&step.generation), true)? {
+                    continue;
+                }
+            } else if source.starts_with("mission-run/") {
+                if !person_work::run_live(&connection, &source, None, true)? {
                     continue;
                 }
             } else if !source.starts_with("daemon/")
@@ -441,14 +572,14 @@ impl Store {
                 requester_id: None,
                 launch_id: None,
                 variant_id: None,
-                message_id: None,
+                message_id: None, answers: Vec::new(), conversation: None,
                 title: format!("st cannot reconcile {source}"),
                 detail: format!(
-                    "{scope}: {}. Inspect with `st subject {source}`.",
+                    "{scope}: {}. Inspect with `st subject show {source}`.",
                     claim.body["fields"]["reason"].as_str().unwrap_or_default()
                 ),
                 mission: None,
-                mission_run: None,
+                mission_run: source.starts_with("mission-run/").then(|| source.clone()),
                 step: None,
                 targets: vec![source.clone()],
                 requested_at_unix_ms: claim.accepted_at_unix_ms,
@@ -478,6 +609,20 @@ impl Store {
             .unwrap_or_default();
         if !matches!(status, "failed" | "cancelled") {
             return Ok(None);
+        }
+        if status == "cancelled" {
+            // Cancellation before admission changes the loop step's state without ever
+            // starting a round. A stopped-loop fault needs round activity in that case;
+            // structural failures still need attention even before the first round.
+            smallclaims::touched::note_read(|| format!("children-of-step:{}", view.subject));
+            let has_round: bool = self.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE parent_step_run=?1)",
+                [&view.subject],
+                |row| row.get(0),
+            )?;
+            if !has_round {
+                return Ok(None);
+            }
         }
         let reason = state
             .body
@@ -560,7 +705,7 @@ impl Store {
             requester_id: None,
             launch_id: None,
             variant_id: None,
-            message_id: None,
+            message_id: None, answers: Vec::new(), conversation: None,
             title,
             detail,
             mission: Some(run.mission.clone()),
@@ -618,13 +763,92 @@ impl Store {
                 continue;
             }
             let source = desired.subject;
+            let diagnostic = self.last_driver_diagnostic(&source)?;
             items.push(AttentionItemView {
                 episode: decision.id.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
-                subject: source.clone(), person: reviewer.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None,
+                subject: source.clone(), person: reviewer.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None, answers: Vec::new(), conversation: None,
                 title: if codex { "A Codex agent stopped after repeated failures" } else { "An agent stopped after repeated runtime failures" }.into(),
-                detail: format!("{source}: {}. Inspect the seat and revise its desired declaration before restarting.", decision.body["fields"]["reason"].as_str().unwrap_or("the runtime is parked")),
+                detail: format!("{source}: {}.{} Inspect the seat and revise its desired declaration before restarting.", decision.body["fields"]["reason"].as_str().unwrap_or("the runtime is parked"), diagnostic.map(|diagnostic| format!(" The driver's last diagnostic: {diagnostic}.")).unwrap_or_default()),
                 mission: None, mission_run: desired.owner_run, step: None, targets: vec![source.clone()], requested_at_unix_ms: decision.accepted_at_unix_ms,
                 actions: vec![attention_action("inspect source", &["st", "subject", &source])],
+                request: None,
+            });
+        }
+        Ok(items)
+    }
+
+    /// The newest word a seat's driver left: its `harness.diagnostic` code and reason. The first
+    /// thing anyone asks of a seat that will not start, and the reason a fault should carry it.
+    fn last_driver_diagnostic(&self, subject: &str) -> Result<Option<String>> {
+        Ok(self
+            .latest_observation(subject, "harness.diagnostic")?
+            .and_then(|claim| {
+                let fields = claim.body.get("fields").unwrap_or(&claim.body);
+                let reason = fields.get("reason").and_then(Value::as_str)?;
+                Some(match fields.get("code").and_then(Value::as_str) {
+                    Some(code) => format!("{code}: {reason}"),
+                    None => reason.to_owned(),
+                })
+            }))
+    }
+
+    /// A seat that is declared to run and that no runtime observation has ever described, for
+    /// ten minutes: `st agents ls` shows it as `desired`, and nothing else says it is not coming.
+    /// Parking and failing both leave a record; this leaves none, so it is found by looking, or
+    /// not at all. The fault ends when the first observation appears.
+    fn unstarted_seat_attention_items(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<Vec<AttentionItemView>> {
+        const REVIEWER: &str = "person/operator";
+        if person.is_some_and(|person| person != REVIEWER) {
+            return Ok(Vec::new());
+        }
+        let connection = self.readers.get();
+        let mut items = Vec::new();
+        for desired in self
+            .desired_subjects()?
+            .into_iter()
+            .filter(|desired| desired.kind == "agent" && desired.member.is_some())
+        {
+            if !person_work::declaration_live(&connection, &desired.subject)? {
+                continue;
+            }
+            let Some(token) = self.selected_desired_token(&desired.subject)? else {
+                continue;
+            };
+            let Some(declared) = self.claim_by_id(&token)? else {
+                continue;
+            };
+            let due = declared
+                .accepted_at_unix_ms
+                .saturating_add(SEAT_NOT_STARTED_MS);
+            if due > as_of
+                || self
+                    .latest_observation(&desired.subject, "runtime.observed")?
+                    .is_some()
+                || crate::suspension::current(self, &desired.subject)?.is_some()
+            {
+                continue;
+            }
+            let source = desired.subject;
+            let host = desired
+                .member
+                .as_ref()
+                .map(|member| member.host.clone())
+                .unwrap_or_default();
+            let diagnostic = match self.last_driver_diagnostic(&source)? {
+                Some(diagnostic) => format!(" The driver's last diagnostic: {diagnostic}."),
+                None => " The driver has left no diagnostic: it never ran.".into(),
+            };
+            items.push(AttentionItemView {
+                episode: token.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
+                subject: source.clone(), person: REVIEWER.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None, answers: Vec::new(), conversation: None,
+                title: "An agent seat has not started".into(),
+                detail: format!("{source} has been declared to run on {host} for over {} minutes and no runtime has ever been observed for it, so it is still `desired`.{diagnostic} Check that the host is up and its daemon can start the seat.", SEAT_NOT_STARTED_MS / 60_000),
+                mission: None, mission_run: desired.owner_run, step: None, targets: vec![source.clone()], requested_at_unix_ms: due,
+                actions: vec![attention_action("inspect seat", &["st", "agents", "show", &source])],
                 request: None,
             });
         }
@@ -771,7 +995,7 @@ impl Store {
                 requester_id: None,
                 launch_id: None,
                 variant_id: None,
-                message_id: None,
+                message_id: None, answers: Vec::new(), conversation: None,
                 title: condition.title().into(),
                 detail: condition.reason(&source, &latest.origin),
                 mission: None,
@@ -797,9 +1021,18 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        self.broken_gate_items_from_failures(person, as_of, self.operational_failures()?)
+    }
+
+    pub(super) fn broken_gate_items_from_failures(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        failures: Vec<AttentionRequestView>,
+    ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let mut items = Vec::new();
-        for failure in self.operational_failures()? {
+        for failure in failures {
             if failure.status != "pending"
                 || failure.requested_at_unix_ms > as_of
                 || person.is_some_and(|person| person != failure.reviewer)
@@ -842,17 +1075,32 @@ impl Store {
         Ok(items)
     }
 
+    // The independently folding operational reader is now used only by parity controls.
+    #[cfg(test)]
     pub(super) fn operational_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        let (items, _) = self.operational_attention_items_with_failures(person, as_of)?;
+        Ok(items)
+    }
+
+    /// Return this call's history cut for the broken-gate reducer, without caching authority.
+    /// Read it at its original first-use point, after the derived fault families below.
+    pub(super) fn operational_attention_items_with_failures(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
         let connection = self.readers.get();
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
         items.extend(self.parked_runtime_attention_items(person, as_of)?);
-        for failure in self.operational_failures()? {
+        items.extend(self.unstarted_seat_attention_items(person, as_of)?);
+        let failures = self.operational_failures()?;
+        for failure in &failures {
             if failure.status != "pending"
                 || failure.requested_at_unix_ms > as_of
                 || person.is_some_and(|person| person != failure.reviewer)
@@ -871,6 +1119,38 @@ impl Store {
                 continue;
             }
             if source.starts_with("mission-run/") {
+                if claim.body["fields"]["condition"] == MISSING_AGENT_CONDITION {
+                    let latest: Option<String> = connection.query_row(
+                        &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure' AND json_extract(body,'$.fields.condition')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                        params![source, MISSING_AGENT_CONDITION], |row| row.get(0),
+                    ).optional()?;
+                    if latest.as_deref() != Some(claim.id.as_str())
+                        || !person_work::run_live(&connection, source, None, true)?
+                    {
+                        continue;
+                    }
+                    let run =
+                        self.mission_run_for_reconcile(source.trim_start_matches("mission-run/"))?;
+                    let generation = failure.targets.get(1);
+                    if generation != Some(&run.generation) {
+                        continue;
+                    }
+                    let Some(step) = failure
+                        .targets
+                        .get(2)
+                        .and_then(|subject| run.steps.iter().find(|s| &s.subject == subject))
+                    else {
+                        continue;
+                    };
+                    if !self.missing_agent_fault_is_current(&run, step)? {
+                        continue;
+                    }
+                    if claim.body["fields"]["episode"].as_str()
+                        != Some(mission_eligibility::episode(&run, step).as_str())
+                    {
+                        continue;
+                    }
+                }
                 // A finished run's failed cleanup is a fault on a run that completed, so the run
                 // is no longer live. It stays for a day, then the failed step is all that remains.
                 let cleanup_fault = claim.body["fields"]["episode"]
@@ -894,12 +1174,37 @@ impl Store {
                 {
                     continue;
                 }
+            } else if claim.body["fields"]["condition"] == "stop-deferred" {
+                // A retained stop belongs to a terminal run, so declaration_live deliberately
+                // excludes it. Its own revision, incarnation and runtime fences decide instead.
+                if !self
+                    .stop_deferral_faults_for(std::slice::from_ref(source), self.index()?)?
+                    .contains_key(source)
+                {
+                    continue;
+                }
             } else if !source.starts_with("daemon/")
                 && !person_work::declaration_live(&connection, source)?
             {
                 continue;
             }
             let f = &claim.body["fields"];
+            // Upgrades retain historical operational episodes. A current login with a concrete
+            // person has one derived person item; the old agent fault must not ask again.
+            if f["condition"] == "provider-auth"
+                && let Some(harness) = self.current_harness(source)?
+            {
+                let update_menu = self.claim_by_id(&harness.claim)?.is_some_and(|claim| {
+                    claim.body["fields"]["code"] == "provider-update-prompt"
+                });
+                // The visible update modal takes priority without restoring authentication.
+                // Once it clears, an unresolved login exposes its fallback fault again.
+                if update_menu
+                    || (harness.state == "needs-login" && self.agent_person(source)?.is_some())
+                {
+                    continue;
+                }
+            }
             if matches!(
                 f["condition"].as_str(),
                 Some("readiness" | "provider-auth" | "provider-trust" | "provider-update")
@@ -929,8 +1234,22 @@ impl Store {
                     continue;
                 }
             }
-            let mut item = attention_item_from_failure(failure);
+            // Diagnostic history stays immutable; current work/runtime state decides whether
+            // this episode still needs an owner. This changes no canonical timing fold.
+            let wake = if f["condition"] == "work-wake-exhausted" {
+                let Some(context) = self.current_exhausted_work_wake(failure, as_of)? else {
+                    continue;
+                };
+                Some(context)
+            } else {
+                None
+            };
+            let mut item = attention_item_from_failure(failure.clone());
             item.kind = "fault".into();
+            if f["condition"] == MISSING_AGENT_CONDITION {
+                item.mission_run = Some(source.clone());
+                item.step = item.targets.get(2).cloned();
+            }
             item.subject = source.clone();
             item.episode = claim.id;
             item.priority = if claim.body["fields"]["severity"] == "warning" {
@@ -943,8 +1262,862 @@ impl Store {
                 "inspect source",
                 &["st", "subject", source],
             )];
+            if f["condition"] == "stop-deferred" {
+                item.actions = vec![attention_action(
+                    "inspect retained seat",
+                    &["st", "agents", "show", source, "--all"],
+                )];
+            }
+            if let Some((step, diagnostic)) = wake {
+                item.step = Some(step.subject.clone());
+                item.mission_run = Some(step.run);
+                item.actions = vec![
+                    attention_action("inspect step", &["st", "work", "show", &step.subject]),
+                    attention_action("inspect seat history", &["st", "trace", "show", &diagnostic.subject, "--limit", "20"]),
+                ];
+            }
             items.push(item);
         }
-        Ok(items)
+        Ok((items, failures))
+    }
+
+    fn current_exhausted_work_wake(
+        &self,
+        failure: &AttentionRequestView,
+        as_of: u128,
+    ) -> Result<Option<(StepRunView, ClaimRecord)>> {
+        let [agent, step_subject, diagnostic_id] = failure.targets.as_slice() else {
+            return Ok(None);
+        };
+        let Some(diagnostic) = self.claim_by_id(diagnostic_id)? else {
+            return Ok(None);
+        };
+        let fields = &diagnostic.body["fields"];
+        if diagnostic.kind != "harness.diagnostic"
+            || &diagnostic.subject != agent
+            || diagnostic.accepted_at_unix_ms > as_of
+            || fields["code"] != "work-wake-exhausted"
+            || fields["status"] != "failed"
+            || fields["step_run"].as_str() != Some(step_subject)
+        {
+            return Ok(None);
+        }
+        let Some(step) = self.step_run(step_subject)? else {
+            return Ok(None);
+        };
+        if step.status != "ready"
+            || step.assigned_to.as_ref() != Some(agent)
+            || fields["attempt"].as_u64() != Some(u64::from(step.attempt))
+            || fields["readiness_epoch"].as_u64() != Some(u64::from(step.readiness_epoch))
+            || !person_work::run_live(
+                &self.readers.get(),
+                &step.run,
+                Some(&step.generation),
+                false,
+            )?
+        {
+            return Ok(None);
+        }
+        let Some(harness) = self.current_harness(agent)? else {
+            return Ok(None);
+        };
+        if !matches!(harness.state.as_str(), "ready" | "idle")
+            || fields["incarnation_id"].as_str() != Some(harness.incarnation_id.as_str())
+        {
+            return Ok(None);
+        }
+        Ok(Some((step, diagnostic)))
+    }
+}
+
+/// Derive one person step using the same source fences as the full reader.
+pub(super) fn person_attention_item(
+    connection: &Connection,
+    subject: &str,
+    as_of: u128,
+) -> Result<Option<AttentionItemView>> {
+    let Some(view) = person_work::step(connection, subject)? else {
+        return Ok(None);
+    };
+    if !matches!(view.status.as_str(), "pending" | "ready")
+        || view
+            .assigned_to
+            .as_deref()
+            .is_none_or(|a| {
+                !a.get(..7)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("person/"))
+            })
+    {
+        return Ok(None);
+    }
+    let ask = person_work::request(connection, subject)?;
+    if let Some(ask) = &ask {
+        if !person_work::current(connection, ask, as_of)? {
+            return Ok(None);
+        }
+    } else if view.status != "ready"
+        || !person_work::run_live(connection, &view.run, Some(&view.generation), false)?
+    {
+        return Ok(None);
+    }
+    let person = view.assigned_to.as_deref().unwrap_or_default();
+    let episode = ask.as_ref().map(|ask| ask.id.clone()).unwrap_or_else(|| {
+        format!(
+            "{}:{}:{}",
+            view.generation, view.attempt, view.readiness_epoch
+        )
+    });
+    let activated: Option<String> = connection.query_row(
+        "SELECT activated_at_unix_ms FROM step_runs WHERE subject=?1",
+        [subject],
+        |row| row.get(0),
+    )?;
+    let since = ask.as_ref().map_or(
+        activated
+            .and_then(|at| at.parse().ok())
+            .unwrap_or(view.created_at_unix_ms),
+        |ask| {
+            ask.body["fields"]["waiting_since"]
+                .as_str()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(ask.accepted_at_unix_ms)
+        },
+    );
+    let request = ask
+        .as_ref()
+        .and_then(|ask| ask.body["fields"].get("request"))
+        .filter(|request| request.is_object())
+        .cloned();
+    let (label, response): (&str, &[&str]) = match request.as_ref().and_then(|r| r["type"].as_str())
+    {
+        Some("decision" | "choice") => ("done", &["--answer", "ANSWER_ID"]),
+        // An update clears when the person opens it or presses read.
+        Some("update") => ("read", &["--answer", "read"]),
+        Some(_) => ("done", &["--text", "FEEDBACK"]),
+        None => ("done", &["--summary", "RESPONSE"]),
+    };
+    Ok(Some(AttentionItemView {
+        episode,
+        priority: "normal".into(),
+        kind: "person-step".into(),
+        review_mode: None,
+        subject: subject.to_owned(),
+        person: person.into(),
+        conversation: match ask
+            .as_ref()
+            .and_then(|ask| ask.actor.as_deref())
+            .and_then(agent)
+        {
+            Some(actor) => Some(actor),
+            None => conversation_agent(connection, None, Some(&view.run))?,
+        },
+        requester_id: ask.and_then(|ask| ask.actor),
+        launch_id: None,
+        variant_id: None,
+        message_id: None, answers: Vec::new(),
+        title: view
+            .title
+            .unwrap_or_else(|| "A step needs your response".into()),
+        detail: view.goals.join("\n"),
+        mission: None,
+        mission_run: Some(view.run),
+        step: Some(subject.to_owned()),
+        targets: vec![subject.to_owned()],
+        requested_at_unix_ms: since,
+        actions: vec![attention_action(
+            label,
+            &[
+                "st",
+                "work",
+                "done",
+                subject,
+                "--as",
+                person,
+                response[0],
+                response[1],
+            ],
+        )],
+        request,
+    }))
+}
+
+/// `subject` when it names an agent: only an agent has a conversation an item can belong to.
+pub(super) fn agent(subject: &str) -> Option<String> {
+    subject.starts_with("agent/").then(|| subject.to_owned())
+}
+
+/// The agent whose conversation an item about `step` or `run` belongs to: the agent assigned to
+/// the step, else the agent that requested its run, else none. A person's run has no agent.
+pub(super) fn conversation_agent(
+    connection: &Connection,
+    step: Option<&str>,
+    run: Option<&str>,
+) -> Result<Option<String>> {
+    let mut run = run.map(str::to_owned);
+    if let Some(step) = step
+        && let Some(view) = person_work::step(connection, step)?
+    {
+        if let Some(agent) = view.assigned_to.as_deref().and_then(agent) {
+            return Ok(Some(agent));
+        }
+        run.get_or_insert(view.run);
+    }
+    let Some(run) = run else { return Ok(None) };
+    Ok(
+        mission_run_header_tx(connection, run.strip_prefix("mission-run/").unwrap_or(&run))
+            .optional()?
+            .and_then(|header| agent(&header.requester)),
+    )
+}
+
+/// Whether a record with this idempotency key exists.
+fn recorded(connection: &Connection, key: &str) -> Result<bool> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+               WHERE json_extract(body, '$._operation.id') IS NOT NULL
+                 AND json_extract(body, '$._operation.id')=?1)",
+        )?
+        .query_row([smallclaims::store::operation_id_for_key(key)], |row| row.get(0))?)
+}
+
+/// The reason recorded with the record whose idempotency key this is, when it exists.
+fn recorded_reason(connection: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT json_extract(body, '$.fields.reason') FROM claims INDEXED BY claims_operation_index
+               WHERE json_extract(body, '$._operation.id') IS NOT NULL
+                 AND json_extract(body, '$._operation.id')=?1 LIMIT 1",
+        )?
+        .query_row([smallclaims::store::operation_id_for_key(key)], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .map(Option::unwrap_or_default))
+}
+
+/// The idempotency key of the record that the screen prompt `claim` recorded is gone.
+pub(crate) fn screen_prompt_gone_key(claim: &str) -> String {
+    format!("native-screen-prompt-gone:{claim}")
+}
+
+/// The idempotency key of the record that st pressed the keys of a person's answer to the screen
+/// prompt `claim` recorded. It is written before the keys, so they are never pressed twice.
+pub(crate) fn screen_prompt_delivered_key(claim: &str) -> String {
+    format!("native-screen-prompt-delivered:{claim}")
+}
+
+/// The idempotency key of the record that the terminal refused a key of a person's answer to the
+/// screen prompt `claim` recorded, after st recorded it delivered.
+pub(crate) fn screen_prompt_undelivered_key(claim: &str) -> String {
+    format!("native-screen-prompt-undelivered:{claim}")
+}
+
+impl Store {
+    /// The screen-only prompt (see `st_drivers::blocking_screen::screen_prompt`) the seat's
+    /// incarnation shows, as the reconciler last recorded it: the newest `native-screen-prompt`
+    /// of that incarnation, unless it is gone. Its id, when it was recorded, and its fields.
+    pub(crate) fn open_screen_prompt(
+        &self,
+        seat: &str,
+        incarnation: &str,
+    ) -> Result<Option<(String, u128, Value)>> {
+        let connection = self.readers.get();
+        open_screen_prompt(&connection, seat, incarnation)
+    }
+
+    /// Whether a record with the idempotency key `key` exists.
+    pub(crate) fn operation_recorded(&self, key: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        recorded(&connection, key)
+    }
+
+    /// The person's answer to the screen prompt `claim` recorded, and whether st pressed its keys.
+    pub(crate) fn screen_prompt_answer(&self, claim: &str) -> Result<(Option<String>, bool)> {
+        let connection = self.readers.get();
+        Ok((
+            native_prompt_answer(&connection, claim)?,
+            recorded(&connection, &screen_prompt_delivered_key(claim))?,
+        ))
+    }
+
+    /// The alert for the seat's open screen prompt: only while its incarnation runs, and until it
+    /// is answered or gone.
+    fn screen_prompt_item(
+        &self,
+        connection: &Connection,
+        seat: &str,
+        person: Option<&str>,
+    ) -> Result<Option<AttentionItemView>> {
+        let runtime = connection
+            .prepare_cached(&format!(
+                "{} LIMIT 1",
+                newest_claims_of_kind_query("claims.body", "runtime.observed")
+            ))?
+            .query_row(params![seat, i64::MAX], |row| row.get::<_, String>(0))
+            .optional()?;
+        let Some(runtime) = runtime else {
+            return Ok(None);
+        };
+        let runtime: Value = serde_json::from_str(&runtime)?;
+        let runtime = runtime.get("fields").unwrap_or(&runtime);
+        let Some(incarnation) = runtime["incarnation_id"].as_str() else {
+            return Ok(None);
+        };
+        if runtime["status"] != "running" {
+            return Ok(None);
+        }
+        let Some((claim, at, prompt)) = open_screen_prompt(connection, seat, incarnation)? else {
+            return Ok(None);
+        };
+        // An answer whose keys the terminal refused part way leaves the dialog for the person to
+        // finish in the terminal: it may now sit on a different option.
+        let undelivered = recorded_reason(connection, &screen_prompt_undelivered_key(&claim))?;
+        if (undelivered.is_none() && native_prompt_answer(connection, &claim)?.is_some())
+            || !person_work::declaration_live(connection, seat)?
+        {
+            return Ok(None);
+        }
+        let Some(owner) = self.agent_person(seat)? else {
+            return Ok(None);
+        };
+        if person.is_some_and(|person| person != owner) {
+            return Ok(None);
+        }
+        let driver = prompt["driver"].as_str().unwrap_or_default();
+        let kind = prompt["status"].as_str().unwrap_or_default();
+        let headline = prompt["matched_line"].as_str().unwrap_or_default();
+        // The folder a trust prompt asks about, as the reconciler recorded it.
+        let folder = prompt["reason"]
+            .as_str()
+            .filter(|folder| !folder.is_empty())
+            .map_or_else(|| "its workspace".to_owned(), |folder| format!("its workspace {folder}"));
+        let ask = match (driver, kind) {
+            ("claude", "mcp-server") => format!(
+                "{headline}. Claude asks before it starts whether to use this project's MCP server. Use it, use all, or skip it. Use all also approves every MCP server this project adds later, without asking again"
+            ),
+            ("claude", "trust") => format!("Claude asks before it starts whether you trust {folder}, and st's own attempts to record that trust did not hold. Trust trusts that folder: Claude can then read, edit and execute files there. Trust it, or exit"),
+            ("codex", "trust") => format!("Codex asks before it starts whether you trust the contents of {folder}. Trust trusts that folder: Codex then loads its project config, hooks and exec policies. Trust it, or quit"),
+            _ => headline.to_owned(),
+        };
+        let (answers, detail) = match undelivered {
+            Some(reason) => (
+                Vec::new(),
+                format!(
+                    "{headline}: st did not finish pressing your answer into the dialog ({reason}), so it may now sit on a different option. Answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone."
+                ),
+            ),
+            None => (
+                st_drivers::blocking_screen::screen_prompt_choices(driver, kind)
+                    .iter()
+                    .map(|(answer, _)| (*answer).to_owned())
+                    .collect(),
+                format!(
+                    "{ask} here, or in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
+                ),
+            ),
+        };
+        Ok(Some(AttentionItemView {
+            episode: claim,
+            priority: "high".into(),
+            kind: "harness-prompt".into(),
+            review_mode: None,
+            subject: seat.to_owned(),
+            person: owner,
+            requester_id: None,
+            launch_id: None,
+            variant_id: None,
+            message_id: None,
+            answers,
+            conversation: Some(seat.to_owned()),
+            title: format!("{seat} is waiting for you"),
+            detail,
+            request: None,
+            mission: None,
+            mission_run: None,
+            step: None,
+            targets: vec![seat.to_owned()],
+            requested_at_unix_ms: at,
+            actions: vec![attention_action(
+                "Attach to answer",
+                &["st", "terminals", "attach", seat],
+            )],
+        }))
+    }
+}
+
+fn open_screen_prompt(
+    connection: &Connection,
+    seat: &str,
+    incarnation: &str,
+) -> Result<Option<(String, u128, Value)>> {
+    let row = connection
+        .prepare_cached(&format!(
+            "{} LIMIT 1",
+            newest_claims_of_kind_query(
+                "claims.id, claims.accepted_at_unix_ms, claims.body",
+                "harness.diagnostic"
+            )
+            .replace(
+                " ORDER BY",
+                " AND json_extract(claims.body, '$.fields.code')='native-screen-prompt' ORDER BY"
+            )
+        ))?
+        .query_row(params![seat, i64::MAX], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .optional()?;
+    let Some((claim, at, body)) = row else {
+        return Ok(None);
+    };
+    let body: Value = serde_json::from_str(&body)?;
+    let fields = body.get("fields").cloned().unwrap_or(body);
+    if fields["incarnation_id"] != incarnation || recorded(connection, &screen_prompt_gone_key(&claim))? {
+        return Ok(None);
+    }
+    Ok(Some((claim, at.parse()?, fields)))
+}
+
+/// The idempotency key of the record that a native prompt opened by `observation` is gone.
+pub(crate) fn native_prompt_gone_key(observation: &str) -> String {
+    format!("native-prompt-gone:{observation}")
+}
+
+fn native_prompt_gone_operation(observation: &str) -> String {
+    smallclaims::store::operation_id_for_key(&native_prompt_gone_key(observation))
+}
+
+/// Whether st can answer the prompt `harness` reports from a client: a permission prompt of
+/// Claude, whose hook waits for the answer, that names its tool; or of Codex, whose control
+/// connection sends it, that names the request it saw (`commandExecution`, `fileChange`,
+/// `permissions`). A Codex wait known only from its thread's `waitingOnApproval` flag has no
+/// request st could answer. The call's input is conversation content a client reads from the
+/// seat's conversation and shows beside the answers; it is never stored here. Other prompts are
+/// answered in the seat's terminal.
+///
+/// A Claude question (`AskUserQuestion`) is answered too: its hook returns the person's choices
+/// as the tool's answers (measured on Claude Code 2.1.296, multi-select included).
+fn answerable(harness: &Value) -> bool {
+    let reason = harness["reason"].as_str().unwrap_or_default();
+    harness["blocked_on"] == "human"
+        && match (harness["driver"].as_str(), harness["ask"].as_str()) {
+            (Some("claude"), Some("permission")) => {
+                !reason.is_empty() && reason != "permissionRequest"
+            }
+            (Some("claude"), Some("question")) => reason == "AskUserQuestion",
+            (Some("codex"), Some("permission")) => {
+                matches!(reason, "commandExecution" | "fileChange" | "permissions")
+            }
+            _ => false,
+        }
+}
+
+/// The answers a client may send to the prompt `harness` reports: `allow` or `deny` to a
+/// permission; to a question, `answer` (its choices, see [`question_answers`]) or `deny`. None
+/// when the prompt is answered in the terminal.
+///
+/// Claude's plan approval (`ExitPlanMode`) takes `approve` or `deny`: its hook can refuse a plan,
+/// which Claude reads as the person's feedback, but its allow does not approve one (measured on
+/// Claude Code 2.1.296), so st approves it with the dialog's own keys (see
+/// `Reconciler::reconcile_plan_approval`).
+fn prompt_answers(harness: &Value) -> Vec<String> {
+    if !answerable(harness) {
+        return Vec::new();
+    }
+    // A subagent's call is not in the seat's conversation, where a client shows the call beside
+    // an allow: st offers only deny for it, never an allow of a call the person cannot see.
+    if subagent_prompt(harness) {
+        return vec!["deny".into()];
+    }
+    let first = if harness["ask"] == "question" {
+        "answer"
+    } else if plan_approval(harness) {
+        "approve"
+    } else {
+        "allow"
+    };
+    vec![first.into(), "deny".into()]
+}
+
+/// Whether the prompt `harness` reports is Claude asking to approve its plan.
+pub(crate) fn plan_approval(harness: &Value) -> bool {
+    harness["driver"] == "claude" && harness["ask"] == "permission" && harness["reason"] == "ExitPlanMode"
+}
+
+/// The most a question's choices may hold: a few indices, so a replicated record stays small.
+const QUESTION_ANSWERS_MAX_BYTES: usize = 1024;
+/// The most questions, and options per question, a choice may name.
+const QUESTION_INDEX_LIMIT: u64 = 64;
+
+/// A question's choices as a client sends them: a JSON object of each question's position in the
+/// pending `AskUserQuestion` call to the positions of the options chosen (several for a
+/// multi-select), such as `{"0":[1],"1":[0,2]}`. Positions only: the questions and labels are
+/// conversation content, which stays in the conversation; the waiting hook turns positions back
+/// into labels from the call it holds. A person's own words are given in the terminal.
+fn question_answers(answer: &str) -> Option<serde_json::Map<String, Value>> {
+    if answer.len() > QUESTION_ANSWERS_MAX_BYTES {
+        return None;
+    }
+    let Ok(Value::Object(answers)) = serde_json::from_str::<Value>(answer) else {
+        return None;
+    };
+    let index = |value: &Value| value.as_u64().filter(|index| *index < QUESTION_INDEX_LIMIT);
+    (!answers.is_empty()
+        && answers.iter().all(|(question, options)| {
+            question.parse::<u64>().is_ok_and(|question| question < QUESTION_INDEX_LIMIT)
+                && options.as_array().is_some_and(|options| {
+                    !options.is_empty()
+                        // Every position is in range and none repeats.
+                        && options.iter().filter_map(index).collect::<std::collections::BTreeSet<_>>().len() == options.len()
+                })
+        }))
+    .then_some(answers)
+}
+
+/// What a Codex approval request asks for, by the reason its observation names.
+fn codex_approval_words(reason: &str) -> &'static str {
+    match reason {
+        "commandExecution" => "to run a command",
+        "fileChange" => "to change files",
+        "permissions" => "for more permissions",
+        _ => "for approval",
+    }
+}
+
+/// Whether the prompt `harness` reports is a Claude subagent's: its call is not in the seat's
+/// conversation, so st answers it only with deny.
+fn subagent_prompt(harness: &Value) -> bool {
+    harness["driver"] == "claude"
+        && harness["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with(st_drivers::claude_prompts::SUBAGENT_PREFIX))
+}
+
+/// The idempotency key of the person's answer to the native prompt `observation` opened.
+fn native_prompt_answer_key(observation: &str) -> String {
+    format!("native-prompt-answer:{observation}")
+}
+
+/// The answer recorded for the prompt `observation` opened, if any.
+fn native_prompt_answer(connection: &Connection, observation: &str) -> Result<Option<String>> {
+    let operation = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(observation));
+    Ok(connection
+        .prepare_cached(
+            "SELECT json_extract(body, '$.fields.status'), json_extract(body, '$.fields.reason')
+               FROM claims INDEXED BY claims_operation_index
+             WHERE json_extract(body, '$._operation.id') IS NOT NULL
+               AND json_extract(body, '$._operation.id')=?1 LIMIT 1",
+        )?
+        .query_row([operation], |row| {
+            let status = row.get::<_, Option<String>>(0)?;
+            // A question's answer is its choices, which the reason holds.
+            Ok(match status.as_deref() {
+                Some("answer") => row.get::<_, Option<String>>(1)?,
+                _ => status,
+            })
+        })
+        .optional()?
+        .flatten())
+}
+
+/// What a waiting prompt hook needs to know: whether the seat's prompt is still open, answered
+/// (and how), or gone.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum NativePromptState {
+    /// Not yet published, or still waiting on a person.
+    Open,
+    Answered { answer: String },
+    /// Answered in the terminal, replaced or ended: nothing will arrive.
+    Gone,
+}
+
+impl Store {
+    /// The newest harness observation of `seat` and when it was accepted.
+    fn newest_harness_observation(&self, seat: &str) -> Result<Option<(String, u128, Value)>> {
+        let connection = self.readers.get();
+        let row = connection
+            .prepare_cached(&format!(
+                "{} LIMIT 1",
+                newest_claims_of_kind_query(
+                    "claims.id, claims.accepted_at_unix_ms, claims.body",
+                    "harness.observed"
+                )
+            ))?
+            .query_row(params![seat, i64::MAX], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .optional()?;
+        row.map(|(id, at, body)| -> Result<(String, u128, Value)> {
+            let body: Value = serde_json::from_str(&body)?;
+            Ok((id, at.parse()?, body.get("fields").cloned().unwrap_or(body)))
+        })
+        .transpose()
+    }
+
+    /// The prompt a hook waits on: the very observation it published, named by the state
+    /// record's ownership and transition sequences. Open until that observation is published and
+    /// while it is the seat's newest; gone once the seat has moved on.
+    pub fn native_prompt_state(
+        &self,
+        seat: &str,
+        ownership: u64,
+        transition: u64,
+    ) -> Result<NativePromptState> {
+        let connection = self.readers.get();
+        // The hook's observation is among the seat's last few: it is published moments after the
+        // hook writes it, and a hook that waited past a few later observations has nothing left.
+        let recent = connection
+            .prepare_cached(&format!(
+                "{} LIMIT 16",
+                newest_claims_of_kind_query("claims.id, claims.body", "harness.observed")
+            ))?
+            .query_map(params![seat, i64::MAX], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let own = recent.iter().position(|(_, body)| {
+            serde_json::from_str::<Value>(body).is_ok_and(|body| {
+                let fields = body.get("fields").unwrap_or(&body);
+                fields["ownership_sequence"] == ownership && fields["transition_sequence"] == transition
+            })
+        });
+        let Some(own) = own else {
+            // Not published yet, or long gone: only the first can be answered, so keep waiting.
+            return Ok(if recent.len() == 16 {
+                NativePromptState::Gone
+            } else {
+                NativePromptState::Open
+            });
+        };
+        // Claude and Codex show one prompt at a time: while every observation since the waiter's
+        // own still waits on that permission, it is the same prompt, and an answer to any of them
+        // is the waiter's. Anything else in between means the prompt is gone, and so does a new
+        // transition that is not a credential edge: a driver writes each prompt as its own
+        // transition, so a later one waiting on the same tool is another prompt.
+        let mut chain = Vec::new();
+        let mut newer: Option<Value> = None;
+        for (claim, body) in &recent[..=own] {
+            let body: Value = serde_json::from_str(body)?;
+            let fields = body.get("fields").unwrap_or(&body);
+            if !answerable(fields) {
+                return Ok(NativePromptState::Gone);
+            }
+            if let Some(newer) = &newer
+                && newer["transition_sequence"] != fields["transition_sequence"]
+                && newer["provider_auth"] == fields["provider_auth"]
+            {
+                return Ok(NativePromptState::Gone);
+            }
+            newer = Some(fields.clone());
+            chain.push(claim.clone());
+        }
+        for claim in &chain {
+            // Refused in the terminal, which only the screen showed.
+            let refused: bool = connection
+                .prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+                       WHERE json_extract(body, '$._operation.id') IS NOT NULL
+                         AND json_extract(body, '$._operation.id')=?1)",
+                )?
+                .query_row([native_prompt_gone_operation(claim)], |row| row.get(0))?;
+            if refused {
+                return Ok(NativePromptState::Gone);
+            }
+            if let Some(answer) = native_prompt_answer(&connection, claim)? {
+                return Ok(NativePromptState::Answered { answer });
+            }
+        }
+        Ok(NativePromptState::Open)
+    }
+
+    /// Record `actor`'s answer to the seat's open screen prompt, when `episode` names it: one of
+    /// that prompt's own answers, once. The reconciler presses its keys. `None` when `episode` is
+    /// not the seat's open screen prompt.
+    fn answer_screen_prompt(
+        &self,
+        seat: &str,
+        episode: &str,
+        answer: &str,
+        actor: &str,
+    ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
+        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+        let Some(incarnation) = self
+            .latest_actual_value(seat)
+            .map_err(internal)?
+            .and_then(|runtime| {
+                runtime
+                    .pointer("/fields/incarnation_id")
+                    .or_else(|| runtime.get("incarnation_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        else {
+            return Ok(None);
+        };
+        let Some((claim, _, prompt)) = self
+            .open_screen_prompt(seat, &incarnation)
+            .map_err(internal)?
+            .filter(|(claim, _, _)| claim == episode)
+        else {
+            return Ok(None);
+        };
+        let driver = prompt["driver"].as_str().unwrap_or_default();
+        let choices = st_drivers::blocking_screen::screen_prompt_choices(
+            driver,
+            prompt["status"].as_str().unwrap_or_default(),
+        );
+        if !choices.iter().any(|(choice, _)| *choice == answer) {
+            return Err(St3Error::new(
+                "invalid-answer",
+                format!(
+                    "answer {}",
+                    choices
+                        .iter()
+                        .map(|(choice, _)| *choice)
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                ),
+            ));
+        }
+        self.append_claim(&ClaimInput {
+            subject: seat.to_owned(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(actor.to_owned()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::String("native-prompt-answered".into())),
+                ("status".into(), Value::String(answer.into())),
+                ("driver".into(), Value::String(driver.into())),
+                ("incarnation_id".into(), Value::String(incarnation)),
+            ]),
+            evidence: vec![claim.clone()],
+            expected_subject: None,
+            idempotency_key: Some(native_prompt_answer_key(&claim)),
+        })
+        .map(Some)
+    }
+
+    /// Record `actor`'s answer to the native prompt `episode` (the observation that opened it) of
+    /// `seat`. Only the seat's person answers, only the prompt still waiting, and only once.
+    pub fn answer_native_prompt(
+        &self,
+        seat: &str,
+        episode: &str,
+        answer: &str,
+        actor: &str,
+    ) -> std::result::Result<ClaimRecord, St3Error> {
+        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+        if self.agent_person(seat).map_err(internal)?.as_deref() != Some(actor) {
+            return Err(St3Error::new(
+                "forbidden",
+                "only the seat's person answers its prompts",
+            ));
+        }
+        if let Some(answered) = self.answer_screen_prompt(seat, episode, answer, actor)? {
+            return Ok(answered);
+        }
+        if !matches!(answer, "allow" | "deny" | "approve") && question_answers(answer).is_none() {
+            return Err(St3Error::new(
+                "invalid-answer",
+                "answer allow or deny, or a question's choices as a JSON object of question position to option positions",
+            ));
+        }
+        let current = self.newest_harness_observation(seat).map_err(internal)?;
+        let Some((claim, _, harness)) = current.filter(|(claim, _, _)| claim == episode) else {
+            return Err(St3Error::new(
+                "stale-fence",
+                "that prompt is no longer waiting: it was answered or replaced",
+            ));
+        };
+        if !answerable(&harness) {
+            return Err(St3Error::new(
+                "stale-fence",
+                "that prompt can only be answered in the seat's terminal",
+            ));
+        }
+        if answer == "allow" && subagent_prompt(&harness) {
+            return Err(St3Error::new(
+                "invalid-answer",
+                "a subagent's call is not shown in the seat's conversation: deny it here, or allow it in the terminal",
+            ));
+        }
+        // A question takes its choices or a refusal; a permission, allow or deny.
+        let question = harness["ask"] == "question";
+        let choices = (question && answer != "deny").then(|| question_answers(answer)).flatten();
+        let valid = if question {
+            answer == "deny" || choices.is_some()
+        } else if plan_approval(&harness) {
+            matches!(answer, "approve" | "deny")
+        } else {
+            matches!(answer, "allow" | "deny")
+        };
+        if !valid {
+            return Err(St3Error::new(
+                "invalid-answer",
+                if question {
+                    "answer this question with its choices, or deny it"
+                } else {
+                    "answer allow or deny"
+                },
+            ));
+        }
+        let incarnation = harness["incarnation_id"].as_str().unwrap_or_default();
+        let driver = harness["driver"].as_str().unwrap_or_default();
+        let mut fields = BTreeMap::from([
+            ("code".into(), Value::String("native-prompt-answered".into())),
+            ("status".into(), Value::String(answer.into())),
+            ("driver".into(), Value::String(driver.into())),
+            ("incarnation_id".into(), Value::String(incarnation.into())),
+        ]);
+        // A question's choices are positions, never the questions' or options' words: they ride
+        // as the reason, and the status says only that it was answered.
+        if let Some(choices) = choices {
+            fields.insert("status".into(), Value::String("answer".into()));
+            fields.insert("reason".into(), Value::Object(choices).to_string().into());
+        }
+        self.append_claim(&ClaimInput {
+            subject: seat.to_owned(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(actor.to_owned()),
+            fields,
+            evidence: vec![claim.clone()],
+            expected_subject: None,
+            idempotency_key: Some(native_prompt_answer_key(&claim)),
+        })
+    }
+}
+
+#[cfg(test)]
+mod person_steps_plan_tests {
+    use super::*;
+
+    #[test]
+    fn the_person_step_read_is_a_search_of_the_assignee_index_not_a_scan() {
+        let store = Store::open_memory("alder").unwrap();
+        let connection = store.readers.get();
+        let plan: Vec<String> = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {PERSON_STEPS_QUERY}"))
+            .unwrap()
+            .query_map([None::<String>], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.starts_with("SEARCH step_runs") && line.contains("step_runs_assignee_index")),
+            "the person-step read must search step_runs_assignee_index: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.starts_with("SCAN step_runs")),
+            "the person-step read must not scan step_runs: {plan:?}"
+        );
     }
 }

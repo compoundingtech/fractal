@@ -14,21 +14,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// The palette's sections, in order; a digit key opens the palette at one.
-const SECTIONS: [&str; 7] = [
-    "needs you",
+const SECTIONS: [&str; 8] = [
+    "alerts",
     "agents",
     "missions",
     "fleet",
     "spaces",
     "start",
     "said in conversations",
+    "sidebar",
 ];
 const GLASSES: usize = 4;
 /// Where each section ranks while a query is typed: agents, missions, what needs you, then
 /// starting things (so "new terminal" finds New terminal before a glass named after it), the
 /// fleet, and glasses.
 /// What was said in conversations comes right after what needs you.
-const RANK: [usize; 7] = [2, 0, 1, 5, 6, 4, 3];
+const RANK: [usize; 8] = [2, 0, 1, 5, 6, 4, 3, 7];
+const SIDEBAR: usize = 7;
 const START: usize = 5;
 /// What was said in conversations that matches the query, from st's search.
 const SAID: usize = 6;
@@ -83,6 +85,7 @@ enum DragFrom {
     Tab(usize, usize),
     /// A subject from the sidebar, which opens where it is let go.
     Subject(String),
+    Folder(String),
 }
 
 /// Where a dragged tab would land.
@@ -96,6 +99,48 @@ enum Drop {
         side: Side,
         first: bool,
     },
+}
+
+/// What a row of the right-click menu does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MenuAction {
+    /// Reuse a registered action, after opening the subject it belongs to if needed.
+    Activate {
+        subject: Option<String>,
+        hit: Box<Hit>,
+    },
+    Agent {
+        agent: String,
+        key: char,
+    },
+    Declaration(String),
+    CopyText(String),
+    Reply {
+        agent: String,
+        message: Option<String>,
+    },
+    Messages(String),
+    Message {
+        agent: String,
+        entry: String,
+    },
+    CloseTab(usize, usize),
+    SplitTab { group: usize, tab: usize, right: bool },
+    MoveTab { group: usize, tab: usize, to: usize },
+    CopyPath(String),
+    SplitGroup { group: usize, right: bool },
+    NewTab(usize),
+    NewTerminal(usize),
+}
+
+/// A menu opened by a right click, at the place of the click.
+#[derive(Clone, Debug)]
+pub(crate) struct ContextMenu {
+    pub(super) column: u16,
+    pub(super) row: u16,
+    pub(super) title: String,
+    pub(super) items: Vec<(String, MenuAction)>,
+    pub(super) selected: usize,
 }
 
 /// The old stui's Usage tab, which now floats over the glass as Now does.
@@ -119,6 +164,7 @@ fn sidebar_step(section: usize, step: isize) -> usize {
 #[derive(Clone, Debug)]
 pub(crate) struct Sidebar {
     pub(crate) shown: bool,
+    pub(crate) configured: bool,
     /// It has the keys: the arrows move through it and Enter opens.
     pub(crate) focused: bool,
     pub(crate) section: usize,
@@ -129,6 +175,7 @@ impl Default for Sidebar {
     fn default() -> Self {
         Self {
             shown: false,
+            configured: false,
             focused: false,
             section: 1,
             selected: [0; 5],
@@ -322,6 +369,48 @@ impl Glasses {
             .any(|tab| matches!(Pane::parse(&tab.pane), Some(Pane::Usage(_))))
     }
 
+    /// Whether a machine shows, which lists the clients connected to this member.
+    pub(crate) fn shows_machine(&self) -> bool {
+        let glass = self.glass();
+        (0..glass.layout.groups().len())
+            .filter_map(|index| glass.shown(index))
+            .any(|tab| matches!(Pane::parse(&tab.pane), Some(Pane::Machine(_))))
+    }
+
+    pub(crate) fn inventories_wanted(&self, tab: usize, hours: u64) -> crate::feed::Inventories {
+        use crate::feed::Inventories;
+        let glass = self.glass();
+        let panes = (0..glass.layout.groups().len()).filter_map(|index| glass.shown(index))
+            .filter_map(|tab| Pane::parse(&tab.pane)).collect::<Vec<_>>();
+        let fleet = tab == 3 || panes.iter().any(|pane| matches!(pane, Pane::List(3)));
+        let machines = fleet || self.sidebar.shown || self.palette.is_some() || self.shows_machine();
+        Inventories {
+            clients: fleet || self.shows_machine(),
+            usage_hours: self.shows_usage().then_some(hours),
+            machines, devices: fleet,
+            sessions: fleet || tab == 1 || self.sidebar.shown || self.palette.is_some()
+                || panes.iter().any(|pane| matches!(pane, Pane::List(1))),
+            terminals: self.sidebar.shown || self.palette.is_some(),
+        }
+    }
+
+    /// Whether a list or card of missions is on screen: a Missions list or a mission's card in a
+    /// shown tab, the palette (which offers every mission) or the sidebar's Missions section.
+    pub(crate) fn shows_missions(&self) -> bool {
+        if self.palette.is_some() || self.home || (self.sidebar.shown && self.sidebar.section == 2) {
+            return true;
+        }
+        let glass = self.glass();
+        (0..glass.layout.groups().len())
+            .filter_map(|index| glass.shown(index))
+            .any(|tab| {
+                matches!(
+                    Pane::parse(&tab.pane),
+                    Some(Pane::List(2) | Pane::Mission(_) | Pane::Declaration(_) | Pane::Home(_))
+                )
+            })
+    }
+
     pub(crate) fn shown_agents(&self) -> Vec<String> {
         let glass = self.glass();
         let count = glass.layout.groups().len();
@@ -338,9 +427,10 @@ impl Glasses {
     /// Open `wanted` (or the last glass used here, or `main`) from what this device keeps.
     pub(crate) fn open(wanted: Option<String>, store: Option<PathBuf>) -> Self {
         let stored = store.as_deref().map(glass_store::load).unwrap_or_default();
-        // A device that never chose shows the sidebar, as the old stui's list always was.
+        // A device that never chose keeps its layout; fresh workspaces and folders can show it.
         let sidebar = Sidebar {
             shown: stored.sidebar.unwrap_or(false),
+            configured: stored.sidebar.is_some(),
             ..Sidebar::default()
         };
         let mut all = stored
@@ -419,7 +509,7 @@ impl Glasses {
         let Some(path) = &self.store else { return };
         let stored = Stored {
             version: 0,
-            sidebar: Some(self.sidebar.shown),
+            sidebar: self.sidebar.configured.then_some(self.sidebar.shown),
             last: Some(self.glass().name.clone()),
             glasses: self
                 .all
@@ -477,6 +567,7 @@ struct Palette {
     top: Option<usize>,
     /// The palette is asking for a glass's name; the query is the name.
     naming: Option<Naming>,
+    sidebar: Option<resource_sidebar::PaletteMode>,
 }
 
 /// What a name typed into the palette is for.
@@ -489,14 +580,16 @@ enum Naming {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Action {
+    SidebarMode(resource_sidebar::PaletteMode),
+    SidebarNew { name: String, subject: Option<String> },
+    SidebarRename { id: String, name: String },
+    SidebarPreview,
     Open(Pane),
     ShowGlass(usize),
     NewGlass(String),
     RenameGlass(String),
     DuplicateGlass(String),
     CloseGlass,
-    /// The new agent form, with what it should do when the query says it.
-    NewAgent(Option<String>),
     /// Home, over the glass.
     Home,
     /// A plain shell in a new tab.
@@ -505,6 +598,9 @@ enum Action {
     NewMission,
     /// Every conversation simplified, or in full again (Ctrl+P).
     ToggleSimple,
+    /// Agents open on their terminal, or on their conversation.
+    ToggleTerminalFirst,
+    ToggleTerminalFallback,
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -524,6 +620,33 @@ struct Choice {
     /// What the query is matched against; empty matches only a typed name.
     search: String,
     action: Action,
+}
+
+/// The graph path a row stands for, without its kind: `example/atlas/builder` for an agent.
+fn choice_path(action: &Action) -> Option<String> {
+    match action {
+        Action::Open(Pane::Agent(Some(id)) | Pane::Terminal(id)) => {
+            Some(id.trim_start_matches("agent/").to_owned())
+        }
+        Action::Open(Pane::Mission(Some(id))) => Some(id.trim_start_matches("mission/").to_owned()),
+        _ => None,
+    }
+}
+
+/// `query` against `text`, or, when it holds several words, every word against it: "atlas builder"
+/// finds `agent/example/atlas/builder`, which no one-run match reaches across the slashes.
+fn fuzzy_words(query: &str, text: &str) -> Option<i64> {
+    if let Some(score) = fuzzy(query, text) {
+        return Some(score);
+    }
+    let words = query.split_whitespace().collect::<Vec<_>>();
+    if words.len() < 2 {
+        return None;
+    }
+    words
+        .iter()
+        .map(|word| fuzzy(word, text))
+        .sum::<Option<i64>>()
 }
 
 /// How well `query` matches `text`: higher is better, `None` is no match. A query matches as a
@@ -589,9 +712,8 @@ impl Ui {
         (palette.naming.is_none() && query.chars().count() >= 3).then(|| query.to_owned())
     }
 
-    /// st's search results for `query` as palette rows; a hit without an agent stui can open is
-    /// left out. When st says its index is refreshing or missed conversations, the first row
-    /// says so, so a missing match is not read as "never said".
+    /// st's search results for `query` as palette rows, including saved native sessions.
+    /// When the index is refreshing or missed conversations, the first row says so.
     fn said_choices(&self, query: &str) -> Vec<Choice> {
         let Some((asked, outcome)) = &self.said else {
             return Vec::new();
@@ -612,8 +734,8 @@ impl Ui {
         found
             .items
             .iter()
-            .filter_map(|hit| {
-                let agent = hit.agent_id.clone()?;
+            .map(|hit| {
+                let agent = hit.agent_id.clone().unwrap_or_else(|| hit.conversation_id.clone());
                 let name = self
                     .world
                     .agents
@@ -626,7 +748,7 @@ impl Ui {
                     );
                 let excerpt =
                     text::sanitize(&hit.excerpt.split_whitespace().collect::<Vec<_>>().join(" "));
-                Some((agent, name, excerpt, hit.timestamp.clone()))
+                (agent, name, excerpt, hit.timestamp.clone())
             })
             .take(12)
             .enumerate()
@@ -650,6 +772,68 @@ impl Ui {
             .collect()
     }
 
+    fn sidebar_choices(&self, mode: &resource_sidebar::PaletteMode, query: &str) -> Vec<Choice> {
+        use resource_sidebar::PaletteMode as Mode;
+        let choice = |label: String, detail: &str, action| Choice { section: SIDEBAR, glyph: ("▸", theme::ACCENT), search: label.clone(), label, detail: detail.into(), action };
+        let mut choices = match mode {
+            Mode::New { subject } => if query.trim().is_empty() { Vec::new() } else { vec![choice(format!("New folder “{}”", query.trim()), "choose", Action::SidebarNew { name: query.trim().into(), subject: subject.clone() })] },
+            Mode::Rename { id } => if query.trim().is_empty() { Vec::new() } else { vec![choice(format!("Rename folder to “{}”", query.trim()), "save", Action::SidebarRename { id: id.clone(), name: query.trim().into() })] },
+            Mode::Manage { id } => vec![choice("Rename folder…".into(), "choose", Action::SidebarMode(Mode::Rename { id: id.clone() })), choice("Delete folder…".into(), "confirm", Action::SidebarMode(Mode::Delete { id: id.clone() }))],
+            Mode::Move { subject } => {
+                let mut rows = self.resource_sidebar.folders().into_iter().map(|(id, title)| choice(title, "choose", Action::SidebarMode(Mode::ConfirmPlace { subject: subject.clone(), folder: Some(id) }))).collect::<Vec<_>>();
+                rows.push(choice("Everything else".into(), "choose", Action::SidebarMode(Mode::ConfirmPlace { subject: subject.clone(), folder: None })));
+                rows.push(choice("New folder…".into(), "name", Action::SidebarMode(Mode::New { subject: Some(subject.clone()) })));
+                rows
+            }
+            Mode::Add { folder } => {
+                let mut seen = BTreeSet::new();
+                let mut rows = self.choices(query).into_iter().filter_map(|mut choice| {
+                    let Action::Open(pane) = &choice.action else { return None; };
+                    let subject = self.sidebar_subject(pane)?;
+                    if subject.starts_with("session/") || subject.starts_with("pty/") || self.resource_sidebar.location(&subject) == Some(folder.as_str()) || !seen.insert(subject.clone()) { return None; }
+                    choice.action = Action::SidebarMode(Mode::ConfirmPlace { subject, folder: Some(folder.clone()) });
+                    choice.detail = "choose".into(); Some(choice)
+                }).collect::<Vec<_>>();
+                let subject = query.trim();
+                if subject.contains('/') && !subject.chars().any(|c| c.is_whitespace() || c.is_control()) && !subject.starts_with("session/") && !subject.starts_with("pty/") && self.resource_sidebar.location(subject) != Some(folder.as_str()) && !seen.contains(subject) {
+                    rows.push(choice(format!("File {subject}"), "choose", Action::SidebarMode(Mode::ConfirmPlace { subject: subject.into(), folder: Some(folder.clone()) })));
+                }
+                rows
+            }
+            Mode::ConfirmPlace { subject, folder } => vec![choice(format!("{} → {}", subject, folder.as_ref().and_then(|id| self.resource_sidebar.folders().into_iter().find(|(folder, _)| folder == id).map(|(_, name)| name)).unwrap_or_else(|| "Everything else".into())), "m: move", Action::SidebarPreview)],
+            Mode::ConfirmCreate { subject, name } => vec![choice(format!("{subject} → new folder “{name}”"), "m: move", Action::SidebarPreview)],
+            Mode::Delete { .. } => vec![choice("Resources return to Everything else".into(), "y: delete", Action::SidebarPreview)],
+        };
+        if !matches!(mode, Mode::New { .. } | Mode::Rename { .. } | Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } | Mode::Delete { .. }) { choices.retain(|choice| fuzzy_words(query, &choice.search).is_some()); }
+        choices
+    }
+    fn sidebar_subject(&self, pane: &Pane) -> Option<String> {
+        match pane {
+            Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id)) | Pane::Resource(id) => Some(id.clone()),
+            Pane::Terminal(id) => self.resource_sidebar.resources().into_iter().find(|row| row.kind == "Terminals" && row.open == *id).map(|row| row.id).or_else(|| id.starts_with("agent/").then(|| id.clone())),
+            _ => None,
+        }
+    }
+    pub(super) fn open_sidebar_palette(&mut self, mode: resource_sidebar::PaletteMode) {
+        self.open_palette(None, Open::Tab);
+        if let Some(palette) = self.glasses.as_mut().and_then(|g| g.palette.as_mut()) {
+            palette.query = match &mode { resource_sidebar::PaletteMode::Rename { id } => self.resource_sidebar.folders().into_iter().find(|(folder, _)| folder == id).map(|(_, name)| name).unwrap_or_default(), _ => String::new() };
+            palette.sidebar = Some(mode);
+        }
+    }
+    fn sidebar_palette_action(&mut self, action: &Action) -> bool {
+        if let Action::SidebarNew { name, .. } | Action::SidebarRename { name, .. } = action && let Err(error) = resource_sidebar::folder_name(name) { self.flash(error); return true; }
+        match action {
+            Action::SidebarMode(mode) => self.open_sidebar_palette(mode.clone()),
+            Action::SidebarNew { name, subject: Some(subject) } => self.open_sidebar_palette(resource_sidebar::PaletteMode::ConfirmCreate { subject: subject.clone(), name: name.clone() }),
+            Action::SidebarNew { name, subject: None } => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_create_folder(name, None); }
+            Action::SidebarRename { id, name } => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_edit(vec![st3_client::ArrangementOperation::FolderRename { id: id.clone(), name: name.trim().to_string() }]); }
+            Action::SidebarPreview => {},
+            _ => return false,
+        }
+        true
+    }
+
     /// Every subject and glass action the palette offers, section by section.
     fn choices(&self, query: &str) -> Vec<Choice> {
         let spinner = self.spinner();
@@ -664,6 +848,16 @@ impl Ui {
                 action: Action::Open(pane),
             });
         };
+        let id = query.trim();
+        if id.starts_with("session/") && id.len() > "session/".len() {
+            open(
+                1,
+                ("❝", theme::SUBTEXT0),
+                id.to_owned(),
+                "Open saved conversation".into(),
+                Pane::Agent(Some(id.to_owned())),
+            );
+        }
         for item in self.world.attention.items() {
             if !self.snoozed.contains(&item.id) {
                 open(
@@ -703,6 +897,15 @@ impl Ui {
                 );
             }
         }
+        for row in self.resource_sidebar.resources().into_iter().filter(|row| row.kind == "Terminals" && !row.missing) {
+            open(1, ("⌨", theme::OVERLAY1), row.title, "terminal".into(), Pane::Terminal(row.open));
+        }
+        for row in &self.resource_sidebar.observations {
+            open(1, ("◇", theme::OVERLAY1), super::observed_resources::title(row), super::observed_resources::kind(row).into(), Pane::Resource(row.id.clone()));
+        }
+        if id.starts_with("resource/") && !self.resource_sidebar.observations.iter().any(|row| row.id == id) {
+            open(1, ("◇", theme::OVERLAY1), id.into(), "graph resource".into(), Pane::Resource(id.into()));
+        }
         for mission in screens::mission_order(&self.world, true) {
             open(
                 2,
@@ -728,7 +931,7 @@ impl Ui {
                 section: 0,
                 glyph: ("◆", theme::PERSON),
                 label: "Now".into(),
-                detail: "what needs you".into(),
+                detail: "alerts and updates".into(),
                 search: "now home".into(),
                 action: Action::Home,
             },
@@ -743,12 +946,6 @@ impl Ui {
             search,
             action,
         };
-        choices.push(start(
-            "New agent".into(),
-            "ctrl+n",
-            "new agent start".into(),
-            Action::NewAgent(None),
-        ));
         choices.push(start(
             "New mission".into(),
             "describe it; a planner drafts it for you to approve",
@@ -771,14 +968,26 @@ impl Ui {
             "simplified simple full conversations tools compact".into(),
             Action::ToggleSimple,
         ));
-        if !name.is_empty() {
-            choices.push(start(
-                format!("Start an agent: “{name}”"),
-                "its first message",
-                String::new(),
-                Action::NewAgent(Some(name.to_owned())),
-            ));
-        }
+        choices.push(start(
+            if self.terminal_first() {
+                "Open agents on their conversation".into()
+            } else {
+                "Open agents on their terminal".into()
+            },
+            "this device; the conversation is the default",
+            "terminal conversation default view open agents attach tui".into(),
+            Action::ToggleTerminalFirst,
+        ));
+        choices.push(start(
+            if self.terminal_fallback {
+                "Fabric only, no fallback".into()
+            } else {
+                "Fall back through the daemon".into()
+            },
+            "terminal routes on this device; daemon fallback is the default",
+            "terminal fabric direct daemon gateway fallback setting".into(),
+            Action::ToggleTerminalFallback,
+        ));
         choices.extend(self.said_choices(name));
         let Some(glasses) = &self.glasses else {
             return choices;
@@ -865,6 +1074,7 @@ impl Ui {
 
     /// What the palette shows for its query: sections in order, best matches first in each.
     fn matches(&self, palette: &Palette) -> Vec<Choice> {
+        if let Some(mode) = &palette.sidebar { return self.sidebar_choices(mode, &palette.query); }
         // Asking for a name: the one thing Enter will do with it.
         if let (Some(naming), Some(glasses)) = (palette.naming, &self.glasses) {
             let name = palette.query.trim().to_owned();
@@ -912,7 +1122,7 @@ impl Ui {
                 let score = if choice.search.is_empty() {
                     Some(0)
                 } else {
-                    fuzzy(&palette.query, &choice.search)
+                    fuzzy_words(&palette.query, &choice.search)
                 };
                 score.map(|score| (choice, score))
             })
@@ -923,10 +1133,13 @@ impl Ui {
             // "close glass" closes the glass rather than starting an agent named that.
             // What is typed exactly as a choice begins ("new mission", "atlas") is first.
             let typed = palette.query.trim().to_lowercase();
+            // A command typed as it begins ("new mission") is first. Among what can be opened,
+            // agents come first, then missions, whatever a mission's title starts with
+            // (Nathan, 2026-10-06); within a section, what begins as typed comes first.
             scored.sort_by_key(|(choice, score)| {
-                let catch_all = matches!(choice.action, Action::NewAgent(Some(_)));
                 let named = choice.label.to_lowercase().starts_with(&typed);
-                (catch_all, !named, RANK[choice.section], -score)
+                let command = named && choice.section > 3;
+                (!command, RANK[choice.section], !named, -score)
             });
         }
         scored.into_iter().map(|(choice, _)| choice).collect()
@@ -936,9 +1149,10 @@ impl Ui {
         let Some(glasses) = &self.glasses else { return };
         let glass = glasses.glass();
         self.status_line(buf, Rect { height: 1, ..area }, glass);
+        self.top_bar_border(buf, area);
         let mut body = Rect {
-            y: area.y + 1,
-            height: area.height.saturating_sub(2),
+            y: area.y + 2,
+            height: area.height.saturating_sub(3),
             ..area
         };
         // The sidebar takes the left of the glass, beside the splits rather than over them.
@@ -967,6 +1181,7 @@ impl Ui {
         };
         self.frame.borrow_mut().glass_dividers = dividers.clone();
         for super::layout::Divider { rect, side, .. } in dividers {
+            self.hit(rect, Hit::Resize);
             let symbol = match side {
                 Side::Right => "│",
                 Side::Below => "─",
@@ -1022,6 +1237,10 @@ impl Ui {
 
     /// The sidebar: its sections across the top, then that section's list.
     fn draw_sidebar(&self, buf: &mut Buffer, area: Rect, sidebar: &Sidebar) {
+        if sidebar.section != 4 {
+            self.draw_resource_sidebar(buf, area);
+            return;
+        }
         buf.set_style(area, Style::default().bg(theme::MANTLE));
         self.frame.borrow_mut().glass_sidebar = area;
         let mut spans = vec![Span::raw(" ")];
@@ -1093,6 +1312,11 @@ impl Ui {
     /// when the event belonged to a drag.
     pub(crate) fn drag_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> bool {
         use crossterm::event::{MouseButton, MouseEventKind};
+        if matches!(mouse.kind, MouseEventKind::Down(_))
+            && (self.popover.is_some() || self.home_open() || self.palette_open())
+        {
+            return false;
+        }
         let Some(glasses) = self.glasses.as_mut() else {
             return false;
         };
@@ -1145,6 +1369,14 @@ impl Ui {
                     }
                     // A sidebar row is selected now and opens when let go, unless it was
                     // dragged somewhere first.
+                    Some(Hit::ResourceFolderDrag(id)) => { glasses.drag = Some(start(DragFrom::Folder(id))); true }
+                    Some(Hit::ResourceRow(index)) => {
+                        self.resource_sidebar.selected = index;
+                        if let Some(super::resource_sidebar::Row::Resource(row)) = self.resource_sidebar.rows().get(index) {
+                            glasses.drag = Some(start(DragFrom::Subject(row.id.clone())));
+                            true
+                        } else { false }
+                    }
                     Some(Hit::SidebarRow(index)) => {
                         let section = glasses.sidebar.section;
                         glasses.sidebar.selected[section] = index;
@@ -1200,6 +1432,7 @@ impl Ui {
                     }
                     return false;
                 }
+                if self.sidebar_drop(&drag.from, point) { return true; }
                 match (self.drop_at(point), drag.from) {
                     (Some(target), DragFrom::Tab(group, tab)) => {
                         self.drop_tab((group, tab), target)
@@ -1211,6 +1444,33 @@ impl Ui {
             }
             _ => false,
         }
+    }
+
+    fn sidebar_drop(&mut self, from: &DragFrom, point: (u16, u16)) -> bool {
+        let hit = self.frame.borrow().hits.iter().rev().find(|(rect, _)| super::contains(*rect, point.0, point.1)).map(|(_, hit)| hit.clone());
+        let (folder, before) = match hit {
+            Some(Hit::ResourceRow(index)) => match self.resource_sidebar.rows().get(index).cloned() {
+                Some(resource_sidebar::Row::Group { id, .. }) if id == "everything" => (None, None),
+                Some(resource_sidebar::Row::Group { id, .. }) if id.starts_with("folder/") => (Some(id[7..].to_owned()), None),
+                Some(resource_sidebar::Row::Resource(row)) => (self.resource_sidebar.location(&row.id).map(str::to_owned), Some(row.id)),
+                _ => return false,
+            },
+            Some(Hit::ResourceAdd(id) | Hit::ResourceFolderMenu(id) | Hit::ResourceFolderDrag(id)) => (Some(id), None),
+            _ => return false,
+        };
+        if let DragFrom::Folder(id) = from {
+            if folder.as_ref() != Some(id) { self.sidebar_move_folder(id, folder.as_deref()); }
+            return true;
+        }
+        let subject = match from {
+            DragFrom::Subject(id) => Some(id.clone()),
+            DragFrom::Tab(group, tab) => self.glasses.as_ref().and_then(|g| g.glass().layout.groups().get(*group).and_then(|group| group.tabs.get(*tab)).and_then(|tab| Pane::parse(&tab.pane))).and_then(|pane| self.sidebar_subject(&pane)),
+            _ => None,
+        };
+        if let Some(subject) = subject {
+            if before.as_deref() != Some(subject.as_str()) { self.sidebar_place(&subject, folder.as_deref(), before.as_deref()); }
+        } else { self.flash("This tab has no resource ready to file in the sidebar."); }
+        true
     }
 
     /// Whether a tab is being dragged; Esc lets it go where it was.
@@ -1309,6 +1569,14 @@ impl Ui {
         else {
             return;
         };
+        // The group a tab left keeps showing one of its tabs: the one that was shown, which moved
+        // up a place if the tab came from before it, else the next one, else the last.
+        if let Some(group) = glass.layout.group_mut(from_group) {
+            if from_tab < group.current {
+                group.current -= 1;
+            }
+            group.current = group.current.min(group.tabs.len().saturating_sub(1));
+        }
         let emptied = sources == 1 && glass.layout.groups().len() > 1;
         if emptied {
             let layout = std::mem::take(&mut glass.layout);
@@ -1361,7 +1629,10 @@ impl Ui {
     /// Open `id` where a drag from the sidebar let go: as a tab in a strip, or in a new split.
     fn drop_subject(&mut self, id: &str, target: Drop) {
         let section = self.glasses.as_ref().map(|glasses| glasses.sidebar.section);
-        let pane = if section == Some(4) {
+        let terminal = self.resource_sidebar.terminals.iter().find(|row| row.id == id).map(|row| row.open.clone());
+        let pane = if let Some(terminal) = terminal {
+            Some(Pane::Terminal(terminal))
+        } else if section == Some(4) {
             Some(Pane::Usage(Some(id.to_owned())))
         } else {
             pane_for(id).or_else(|| {
@@ -1372,6 +1643,7 @@ impl Ui {
         if let Some(glasses) = self.glasses.as_mut() {
             glasses.sidebar.focused = false;
         }
+        self.resource_sidebar.focused = false;
         // Already open somewhere: move that tab there instead of opening it twice.
         let open = self
             .glasses
@@ -1488,6 +1760,7 @@ impl Ui {
                     })
                 })
                 .unwrap_or_default(),
+            DragFrom::Folder(id) => self.resource_sidebar.folders().into_iter().find(|(folder, _)| folder == id).map(|(_, name)| name).unwrap_or_else(|| id.clone()),
             DragFrom::Subject(id) => pane_for(id)
                 .map(|pane| self.pane_title(&pane))
                 .unwrap_or_else(|| id.clone()),
@@ -1536,8 +1809,10 @@ impl Ui {
         };
         // Ctrl+S shows and hides it, nothing else: shown, it has the keys; hidden, the splits do.
         let sidebar = &mut glasses.sidebar;
+        sidebar.configured = true;
         sidebar.shown = !sidebar.shown;
         sidebar.focused = sidebar.shown;
+        self.resource_sidebar.focused = sidebar.shown;
         glasses.save();
     }
 
@@ -1546,6 +1821,10 @@ impl Ui {
         let Some(sidebar) = self.glasses.as_ref().map(|glasses| glasses.sidebar.clone()) else {
             return;
         };
+        if sidebar.section != 4 {
+            self.open_resource_row(self.resource_sidebar.selected);
+            return;
+        }
         let ids = self.listing_for(sidebar.section, 40).ids;
         let Some(id) = ids.get(sidebar.selected[sidebar.section]).cloned() else {
             return;
@@ -1554,7 +1833,7 @@ impl Ui {
             glasses.sidebar.focused = false;
         }
         if sidebar.section == 0 {
-            // What needs you opens where it is answered: Home, at that item.
+            // An alert opens where it is answered: Home, at that item.
             self.open_home();
             self.selected[0] = sidebar.selected[0];
         } else if sidebar.section == 4 {
@@ -1573,6 +1852,7 @@ impl Ui {
         let Some(section) = self.glasses.as_ref().map(|glasses| glasses.sidebar.section) else {
             return false;
         };
+        if section != 4 && self.resource_sidebar_key(key) { return true; }
         let count = self.listing_for(section, 40).ids.len();
         let Some(sidebar) = self.glasses.as_mut().map(|glasses| &mut glasses.sidebar) else {
             return false;
@@ -1612,6 +1892,7 @@ impl Ui {
         if rect.width < 30 || rect.height < 8 {
             return;
         }
+        self.cover(body);
         for y in body.y..body.y + body.height {
             for x in body.x..body.x + body.width {
                 if !rect.contains((x, y).into()) {
@@ -1750,7 +2031,6 @@ impl Ui {
     fn launcher_bar(&self, buf: &mut Buffer, area: Rect) {
         let mut x = area.x + 1;
         for (glyph, label, key, hit) in [
-            ("＋", "New agent", "ctrl+n", Hit::NewAgent),
             ("⌨", "New terminal", "", Hit::NewTerminal),
             ("⇥", "Split right", "ctrl+v", Hit::Split(true)),
             ("⤓", "Split below", "ctrl+x", Hit::Split(false)),
@@ -1835,125 +2115,133 @@ impl Ui {
     fn status_line(&self, buf: &mut Buffer, area: Rect, glass: &Glass) {
         buf.set_style(area, Style::default().bg(theme::CRUST));
         let bar = |style: Style| style.bg(theme::CRUST);
-        let mut spans = vec![Span::styled(" ≡ st  ", bar(theme::strong(theme::ACCENT)))];
+        // No label at the left: the bar starts at what is live (Nathan, 2026-10-06).
+        let mut spans = vec![Span::styled(" ", bar(theme::strong(theme::ACCENT)))];
         let (glyph, word, color) = match &self.world.link {
             Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged", theme::RED),
+            Link::Live if !self.world.stale.is_empty() => ("◐", "stale", theme::YELLOW),
             Link::Live => ("●", "live", theme::GREEN),
             Link::Connecting => (self.spinner(), "connecting", theme::YELLOW),
             Link::Offline(_) => ("○", "offline", theme::RED),
         };
-        spans.push(Span::styled(
-            format!("{glyph} {word}"),
-            bar(theme::fg(color)),
-        ));
-        // Now opens over the glass from its count, "need you" (Nathan, 2026-10-04: one way in,
-        // named as `st now` is).
-        let need = self
+        let link_text = format!("{glyph} {word}");
+        // The connection opens what is known of it: this machine, or why it is not reached.
+        self.hit(
+            Rect {
+                x: area.x + Line::from(spans.clone()).width() as u16,
+                width: text::width(&link_text) as u16,
+                ..area
+            },
+            Hit::Connection,
+        );
+        spans.push(Span::styled(link_text, bar(theme::fg(color))));
+        // Now opens over the glass from its count of alerts (Nathan, 2026-10-04: one way in,
+        // named as `st now` is). No alert prints nothing at all (Nathan, 2026-10-10).
+        let alerts = self
             .world
             .attention
             .items()
             .iter()
-            .filter(|item| !self.snoozed.contains(&item.id))
-            .count();
-        spans.push(Span::styled(" · ", bar(theme::dim())));
-        // Each count opens the palette at what it counts.
-        let mut x = area.x + Line::from(spans.clone()).width() as u16;
-        let need_text = if need > 0 {
-            format!("◆ {need} need you")
-        } else {
-            "nothing needs you".to_owned()
-        };
-        self.hit(
-            Rect {
-                x,
-                width: text::width(&need_text) as u16,
-                ..area
-            },
-            Hit::Home,
-        );
-        spans.push(if need > 0 {
-            Span::styled(need_text, bar(theme::strong(theme::PERSON)))
-        } else {
-            Span::styled(need_text, bar(theme::dim()))
-        });
-        let working = self
-            .world
-            .agents
-            .items()
-            .iter()
-            .filter(|agent| agent.state == AgentState::Working)
-            .count();
-        spans.push(Span::styled(" · ", bar(theme::dim())));
-        x = area.x + Line::from(spans.clone()).width() as u16;
-        let working_text = format!("{} {working} working", self.spinner());
-        self.hit(
-            Rect {
-                x,
-                width: text::width(&working_text) as u16,
-                ..area
-            },
-            Hit::PaletteSection(1),
-        );
-        spans.push(Span::styled(working_text, bar(theme::fg(theme::WORKING))));
-        // Missions with work open: running, waiting their turn, or waiting on someone.
-        let active = screens::mission_order(&self.world, false)
-            .iter()
-            .filter(|mission| {
-                matches!(
-                    mission.word,
-                    Word::Working
-                        | Word::Queued
-                        | Word::Decision
-                        | Word::Stalled
-                        | Word::Unstaffed
-                        | Word::Unclaimed
-                )
+            .filter(|item| {
+                item.is_alert() && !self.snoozed.contains(&item.id) && !self.closed.contains(&item.id)
             })
             .count();
-        spans.push(Span::styled(" · ", bar(theme::dim())));
-        x = area.x + Line::from(spans.clone()).width() as u16;
-        let active_text = format!("◇ {active} active");
-        self.hit(
-            Rect {
-                x,
-                width: text::width(&active_text) as u16,
-                ..area
-            },
-            Hit::PaletteSection(2),
-        );
-        spans.push(Span::styled(active_text, bar(theme::fg(theme::SAPPHIRE))));
-        let machines = self.world.machines.items();
-        let machines_shown = !machines.is_empty();
-        if machines_shown {
-            let count = |reach: &[Reach]| {
-                machines
+        // A fresh workspace names its host and where to start instead of counting nothing.
+        // Until st has sent the first real state, the bar says only how it is connected: a
+        // placeholder that turns into the counts a moment later reads as flicker (Nathan, 2026-10-11).
+        let settled = self.world.settled;
+        let fresh = settled
+            && self.world.attention.ready().is_some()
+            && alerts == 0
+            && self.world.agents.ready().is_some_and(|agents| {
+                !agents
                     .iter()
-                    .filter(|machine| reach.contains(&machine.reach))
-                    .count()
-            };
+                    .any(|agent| agent.state == AgentState::Working)
+            });
+        if fresh {
+            spans.push(Span::styled(
+                format!(
+                    " · {} · nothing running yet · Ctrl+K: New terminal",
+                    self.world.host
+                ),
+                bar(theme::fg(theme::ACCENT)),
+            ));
+        }
+        let mut machines_shown = false;
+        if settled && !fresh {
+            let mut x;
+            if alerts > 0 {
+                spans.push(Span::styled(" · ", bar(theme::dim())));
+                // Each count opens the palette at what it counts.
+                x = area.x + Line::from(spans.clone()).width() as u16;
+                let alerts_text = format!(
+                    "◆ {alerts} alert{}",
+                    if alerts == 1 { "" } else { "s" }
+                );
+                self.hit(
+                    Rect {
+                        x,
+                        width: text::width(&alerts_text) as u16,
+                        ..area
+                    },
+                    Hit::Home,
+                );
+                spans.push(Span::styled(alerts_text, bar(theme::strong(theme::PERSON))));
+            }
+            let working = self
+                .world
+                .agents
+                .items()
+                .iter()
+                .filter(|agent| agent.state == AgentState::Working)
+                .count();
             spans.push(Span::styled(" · ", bar(theme::dim())));
             x = area.x + Line::from(spans.clone()).width() as u16;
-            spans.push(Span::styled("fleet ", bar(theme::dim())));
-            for (glyph, color, n) in [
-                ("●", theme::GREEN, count(&[Reach::Here, Reach::Direct])),
-                ("◐", theme::SAPPHIRE, count(&[Reach::Indirect])),
-                ("○", theme::RED, count(&[Reach::Offline, Reach::Unknown])),
-            ] {
-                if n > 0 {
-                    spans.push(Span::styled(format!("{glyph}{n} "), bar(theme::fg(color))));
-                }
-            }
-        }
-        let end = area.x + Line::from(spans.clone()).width() as u16;
-        if machines_shown {
+            let working_text = format!("{} {working} working", self.spinner());
             self.hit(
                 Rect {
                     x,
-                    width: end.saturating_sub(x),
+                    width: text::width(&working_text) as u16,
                     ..area
                 },
-                Hit::PaletteSection(3),
+                Hit::PaletteSection(1),
             );
+            spans.push(Span::styled(working_text, bar(theme::fg(theme::WORKING))));
+            // No mission counts here (Nathan, 2026-10-12: until they become more meaningful); the
+            // missions list keeps them.
+            let machines = self.world.machines.items();
+            machines_shown = !machines.is_empty();
+            if machines_shown {
+                let count = |reach: &[Reach]| {
+                    machines
+                        .iter()
+                        .filter(|machine| reach.contains(&machine.reach))
+                        .count()
+                };
+                spans.push(Span::styled(" · ", bar(theme::dim())));
+                x = area.x + Line::from(spans.clone()).width() as u16;
+                spans.push(Span::styled("fleet ", bar(theme::dim())));
+                for (glyph, color, n) in [
+                    ("●", theme::GREEN, count(&[Reach::Here, Reach::Direct])),
+                    ("◐", theme::SAPPHIRE, count(&[Reach::Indirect])),
+                    ("○", theme::RED, count(&[Reach::Offline, Reach::Unknown])),
+                ] {
+                    if n > 0 {
+                        spans.push(Span::styled(format!("{glyph}{n} "), bar(theme::fg(color))));
+                    }
+                }
+            }
+            let end = area.x + Line::from(spans.clone()).width() as u16;
+            if machines_shown {
+                self.hit(
+                    Rect {
+                        x,
+                        width: end.saturating_sub(x),
+                        ..area
+                    },
+                    Hit::PaletteSection(3),
+                );
+            }
         }
         // Usage beside the fleet, floating over the glass as Now does (Nathan, 2026-10-04).
         // The fleet's counts end in a space already.
@@ -2099,6 +2387,7 @@ impl Ui {
                     .unwrap_or(id)
             }
             Pane::Machine(id) => find(id).trim_start_matches("machine/").to_owned(),
+            Pane::Resource(id) => self.resource_sidebar.observations.iter().find(|row| &row.id == id).map(super::observed_resources::title).unwrap_or_else(|| id.clone()),
             Pane::Usage(None) => "Usage".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
@@ -2148,6 +2437,7 @@ impl Ui {
     }
 
     fn draw_palette(&self, buf: &mut Buffer, area: Rect, palette: &Palette) {
+        self.cover(area);
         let width = area.width.saturating_sub(8).clamp(20, 84);
         let height = area.height.saturating_sub(6).clamp(6, 26);
         let rect = Rect {
@@ -2176,7 +2466,10 @@ impl Ui {
             }
         }
         let inner = width.saturating_sub(4) as usize;
-        let title = match (palette.naming, &self.glasses) {
+        let title = if let Some(mode) = &palette.sidebar {
+            use resource_sidebar::PaletteMode as Mode;
+            match mode { Mode::New { .. } => " New folder: type a name ".into(), Mode::Rename { .. } => " Rename folder: type a name ".into(), Mode::Move { .. } => " Move to: choose a folder ".into(), Mode::Add { .. } => " Add to folder: find a resource ".into(), Mode::Manage { .. } => " Folder actions ".into(), Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } => " m: move resource · Esc: cancel ".into(), Mode::Delete { .. } => " y: delete folder · Esc: cancel ".into() }
+        } else { match (palette.naming, &self.glasses) {
             (Some(Naming::Rename), Some(glasses)) => {
                 format!(" rename “{}”: type its new name ", glasses.glass().name)
             }
@@ -2185,7 +2478,7 @@ impl Ui {
                 format!(" a copy of “{}”: type its name ", glasses.glass().name)
             }
             _ => self.palette_target(palette.enter),
-        };
+        }};
         buf.set_stringn(
             rect.x + 2,
             rect.y,
@@ -2226,7 +2519,14 @@ impl Ui {
             };
             let detail_width = text::width(&choice.detail).min(inner / 3);
             let label = text::truncate(&choice.label, inner.saturating_sub(detail_width + 6));
-            let fill = inner.saturating_sub(text::width(&label) + detail_width + 4);
+            // The whole path after the name, so two agents with one name are told apart and
+            // what was typed against the path is seen to match (Nathan, 2026-10-06).
+            let room = inner.saturating_sub(text::width(&label) + detail_width + 6);
+            let path = choice_path(&choice.action)
+                .filter(|path| room > 6 && !path.eq_ignore_ascii_case(&choice.label))
+                .map(|path| format!("  {}", text::truncate(&path, room - 2)))
+                .unwrap_or_default();
+            let fill = inner.saturating_sub(text::width(&label) + text::width(&path) + detail_width + 4);
             rows.push((
                 Some(index),
                 Line::from(vec![
@@ -2239,6 +2539,7 @@ impl Ui {
                         theme::fg(choice.glyph.1).bg(bg),
                     ),
                     Span::styled(label, theme::text().bg(bg)),
+                    Span::styled(path, theme::dim().bg(bg)),
                     Span::styled(" ".repeat(fill), Style::default().bg(bg)),
                     Span::styled(
                         text::truncate(&choice.detail, detail_width),
@@ -2288,7 +2589,13 @@ impl Ui {
         buf.set_stringn(
             rect.x + 2,
             rect.y + rect.height - 2,
-            "enter open · ctrl+v split right · ctrl+x split below · ctrl+t tab · ctrl+g spaces · esc",
+            match &palette.sidebar {
+                Some(resource_sidebar::PaletteMode::ConfirmPlace { .. } | resource_sidebar::PaletteMode::ConfirmCreate { .. }) => "m move · esc cancel",
+                Some(resource_sidebar::PaletteMode::Delete { .. }) => "y delete folder · enter keeps it · esc cancel",
+                Some(resource_sidebar::PaletteMode::Move { .. } | resource_sidebar::PaletteMode::Add { .. }) => "enter choose · m commits the preview · esc cancel",
+                Some(_) => "enter save or choose · esc cancel",
+                None => "enter open · ctrl+v split right · ctrl+x split below · ctrl+t tab · ctrl+g spaces · esc",
+            },
             inner,
             theme::dim().bg(theme::MANTLE),
         );
@@ -2302,6 +2609,17 @@ impl Ui {
         }
         let terminal_focused = self.terminal_focused();
         let mission_form = self.mission_form_focused();
+        if let Some(mode) = self.glasses.as_ref().and_then(|g| g.palette.as_ref()).and_then(|p| p.sidebar.clone()) {
+            use resource_sidebar::PaletteMode as Mode;
+            let explicit = key.modifiers.is_empty();
+            match mode {
+                Mode::ConfirmPlace { subject, folder } if explicit && key.code == KeyCode::Char('m') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_place(&subject, folder.as_deref(), None); return true; }
+                Mode::ConfirmCreate { subject, name } if explicit && key.code == KeyCode::Char('m') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_create_folder(&name, Some(&subject)); return true; }
+                Mode::Delete { id } if explicit && key.code == KeyCode::Char('y') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_edit(vec![st3_client::ArrangementOperation::FolderDelete { id }]); return true; }
+                Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } | Mode::Delete { .. } if key.code != KeyCode::Esc => return true,
+                _ => {}
+            }
+        }
         let Some(glasses) = self.glasses.as_mut() else {
             return false;
         };
@@ -2384,14 +2702,13 @@ impl Ui {
         // Esc leaves the input and glasses keys work again.
         if self.editing
             || self.find.is_some()
-            || (self.agent_form && self.tab == 1 && self.new_agent.is_some())
             || mission_form
             || self.chat.as_ref().is_some_and(|chat| chat.editing)
         {
             return false;
         }
-        // In a focused, attached terminal every key is the agent's; Ctrl+\ leaves it first.
-        if terminal_focused {
+        // Space control chords retain their owner; the other terminal keys go to the child.
+        if terminal_focused && !super::terminal_space_key(key) {
             return false;
         }
         // Alt and a letter or digit commands nothing: on a Mac Option types a character instead,
@@ -2444,14 +2761,22 @@ impl Ui {
             }
             // Ctrl chords, not Alt: on a Mac Option and a letter types a character (Nathan,
             // 2026-10-03).
+            KeyCode::Enter if control && quiet && conversation.is_some() => self.toggle_focused_tool(),
+            KeyCode::Up if control && quiet && conversation.is_some() => self.focus_tool(-1),
+            KeyCode::Down if control && quiet && conversation.is_some() => self.focus_tool(1),
+            KeyCode::Char('u') if control && quiet && conversation.is_some() => self.toggle_focused_images(),
             KeyCode::Char('e') if control && conversation.is_some() => self.toggle_all_tools(),
             KeyCode::Char('p') if control && conversation.is_some() => self.toggle_simple(),
             KeyCode::Char('d') if control && conversation.is_some() => self.toggle_details(),
+            // Ctrl+R tries again: it sends a message st never had again. Speaking into the box is
+            // Ctrl+Y, with the box open or not (Nathan, 2026-10-05: it did nothing until a letter
+            // had opened the box; 2026-10-14: Ctrl+R means retry, so voice moved off it).
             KeyCode::Char('r') if control && conversation.is_some() && self.live => {
                 if let Some(entry) = self.undelivered() {
                     self.effects.push(Effect::Resend { entry });
                 }
             }
+            KeyCode::Char('y') if control && conversation.is_some() && self.live => self.start_voice(),
             // Backspace takes a message st never had back into the box, to change or delete.
             KeyCode::Backspace
                 if quiet
@@ -2462,6 +2787,8 @@ impl Ui {
             {
                 self.take_back_undelivered()
             }
+            // Ctrl+K (or ⌘K), paste session/... then Enter opens its transcript.
+            // Ctrl+T opens a tab; Ctrl+V / Ctrl+X opens a right / below split.
             KeyCode::Char('k') if control || command => self.open_palette(None, Open::Here),
             KeyCode::Char('s') if control => self.toggle_sidebar(),
             // Home over the glass, and away again; in a text box Ctrl+H stays backspace.
@@ -2476,7 +2803,6 @@ impl Ui {
             KeyCode::Char('v') if control => self.split_group(Side::Right),
             KeyCode::Char('x') if control => self.split_group(Side::Below),
             KeyCode::Char('w') if control => self.close_tab(),
-            KeyCode::Char('n') if control => self.open_new_agent(None),
             KeyCode::Char('o') if control => {
                 glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
             }
@@ -2565,7 +2891,6 @@ impl Ui {
         // keys again when Home closes.
         self.tab = 0;
         self.kdl = false;
-        self.agent_form = false;
     }
 
     /// Close Home; stui's own tab follows the focused split again.
@@ -2577,8 +2902,21 @@ impl Ui {
         self.show_focused();
     }
 
+    /// Whether `pane` is already open in a tab of the glass in front.
+    pub(crate) fn shows_in_glass(&self, pane: &Pane) -> bool {
+        self.glasses
+            .as_ref()
+            .is_some_and(|glasses| glasses.glass().find(&pane.key()).is_some())
+    }
+
     pub(crate) fn home_open(&self) -> bool {
         self.glasses.as_ref().is_some_and(|glasses| glasses.home)
+    }
+
+    /// Whether the missions window must be followed now: a mission list or card is on screen.
+    /// Without glasses (the classic layout) it always is, as before.
+    pub(crate) fn missions_wanted(&self) -> bool {
+        self.glasses.as_ref().is_none_or(|glasses| glasses.shows_missions())
     }
 
     pub(crate) fn palette_open(&self) -> bool {
@@ -2642,6 +2980,7 @@ impl Ui {
         let Some(choice) = self.matches(palette).into_iter().nth(index) else {
             return;
         };
+        if self.sidebar_palette_action(&choice.action) { return; }
         let Some(glasses) = self.glasses.as_mut() else {
             return;
         };
@@ -2653,11 +2992,13 @@ impl Ui {
                 self.attach_terminal(&agent);
             }
             Action::Open(pane) => self.open_in_glass(pane, how),
+            Action::SidebarMode(_) | Action::SidebarNew { .. } | Action::SidebarRename { .. } | Action::SidebarPreview => {}
             Action::ShowGlass(index) => self.show_glass(index),
-            Action::NewAgent(task) => self.open_new_agent(task),
             Action::NewTerminal => self.open_new_terminal(),
             Action::NewMission => self.open_new_mission(),
             Action::ToggleSimple => self.toggle_simple(),
+            Action::ToggleTerminalFirst => self.toggle_terminal_first(),
+            Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);
@@ -3099,6 +3440,9 @@ impl Ui {
     /// A click inside a group that is not focused focuses it, and does nothing else. While the
     /// palette is open, only its rows take clicks; a click elsewhere closes it.
     pub(crate) fn glass_click(&mut self, column: u16, row: u16) -> bool {
+        if self.popover.is_some() {
+            return false;
+        }
         // A click outside the sidebar takes the keys from it (it stays shown); inside, the
         // sidebar's own targets act.
         let in_sidebar = {
@@ -3160,13 +3504,24 @@ impl Ui {
         }
     }
 
+    pub(super) fn click_focuses_split(&self, column: u16, row: u16) -> bool {
+        self.glasses.as_ref().is_some_and(|glasses| {
+            self.frame
+                .borrow()
+                .glass_leaves
+                .iter()
+                .position(|rect| contains(*rect, column, row))
+                .is_some_and(|group| group != glasses.glass().focus)
+        })
+    }
+
     /// Close the focused tab when it is a form that was just finished or cancelled.
     pub(crate) fn close_form_tab(&mut self) {
         let form = self
             .glasses
             .as_ref()
             .and_then(|glasses| glasses.glass().focused())
-            .is_some_and(|key| key == Pane::NewAgent.key() || key == Pane::NewMission.key());
+            .is_some_and(|key| key == Pane::NewMission.key());
         if form {
             self.close_tab();
         }
@@ -3174,6 +3529,281 @@ impl Ui {
 
     /// Close the focused group's shown tab; an empty group other than the first goes with it.
     /// Home stays.
+    /// Open the right-click menu for what is under the pointer: a tab, or a split's strip or
+    /// non-terminal body (a terminal body keeps the click for its program).
+    pub(super) fn open_glass_context_menu(&mut self, column: u16, row: u16) {
+        let Some(glasses) = self.glasses.as_ref() else {
+            return;
+        };
+        if glasses.palette.is_some() {
+            return;
+        }
+        let glass = glasses.glass();
+        let groups = glass.layout.groups();
+        let tab_under = {
+            let info = self.frame.borrow();
+            info.hits.iter().rev().find_map(|(rect, hit)| match hit {
+                Hit::GlassTab(group, tab) if contains(*rect, column, row) => Some((*group, *tab)),
+                _ => None,
+            })
+        };
+        let menu = if let Some((group, tab)) = tab_under {
+            let Some(pane) = groups
+                .get(group)
+                .and_then(|members| members.tabs.get(tab.saturating_sub(offset(group))))
+                .map(|tab| tab.pane.clone())
+            else {
+                return;
+            };
+            let subject = pane
+                .split_once(':')
+                .map(|(_, subject)| subject.to_owned())
+                .filter(|s| !s.is_empty());
+            let mut items = vec![(
+                "Show tab [Enter]".to_owned(),
+                MenuAction::Activate {
+                    subject: None,
+                    hit: Box::new(Hit::GlassTab(group, tab)),
+                },
+            )];
+            if groups.get(group).is_some_and(|group| group.tabs.len() > 1) {
+                items.push(("Split right with this tab".into(), MenuAction::SplitTab { group, tab, right: true }));
+                items.push(("Split below with this tab".into(), MenuAction::SplitTab { group, tab, right: false }));
+            }
+            if groups.len() > 1 {
+                let to = (group + 1) % groups.len();
+                items.push((
+                    format!("Move to split {}", to + 1),
+                    MenuAction::MoveTab { group, tab, to },
+                ));
+            }
+            if let Some(subject) = subject {
+                items.push(("Copy its path".into(), MenuAction::CopyPath(subject.clone())));
+            }
+            items.push((
+                "Close tab [Ctrl+W]".into(),
+                MenuAction::CloseTab(group, tab),
+            ));
+            ContextMenu {
+                column,
+                row,
+                title: "tab".into(),
+                items,
+                selected: 0,
+            }
+        } else {
+            let leaf = {
+                let info = self.frame.borrow();
+                info.glass_leaves.iter().position(|rect| {
+                    contains(
+                        Rect {
+                            y: rect.y.saturating_sub(1),
+                            height: rect.height + 1,
+                            ..*rect
+                        },
+                        column,
+                        row,
+                    )
+                })
+            };
+            let Some(group) = leaf else { return };
+            let strip = self
+                .frame
+                .borrow()
+                .glass_leaves
+                .get(group)
+                .is_some_and(|rect| row + 1 == rect.y);
+            let on_terminal = groups
+                .get(group)
+                .and_then(|members| members.tabs.get(members.current.saturating_sub(offset(group))))
+                .is_some_and(|tab| matches!(Pane::parse(&tab.pane), Some(Pane::Terminal(_))));
+            if on_terminal && !strip {
+                return;
+            }
+            ContextMenu {
+                column,
+                row,
+                title: "split".into(),
+                items: vec![
+                    (
+                        "Split right [Ctrl+V]".into(),
+                        MenuAction::SplitGroup { group, right: true },
+                    ),
+                    (
+                        "Split below [Ctrl+X]".into(),
+                        MenuAction::SplitGroup {
+                            group,
+                            right: false,
+                        },
+                    ),
+                    ("New tab… [Ctrl+T]".into(), MenuAction::NewTab(group)),
+                    ("New terminal".into(), MenuAction::NewTerminal(group)),
+                ],
+                selected: 0,
+            }
+        };
+        self.context = Some(menu);
+    }
+
+    /// The right-click menu, drawn at the click and kept inside the glass; each row is a target.
+    pub(super) fn draw_context_menu(&self, buf: &mut Buffer, area: Rect) {
+        let Some(menu) = &self.context else { return };
+        self.cover(area);
+        let width = menu
+            .items
+            .iter()
+            .map(|(label, _)| text::width(label))
+            .chain([text::width(&menu.title)])
+            .max()
+            .unwrap_or(8)
+            .saturating_add(4)
+            .min(area.width as usize) as u16;
+        let height = menu.items.len().saturating_add(2).min(area.height as usize) as u16;
+        let x = menu.column.min((area.x + area.width).saturating_sub(width));
+        let y = menu
+            .row
+            .saturating_add(1)
+            .min((area.y + area.height).saturating_sub(height));
+        let rect = Rect {
+            x,
+            y,
+            width: width.min(area.width),
+            height: height.min(area.height),
+        };
+        self.frame.borrow_mut().menu = Some(rect);
+        buf.set_style(rect, Style::default().bg(theme::MANTLE));
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                buf[(x, y)].set_symbol(" ");
+            }
+        }
+        buf.set_stringn(
+            rect.x + 1,
+            rect.y,
+            &menu.title,
+            rect.width.saturating_sub(2) as usize,
+            theme::dim().bg(theme::MANTLE),
+        );
+        let visible = rect.height.saturating_sub(2) as usize;
+        let top = menu.selected.saturating_sub(visible.saturating_sub(1));
+        for (offset, (index, (label, action))) in menu
+            .items
+            .iter()
+            .enumerate()
+            .skip(top)
+            .take(visible)
+            .enumerate()
+        {
+            let line = Rect {
+                y: rect.y + 1 + offset as u16,
+                height: 1,
+                ..rect
+            };
+            let background = if index == menu.selected {
+                theme::ROW_SELECTED
+            } else {
+                theme::MANTLE
+            };
+            buf.set_style(line, theme::text().bg(background));
+            buf.set_stringn(
+                line.x + 2,
+                line.y,
+                label,
+                line.width.saturating_sub(3) as usize,
+                theme::text().bg(background),
+            );
+            self.hit(line, Hit::Menu(action.clone()));
+        }
+        buf.set_stringn(
+            rect.x + 1,
+            rect.y + rect.height.saturating_sub(1),
+            "↑↓ · Enter · Esc",
+            rect.width.saturating_sub(2) as usize,
+            theme::dim().bg(theme::MANTLE),
+        );
+    }
+
+    /// A row of the right-click menu was chosen.
+    pub(crate) fn run_menu_action(&mut self, action: MenuAction) {
+        self.context = None;
+        match action {
+            MenuAction::Activate { subject, hit } => {
+                self.popover = None;
+                if let Some(subject) = subject {
+                    self.open(&subject);
+                    if let Hit::Key(key) = *hit {
+                        self.action_key(key);
+                    } else {
+                        self.click(*hit);
+                    }
+                } else {
+                    self.click(*hit);
+                }
+            }
+            MenuAction::Agent { agent, key } => {
+                self.popover = None;
+                self.agent_action(agent, key);
+            }
+            MenuAction::Declaration(mission) => {
+                self.open(&mission);
+                if !self.kdl {
+                    self.action_key('k');
+                }
+            }
+            MenuAction::CopyText(text) => {
+                copy(&text);
+                self.flash("Copied message text");
+            }
+            MenuAction::Reply { agent, message } => {
+                self.open(&agent);
+                if let Some(message) = message {
+                    self.replies.insert(agent, message);
+                } else {
+                    self.replies.remove(&agent);
+                }
+                self.editing = true;
+            }
+            MenuAction::Messages(agent) => self.open_message_choices(&agent),
+            MenuAction::Message { agent, entry } => self.open_message_actions(&agent, &entry),
+            MenuAction::CloseTab(group, tab) => {
+                self.show_in(group, tab);
+                self.close_tab();
+            }
+            MenuAction::SplitTab { group, tab, right } => self.drop_tab(
+                (group, tab),
+                Drop::Edge {
+                    group,
+                    side: if right { Side::Right } else { Side::Below },
+                    first: false,
+                },
+            ),
+            MenuAction::MoveTab { group, tab, to } => {
+                let end = self
+                    .glasses
+                    .as_ref()
+                    .and_then(|glasses| glasses.glass().layout.groups().get(to).map(|group| group.tabs.len()))
+                    .unwrap_or(0);
+                self.drop_tab((group, tab), Drop::Strip { group: to, index: end });
+            }
+            MenuAction::CopyPath(path) => {
+                copy(&path);
+                self.flash(format!("Copied {path}"));
+            }
+            MenuAction::SplitGroup { group, right } => {
+                self.focus_group(group);
+                self.split(right);
+            }
+            MenuAction::NewTab(group) => {
+                self.focus_group(group);
+                self.open_palette(None, Open::Tab);
+            }
+            MenuAction::NewTerminal(group) => {
+                self.focus_group(group);
+                self.open_new_terminal();
+            }
+        }
+    }
+
     fn close_tab(&mut self) {
         let Some(glasses) = self.glasses.as_mut() else {
             return;
@@ -3188,13 +3818,14 @@ impl Ui {
         let Some(group) = glass.layout.group_mut(focus) else {
             return;
         };
-        let mut detach = false;
+        let mut released: Option<String> = None;
         match group.current.checked_sub(offset(focus)) {
             Some(index) if index < group.tabs.len() => {
                 let closed = group.tabs.remove(index);
-                // Closing the attached terminal's tab lets it go.
-                detach = matches!(Pane::parse(&closed.pane), Some(Pane::Terminal(agent))
-                    if self.terminal.as_ref().is_some_and(|view| view.agent == agent));
+                // Closing an attached terminal's tab lets it go.
+                if let Some(Pane::Terminal(agent)) = Pane::parse(&closed.pane) {
+                    released = Some(agent);
+                }
                 let shown = group.tabs.len() + offset(focus);
                 group.current = group.current.min(shown.saturating_sub(1));
             }
@@ -3206,9 +3837,12 @@ impl Ui {
             glass.focus = focus.saturating_sub(1);
         }
         let id = glass.id.clone();
-        if detach {
-            self.terminal = None;
-            self.effects.push(Effect::CloseTerminal);
+        if let Some(agent) = released {
+            // The one that had the keys also stops being followed through st.
+            let focused = self.terminal.as_ref().is_some_and(|view| view.agent == agent);
+            if self.drop_terminal(&agent) && focused {
+                self.effects.push(Effect::CloseTerminal);
+            }
         }
         self.glass_changed(&id);
         self.show_focused();
@@ -3241,24 +3875,47 @@ impl Ui {
     /// Show `pane` in the focused tab in place of what it shows: an agent's conversation and
     /// its terminal are one tab, switched by Ctrl+] and Ctrl+\.
     pub(crate) fn swap_focused_pane(&mut self, pane: Pane) {
+        let Some(focus) = self.glasses.as_ref().map(|glasses| glasses.glass().focus) else {
+            return;
+        };
+        self.swap_shown_pane(focus, pane);
+    }
+
+    /// Show `pane` in place of what the split `group` shows.
+    pub(crate) fn swap_shown_pane(&mut self, group: usize, pane: Pane) {
         let Some(glasses) = self.glasses.as_mut() else {
             return;
         };
         let glass = glasses.glass_mut();
-        let focus = glass.focus;
-        let Some(group) = glass.layout.group_mut(focus) else {
+        let Some(split) = glass.layout.group_mut(group) else {
             return;
         };
-        let Some(tab) = group
+        let Some(tab) = split
             .current
-            .checked_sub(offset(focus))
-            .and_then(|index| group.tabs.get_mut(index))
+            .checked_sub(offset(group))
+            .and_then(|index| split.tabs.get_mut(index))
         else {
             return;
         };
         tab.pane = pane.key();
         let id = glass.id.clone();
         self.glass_changed(&id);
+    }
+
+    /// The pane each split of the glass in front shows, with the split's index.
+    pub(crate) fn shown_panes(&self) -> Vec<(usize, Pane)> {
+        let Some(glasses) = self.glasses.as_ref() else {
+            return Vec::new();
+        };
+        let glass = glasses.glass();
+        (0..glass.layout.groups().len())
+            .filter_map(|group| {
+                glass
+                    .shown(group)
+                    .and_then(|tab| Pane::parse(&tab.pane))
+                    .map(|pane| (group, pane))
+            })
+            .collect()
     }
 
     /// Whether the new mission form takes the keys: in a glass only while its tab has focus.
@@ -3276,6 +3933,25 @@ impl Ui {
 
     /// Point stui's own tab and selection at a pane's subject, so its keys act on it.
     fn focus_pane(&mut self, pane: &Pane) {
+        let before = (self.tab, self.selected_id());
+        self.focus_pane_inner(pane);
+        // A message box belongs to the pane it was opened in: once another pane or tab has the
+        // focus, typing must not go on into a draft nobody can see (Nathan, 2026-10-07).
+        if before != (self.tab, self.selected_id()) {
+            if self.terminal_first
+                && let Some(Pane::Agent(Some(id))) = self.focused_pane()
+                && id.starts_with("agent/")
+            {
+                self.attach_when = Some((id, Instant::now()));
+            }
+            self.editing = false;
+            self.chat = None;
+            self.answering = None;
+            self.confirm = None;
+        }
+    }
+
+    fn focus_pane_inner(&mut self, pane: &Pane) {
         let Some((tab, subject)) = pane_subject(pane) else {
             return;
         };
@@ -3283,7 +3959,6 @@ impl Ui {
         // Focus only moves focus: an attached terminal stays attached until Ctrl+\\ or its tab
         // closes, and takes keys only while its tab has focus.
         self.kdl = matches!(pane, Pane::Declaration(_));
-        self.agent_form = matches!(pane, Pane::NewAgent);
         let Some(subject) = subject else { return };
         let mut position = self
             .listing_for(tab, 40)
@@ -3312,7 +3987,6 @@ fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
         Pane::Agent(id) => (1, id.clone()),
         Pane::Terminal(id) => (1, Some(id.clone())),
         Pane::Mission(id) | Pane::Declaration(id) => (2, id.clone()),
-        Pane::NewAgent => (1, None),
         Pane::Usage(id) => (4, id.clone()),
         Pane::Machine(id) => (
             3,
@@ -3419,8 +4093,10 @@ pub(crate) fn pane_for(id: &str) -> Option<Pane> {
         Some(Pane::Home(Some(id)))
     } else if id.starts_with("mission/") {
         Some(Pane::Mission(Some(id)))
-    } else if id.starts_with("agent/") {
+    } else if id.starts_with("agent/") || id.starts_with("session/") {
         Some(Pane::Agent(Some(id)))
+    } else if id.starts_with("resource/") {
+        Some(Pane::Resource(id))
     } else if id.starts_with("machine/") {
         Some(Pane::Machine(Some(id)))
     } else {
@@ -3445,9 +4121,155 @@ fn home_popover_rect(body: Rect) -> Rect {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        let agent = ui.world.agents.items()[0].id.clone();
+        ui.open_sidebar_palette(Mode::Move { subject: agent.clone() });
+        // Selecting Everything else with Enter only previews it.
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        ui.open_choice(Some(0), Open::Tab);
+        assert!(ui.effects.is_empty());
+        press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|operation| matches!(operation, st3_client::ArrangementOperation::SubjectPlace { subject, folder: None, .. } if subject == &agent))));
+        ui.effects.clear(); ui.resource_sidebar.writing = false;
+        ui.open_sidebar_palette(Mode::Delete { id: "folder-demo".into() });
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        ui.open_choice(Some(0), Open::Tab);
+        assert!(ui.effects.is_empty());
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty());
+        ui.open_sidebar_palette(Mode::Delete { id: "folder-demo".into() });
+        press(&mut ui, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::FolderDelete { id } if id == "folder-demo"))));
+    }
+
+    #[test]
+    fn sidebar_drag_files_tabs_and_resources_and_reorders_folders_only_after_motion() {
+        let mut ui = glass();
+        let agent = ui.world.agents.items()[0].id.clone();
+        let first = uuid::Uuid::now_v7().to_string(); let second = uuid::Uuid::now_v7().to_string();
+        ui.resource_sidebar.arrangements.push(serde_json::from_value(serde_json::json!({
+            "id": format!("arrangement/{}/{}", ui.world.person, uuid::Uuid::now_v7()), "revision":"claim/test", "updated_at":"2026-10-11T00:00:00Z", "owner":ui.world.person, "deleted":false,
+            "body":{"version":1,"name":{"value":"Sidebar","revision":"claim/test"},"folders":{
+                first.clone():{"name":{"value":"First","revision":"claim/test"},"position":{"value":{"key":"a0","parent":null},"revision":"claim/test"},"tombstone":null},
+                second.clone():{"name":{"value":"Second","revision":"claim/test"},"position":{"value":{"key":"a1","parent":null},"revision":"claim/test"},"tombstone":null}
+            },"placements":{}}
+        })).unwrap());
+        ui.open_in_glass(Pane::Agent(Some(agent.clone())), Open::Tab);
+        ctrl(&mut ui, 's'); screen(&ui);
+        let find = |ui: &Ui, wanted: &Hit| { let frame = ui.frame.borrow(); let rect = frame.hits.iter().find(|(_, hit)| hit == wanted).unwrap().0; (rect.x + 1, rect.y) };
+        let folder_at = |ui: &Ui, id: &str| { let rows = ui.resource_sidebar.rows(); let index = rows.iter().position(|row| matches!(row, resource_sidebar::Row::Group { id: folder, .. } if folder == &format!("folder/{id}"))).unwrap(); find(ui, &Hit::ResourceRow(index)) };
+        let to = folder_at(&ui, &first);
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), to.0, to.1);
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))));
+        screen(&ui);
+        let from = find(&ui, &Hit::GlassTab(0, 0));
+        let tabs_before = tabs(&ui);
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), from.0, from.1);
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), from.0, from.1);
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))));
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), from.0, from.1);
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
+        let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).expect("drag files the tab's subject");
+        assert!(matches!(&write.operations[..], [st3_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &first));
+        assert_eq!(tabs(&ui), tabs_before, "filing does not close a space tab");
+        assert!(ui.resource_sidebar.arrangement().unwrap().body.placements.is_empty(), "only the stream updates the arrangement projection");
+        ui.resource_sidebar.saved(&write, true); ui.effects.clear(); screen(&ui);
+        // A resource row can be dragged back into the sidebar as well as out to a tab.
+        let rows = ui.resource_sidebar.rows();
+        let index = rows.iter().position(|row| matches!(row, resource_sidebar::Row::Resource(row) if row.id == agent)).unwrap();
+        let from = find(&ui, &Hit::ResourceRow(index)); let to = folder_at(&ui, &second);
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), from.0, from.1);
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
+        let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).unwrap();
+        assert!(matches!(&write.operations[..], [st3_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &second));
+        ui.resource_sidebar.saved(&write, true); ui.effects.clear(); screen(&ui);
+        let grip = find(&ui, &Hit::ResourceFolderDrag(second.clone())); let to = folder_at(&ui, &first);
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), grip.0, grip.1);
+        mouse(&mut ui, MouseEventKind::Drag(MouseButton::Left), to.0, to.1);
+        mouse(&mut ui, MouseEventKind::Up(MouseButton::Left), to.0, to.1);
+        assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(write) if matches!(&write.operations[..], [st3_client::ArrangementOperation::FolderMove { id, key, .. }] if id == &second && key.as_str() < "a0"))));
+    }
+
+    #[test]
+    fn a_retired_reserved_sidebar_is_never_created_again() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        // st refused a create because the person retired their Sidebar, and none older exists.
+        ui.resource_sidebar.reserved_retired = true;
+        ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, "Builds");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))), "nothing creates a retired subject");
+        assert_eq!(ui.flash.as_ref().map(|(text, _)| text.as_str()), Some(resource_sidebar::SIDEBAR_RETIRED));
+    }
+
+    #[test]
+    fn sidebar_folder_names_and_add_finder_use_the_existing_palette() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, &"é".repeat(129));
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty() && ui.glasses.as_ref().unwrap().palette.is_some(), "invalid name stays editable");
+        ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, "Builds");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).unwrap();
+        let folder = write.operations.iter().find_map(|operation| if let st3_client::ArrangementOperation::FolderCreate { id, name, .. } = operation { assert_eq!(name, "Builds"); Some(id.clone()) } else { None }).unwrap();
+        assert!(write.creating && write.subject.starts_with(&format!("arrangement/{}/", ui.world.person)));
+        ui.resource_sidebar.saved(&write, true); ui.effects.clear();
+        ui.open_sidebar_palette(Mode::Rename { id: folder.clone() }); typed(&mut ui, "Renamed");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if !write.creating && matches!(&write.operations[..], [st3_client::ArrangementOperation::FolderRename { id, name }] if id == &folder && name == "Renamed")));
+        ui.resource_sidebar.writing = false; ui.effects.clear();
+        ui.open_sidebar_palette(Mode::Add { folder: folder.clone() });
+        let choices = ui.matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap());
+        assert!(choices.iter().any(|choice| matches!(&choice.action, Action::SidebarMode(Mode::ConfirmPlace { folder: Some(id), .. }) if id == &folder)));
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty(), "finder selection only previews filing");
+        press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))));
+    }
+
+    #[test]
+    fn sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        ui.sidebar_place("session/temporary", None, None);
+        assert!(ui.effects.is_empty(), "ephemeral sessions only navigate");
+        let subject = "resource/github/acme/garden/issue/9";
+        ui.resource_sidebar.observations.push(serde_json::from_value(serde_json::json!({
+            "id":subject,"kind":"vcs.pull-request","facts":{"title":"Build garden","number":9},
+            "observed_at":"2026-10-11T00:00:00Z","opened_by":null,"opened_by_run":null
+        })).unwrap());
+        ui.resource_sidebar.observe(&ui.world);
+        let index = ui.resource_sidebar.rows().iter().position(|row| matches!(row, resource_sidebar::Row::Resource(row) if row.id == subject)).unwrap();
+        ui.open_resource_row(index);
+        assert_eq!(ui.focused_pane(), Some(Pane::Resource(subject.into())));
+        assert!(ui.effects.is_empty(), "opening a resource only navigates");
+        assert!(screen(&ui).contains("Build garden"));
+        ui.open_sidebar_palette(Mode::Add { folder: "folder-demo".into() }); typed(&mut ui, subject);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty(), "Enter cannot commit filing");
+        press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::SubjectPlace { subject: id, .. } if id == subject))));
+        ui.effects.clear(); ui.resource_sidebar.writing = false;
+        ui.open_sidebar_palette(Mode::Add { folder: "folder-demo".into() }); typed(&mut ui, "doc/garden-notes");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty());
+        press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::SubjectPlace { subject, .. } if subject == "doc/garden-notes"))));
+    }
+
     fn glass() -> Ui {
         let mut ui = Ui::new(demo::world());
         ui.glasses = Some(Glasses::open(None, None));
+        ui.glasses.as_mut().unwrap().sidebar.shown = false;
         ui
     }
 
@@ -3520,15 +4342,140 @@ mod tests {
         let shown = screen(&ui);
         let first = shown.lines().next().unwrap();
         assert!(
-            first.contains("need you") && first.contains("working") && first.contains("main"),
+            first.contains("alerts") && first.contains("working") && first.contains("main"),
             "{first}"
         );
-        assert!(!first.contains("⌂") && first.contains("active"), "{first}");
+        assert!(!first.contains("⌂") && !first.contains("active") && !first.contains("stuck"), "{first}");
         // A glass with nothing open shows Home, under a bar for starting things.
-        assert!(shown.contains("New agent ctrl+n"), "{shown}");
+        assert!(shown.contains("New terminal") && !shown.contains("New agent"), "{shown}");
         assert!(shown.contains("ctrl+k open"));
         let plain = screen(&Ui::new(demo::world()));
-        assert!(!plain.contains("ctrl+k") && !plain.lines().next().unwrap().contains("need you"));
+        assert!(!plain.contains("ctrl+k") && !plain.lines().next().unwrap().contains("alert"));
+    }
+
+    fn alert_prompt(id: &str, agent: &str) -> Attention {
+        Attention {
+            id: id.into(),
+            tier: Tier::Stopped,
+            title: format!("{agent} is waiting for a permission"),
+            waiting: None,
+            age: "1m".into(),
+            mission: None,
+            agent: Some(agent.into()),
+            kind: AttentionKind::Prompt {
+                seat: "builder".into(),
+                seat_id: agent.into(),
+                text: "Claude asks to use Bash".into(),
+                answers: vec!["allow".into(), "deny".into()],
+                episode: "episode-1".into(),
+            },
+            actions: vec!["prompt.respond".into()],
+            related: vec![],
+            raised_by: None,
+            blocked: None,
+            conversations: vec![agent.into()],
+        }
+    }
+
+    #[test]
+    fn the_top_bar_counts_alerts_and_prints_nothing_at_zero() {
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![]);
+        let none = screen(&ui);
+        let first = none.lines().next().unwrap();
+        assert!(!first.contains("alert") && !first.contains("need"), "{first}");
+        // An update asks nothing: it is not an alert.
+        let mut update = alert_prompt("attention/update", "agent/example/atlas/builder");
+        update.kind = AttentionKind::Update {
+            from: "builder".into(),
+            body: "done".into(),
+            about: String::new(),
+            subjects: vec![],
+        };
+        ui.world.attention = Load::Ready(vec![update.clone()]);
+        let first = screen(&ui).lines().next().unwrap().to_owned();
+        assert!(!first.contains("alert"), "{first}");
+        ui.world.attention = Load::Ready(vec![update, alert_prompt("attention/one", "agent/example/atlas/builder")]);
+        let first = screen(&ui).lines().next().unwrap().to_owned();
+        assert!(first.contains("◆ 1 alert ") && !first.contains("alerts"), "{first}");
+        ui.world.attention = Load::Ready(vec![
+            alert_prompt("attention/one", "agent/example/atlas/builder"),
+            alert_prompt("attention/two", "agent/example/docs/writer"),
+        ]);
+        let first = screen(&ui).lines().next().unwrap().to_owned();
+        assert!(first.contains("◆ 2 alerts"), "{first}");
+    }
+
+    #[test]
+    fn an_alert_shows_in_its_agents_conversation_and_clears_with_it() {
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![alert_prompt("attention/one", "agent/example/atlas/builder")]);
+        ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
+        // Collapsed: one line above the box, the box whole at the bottom, and nothing to answer.
+        let shown = screen(&ui);
+        assert!(shown.contains("1 alert") && shown.contains("▸ show"), "{shown}");
+        assert!(!shown.contains("deny"), "{shown}");
+        let lines: Vec<&str> = shown.lines().collect();
+        let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+        let band = line("1 alert");
+        let rule = lines.iter().rposition(|line| line.contains('─') && !line.contains("alert")).unwrap();
+        let input = line("Message Atlas Builder");
+        assert!(band < rule && rule < input, "{shown}");
+        assert!(input + 3 >= lines.len(), "the box sits at the bottom: {shown}");
+        // Expanded on a click: the cards fill the room the conversation gives up.
+        ui.click(Hit::Alert("agent/example/atlas/builder".into(), AlertTap::Toggle));
+        let shown = screen(&ui);
+        assert!(shown.contains("1 alert") && shown.contains("deny") && shown.contains("open in Now"), "{shown}");
+        let lines: Vec<&str> = shown.lines().collect();
+        let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+        assert!(line("open in Now") < line("Message Atlas Builder"), "{shown}");
+        assert!(line("Message Atlas Builder") + 3 >= lines.len(), "{shown}");
+        // Another agent's conversation shows none of it.
+        ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Tab);
+        let other = screen(&ui);
+        assert!(!other.contains("open in Now"), "{other}");
+        // It clears itself when st stops listing it.
+        ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
+        ui.world.attention = Load::Ready(vec![]);
+        assert!(!screen(&ui).contains("open in Now"));
+    }
+
+    #[test]
+    fn a_long_draft_renders_at_every_size_beside_alerts() {
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![alert_prompt("attention/one", agent)]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        let paragraph = "A long thought, 日本語の文章 👩‍👩‍👧‍👦 e\u{301} with a tail. ";
+        for round in 0..40 {
+            typed(&mut ui, paragraph);
+            if round % 3 == 0 {
+                press(&mut ui, KeyCode::Enter, KeyModifiers::ALT);
+            }
+            if round % 10 == 0 {
+                ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+            }
+            for (width, height) in [(20, 6), (24, 8), (40, 12), (80, 24), (120, 32), (200, 60), (33, 7)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
+        assert!(ui.conversation_state.drafts[agent].len() > 1000);
+        // Every size a window or a split pane can have, with the box full of text.
+        for width in (20..=150).step_by(7) {
+            for height in 6..=40 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
+        ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Right);
+        for width in (20..=150).step_by(11) {
+            for height in 6..=40 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -3547,7 +4494,7 @@ mod tests {
         assert!(
             screen(&ui)
                 .lines()
-                .nth(1)
+                .nth(2)
                 .unwrap()
                 .contains("◆ Atlas Builder"),
             "it needs the person"
@@ -3582,7 +4529,7 @@ mod tests {
         assert_eq!(tabs(&ui).2[0], [ATLAS, WEEKLY, "machine:machine/harbor"]);
         ctrl(&mut ui, 'w');
 
-        // Now opens over the glass from "need you", with its keys; Esc puts the tab back in charge.
+        // Now opens over the glass from "alerts", with its keys; Esc puts the tab back in charge.
         ui.open_home();
         assert!(screen(&ui).contains("Now · esc closes"));
         assert_eq!(ui.tab, 0);
@@ -3601,6 +4548,185 @@ mod tests {
         assert_eq!(tabs(&ui).1, 1);
         ctrl(&mut ui, 'w');
         assert_eq!(tabs(&ui).2, vec![vec![ATLAS.to_owned()]]);
+    }
+
+    #[test]
+    fn typing_stops_when_another_tab_takes_the_focus() {
+        // Nathan, 2026-10-07: a message box stayed selected after switching tabs, so keys went on
+        // into a draft in a tab that was no longer shown.
+        let mut ui = glass();
+        ui.live = true;
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
+        ui.open_in_glass(
+            Pane::Mission(Some("mission/fleet/atlas/store-move".into())),
+            Open::Tab,
+        );
+        ui.show_tab(0);
+        assert_eq!(ui.tab, 1, "the agent's tab has the focus");
+        press(&mut ui, KeyCode::Char('h'), KeyModifiers::NONE);
+        assert!(ui.editing, "a plain key opens the message box and types");
+        let draft_before = ui
+            .conversation_state
+            .drafts
+            .get("agent/example/atlas/builder")
+            .cloned();
+        assert_eq!(draft_before.as_deref(), Some("h"));
+        // A click on another tab, as a mouse does; keys stay the message box's while it is open.
+        ui.show_tab(1);
+        assert!(!ui.editing, "the message box does not follow the person to another tab");
+        press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(
+            ui.conversation_state
+                .drafts
+                .get("agent/example/atlas/builder")
+                .cloned(),
+            draft_before,
+            "nothing is typed into the draft of a tab that is not shown"
+        );
+    }
+
+    #[test]
+    fn terminal_fallback_defaults_on_and_the_palette_changes_it_locally() {
+        let mut ui = glass();
+        assert!(ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(!ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(ui.terminal_fallback);
+    }
+
+    #[test]
+    fn a_terminal_first_device_attaches_an_agent_after_the_tab_stays_in_front() {
+        // Nathan, 2026-10-07: a setting for the terminal as the default view; the conversation
+        // stays the default, and flicking through tabs attaches nothing.
+        let mut ui = glass();
+        ui.live = true;
+        assert!(!ui.terminal_first(), "the conversation is the default");
+        ui.toggle_terminal_first();
+        assert!(ui.terminal_first());
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
+            Open::Tab,
+        );
+        ui.open_in_glass(
+            Pane::Mission(Some("mission/fleet/atlas/store-move".into())),
+            Open::Tab,
+        );
+        ui.effects.clear();
+        // Passing through the agent's tab: nothing attaches.
+        ui.show_tab(0);
+        ui.show_tab(1);
+        ui.step_default_view();
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        // Staying on it does.
+        ui.show_tab(0);
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        ui.step_default_view();
+        assert!(
+            ui.effects.iter().any(|effect| matches!(effect, Effect::OpenTerminal { agent } if agent == "agent/example/atlas/builder")),
+            "{:?}",
+            ui.effects
+        );
+        // Switched back, the conversation is the default again.
+        ui.toggle_terminal_first();
+        assert!(!ui.terminal_first());
+    }
+
+    #[test]
+    fn a_group_a_tab_was_dragged_out_of_still_shows_one_of_its_tabs() {
+        // Nathan, 2026-10-04: after dragging a tab to a new place, the group with the other tabs
+        // showed none of them.
+        let shown = |ui: &Ui, group: usize| {
+            ui.glasses
+                .as_ref()
+                .unwrap()
+                .glass()
+                .shown(group)
+                .map(|tab| tab.pane.clone())
+        };
+        let three = |ui: &mut Ui| {
+            ui.open_in_glass(
+                Pane::Agent(Some("agent/example/atlas/builder".into())),
+                Open::Tab,
+            );
+            ui.open_in_glass(
+                Pane::Mission(Some("mission/fleet/release/weekly".into())),
+                Open::Tab,
+            );
+            ui.open_in_glass(Pane::Agent(Some("agent/example/cos".into())), Open::Tab);
+        };
+        let cos = "agent:agent/example/cos";
+
+        // The shown tab is the last one and it leaves into a new split: the one before it shows.
+        let mut ui = glass();
+        three(&mut ui);
+        assert_eq!(tabs(&ui).1, 2);
+        ui.drop_tab(
+            (0, 2),
+            Drop::Edge {
+                group: 0,
+                side: Side::Right,
+                first: false,
+            },
+        );
+        assert_eq!(tabs(&ui).2, vec![vec![ATLAS, WEEKLY], vec![cos]]);
+        assert_eq!(shown(&ui, 0).as_deref(), Some(WEEKLY));
+        assert_eq!(shown(&ui, 1).as_deref(), Some(cos));
+
+        // The shown tab leaves from the middle: the next one takes its place.
+        let mut ui = glass();
+        three(&mut ui);
+        ui.glasses
+            .as_mut()
+            .unwrap()
+            .glass_mut()
+            .layout
+            .group_mut(0)
+            .unwrap()
+            .current = 1;
+        ui.drop_tab(
+            (0, 1),
+            Drop::Edge {
+                group: 0,
+                side: Side::Below,
+                first: false,
+            },
+        );
+        assert_eq!(shown(&ui, 0).as_deref(), Some(cos));
+
+        // A tab before the shown one leaves: the shown tab stays shown.
+        let mut ui = glass();
+        three(&mut ui);
+        ui.drop_tab(
+            (0, 0),
+            Drop::Edge {
+                group: 0,
+                side: Side::Right,
+                first: false,
+            },
+        );
+        assert_eq!(shown(&ui, 0).as_deref(), Some(cos));
+    }
+
+    #[test]
+    fn ctrl_y_speaks_in_a_conversation_without_the_box_open_first() {
+        let mut ui = glass();
+        ui.live = true;
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        assert!(!ui.editing, "the box is closed");
+        ctrl(&mut ui, 'y');
+        // Without a speech helper (this test has none) it says so; before, it did nothing.
+        let flash = ui.flash.as_ref().map(|(message, _)| message.as_str());
+        assert!(
+            flash.is_some_and(|message| message.contains("voice")),
+            "ctrl+y reached voice: {flash:?}"
+        );
     }
 
     #[test]
@@ -3683,7 +4809,7 @@ mod tests {
         );
         assert_eq!(ui.tab, 2, "the new split has the focus");
         let shown = screen(&ui);
-        let strip = shown.lines().nth(1).unwrap();
+        let strip = shown.lines().nth(2).unwrap();
         assert!(
             strip.contains("Atlas Builder")
                 && strip.contains("Weekly release")
@@ -3795,10 +4921,20 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::CloseTerminal))
         );
-        // Closing an attached terminal's tab lets it go too.
+        // Middle-closing an attached terminal's tab uses the same detach action.
         ctrl(&mut ui, ']');
         ui.effects.clear();
-        ui.close_tab();
+        screen(&ui);
+        let tab = ui.frame.borrow().hits.iter()
+            .find(|(_, hit)| matches!(hit, Hit::GlassTab(0, 0))).unwrap().0;
+        for kind in [MouseEventKind::Down(MouseButton::Middle), MouseEventKind::Up(MouseButton::Middle)] {
+            ui.mouse(crossterm::event::MouseEvent {
+                kind,
+                column: tab.x,
+                row: tab.y,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
         assert!(ui.terminal.is_none());
         assert!(
             ui.effects
@@ -3843,6 +4979,184 @@ mod tests {
     }
 
     #[test]
+    fn two_terminals_in_two_splits_stay_attached_and_keys_follow_focus() {
+        // Nathan, 2026-10-06: attaching one terminal detached the other.
+        let mut ui = glass();
+        let ids = ui
+            .world
+            .agents
+            .items()
+            .iter()
+            .filter(|agent| agent.terminal)
+            .map(|agent| (agent.id.clone(), agent.name.clone()))
+            .take(2)
+            .collect::<Vec<_>>();
+        let [(first, first_name), (second, second_name)] = &ids[..] else {
+            panic!("the demo has two agents with terminals");
+        };
+        ui.open_in_glass(Pane::Agent(Some(first.clone())), Open::Tab);
+        ctrl(&mut ui, ']');
+        ui.open_in_glass(Pane::Agent(Some(second.clone())), Open::Right);
+        ctrl(&mut ui, ']');
+        assert_eq!(ui.terminal.as_ref().map(|view| view.agent.as_str()), Some(second.as_str()));
+        assert_eq!(ui.parked.len(), 1, "the first is still attached");
+        let shown = screen(&ui);
+        assert!(
+            shown.contains(first_name) && shown.contains(second_name),
+            "both terminals draw: {shown}"
+        );
+        // Focus moves to the left split; the next key finds its terminal.
+        let left = ui.frame.borrow().glass_leaves[0];
+        ui.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: left.x + 2,
+            row: left.y + 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        press(&mut ui, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(ui.terminal.as_ref().map(|view| view.agent.as_str()), Some(first.as_str()));
+        assert_eq!(ui.parked.first().map(|view| view.agent.as_str()), Some(second.as_str()));
+        // Closing a tab lets only its own terminal go (Ctrl+W goes to a focused terminal).
+        ui.close_tab();
+        assert!(ui.terminal_view(first).is_none());
+        assert!(ui.terminal_view(second).is_some(), "the other stays attached");
+    }
+
+    #[test]
+    fn native_split_terminals_route_wheel_and_focus_to_their_own_connections() {
+        use pty_core::protocol::{MessageType, PacketReader, encode_packet};
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        fn input(peer: &mut UnixStream, reader: &mut PacketReader) -> Vec<u8> {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                assert!(Instant::now() < deadline, "no terminal input");
+                let mut bytes = [0u8; 1024];
+                let count = peer.read(&mut bytes).unwrap();
+                for packet in reader.feed(&bytes[..count]).unwrap() {
+                    if packet.type_ == MessageType::Data {
+                        return packet.payload;
+                    }
+                }
+            }
+        }
+
+        let mut ui = glass();
+        let ids: Vec<_> = ui
+            .world
+            .agents
+            .items()
+            .iter()
+            .filter(|agent| agent.terminal)
+            .take(2)
+            .map(|agent| agent.id.clone())
+            .collect();
+        let [first, second] = &ids[..] else {
+            panic!("two demo terminals")
+        };
+        ui.open_in_glass(Pane::Agent(Some(first.clone())), Open::Tab);
+        ctrl(&mut ui, ']');
+        ui.open_in_glass(Pane::Agent(Some(second.clone())), Open::Right);
+        ctrl(&mut ui, ']');
+        let mut peers = Vec::new();
+        for agent in &ids {
+            let (client, mut peer) = UnixStream::pair().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            ui.terminal_view_mut(agent).unwrap().native = Some(
+                crate::ui::pty::NativeTerminal::spawn(client, agent, "one".into(), 24, 80),
+            );
+            peer.write_all(&encode_packet(
+                MessageType::Screen,
+                b"\x1b[?1004h\x1b[?1003h\x1b[?1006h",
+            ))
+            .unwrap();
+            peers.push(peer);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ids.iter().all(|agent| {
+            ui.terminal_view(agent)
+                .unwrap()
+                .native
+                .as_ref()
+                .unwrap()
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::MOUSE_MOTION)
+        }) {
+            assert!(Instant::now() < deadline, "screen did not arrive");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        screen(&ui);
+        let mut readers = [PacketReader::new(), PacketReader::new()];
+        ui.input_event(crossterm::event::Event::FocusGained);
+        assert_eq!(input(&mut peers[1], &mut readers[1]), b"\x1b[I");
+        let body = ui
+            .frame
+            .borrow()
+            .panes
+            .iter()
+            .find(|pane| pane.key == Pane::Terminal(first.clone()).key())
+            .unwrap()
+            .rect;
+        ui.terminal_selection_mode = true;
+        ui.input_event(crossterm::event::Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: body.x + 4,
+            row: body.y + 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(
+            input(&mut peers[0], &mut readers[0]),
+            b"\x1b[<65;5;3M".repeat(3)
+        );
+        assert_eq!(
+            ui.terminal.as_ref().unwrap().agent,
+            *second,
+            "wheel does not move focus"
+        );
+        let left = ui.frame.borrow().glass_leaves[0];
+        ui.input_event(crossterm::event::Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: left.x + 2,
+            row: left.y + 2,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(ui.terminal.as_ref().unwrap().agent, *first);
+        assert!(
+            !ui.terminal_selection_mode,
+            "selection override does not leak into another tab"
+        );
+        assert_eq!(input(&mut peers[1], &mut readers[1]), b"\x1b[O");
+        assert_eq!(input(&mut peers[0], &mut readers[0]), b"\x1b[I");
+        screen(&ui);
+        assert!(
+            ui.terminal_cursor.get().is_some(),
+            "the other split must not erase the focused cursor"
+        );
+        ui.input_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        ));
+        assert_eq!(input(&mut peers[0], &mut readers[0]), b"a");
+    }
+
+    #[test]
+    fn usage_in_a_narrow_pane_reads_whole_a_limit_to_a_line_and_notes_wrapped() {
+        // Nathan, 2026-10-06: the usage view was cut off and double spaced.
+        let mut ui = glass();
+        ui.toggle_usage();
+        let shown = screen(&ui);
+        let lines = shown.lines().collect::<Vec<_>>();
+        let weekly = lines.iter().position(|line| line.contains("weekly   23%")).unwrap();
+        assert!(lines[weekly + 1].contains("5-hour   41%"), "{shown}");
+        let summary = lines.iter().position(|line| line.contains("summary")).unwrap();
+        assert!(
+            lines[summary + 1].contains("$77.30"),
+            "the summary starts straight under its heading: {shown}"
+        );
+    }
+
+    #[test]
     fn ctrl_a_opens_an_agents_actions_and_restart_asks_first() {
         let mut ui = glass();
         ui.live = true;
@@ -3853,7 +5167,7 @@ mod tests {
         ctrl(&mut ui, 'a');
         assert_eq!(ui.popover.as_deref(), Some("actions:agent/example/atlas/builder"));
         let shown = screen(&ui);
-        for action in ["Restart", "Suspend", "Retire", "Copy id", "ACTIONS · ESC CLOSES"] {
+        for action in ["Restart", "Suspend", "Stop", "Copy id", "ACTIONS · ESC CLOSES"] {
             assert!(shown.contains(action), "{action}: {shown}");
         }
         // Restart asks first; Esc would keep it, y restarts.
@@ -3875,6 +5189,14 @@ mod tests {
         press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE);
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ui.effects.is_empty());
+    }
+
+    #[test]
+    fn a_retired_identity_has_no_start_resume_or_runtime_actions() {
+        let agent = Agent { state: AgentState::Retired, terminal: false, ..glass().world.agents.items()[0].clone() };
+        let keys = screens::agent_actions(&agent).iter().map(|action| action.key).collect::<String>();
+        for key in ['s','u','r','x','p','t'] { assert!(!keys.contains(key), "{keys}"); }
+        assert_eq!(screens::agent_word(agent.state), "retired");
     }
 
     #[test]
@@ -3936,6 +5258,25 @@ mod tests {
     }
 
     #[test]
+    fn inventory_demand_tracks_the_shown_sidebar_and_usage_overlay() {
+        let mut ui = glass();
+        let initial = ui.inventories_wanted();
+        assert!(!initial.terminals && initial.usage_hours.is_none());
+        ctrl(&mut ui, 's');
+        let sidebar = ui.inventories_wanted();
+        assert!(sidebar.machines && sidebar.sessions && sidebar.terminals);
+        ui.click(Hit::Usage);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(24));
+        ui.usage_period_next();
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.glasses.as_ref().unwrap().sidebar.focused);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168), "changing focus keeps the visible usage overlay followed");
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(ui.inventories_wanted().usage_hours, None);
+    }
+
+    #[test]
     fn usage_floats_over_the_glass_and_a_row_shows_its_spend_whatever_the_list_groups_by() {
         let mut ui = glass();
         assert_eq!(ui.usage_wanted(), None, "nothing shows usage yet");
@@ -3960,53 +5301,40 @@ mod tests {
         let sidebar = |ui: &Ui| ui.glasses.as_ref().unwrap().sidebar.clone();
         assert!(sidebar(&ui).shown && sidebar(&ui).focused);
         let shown = screen(&ui);
-        for (_, section) in SIDEBAR_SECTIONS {
+        for section in ["Everything else", "Agents", "Missions", "Machines", "Filter:"] {
             assert!(shown.contains(section), "{shown}");
         }
-        assert!(
-            !shown.contains(" Home "),
-            "Home opens from the status line: {shown}"
-        );
-        // Agents first; the arrows move, Enter opens the selection as a tab and gives the keys
-        // back to the glass, with the sidebar still shown.
-        let agents = ui.listing_for(1, 40).ids;
-        press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
+        let rows = ui.resource_sidebar.rows();
+        let (agent_index, agent) = rows.iter().enumerate().find_map(|(index, row)| match row {
+            super::super::resource_sidebar::Row::Resource(row) if row.kind == "Agents" => Some((index, row.id.clone())),
+            _ => None,
+        }).unwrap();
+        for _ in 0..agent_index { press(&mut ui, KeyCode::Down, KeyModifiers::NONE); }
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(tabs(&ui).2, vec![vec![format!("agent:{}", agents[1])]]);
+        assert_eq!(tabs(&ui).2, vec![vec![format!("agent:{agent}")]]);
         assert!(sidebar(&ui).shown && !sidebar(&ui).focused);
         typed(&mut ui, "c");
         assert!(ui.editing, "keys reach the opened pane");
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        // Alt+← from the leftmost split takes the keys back to it; Ctrl+S only shows and hides,
-        // and shown again it remembers where it was.
         press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
         assert!(sidebar(&ui).focused);
-        press(&mut ui, KeyCode::Right, KeyModifiers::NONE);
         ctrl(&mut ui, 's');
         assert!(!sidebar(&ui).shown);
         ctrl(&mut ui, 's');
         assert!(sidebar(&ui).shown && sidebar(&ui).focused);
-        assert_eq!((sidebar(&ui).section, sidebar(&ui).selected[1]), (2, 1));
-        // A mission opens as a tab beside the agent; opening never replaces it.
-        let missions = ui.listing_for(2, 40).ids;
+        assert_eq!(ui.resource_sidebar.selected, agent_index);
+        let (mission_index, mission) = rows.iter().enumerate().find_map(|(index, row)| match row {
+            super::super::resource_sidebar::Row::Resource(row) if row.kind == "Missions" => Some((index, row.id.clone())),
+            _ => None,
+        }).unwrap();
+        for _ in agent_index..mission_index { press(&mut ui, KeyCode::Down, KeyModifiers::NONE); }
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(
-            tabs(&ui).2,
-            vec![vec![
-                format!("agent:{}", agents[1]),
-                format!("mission:{}", missions[0])
-            ]]
-        );
-        // Esc and Alt+→ give the keys back and leave it showing; Ctrl+S hides it.
+        assert_eq!(tabs(&ui).2, vec![vec![format!("agent:{agent}"), format!("mission:{mission}")]]);
         press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(sidebar(&ui).shown && !sidebar(&ui).focused);
-        press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
-        press(&mut ui, KeyCode::Right, KeyModifiers::ALT);
-        assert!(sidebar(&ui).shown && !sidebar(&ui).focused);
         ctrl(&mut ui, 's');
         assert!(!sidebar(&ui).shown);
-        assert!(!screen(&ui).contains(" Fleet "));
     }
 
     #[test]
@@ -4172,7 +5500,10 @@ mod tests {
             let rect = info
                 .hits
                 .iter()
-                .find(|(_, hit)| *hit == Hit::SidebarRow(index))
+                .find(|(_, hit)| {
+                    let wanted = &ui.listing_for(1, 40).ids[index];
+                    matches!(hit, Hit::ResourceRow(row) if matches!(ui.resource_sidebar.rows().get(*row), Some(super::super::resource_sidebar::Row::Resource(resource)) if &resource.id == wanted))
+                })
                 .map(|(rect, _)| *rect)
                 .expect("the row is drawn");
             (rect.x + 3, rect.y)
@@ -4518,7 +5849,7 @@ mod tests {
         assert_eq!(section(&ui), Some(2));
         press(&mut ui, KeyCode::Char('3'), KeyModifiers::CONTROL);
         assert_eq!(section(&ui), None, "the same again shows every section");
-        // "need you" in the top bar opens Home; the other counts open the palette there.
+        // "alerts" in the top bar opens Home; the other counts open the palette there.
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         screen(&ui);
         let hit_at = |ui: &Ui, wanted: Hit| {
@@ -4539,11 +5870,6 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             })
         };
-        let active = hit_at(&ui, Hit::PaletteSection(2));
-        click(&mut ui, active);
-        assert_eq!(section(&ui), Some(2), "active opens the missions");
-        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        screen(&ui);
         let need = hit_at(&ui, Hit::Home);
         click(&mut ui, need);
         assert!(ui.home_open());
@@ -4620,14 +5946,14 @@ mod tests {
         let zoomed = screen(&ui);
         assert!(zoomed.contains("zoomed · ctrl+o"), "{zoomed}");
         assert!(
-            !zoomed.lines().nth(1).unwrap().contains("Atlas Builder"),
+            !zoomed.lines().nth(2).unwrap().contains("Atlas Builder"),
             "only the focused split shows"
         );
         ctrl(&mut ui, 'o');
         assert!(
             screen(&ui)
                 .lines()
-                .nth(1)
+                .nth(2)
                 .unwrap()
                 .contains("Atlas Builder")
         );
@@ -4704,62 +6030,6 @@ mod tests {
     }
 
     #[test]
-    fn a_new_agent_starts_from_a_form_in_its_own_tab() {
-        let mut ui = glass();
-        ui.live = true;
-        // Home's bar and Ctrl+N both open the form; Ctrl+K can start one from a sentence.
-        assert!(screen(&ui).contains("New agent ctrl+n"));
-        ctrl(&mut ui, 'k');
-        typed(&mut ui, "fix the login test");
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
-        let start = ui
-            .matches(palette)
-            .iter()
-            .position(|choice| choice.action == Action::NewAgent(Some("fix the login test".into())))
-            .unwrap();
-        ui.open_choice(Some(start), Open::Here);
-        assert_eq!(tabs(&ui).2, vec![vec!["new-agent:".to_owned()]]);
-        let shown = screen(&ui);
-        assert!(
-            shown.contains("fix the login test") && shown.contains("claude"),
-            "{shown}"
-        );
-        let name = ui.new_agent.as_ref().unwrap().name.clone();
-        assert!(name.contains('-'), "a name is made up: {name}");
-        // Typing goes to the form; Tab moves on; ← → choose.
-        typed(&mut ui, ", then open a PR");
-        press(&mut ui, KeyCode::Tab, KeyModifiers::NONE);
-        ctrl(&mut ui, 'u');
-        typed(&mut ui, "login fixer");
-        press(&mut ui, KeyCode::Tab, KeyModifiers::NONE);
-        press(&mut ui, KeyCode::Right, KeyModifiers::NONE);
-        press(&mut ui, KeyCode::Tab, KeyModifiers::NONE);
-        press(&mut ui, KeyCode::Right, KeyModifiers::NONE);
-        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(
-            std::mem::take(&mut ui.effects),
-            [Effect::CreateAgent {
-                name: "loginfixer".into(),
-                harness: "codex".into(),
-                model: Some("gpt-6-sol".into()),
-                effort: None,
-                host: None,
-                message: Some("fix the login test, then open a PR".into()),
-            }],
-            "a name keeps to letters, digits, dots and dashes"
-        );
-        // Once st starts it, its conversation takes the form's place.
-        ui.agent_started("agent/example/atlas/builder".into());
-        assert_eq!(tabs(&ui).2, vec![vec![ATLAS.to_owned()]]);
-        assert!(ui.new_agent.is_none());
-        // Ctrl+N again opens a fresh form; Esc closes it and its tab.
-        ctrl(&mut ui, 'n');
-        assert_eq!(tabs(&ui).2[0].len(), 2);
-        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(tabs(&ui).2, vec![vec![ATLAS.to_owned()]]);
-    }
-
-    #[test]
     fn links_in_a_conversation_can_be_clicked() {
         let mut ui = glass();
         ui.open_in_glass(
@@ -4800,6 +6070,47 @@ mod tests {
             links.contains(&"https://example.com/notes".to_owned()),
             "{links:?}"
         );
+    }
+
+    #[test]
+    fn an_address_the_renderer_wrapped_is_one_link_on_every_row() {
+        // Nathan, 2026-10-05: clicking a wrapped link copied only the part on the clicked row.
+        let long = "https://github.com/example/widgets/blob/main/docs/a-very-long-file-name-for-wrapping-tests/and-then-some-more-path-segments.md";
+        let mut ui = glass();
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        if let Some(Load::Ready(entries)) = ui
+            .world
+            .conversations
+            .get_mut("agent/example/atlas/builder")
+        {
+            entries.push(Entry {
+                id: "wrapped".into(),
+                at: "17:41".into(),
+                body: Body::Assistant(format!("Start here: {long}\nThen it ends.")),
+            });
+        }
+        ui.follow_latest();
+        screen(&ui);
+        let frame = ui.frame.borrow();
+        let rows = frame
+            .hits
+            .iter()
+            .filter_map(|(rect, hit)| match hit {
+                Hit::Link(url) if url == long => Some(rect.y),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            rows.len() >= 2,
+            "the whole address is the link on each row it covers: {rows:?}"
+        );
+        let partial = frame.hits.iter().any(|(_, hit)| {
+            matches!(hit, Hit::Link(url) if url != long && url.starts_with("https://github.com/example/widgets/blob"))
+        });
+        assert!(!partial, "no link holds only part of the address");
     }
 
     #[test]
@@ -4969,6 +6280,112 @@ mod tests {
         assert_eq!((tabs(&ui).0, ui.tab), (0, 1));
     }
 
+    fn mouse(ui: &mut Ui, kind: MouseEventKind, column: u16, row: u16) {
+        ui.mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn a_right_click_on_a_tab_offers_its_actions_and_a_split_offers_a_new_split() {
+        let mut ui = glass();
+        ui.open_in_glass(
+            Pane::Agent(Some("agent/example/atlas/builder".into())),
+            Open::Tab,
+        );
+        ui.open_in_glass(
+            Pane::Mission(Some("mission/fleet/release/weekly".into())),
+            Open::Tab,
+        );
+        screen(&ui);
+        let (group, tab, rect) = {
+            let info = ui.frame.borrow();
+            info.hits
+                .iter()
+                .find_map(|(rect, hit)| match hit {
+                    Hit::GlassTab(group, tab) if *tab == 0 => Some((*group, *tab, *rect)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(group, 0);
+        let before = tabs(&ui).2[0].len();
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Right), rect.x, rect.y);
+        assert!(ui.context.is_some());
+        let shown = screen(&ui);
+        assert!(shown.contains("Close tab") && shown.contains("Copy its path"), "{shown}");
+        // A click elsewhere only closes the menu.
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), 1, 20);
+        assert!(ui.context.is_none());
+        assert_eq!(tabs(&ui).2[0].len(), before);
+        // A row acts: Close tab.
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Right), rect.x, rect.y);
+        screen(&ui);
+        let close = {
+            let info = ui.frame.borrow();
+            info.hits
+                .iter()
+                .find_map(|(rect, hit)| {
+                    (*hit == Hit::Menu(MenuAction::CloseTab(group, tab))).then_some(*rect)
+                })
+                .unwrap()
+        };
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), close.x + 2, close.y);
+        assert!(ui.context.is_none());
+        assert_eq!(tabs(&ui).2[0].len(), before - 1);
+        // The empty end of a strip offers a new split.
+        screen(&ui);
+        let leaf = ui.frame.borrow().glass_leaves[0];
+        mouse(
+            &mut ui,
+            MouseEventKind::Down(MouseButton::Right),
+            leaf.x + leaf.width - 2,
+            leaf.y - 1,
+        );
+        let shown = screen(&ui);
+        assert!(shown.contains("Split right") && shown.contains("New terminal"), "{shown}");
+        ui.run_menu_action(MenuAction::SplitGroup { group: 0, right: true });
+        assert_eq!(tabs(&ui).2.len(), 2, "a second split exists");
+    }
+
+    #[test]
+    fn the_connection_word_is_clickable_and_says_what_is_known() {
+        let mut ui = glass();
+        ui.world.link = Link::Offline("Last connected at 10:02 · reconnecting · r retry now".into());
+        screen(&ui);
+        let rect = {
+            let info = ui.frame.borrow();
+            info.hits
+                .iter()
+                .find_map(|(rect, hit)| (*hit == Hit::Connection).then_some(*rect))
+                .unwrap()
+        };
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), rect.x, rect.y);
+        assert!(
+            ui.flash
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("Last connected at 10:02")),
+            "{:?}",
+            ui.flash
+        );
+        // Live opens this machine.
+        ui.world.link = Link::Live;
+        screen(&ui);
+        mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), rect.x, rect.y);
+        assert!(
+            tabs(&ui)
+                .2
+                .iter()
+                .flatten()
+                .any(|pane| pane.starts_with("machine:machine/")),
+            "{:?}",
+            tabs(&ui)
+        );
+    }
+
     #[test]
     fn clicking_another_split_only_moves_focus_away_from_an_attached_terminal() {
         let mut ui = glass();
@@ -5037,6 +6454,24 @@ mod tests {
             ui.effects
         );
     }
+    #[test]
+    fn a_child_open_intent_opens_its_own_live_conversation() {
+        let mut ui = glass();
+        ui.click(Hit::Pane(st3_conversation_ui::PaneIntent::Open("session/child".into())));
+        assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some("session/child".into()))));
+        assert!(ui.live_conversations().contains(&"session/child".to_owned()));
+    }
+
+    #[test]
+    fn a_pasted_session_id_opens_even_when_not_in_the_agent_list() {
+        let mut ui = glass();
+        ctrl(&mut ui, 'k');
+        assert!(ui.paste_into_palette("session/saved-omp"));
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some("session/saved-omp".into()))));
+        assert!(ui.live_conversations().contains(&"session/saved-omp".to_owned()));
+    }
+
 
     #[test]
     fn home_floats_clear_of_the_edges() {
@@ -5107,9 +6542,64 @@ mod tests {
                 .is_some_and(|find| find.agent == agent.id && find.query == "harbor keys")
         );
         // An answer to another query is not shown.
+        // The find bar owns editing keys until Esc; leave it before reopening the palette.
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         ctrl(&mut ui, 'k');
         typed(&mut ui, "atlas");
+        assert_eq!(ui.said_wanted().as_deref(), Some("atlas"));
         assert!(!screen(&ui).contains("said in conversations"));
+        // A saved conversation need not have an agent: open its session directly.
+        ctrl(&mut ui, 'u');
+        typed(&mut ui, "harbor keys");
+        if let Some((_, Ok(found))) = ui.said.as_mut() {
+            found.items[0].agent_id = None;
+        }
+        let said = ui
+            .matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap())
+            .into_iter()
+            .position(|choice| matches!(choice.action, Action::Said { .. }))
+            .unwrap();
+        ui.open_choice(Some(said), Open::Tab);
+        assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some("session/one".into()))));
+        assert!(ui.live_conversations().contains(&"session/one".to_owned()));
+        assert!(
+            ui.find.as_ref().is_some_and(|find| {
+                find.agent == "session/one" && find.query == "harbor keys"
+            })
+        );
+    }
+
+    #[test]
+    fn find_ranks_agents_before_missions_and_matches_words_across_the_path() {
+        // A mission whose title starts with what is typed does not outrank an agent that
+        // matches it (Nathan, 2026-10-06).
+        let mut ui = glass();
+        let agent = ui.world.agents.items()[0].clone();
+        let title = agent.name.clone();
+        if let Load::Ready(missions) = &mut ui.world.missions {
+            missions[0].title = format!("{title} rollout");
+        }
+        ctrl(&mut ui, 'k');
+        typed(&mut ui, &title.to_lowercase());
+        let found = ui.matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap());
+        let first_mission = found.iter().position(|choice| choice.section == 2);
+        let first_agent = found.iter().position(|choice| choice.section == 1);
+        assert!(first_agent < first_mission, "agents lead: {first_agent:?} {first_mission:?}");
+        // Words typed against the path find the agent across its slashes, and the row shows
+        // the whole path.
+        let path = agent.id.trim_start_matches("agent/").to_owned();
+        let words = path.split('/').take(2).collect::<Vec<_>>().join(" ");
+        ctrl(&mut ui, 'k');
+        ctrl(&mut ui, 'k');
+        typed(&mut ui, &words);
+        let found = ui.matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap());
+        assert!(
+            found
+                .iter()
+                .any(|choice| choice_path(&choice.action).as_deref() == Some(path.as_str())),
+            "{words:?} finds {path}"
+        );
+        assert!(screen(&ui).contains(&path), "{}", screen(&ui));
     }
 
     #[test]
@@ -5130,6 +6620,112 @@ mod tests {
         ui.open_in_glass(Pane::Home(Some(other.clone())), Open::Here);
         assert!(ui.home_open());
         assert_eq!(ui.attention_focus().as_deref(), Some(other.as_str()));
+    }
+
+    #[test]
+    fn the_missions_window_is_wanted_only_while_a_mission_list_or_card_is_on_screen() {
+        let mut ui = glass();
+        // A fresh glass shows one agent or nothing about missions: not wanted.
+        assert!(!ui.missions_wanted());
+        // The palette offers every mission; Now shows mission cards.
+        ctrl(&mut ui, 'k');
+        assert!(ui.missions_wanted(), "the palette lists missions");
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.missions_wanted());
+        // A mission's card or the Missions list in a shown tab.
+        let mission = ui.world.missions.items()[0].id.clone();
+        ui.open_in_glass(Pane::Mission(Some(mission)), Open::Tab);
+        assert!(ui.missions_wanted(), "a mission card is on screen");
+        // The classic layout always follows, as before.
+        let classic = Ui::new(demo::world());
+        assert!(classic.missions_wanted());
+    }
+
+    #[test]
+    fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![
+            alert_prompt("attention/one", agent),
+            alert_prompt("attention/two", agent),
+        ]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        let shown = screen(&ui);
+        let lines: Vec<&str> = shown.lines().collect();
+        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ hide")).expect(&shown);
+        let rule = lines.iter().position(|line| line.contains("┄┄┄┄")).expect(&shown);
+        let input = lines.iter().position(|line| line.contains("Message Atlas Builder")).expect(&shown);
+        assert!(title < rule && rule < input, "{shown}");
+        // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
+        let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
+        assert!(barred >= 6, "{shown}");
+        assert!(shown.matches("terminal (Ctrl+]) or open it in Now").count() == 2, "{shown}");
+        assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
+    }
+
+    #[test]
+    fn the_top_bar_prints_only_the_connection_until_st_has_sent_the_first_state() {
+        let mut ui = glass();
+        let top = |ui: &Ui| screen(ui).lines().next().unwrap().to_owned();
+        // A cached copy is not st's answer: no placeholder, no counts to flip a moment later.
+        ui.world.settled = false;
+        ui.world.attention = Load::Ready(vec![]);
+        let bar = top(&ui);
+        for word in ["working", "nothing running", "alert", "Ctrl+K"] {
+            assert!(!bar.contains(word), "{word}: {bar}");
+        }
+        assert!(bar.contains("live"), "{bar}");
+        ui.world.settled = true;
+        assert!(top(&ui).contains("working"), "{}", top(&ui));
+    }
+
+    #[test]
+    fn the_missions_list_reads_running_first_and_ages_finished_runs_out() {
+        let mut world = demo::world();
+        let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).to_rfc3339();
+        if let Load::Ready(missions) = &mut world.missions {
+            let template = missions[0].clone();
+            *missions = [
+                (Word::Done, "Done yesterday", yesterday.clone()),
+                (Word::Stalled, "Stuck", chrono::Local::now().to_rfc3339()),
+                (Word::Working, "Running", chrono::Local::now().to_rfc3339()),
+                (Word::Decision, "Asks you", chrono::Local::now().to_rfc3339()),
+                (Word::Cancelled, "Stopped yesterday", yesterday),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (word, title, at))| Mission {
+                id: format!("mission/example/m{index}"),
+                title: title.into(),
+                word,
+                system: false,
+                updated_at: at,
+                ..template.clone()
+            })
+            .collect();
+        }
+        let list = screens::missions_list(&world, 60, "⠋", false);
+        let titles: Vec<String> = list
+            .ids
+            .iter()
+            .filter_map(|id| world.missions.items().iter().find(|m| &m.id == id))
+            .map(|m| m.title.clone())
+            .collect();
+        assert_eq!(titles, ["Running", "Asks you", "Stuck"]);
+        let all = screens::missions_list(&world, 60, "⠋", true);
+        assert_eq!(all.ids.len(), 5);
+    }
+
+    #[test]
+    fn a_slow_turn_is_described_by_kinds_and_counts_never_names() {
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
+        screen(&ui);
+        let context = ui.slow_context();
+        assert!(context.starts_with("pane agent, 120x32"), "{context}");
+        assert!(context.contains("agents ") && context.contains("missions "), "{context}");
+        assert!(!context.contains("atlas") && !context.contains('/'), "{context}");
     }
 
     #[test]
@@ -5222,6 +6818,98 @@ mod tests {
             "{:?}",
             ui.flash
         );
+    }
+
+    /// A shell tab with the daemon played by the test; what the shell is sent is read back.
+    fn shell_tab() -> (Ui, std::os::unix::net::UnixStream) {
+        use pty_core::protocol::{MessageType, PacketReader, encode_packet};
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixStream;
+        let mut ui = glass();
+        ui.live = true;
+        let shell = "terminal/example-shell".to_owned();
+        ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
+        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        ui.terminal = Some(crate::ui::TerminalView {
+            agent: shell,
+            title: "shell".into(),
+            name: "shell".into(),
+            lines: Vec::new(),
+            cursor: None,
+            stale: None,
+            ended: None,
+            native: Some(crate::ui::pty::NativeTerminal::spawn(
+                stui,
+                "example-shell",
+                "one".into(),
+                24,
+                80,
+            )),
+        });
+        let mut reader = PacketReader::new();
+        let mut bytes = [0_u8; 256];
+        let mut attached = false;
+        while !attached {
+            let count = daemon.read(&mut bytes).unwrap();
+            attached = reader
+                .feed(&bytes[..count])
+                .unwrap()
+                .iter()
+                .any(|packet| packet.type_ == MessageType::Attach);
+        }
+        daemon
+            .write_all(&encode_packet(MessageType::Screen, b"$ "))
+            .unwrap();
+        while !screen(&ui).contains("$") {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        (ui, daemon)
+    }
+
+    /// What the shell was sent within `wait`.
+    fn sent(daemon: &mut std::os::unix::net::UnixStream, wait: std::time::Duration) -> Vec<u8> {
+        use pty_core::protocol::{MessageType, PacketReader};
+        use std::io::Read as _;
+        daemon.set_read_timeout(Some(wait)).unwrap();
+        let mut reader = PacketReader::new();
+        let mut out = Vec::new();
+        let mut bytes = [0_u8; 256];
+        while let Ok(count) = daemon.read(&mut bytes) {
+            if count == 0 {
+                break;
+            }
+            for packet in reader.feed(&bytes[..count]).unwrap() {
+                if packet.type_ == MessageType::Data {
+                    out.extend(packet.payload);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn ctrl_t_twice_leaves_a_terminal_and_once_reaches_its_program_late() {
+        let (mut ui, mut daemon) = shell_tab();
+        // Held back: nothing yet, then the program has it after the moment for a second press.
+        ctrl(&mut ui, 't');
+        assert!(sent(&mut daemon, std::time::Duration::from_millis(100)).is_empty());
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        ui.step_terminal_hold();
+        assert_eq!(sent(&mut daemon, std::time::Duration::from_millis(300)), b"\x14");
+        // Another key lets a held one go first, in order.
+        ctrl(&mut ui, 't');
+        press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(sent(&mut daemon, std::time::Duration::from_millis(300)), b"\x14x");
+        // Twice: the terminal is left, and the program is sent nothing.
+        ctrl(&mut ui, 't');
+        ctrl(&mut ui, 't');
+        ui.step_terminal_hold();
+        assert!(
+            ui.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::CloseTerminal))
+        );
+        assert!(sent(&mut daemon, std::time::Duration::from_millis(500)).is_empty());
     }
 
     #[test]
@@ -5369,6 +7057,72 @@ mod tests {
         // A focus with nothing in it (a group showing Home) moves focus and nothing else.
         ui.show_focused();
         assert!(ui.terminal.is_some());
+    }
+
+    /// The ids of the panes open in the glass in front, in tab order.
+    fn open_panes(ui: &Ui) -> Vec<String> {
+        tabs(ui).2.into_iter().flatten().collect()
+    }
+
+    #[test]
+    fn a_terminal_tab_in_front_with_nothing_attached_attaches() {
+        let mut ui = glass();
+        let agent = ui
+            .world
+            .agents
+            .items()
+            .iter()
+            .find(|agent| agent.terminal)
+            .cloned()
+            .unwrap();
+        ui.open_in_glass(Pane::Terminal(agent.id.clone()), Open::Tab);
+        assert!(ui.terminal_view(&agent.id).is_none());
+        ui.step_terminal_tabs();
+        assert!(ui.terminal_view(&agent.id).is_some(), "attached, not dead");
+        assert_eq!(ui.focused_pane(), Some(Pane::Terminal(agent.id)));
+    }
+
+    #[test]
+    fn a_terminal_tab_for_an_agent_without_a_terminal_shows_its_conversation() {
+        let mut ui = glass();
+        let mut agent = ui.world.agents.items()[0].clone();
+        agent.terminal = false;
+        if let Load::Ready(items) = &mut ui.world.agents {
+            items[0] = agent.clone();
+        }
+        ui.open_in_glass(Pane::Terminal(agent.id.clone()), Open::Tab);
+        ui.step_terminal_tabs();
+        assert!(ui.terminal.is_none());
+        assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some(agent.id))));
+    }
+
+    #[test]
+    fn attaching_from_the_agents_tab_focuses_its_terminal_tab_instead_of_opening_another() {
+        let mut ui = glass();
+        let agent = ui
+            .world
+            .agents
+            .items()
+            .iter()
+            .find(|agent| agent.terminal)
+            .cloned()
+            .unwrap();
+        ui.open_in_glass(Pane::Agent(Some(agent.id.clone())), Open::Tab);
+        ui.open_in_glass(Pane::Terminal(agent.id.clone()), Open::Right);
+        ui.open_in_glass(Pane::Agent(Some(agent.id.clone())), Open::Tab);
+        let before = open_panes(&ui);
+        ui.open_terminal();
+        let after = open_panes(&ui);
+        assert_eq!(before.len(), after.len(), "{before:?} → {after:?}");
+        assert_eq!(
+            after
+                .iter()
+                .filter(|pane| **pane == Pane::Terminal(agent.id.clone()).key())
+                .count(),
+            1,
+            "{after:?}"
+        );
+        assert_eq!(ui.focused_pane(), Some(Pane::Terminal(agent.id)));
     }
 
     #[test]
@@ -5580,6 +7334,27 @@ mod tests {
         // A failure keeps it for the next try.
         ui.glass_saved(&local, sent[0].key(), Err("member restarting".into()));
         assert_eq!(ui.unsent_glass_writes(), sent);
+    }
+
+    #[test]
+    fn initial_subject_waits_for_a_restored_glass_then_opens_its_conversation_tab() {
+        let mut ui = glass();
+        let agent = ui.world.agents.items()[0].id.clone();
+        let before = tabs(&ui);
+        let mut subject = Some(agent.clone());
+        super::super::live::focus_initial_subject(&mut ui, &mut subject, true, false);
+        assert_eq!(tabs(&ui), before);
+        assert!(subject.is_some());
+        let world = ui.world.clone();
+        ui.glasses_from_graph(vec![graph_glass("0190-main", "r1", "main", &[WEEKLY])]);
+        ui.set_world(world);
+        super::super::live::focus_initial_subject(&mut ui, &mut subject, true, true);
+        assert_eq!(tabs(&ui).2, vec![vec![WEEKLY.to_owned(), format!("agent:{agent}")]]);
+        assert_eq!(ui.focus(), (1, Some(agent.clone())));
+        assert_eq!(ui.live_conversations()[0], agent);
+        assert!(!ui.editing);
+        assert!(ui.terminal.is_none());
+        assert!(subject.is_none());
     }
 
     #[test]
