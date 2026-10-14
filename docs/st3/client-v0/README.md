@@ -1872,12 +1872,12 @@ projection time of its cut.
 
 Before the missions list's first publication, and while its refresher fails three folds in a
 row or after it stops, missions windows fold on read and follow commits as before, until a fold
-publishes again. When projections are replaced without a claim (a replay, trim or heal), they
+publishes again. When projections are replaced without a claim (a replay or trim), they
 keep the newest rows, under their own cut, until the list's fold from nothing publishes.
 
 The work list is never folded on read while its refresher runs. Until it has a current
 publication (at startup, after its refresher withdrew it on three failed folds in a row, and
-after a replay, trim or heal until its fold from nothing publishes), a work window receives one
+after a replay or trim until its fold from nothing publishes), a work window receives one
 retryable `resync`, then waits for the list's next publication; neither commits, the reread
 interval nor a repeat of that answer sends it anything more. A paired session's clock still
 rechecks its grant meanwhile, and an expired or revoked grant ends the window. If the work
@@ -1887,7 +1887,7 @@ list's refresher stops for good, a work window receives one `error` frame and en
 `GET /v1/client/work` (the current list, not `history=true`) answers the same way. A first
 page is a slice of the newest publication, under that publication's snapshot. A continuation
 is a slice of the same publication, even after a newer one, a withdrawal or the refresher's end
-(new first pages then refuse), until its cursor expires or a replay, trim or heal replaced the
+(new first pages then refuse), until its cursor expires or a replay or trim replaced the
 projections behind it (`page-cursor-expired`). Asking for the same first page again reuses its
 cursor and its original expiry: a cursor close to expiring can still expire before its next page
 is read, and the client restarts from a first page. The daemon keeps at most 32 cached first pages,
@@ -1904,7 +1904,7 @@ comes, it answers HTTP 503, retryable, with `details.reason: "work-list-not-fres
 asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across every
 attempt. A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
 model, gets that retryable 503 until the work list's first fold after the daemon starts, and again
-after each replay, trim or heal and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
+after each replay or trim and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
 
 A daemon started with `ST3_PUBLISHED_LISTS=off` folds each window and page on read instead.
 
