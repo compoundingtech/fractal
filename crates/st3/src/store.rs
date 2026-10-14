@@ -81,7 +81,7 @@ use crate::model::{
 #[cfg(test)]
 use crate::model::{
     ReplicaEnvelope, ReplicaEnvelopeId, ReplicaRange, ReplicationBatch, ReplicationExchange,
-    ReplicationHealReport, ReplicationInventory, ReplicationReceipt, ReplicationResponse,
+    ReplicationInventory, ReplicationReceipt, ReplicationResponse,
 };
 use crate::model::{SeatQueueMoveRequest, SeatQueueMoveView, SeatQueueRunView, SeatQueueView};
 use crate::seat_queue::{self, Placement, QueueJoin, QueueMove, SeatStep};
@@ -100,7 +100,7 @@ use smallclaims::hash::{
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
-// The graph half of the store: the claim log, envelopes, replication, checkpoints, heals,
+// The graph half of the store: the claim log, envelopes, replication, checkpoints,
 // documents and blobs. Everything it exports is in scope here as it was before the carve.
 #[allow(unused_imports)]
 use smallclaims::sqlite::*;
@@ -3244,13 +3244,7 @@ impl Store {
 
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
         let smalltalk = Arc::new(SmalltalkRuntime::default());
-        #[cfg_attr(not(test), allow(unused_mut))]
-        let mut graph = GraphStore::open(path, origin, smalltalk.clone())?;
-        // Heals replay without waiting in this crate's tests.
-        #[cfg(test)]
-        {
-            graph.heal_replay_backoff_ms = 0;
-        }
+        let graph = GraphStore::open(path, origin, smalltalk.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
@@ -3277,13 +3271,7 @@ impl Store {
     /// contention returns `SQLITE_LOCKED` immediately instead of waiting.
     pub fn open_memory(origin: impl Into<String>) -> Result<Self> {
         let smalltalk = Arc::new(SmalltalkRuntime::default());
-        #[cfg_attr(not(test), allow(unused_mut))]
-        let mut graph = GraphStore::open_memory(origin, smalltalk.clone())?;
-        // Heals replay without waiting in this crate's tests.
-        #[cfg(test)]
-        {
-            graph.heal_replay_backoff_ms = 0;
-        }
+        let graph = GraphStore::open_memory(origin, smalltalk.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &smalltalk);
@@ -26850,13 +26838,12 @@ mod fleet_admission_tests {
         sync(&older, &current);
         assert!(admitted(&current, &local));
 
-        // Equal wire logs from different registries are not projection divergence and never heal.
+        // Equal wire logs from different registries are not projection divergence.
         for (from, to) in [(&current, &older), (&older, &current)] {
             let exchange = from.export_replication_summary(FLEET).unwrap();
-            let receipt = to
+            to
                 .receive_replication_exchange_asking(&from.origin, FLEET, &exchange, true)
                 .unwrap();
-            assert!(!receipt.heal);
             let status = to
                 .replication_status(true, Some(FLEET), std::slice::from_ref(&from.origin))
                 .unwrap();
@@ -26917,14 +26904,19 @@ mod fleet_admission_tests {
                 .hash
         );
         let exchange = current.export_replication_summary(FLEET).unwrap();
-        let receipt = upgraded
+        upgraded
             .receive_replication_exchange_asking("current", FLEET, &exchange, true)
             .unwrap();
-        assert!(!receipt.heal);
+        // The first sync settled on the equal log; matching builds do not reopen it to compare
+        // projections.
         let first_sync = upgraded.first_sync().unwrap().unwrap();
         assert_eq!(first_sync.state, "verified");
-        assert!(first_sync.authority_digest.is_none());
-        assert_eq!(first_sync.graph_digest, first_sync.peer_graph_digest);
+        assert_eq!(
+            first_sync.authority_digest.as_deref(),
+            Some(before.authority_digest.as_str())
+        );
+        assert!(first_sync.graph_digest.is_none());
+        assert!(first_sync.message.is_none());
         assert!(
             upgraded.replication_peer_sync(&["current".into()])["current"]
                 .graph_compared_at_unix_ms
@@ -35137,7 +35129,6 @@ pub(crate) fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &s
 mod tests {
     use super::*;
     use crate::graph::parse_test_intent as parse_intent;
-    use crate::model::{ReplicationHealAnswer, ReplicationHealQuery, ReplicationHealStep};
     use proptest::prelude::*;
 
     const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
@@ -37332,79 +37323,6 @@ agent "test/empty" { command "true" }
                 .unwrap()
                 .graph_digest,
             digest
-        );
-    }
-
-    #[test]
-    fn heal_invalidation_point_is_read_only_and_stays_at_one_committed_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(&directory.path().join("graph.db"), "node").unwrap());
-        store.apply_internal(&simple("true"), "heal/point").unwrap();
-        let read = || {
-            let statements = STATEMENTS_RUN.with(std::cell::Cell::get);
-            let point = store.replication_change_point().unwrap();
-            (
-                point,
-                STATEMENTS_RUN.with(std::cell::Cell::get) - statements,
-            )
-        };
-        let (first, small) = read();
-        {
-            let mut connection = store.connection.write();
-            let tx = connection.transaction().unwrap();
-            tx.execute("UPDATE desired SET revision='rolled-back'", [])
-                .unwrap();
-            tx.rollback().unwrap();
-        }
-        assert_eq!(
-            read().0,
-            first,
-            "rolled-back graph changes never invalidate committed answers"
-        );
-        store
-            .read_snapshot(|_| {
-                let before = store.replication_change_point()?;
-                let writer = store.clone();
-                std::thread::spawn(move || {
-                    let mut connection = writer.connection.write();
-                    let tx = connection.transaction().unwrap();
-                    for number in 0..3000 {
-                        append_claim_record_tx(
-                            &tx,
-                            "node",
-                            "agent/growth",
-                            "harness.observed",
-                            None,
-                            &json!({"fields":{"sequence":number}}),
-                            &[],
-                            None,
-                        )
-                        .unwrap();
-                    }
-                    tx.execute("UPDATE desired SET revision='committed-change'", [])
-                        .unwrap();
-                    tx.commit().unwrap();
-                })
-                .join()
-                .unwrap();
-                assert_eq!(
-                    store.replication_change_point()?,
-                    before,
-                    "point cannot mix the live graph generation with a preceding source cut"
-                );
-                Ok(())
-            })
-            .unwrap();
-        let (grown, large) = read();
-        assert!(grown.0 > first.0 && grown.1 > first.1);
-        assert_eq!(
-            small, large,
-            "invalidation does not enumerate peers, claims, envelopes or graphs"
-        );
-        assert_eq!(
-            read().0,
-            grown,
-            "the point read writes no observation or repair"
         );
     }
 
@@ -43280,10 +43198,9 @@ version 2
         summary
             .projection_digests
             .insert("step_runs".into(), "invented-previous-layout-table".into());
-        let receipt = controller
+        controller
             .receive_replication_exchange_asking("worker", TEST_FLEET, &summary, true)
             .unwrap();
-        assert!(!receipt.heal);
         let status = controller
             .replication_status(true, Some(TEST_FLEET), &["worker".into()])
             .unwrap();
@@ -45122,33 +45039,6 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
         );
     }
 
-    /// Drive one heal as a worker does: `asker` asks `peer` until the heal ends.
-    fn heal_between(
-        asker: &Store,
-        asker_name: &str,
-        peer: &Store,
-        peer_name: &str,
-    ) -> ReplicationHealReport {
-        heal_between_through(asker, peer_name, |query| {
-            peer.heal_answer(asker_name, query).unwrap()
-        })
-    }
-
-    fn heal_between_through(
-        asker: &Store,
-        peer_name: &str,
-        mut answer: impl FnMut(&ReplicationHealQuery) -> ReplicationHealAnswer,
-    ) -> ReplicationHealReport {
-        let mut query = ReplicationHealQuery::Ranges;
-        for _ in 0..48 {
-            match asker.heal_next(peer_name, answer(&query)).unwrap() {
-                ReplicationHealStep::Ask { query: next } => query = next,
-                ReplicationHealStep::Done { report } => return report,
-            }
-        }
-        panic!("the heal did not end");
-    }
-
     fn graph_digest_of(store: &Store) -> String {
         store
             .replication_status(true, Some(TEST_FLEET), &[])
@@ -45169,23 +45059,6 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
         (source, replica, failed)
     }
 
-    /// Delete the admitted claims about steps while keeping their envelopes, as a store that
-    /// lost admitted claims would, and project what is left.
-    fn lose_step_claims(store: &Store) -> u64 {
-        let lost = {
-            let connection = store.connection.lock().unwrap();
-            connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-            let lost = connection
-                .execute("DELETE FROM claims WHERE subject LIKE 'step-run/%'", [])
-                .unwrap();
-            connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
-            lost as u64
-        };
-        assert!(lost > 0);
-        store.replay_replication_graph().unwrap();
-        lost
-    }
-
     /// Put one step of every run on another attempt, as the carried-step lookup by batch did.
     fn misproject_a_step(store: &Store) {
         let connection = store.connection.lock().unwrap();
@@ -45199,104 +45072,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
     }
 
     #[test]
-    fn a_node_that_lost_claims_refetches_them_by_range_and_subject() {
-        let (source, replica, failed) = synced_takeover_pair();
-        let lost = lose_step_claims(&replica);
-        assert_ne!(graph_digest_of(&replica), graph_digest_of(&source));
-        assert_eq!(
-            replica.replication_inventory().unwrap().digest,
-            source.replication_inventory().unwrap().digest,
-            "the envelopes still match, so no exchange moves anything"
-        );
-
-        let report = heal_between(&replica, "replica", &source, "source");
-
-        assert!(report.healed, "{report:?}");
-        assert_eq!((report.refetched, report.pushed), (lost, 0));
-        assert_eq!(report.ranges, 1, "one writer range holds every claim");
-        assert!(
-            report.subjects >= 1 && report.subjects <= lost,
-            "{report:?}"
-        );
-        assert!(!report.replayed && !report.peer_replayed);
-        assert_eq!(graph_digest_of(&replica), graph_digest_of(&source));
-        let states = |store: &Store| {
-            let run = store.mission_run(&failed.id).unwrap().unwrap();
-            (
-                run.status,
-                run.steps
-                    .into_iter()
-                    .map(|step| (step.step, step.status, step.attempt))
-                    .collect::<Vec<_>>(),
-            )
-        };
-        assert_eq!(states(&replica), states(&source));
-    }
-
-    #[test]
-    fn a_node_pushes_the_claims_a_peer_lost_back_to_it() {
-        let (source, replica, _) = synced_takeover_pair();
-        let lost = lose_step_claims(&replica);
-
-        // The node that still holds the claims asks, as a dial-out peer's listener cannot.
-        let report = heal_between(&source, "source", &replica, "replica");
-
-        assert!(report.healed, "{report:?}");
-        assert_eq!((report.refetched, report.pushed), (0, lost));
-        assert_eq!(graph_digest_of(&replica), graph_digest_of(&source));
-    }
-
-    #[test]
-    fn nodes_that_project_the_same_claims_differently_replay_from_nothing() {
-        let (source, replica, _) = synced_takeover_pair();
-        misproject_a_step(&replica);
-        assert_ne!(graph_digest_of(&replica), graph_digest_of(&source));
-
-        let report = heal_between(&replica, "replica", &source, "source");
-        assert!(report.healed, "{report:?}");
-        assert_eq!((report.ranges, report.refetched, report.pushed), (0, 0, 0));
-        assert!(report.replayed && !report.peer_replayed, "{report:?}");
-        assert_eq!(graph_digest_of(&replica), graph_digest_of(&source));
-
-        // When the asker's graph already follows its claims, the peer replays.
-        misproject_a_step(&source);
-        let report = heal_between(&replica, "replica", &source, "source");
-        assert!(report.healed, "{report:?}");
-        assert!(report.replayed && report.peer_replayed, "{report:?}");
-        assert_eq!(graph_digest_of(&replica), graph_digest_of(&source));
-    }
-
-    #[test]
-    fn a_heal_starts_once_graphs_diverge_and_then_once_per_backoff() {
-        let start = 1_000_000_000;
-        let mut progress = PeerSyncProgress::default();
-        progress.compare_graphs(false, start);
-        assert!(
-            !progress.heal_due(start, false),
-            "one comparison can catch a peer mid-projection"
-        );
-        let diverged = start + REPLICATION_DIVERGED_AFTER_MS;
-        progress.compare_graphs(false, diverged);
-        assert!(progress.heal_due(diverged, false));
-        assert!(
-            !progress.heal_due(diverged + 1, false),
-            "one heal at a time"
-        );
-        // A heal that changed nothing waits twice as long before the next.
-        progress.finish_heal(&ReplicationHealReport::default());
-        assert!(!progress.heal_due(diverged + heal::HEAL_RETRY_MS, false));
-        assert!(progress.heal_due(diverged + 2 * heal::HEAL_RETRY_MS, false));
-        progress.compare_graphs(true, diverged + 3 * heal::HEAL_RETRY_MS);
-        assert!(!progress.heal_due(diverged + 4 * heal::HEAL_RETRY_MS, false));
-
-        // The end of a first sync heals at its first difference.
-        let mut first = PeerSyncProgress::default();
-        first.compare_graphs(false, start);
-        assert!(first.heal_due(start, true));
-    }
-
-    #[test]
-    fn a_first_sync_ends_by_checking_that_both_graphs_match() {
+    fn a_first_sync_ends_once_both_hold_the_same_claims() {
         let source = Store::open_memory("source").unwrap();
         failed_takeover_run(&source, &["deploy-check"]);
         let newcomer = Store::open_memory("newcomer").unwrap();
@@ -45309,15 +45085,14 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
         assert_eq!(
             newcomer.first_sync().unwrap().unwrap().state,
             "syncing",
-            "an exchange that stores envelopes compares nothing"
+            "an exchange that stores envelopes has not admitted them yet"
         );
 
         let summary = source.export_replication_summary(TEST_FLEET).unwrap();
-        let receipt = newcomer
+        newcomer
             .receive_replication_exchange_asking("source", TEST_FLEET, &summary, true)
             .unwrap();
 
-        assert!(!receipt.heal);
         let first = newcomer.first_sync().unwrap().unwrap();
         assert_eq!(first.state, "verified");
         assert_eq!(first.peer.as_deref(), Some("source"));
@@ -45325,82 +45100,34 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             first.envelopes,
             Some(source.replication_inventory().unwrap().envelopes.len() as u64)
         );
-        assert_eq!(first.graph_digest, Some(graph_digest_of(&source)));
-        assert_eq!(first.peer_graph_digest, first.graph_digest);
-        assert!(!first.healed);
+        assert_eq!(first.message, None);
     }
 
+    /// Projections are this node's own pure functions of its claims. A first sync that ends
+    /// with a graph unlike the peer's settles on the claims, records no defect, and neither
+    /// replays nor repairs either graph.
     #[test]
-    fn a_first_sync_that_ends_with_different_graphs_heals_at_once_or_fails() {
+    fn a_first_sync_with_a_different_graph_settles_on_claims_without_repair() {
         let (source, newcomer, _) = synced_takeover_pair();
         newcomer.begin_first_sync("source").unwrap();
         misproject_a_step(&newcomer);
+        let (newcomer_graph, source_graph) = (graph_digest_of(&newcomer), graph_digest_of(&source));
+        assert_ne!(newcomer_graph, source_graph);
         let summary = source.export_replication_summary(TEST_FLEET).unwrap();
-        let inbound = newcomer
-            .receive_replication_exchange("source", TEST_FLEET, &summary)
-            .unwrap();
-        assert!(
-            !inbound.heal,
-            "an exchange the peer started leaves the heal to this node"
-        );
-        let receipt = newcomer
-            .receive_replication_exchange_asking("source", TEST_FLEET, &summary, true)
-            .unwrap();
-        assert!(
-            receipt.heal,
-            "the end of a first sync does not wait to diverge"
-        );
-        let report = heal_between(&newcomer, "newcomer", &source, "source");
-        assert!(report.healed && report.replayed, "{report:?}");
-        let first = newcomer.first_sync().unwrap().unwrap();
-        assert_eq!((first.state.as_str(), first.healed), ("verified", true));
-        assert_eq!(first.graph_digest, Some(graph_digest_of(&source)));
-
-        // A newcomer whose graph no heal can match fails its first sync, and says why.
-        let (source, newcomer, _) = synced_takeover_pair();
-        newcomer.begin_first_sync("source").unwrap();
-        let unmatched = "f".repeat(64);
-        let mut summary = source.export_replication_summary(TEST_FLEET).unwrap();
-        summary.graph_digest = unmatched.clone();
-        summary.projection_digests.clear();
-        let receipt = newcomer
-            .receive_replication_exchange_asking("source", TEST_FLEET, &summary, true)
-            .unwrap();
-        assert!(receipt.heal);
-        let report = heal_between_through(&newcomer, "source", |query| {
-            match source.heal_answer("newcomer", query).unwrap() {
-                ReplicationHealAnswer::Ranges { ranges, .. } => ReplicationHealAnswer::Ranges {
-                    graph_digest: unmatched.clone(),
-                    projection_digests: Default::default(),
-                    ranges,
-                },
-                ReplicationHealAnswer::Replayed { replayed, .. } => {
-                    ReplicationHealAnswer::Replayed {
-                        replayed,
-                        graph_digest: unmatched.clone(),
-                        projection_digests: Default::default(),
-                    }
-                }
-                other => other,
-            }
-        });
-        assert!(!report.healed);
-        assert!(report.replayed && report.peer_replayed, "{report:?}");
-        let reason = report.unresolved.clone().unwrap();
-        assert!(
-            reason.contains("both replayed from nothing and still project different graphs"),
-            "{reason}"
-        );
+        for asks in [false, true] {
+            newcomer
+                .receive_replication_exchange_asking("source", TEST_FLEET, &summary, asks)
+                .unwrap();
+        }
         let status = newcomer
             .replication_status(true, Some(TEST_FLEET), &["source".to_owned()])
             .unwrap();
         let first = status.first_sync.unwrap();
-        assert_eq!(first.state, "failed");
-        assert_eq!(first.message.as_deref(), Some(reason.as_str()));
-        assert_eq!(first.peer_graph_digest.as_deref(), Some(unmatched.as_str()));
+        assert_eq!((first.state.as_str(), first.message), ("verified", None));
         assert_eq!(
-            status.peers[0].sync.as_ref().unwrap().heal.as_ref(),
-            Some(&report)
+            (graph_digest_of(&newcomer), graph_digest_of(&source)),
+            (newcomer_graph, source_graph),
+            "neither graph is replayed or repaired"
         );
     }
 
@@ -52735,7 +52462,7 @@ resource "receipt/file" {
         newest_first(&stepwise);
         newest_first(&reversed);
         assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
-        // A replay from nothing, as a heal runs, projects the same graph.
+        // A replay from nothing, as a restore runs, projects the same graph.
         stepwise.replay_replication_graph().unwrap();
         reversed.replay_replication_graph().unwrap();
         sync(&late);
@@ -52784,7 +52511,7 @@ resource "receipt/file" {
             );
         };
         // The newest envelope arrives before the older ones, so the target rebuilds the run tree
-        // it reaches out of order; then it replays from nothing, as a heal does.
+        // it reaches out of order; then it replays from nothing, as a restore does.
         let replay = |source: &Store, target: &Store| {
             let mut older = exchange_from(source, &target.replication_inventory().unwrap());
             let newest = older.envelopes.split_off(older.envelopes.len() - 1);
