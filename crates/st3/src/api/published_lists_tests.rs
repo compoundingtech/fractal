@@ -1559,3 +1559,34 @@ fn a_warm_fold_probes_only_the_named_runs_of_the_seats_it_reads() {
     assert!(crate::store::named_run_probes() > probes, "B's named run probed");
     fold_work_checked(&store);
 }
+
+/// A mission's presentation reads its gates and the agents its steps name, so a change to either
+/// refolds exactly the missions that read it.
+#[test]
+fn gate_and_agent_changes_refold_the_missions_that_read_them() {
+    use st3_ui_model::missions::Gate;
+    let gate = |mission: &str| Gate { mission: mission.into(), step: None, person: "person/avery".into() };
+    assert_eq!(
+        missions_of_changed_gates(&[gate("mission/a"), gate("mission/b")], &[gate("mission/b"), gate("mission/c")]),
+        ["mission/a".to_owned(), "mission/c".to_owned()].into_iter().collect()
+    );
+    let mut rows = MissionRows::default();
+    let card = |id: &str, step: Value| json!({"id": id, "run_details": [{"steps": [step]}]});
+    rows.cards.insert("mission/queued".into(), Arc::new(card("mission/queued", json!({"id": "step-run/q/next"}))));
+    rows.cards.insert("mission/claimed".into(), Arc::new(card("mission/claimed", json!({"id": "step-run/c/fix", "claimant": "agent/example/keeper"}))));
+    rows.cards.insert("mission/other".into(), Arc::new(card("mission/other", json!({"id": "step-run/o/x", "claimant": "agent/example/other"}))));
+    let roster = |cut, state: &str| {
+        RosterFleet::from_cards(cut, &[
+            json!({"id": "agent/example/keeper", "name": "Keeper", "state": state, "next_work_id": "step-run/q/next"}),
+            json!({"id": "agent/example/other", "name": "Other", "state": "running"}),
+        ])
+    };
+    let before = roster(1, "running");
+    assert!(missions_of_changed_agents(&rows, Some(&before), Some(&roster(2, "running"))).is_empty(), "nothing changed");
+    assert_eq!(
+        missions_of_changed_agents(&rows, Some(&before), Some(&roster(2, "stopped"))),
+        ["mission/claimed".to_owned(), "mission/queued".to_owned()].into_iter().collect(),
+        "the missions that queue on, or are claimed by, the agent that stopped"
+    );
+    assert_eq!(missions_of_changed_agents(&rows, None, Some(&before)).len(), 3, "a first roster presents every card");
+}

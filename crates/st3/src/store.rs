@@ -3214,6 +3214,9 @@ fn agent_resources_entry_hits(
         }
 }
 
+/// The runs that wait on a person, and the open human gates among them.
+pub(crate) type HumanAttention = (BTreeSet<String>, Vec<st3_ui_model::missions::Gate>);
+
 impl Store {
     /// The explicitly registered keyed views for this graph. This getter performs no reads
     /// or installation; availability and source coverage must be checked in a snapshot.
@@ -3852,6 +3855,11 @@ impl Store {
     /// including a replacement at the same graph index after local activity or a deadline.
     pub(crate) fn subscribe_agent_roster(&self) -> tokio::sync::watch::Receiver<u64> {
         self.smalltalk.agent_roster_published.subscribe()
+    }
+
+    /// The revision `subscribe_agent_roster` follows, now.
+    pub(crate) fn agent_roster_revision(&self) -> u64 {
+        *self.smalltalk.agent_roster_published.borrow()
     }
 
     /// Queue selection changes at lease expiry even when the claim frontier is unchanged.
@@ -14851,9 +14859,31 @@ impl Store {
 
     /// Current runs waiting on person steps, human gates or approvals.
     pub fn human_attention_runs(&self) -> Result<BTreeSet<String>> {
+        Ok(self.human_attention()?.0)
+    }
+
+    /// The runs that wait on a person, with the open human gates among them: each gate's
+    /// mission, the step it holds when it holds one, and the person it waits on.
+    pub(crate) fn human_attention(&self) -> Result<HumanAttention> {
         let mut items = self.mission_run_attention_items(None)?;
+        let gates = items
+            .iter()
+            .filter(|item| item.kind == "human-gate")
+            .filter_map(|item| {
+                let mission = item.mission.as_deref()?;
+                Some(st3_ui_model::missions::Gate {
+                    mission: if mission.starts_with("mission/") {
+                        mission.to_owned()
+                    } else {
+                        format!("mission/{mission}")
+                    },
+                    step: item.step.clone(),
+                    person: item.person.clone(),
+                })
+            })
+            .collect();
         items.extend(self.person_attention_items(None, now_ms())?);
-        Ok(items.into_iter().filter_map(|item| item.mission_run).collect())
+        Ok((items.into_iter().filter_map(|item| item.mission_run).collect(), gates))
     }
 
     /// The attention items that belong to a mission run: gate reviews, launch approvals and
