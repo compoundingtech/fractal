@@ -151,6 +151,11 @@ pub(super) fn agent_state(
             Some("unauthenticated" | "needs-login") => {
                 "Waiting for you — attach to sign in to the agent's provider.".into()
             }
+            // st withdraws an idle report it has not heard renewed in 90 s (idle seats renew every
+            // five minutes): nothing is known to be waiting on a person.
+            Some("indeterminate") => {
+                "Quiet — st has no current report from the agent's harness; an idle agent reports every few minutes. Attach to inspect.".into()
+            }
             _ => "Waiting for you — attach to inspect what the agent needs.".into(),
         },
         _ => match harness {
@@ -345,6 +350,8 @@ mod tests {
             ),
             ("starting", Some("starting"), "initializing"),
             ("waiting", Some("needs-login"), "Waiting for you"),
+            ("waiting", Some("blocked"), "Waiting for you"),
+            ("waiting", Some("indeterminate"), "Quiet — st has no current report"),
             ("failed", None, "Could not start"),
             ("down", None, "Down — st sees no running session"),
         ] {
