@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { nativePushPorts, pushFetch, PUSH_REQUEST_TIMEOUT_MS } from './pushNative.ts';
+import { nativePushPorts, pushWrite, PUSH_REQUEST_TIMEOUT_MS } from './pushNative.ts';
 
 const storage = { readEnabled: async () => false, writeEnabled: async () => {} };
 
@@ -56,11 +56,10 @@ test('native adapter captures direct iOS tokens and releases its change subscrip
 test('push-only request deadline aborts a stalled transport without exposing request bytes', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let signal;
-  const fetch = pushFetch(async (_input, init) => {
-    signal = init.signal;
+  const pending = pushWrite(async abortSignal => {
+    signal = abortSignal;
     return new Promise(() => {});
   });
-  const pending = fetch('https://gateway.example/v1/client/push-registration', { method: 'POST', body: 'private-token-sentinel' });
   const rejected = assert.rejects(pending, error => /timed out/.test(error.message) && !error.message.includes('private-token-sentinel'));
   t.mock.timers.tick(PUSH_REQUEST_TIMEOUT_MS);
   await rejected;
@@ -70,9 +69,25 @@ test('push-only request deadline aborts a stalled transport without exposing req
 test('completed push requests clear their deadline', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let signal;
-  const response = new Response('{}');
-  const fetch = pushFetch(async (_input, init) => { signal = init.signal; return response; });
-  assert.equal(await fetch('https://gateway.example/v1/client/push-registration'), response);
+  const response = {};
+  assert.equal(await pushWrite(async abortSignal => { signal = abortSignal; return response; }), response);
   t.mock.timers.tick(PUSH_REQUEST_TIMEOUT_MS);
   assert.equal(signal.aborted, false);
+});
+
+test('push deadline includes response body decoding after the transport returns headers', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let signal, bodyStarted, finishBody;
+  const started = new Promise(resolve => { bodyStarted = resolve; });
+  const pending = pushWrite(async abortSignal => {
+    signal = abortSignal;
+    const response = new Response(new ReadableStream({ start(controller) { bodyStarted(); finishBody = () => controller.close(); } }));
+    return response.json();
+  });
+  const rejected = assert.rejects(pending, /timed out/);
+  await started;
+  t.mock.timers.tick(PUSH_REQUEST_TIMEOUT_MS);
+  await rejected;
+  finishBody();
+  assert.equal(signal.aborted, true);
 });

@@ -1119,6 +1119,7 @@ fn paired_session() -> ClientSession {
         actor: "person/avery/session/phone".into(),
         authority_actor: "person/avery".into(),
         pairing_grant: None,
+        pairing_issued_here: false,
         grant_expires_at: None,
         transport: "paired",
         custom_forms: false,

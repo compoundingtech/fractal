@@ -42,13 +42,14 @@ is at most 4096 bytes.
 
 ## Who may register
 
-Only a current paired session may call either command. The person and device come from the
-session, never from the body. Read-only pairings may register: a registration grants nothing.
-Anonymous callers, unpaired local Unix sessions, and expired or revoked pairings are refused.
+Only a current paired session on the member that issued its pairing may call either command.
+The person and device come from the session, never from the body. Read-only pairings may
+register: a registration grants nothing. Anonymous callers, local Unix sessions, pairings
+issued by another member, and expired or revoked pairings are refused.
 
 `GET /v1/client/capabilities` advertises `{"id": "push-registration", "version": 1}`. It is
-`granted` for a paired session and `unavailable` for a local session. Older servers omit it; a
-client that does not see it granted must not call these commands.
+`granted` for a paired session on its issuer and `unavailable` for local sessions and on other
+members. Older servers omit it; a client that does not see it granted must not call these commands.
 
 ## Storage
 
@@ -57,16 +58,18 @@ phone registers on every launch, as Apple asks, and a rotated token wins. `push.
 deletes it and returns `{"registered": false}`, also when nothing was registered.
 
 The registration lives in a local table on the member that issued the pairing. It is not a
-claim kind, so it is never written to the graph, never replicated to other members and never
-part of an export or snapshot. It survives a daemon restart.
+claim kind, so it never enters the graph, replication, graph exports or client snapshots.
+It survives a daemon restart; full local database backups must be treated as secret-bearing.
 
 ## Removal
 
-A registration never outlives its pairing:
+Registration eligibility never outlives its pairing:
 
 - `pairing.revoke` deletes the pairing's registration in the same step.
 - A revocation that reaches the member later by replication deletes it too.
-- An expired pairing's registration is deleted, and expired or revoked sessions cannot register.
+- Expiry immediately prevents registration and hides the registered summary. Independent
+  cleanup deletes expired rows on daemon startup and within 30 seconds while running, without
+  needing an attention reader or a device window.
 - "Forget this device" on the phone unregisters first, best effort, before deleting its
   credentials.
 

@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const configure = require('./app.config.js');
 const baseline = require('./app.json').expo;
 const withoutPush = require('./plugins/withoutPush.js');
-const withNotifications = require('expo-notifications/app.plugin.js');
+const withNotifications = require('expo-notifications/app.plugin.js').default;
 
 test('only ST_IOS_PUSH=1 selects the notification plugin; default leaves iOS config unchanged', () => {
   const saved = process.env.ST_IOS_PUSH;

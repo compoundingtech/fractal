@@ -5,15 +5,15 @@ import type { PushPorts } from './pushRegistration';
 
 export const PUSH_REQUEST_TIMEOUT_MS = 8_000;
 
-/** Push writes must not keep Forget waiting indefinitely; this deadline is isolated from other I/O. */
-export const pushFetch = (inner: typeof fetch): typeof fetch => async (input, init) => {
+/** Bound the complete push write (including response decoding), so Forget can delete credentials. */
+export const pushWrite = async <T>(request: (signal: AbortSignal) => Promise<T>): Promise<T> => {
   const abort = new AbortController();
   let clearDeadline = () => {};
   const deadline = new Promise<never>((_, reject) => {
     const timer = setTimeout(() => { abort.abort(); reject(new Error('Push registration request timed out.')); }, PUSH_REQUEST_TIMEOUT_MS);
     clearDeadline = () => clearTimeout(timer);
   });
-  try { return await Promise.race([inner(input, { ...init, signal: abort.signal }), deadline]); }
+  try { return await Promise.race([request(abort.signal), deadline]); }
   finally { clearDeadline(); }
 };
 

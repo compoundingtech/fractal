@@ -67,6 +67,23 @@ fn device_push_summary_is_omitted_on_nonissuer_members() {
     assert!(resources[0].get("push").is_none());
 }
 
+#[test]
+fn push_registration_capability_is_granted_only_on_the_pairing_issuer() {
+    let root = tempfile::tempdir().unwrap();
+    let state = tests::test_state_named(root.path(), "push-device-test");
+    pair(&state);
+    let mut grant = state.store.claims_for_subject_kind_at(
+        GRANT, "custom.client.pairing-completed", None, true, 1,
+    ).unwrap().claims.remove(0);
+    let session = paired_client_session(&state, &grant, "fabric-loopback", false).unwrap();
+    let capability = capabilities(&session).into_iter().find(|entry| entry["id"] == "push-registration").unwrap();
+    assert_eq!(capability["state"], "granted");
+    grant.origin = "another-member".into();
+    let session = paired_client_session(&state, &grant, "fabric-loopback", false).unwrap();
+    let capability = capabilities(&session).into_iter().find(|entry| entry["id"] == "push-registration").unwrap();
+    assert_eq!(capability["state"], "unavailable");
+}
+
 #[tokio::test]
 async fn push_secret_expiry_cleanup_runs_at_startup_without_any_attention_reader() {
     let root = tempfile::tempdir().unwrap();

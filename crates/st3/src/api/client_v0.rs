@@ -2704,6 +2704,8 @@ pub(super) struct ClientSession {
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
     pub(super) pairing_grant: Option<String>,
+    /// Local-only push registrations belong to the member that issued this exact pairing.
+    pub(super) pairing_issued_here: bool,
     grant_expires_at: Option<u128>,
     pub(super) transport: &'static str,
     pub(super) custom_forms: bool,
@@ -2718,6 +2720,7 @@ impl ClientSession {
             actor: actor.into(),
             authority_actor: authority_actor.into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             transport,
             custom_forms: true,
@@ -2753,6 +2756,7 @@ impl ClientSession {
                 actor: "client/local/read-only".into(),
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
+                pairing_issued_here: false,
             grant_expires_at: None,
                 transport: "unix",
                 custom_forms,
@@ -2769,6 +2773,7 @@ impl ClientSession {
             actor: person.into(),
             authority_actor: person.into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             transport: "unix",
             custom_forms,
@@ -2782,6 +2787,7 @@ impl ClientSession {
             actor: "client/pairing/completion".into(),
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             transport: "fabric-loopback",
             custom_forms: false,
@@ -2852,7 +2858,7 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
-    capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_grant.is_some() && session.transport != "unix" {"granted"} else {"unavailable"}}));
+    capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_issued_here && session.transport != "unix" {"granted"} else {"unavailable"}}));
     capabilities
 }
 
@@ -3004,6 +3010,7 @@ fn paired_client_session(
         actor: actor.into(),
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
+        pairing_issued_here: paired.origin == state.store.origin(),
         grant_expires_at: Some(expires_at),
         transport,
         custom_forms,
@@ -22273,6 +22280,7 @@ mission "example/zero-run" state="ready" {
             actor: "person/alex/session/device-one".into(),
             authority_actor: "person/alex".into(),
             pairing_grant: None,
+            pairing_issued_here: false,
             grant_expires_at: None,
             transport: "paired",
             custom_forms: false,

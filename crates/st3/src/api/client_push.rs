@@ -14,11 +14,11 @@ fn unavailable() -> ApiError {
 }
 
 fn paired(session: &ClientSession) -> Result<&str, ApiError> {
-    session.pairing_grant.as_deref().filter(|_| session.transport != "unix")
+    session.pairing_grant.as_deref().filter(|_| session.pairing_issued_here && session.transport != "unix")
         .ok_or_else(|| ApiError {
             status: StatusCode::FORBIDDEN,
             code: "forbidden".into(),
-            message: "push registration requires a current authenticated paired session".into(),
+            message: "push registration requires a current authenticated paired session issued by this member".into(),
             details: Box::default(),
         })
 }

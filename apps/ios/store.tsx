@@ -33,7 +33,7 @@ import { sidebarArrangement, uuid7 } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
-import { nativePushPorts, pushFetch } from './pushNative';
+import { nativePushPorts, pushWrite } from './pushNative';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -253,10 +253,11 @@ function useAppStore(proof?: FabricProfile) {
   const pushGranted = !proof && capsClient.current === client && !!caps?.capabilities.some(capability => capability.id === 'push-registration' && capability.version >= 1 && capability.state === 'granted');
   const pushRemote = useMemo<PushRemote | undefined>(() => {
     if (!connectUrl) return;
-    const remote = new St3Client({ baseUrl: connectUrl, credential: () => credential ?? undefined, fetchImpl: pushFetch(gatewayFetch()), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) });
+    // Bind one write's abort signal through response decoding; it cannot abort the next write.
+    const remote = (signal: AbortSignal) => new St3Client({ baseUrl: connectUrl, credential: () => credential ?? undefined, fetchImpl: gatewayFetch((input, init) => fetch(input, { ...init, signal })), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) });
     return {
-      register: async request => (await remote.pushRegister(request)).value,
-      unregister: async () => (await remote.pushUnregister()).value,
+      register: request => pushWrite(async signal => (await remote(signal).pushRegister(request)).value),
+      unregister: () => pushWrite(async signal => (await remote(signal).pushUnregister()).value),
     };
   }, [connectUrl, credential]);
   const subscribePush = useCallback((changed: () => void) => {

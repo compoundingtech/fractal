@@ -126,7 +126,7 @@ function NotificationsSetting() {
   const detail = !pushInfo.loaded ? 'Checking notification support…'
     : !pushInfo.environment ? 'Requires a push-enabled build on a physical iPhone.'
     : status !== 'online' ? 'Connect to your paired member to register. Turning off is saved on this phone.'
-    : !pushInfo.granted ? 'This paired member does not support push registration yet.'
+    : !pushInfo.granted ? 'Push registration is unavailable on this paired member.'
     : pushInfo.status === 'failed' ? 'Could not update registration. Reconnect or turn notifications off and on to try again.'
     : pushInfo.status === 'permission-denied' ? 'Allow notifications in iOS Settings, or turn this setting off.'
     : pushInfo.status === 'working' ? 'Updating registration…'

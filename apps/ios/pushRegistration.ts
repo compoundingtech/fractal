@@ -41,8 +41,8 @@ export type PushPorts = {
   version: string | null;
 };
 
-/** One phone-local lifecycle. Serialize writes so an in-flight register cannot win over opt-out.
- * Native acquisition is generation-fenced before sending; failed native/network errors are discarded.
+/** One phone-local lifecycle. Serialize writes so opt-out follows an already-sent register.
+ * Native acquisition is generation-fenced; failed transport writes reconcile on the next connection.
  */
 export class PushRegistrationLifecycle {
   private state: PushState = { enabled: false, loaded: false, status: 'idle' };
