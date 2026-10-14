@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A compact replication answer starts its differing-range listing by golden-ratio steps of the store's answer count, so a peer answered every few times still reaches every differing range instead of seeing the same few",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "No API or wire changes; only the order in which an answer lists differing ranges changes."},
+  "downtime": {"status": "none", "detail": "A daemon restart to install the build; no extra interruption."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swap back to the previous binary freely; nothing is persisted."}
+}
