@@ -1120,6 +1120,7 @@ fn paired_session() -> ClientSession {
         authority_actor: "person/avery".into(),
         pairing_grant: None,
         grant_expires_at: None,
+        assistant_write: None,
         transport: "paired",
         local_peer: false,
         custom_forms: false,

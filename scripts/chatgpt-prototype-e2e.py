@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real scratch daemon API + HTTP/stdio MCP exercise; never uses ambient st state."""
-import base64, json, os, pathlib, selectors, socket, sqlite3, subprocess, tempfile, time, urllib.request, urllib.error, urllib.parse
+import base64, concurrent.futures, json, os, pathlib, selectors, socket, sqlite3, subprocess, tempfile, time, urllib.request, urllib.error, urllib.parse
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BIN = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'tmp/target')) / 'debug'
 STATE = pathlib.Path(tempfile.mkdtemp(prefix='st-chatgpt-', dir=os.environ.get('TMPDIR')))
@@ -56,8 +56,8 @@ def cli(*args):
     if output.returncode: raise RuntimeError(output.stderr)
     return json.loads(output.stdout)
 
-def policy(grant, scopes=SCOPES, seconds=3600):
-    return local('/v1/client/assistant/grants/'+grant.split('/')[-1]+'/policy', {'api_version':API,'scopes':scopes,'expires_in_seconds':seconds,'disclosure_consent':True,'consent_evidence':'prototype scripted explicit disclosure consent','minimal_read_mode':'caller-bound-allow','recipient_allowlist':['agent/prototype.worker']})
+def policy(grant, scopes=SCOPES, seconds=3600, recipients=('agent/prototype.worker',)):
+    return local('/v1/client/assistant/grants/'+grant.split('/')[-1]+'/policy', {'api_version':API,'scopes':scopes,'expires_in_seconds':seconds,'disclosure_consent':True,'consent_evidence':'scripted explicit disclosure consent','minimal_read_mode':'caller-bound-allow','recipient_allowlist':list(recipients)})
 
 def pair(info, seconds=3600):
     challenge=local('/v1/client/pairings',{'api_version':API,'device_name':'Prototype ChatGPT','assistant_id':'assistant/chatgpt','scopes':READ_SCOPES,'expires_in_seconds':seconds,'disclosure_consent':True,'consent_evidence':'prototype scripted explicit disclosure consent'})['value']
@@ -84,6 +84,27 @@ def count_messages():
     with sqlite3.connect(STATE/'store.sqlite') as db:
         return db.execute("SELECT count(*) FROM claims WHERE kind='message.sent'").fetchone()[0]
 
+
+def arm_mutation_gate():
+    gate=STATE/'mutation-gate'
+    for name in ('hold','entered','release','done'):
+        (gate/name).unlink(missing_ok=True)
+    (gate/'hold').write_text('hold')
+
+def wait_mutation_gate(name):
+    deadline=time.monotonic()+20
+    while not (STATE/'mutation-gate'/name).exists():
+        if time.monotonic()>=deadline: raise RuntimeError('mutation scheduling gate did not signal '+name)
+        time.sleep(.005)
+
+def release_mutation_gate():
+    (STATE/'mutation-gate'/'hold').unlink(missing_ok=True)
+    (STATE/'mutation-gate'/'release').write_text('release')
+    wait_mutation_gate('done')
+
+def count_person_answers(subject):
+    with sqlite3.connect(STATE/'store.sqlite') as db:
+        return db.execute("SELECT count(*) FROM claims WHERE kind='work.person-done' AND subject=?", (subject,)).fetchone()[0]
 try:
     fixture=start([str(BIN/'examples/chatgpt_fixture'),str(STATE)],'fixture.log')
     ready(lambda:(STATE/'fixture.json').exists() and (STATE/'st3.sock').exists() and (STATE/'st3-client.sock').exists(),fixture)
@@ -175,6 +196,33 @@ try:
     answer_approval(pending)
     denied,error=mcp(endpoint,'st_alert_answer',stale)
     record('stale episode/fence rejected after approval',error,denied)
+    before=count_messages()
+    narrowed=dict(message_args,action_id='action/allowlist-race',idempotency_key='allowlist-race-key',fence={'snapshot_id':local('/v1/client/attention')['snapshot']['id']})
+    arm_mutation_gate()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future=executor.submit(mcp,endpoint,'st_message_send',narrowed)
+        wait_mutation_gate('entered')
+        policy(paired['grant']['id'],recipients=())
+        release_mutation_gate()
+        denied,error=future.result()
+    record('recipient removed after proposal before commit',error and count_messages()==before,denied)
+    policy(paired['grant']['id'])
+
+    expiry_detail,error=mcp(endpoint,'st_alert_get',{'alert_id':info['expiry_ask_id']})
+    expiry_ask=expiry_detail['value']
+    expiry_args=dict(arguments,action_id='action/approval-expiry',idempotency_key='approval-expiry-key',alert_id=expiry_ask['id'],episode=expiry_ask['episode'],fence={'snapshot_id':expiry_detail['snapshot']['id'],'subject_revisions':{expiry_ask['id']:expiry_ask['episode']}})
+    pending,error=mcp(endpoint,'st_alert_answer',expiry_args)
+    answer_approval(pending)
+    policy(paired['grant']['id'],seconds=2)
+    arm_mutation_gate()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future=executor.submit(mcp,endpoint,'st_alert_answer',expiry_args)
+        wait_mutation_gate('entered')
+        time.sleep(2.2)
+        release_mutation_gate()
+        denied,error=future.result()
+    record('expiry between proposal approval and execution',error and count_person_answers(info['expiry_ask_id'])==0,denied)
+    policy(paired['grant']['id'])
     stdio=subprocess.Popen(adapter_args+['--transport','stdio'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=open(STATE/'stdio.log','wb'),env=ENV,text=True,bufsize=1)
     PROCESSES.append(stdio)
     def stdio_rpc(request):
@@ -192,7 +240,15 @@ try:
     denied,error=mcp(endpoint,'st_agents_list')
     record('expired grant denied',error,denied)
     policy(paired['grant']['id'])
+    before=count_messages()
+    revoked_send=dict(message_args,action_id='action/revoke-unconfirmed',idempotency_key='revoke-unconfirmed-key',fence={'snapshot_id':local('/v1/client/attention')['snapshot']['id']})
+    arm_mutation_gate()
+    unconfirmed,error=mcp(endpoint,'st_message_send',revoked_send)
+    wait_mutation_gate('entered')
+    record('queued send returns unconfirmed',error and unconfirmed.get('daemon',{}).get('code')=='message-send-unconfirmed',unconfirmed)
     local('/v1/client/assistant/grants/'+paired['grant']['id'].split('/')[-1]+'/revoke',{},method='POST')
+    release_mutation_gate()
+    record('revoke between unconfirmed send and commit',count_messages()==before,{'message_claims_before':before,'message_claims_after':count_messages(),'worker_completed':True})
     denied,error=mcp(endpoint,'st_agents_list')
     record('revoked grant denied',error,denied)
     fixture.terminate();fixture.wait(timeout=10)

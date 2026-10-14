@@ -626,7 +626,26 @@ impl Store {
         input: &PersonStepResponse,
         cancel: bool,
     ) -> Result<StepRunView, St3Error> {
+        self.finish_person_step_authorized(input, cancel, None)
+    }
+
+    pub(crate) fn finish_person_step_authorized(
+        &self,
+        input: &PersonStepResponse,
+        cancel: bool,
+        authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
+    ) -> Result<StepRunView, St3Error> {
+        if let Some(authorization) = authorization {
+            if authorization.scope != "read.assistant.attention" || authorization.approval_subject.is_none()
+                || authorization.owner != input.actor || cancel
+            { return Err(St3Error::new("forbidden", "assistant authorization does not bind this person answer")); }
+        }
+        #[cfg(feature = "test-support")]
+        let _gate = if authorization.is_some() { super::assistant_write_gate::pause()? } else { None };
         self.connection.batched(|tx| {
+            if let Some(authorization) = authorization {
+                super::assistant_write::authorize(tx, &self.origin, authorization)?;
+            }
             let subject = normalize_step_run(&input.subject);
             let mut view = step(tx, &subject).map_err(internal)?
                 .ok_or_else(|| St3Error::new("missing-step-run", "the person step does not exist"))?;

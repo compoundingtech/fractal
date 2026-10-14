@@ -13448,6 +13448,7 @@ fn check_device_signature(
     Ok(())
 }
 
+#[cfg(test)]
 fn accept_message(
     state: &AppState,
     request: MessageSendRequest,
@@ -13466,7 +13467,7 @@ fn accept_message_receipt(
     session_id: Option<String>,
     device_signature: Option<smallclaims::principal::ClaimSignature>,
 ) -> Result<MessageSendReceipt, ApiError> {
-    accept_message_receipt_with_upload_owner(state, request, session_id, device_signature, None)
+    accept_message_receipt_with_upload_owner(state, request, session_id, device_signature, None, None)
 }
 
 fn accept_message_receipt_with_upload_owner(
@@ -13475,6 +13476,7 @@ fn accept_message_receipt_with_upload_owner(
     session_id: Option<String>,
     device_signature: Option<smallclaims::principal::ClaimSignature>,
     upload_owner: Option<&str>,
+    assistant_authorization: Option<&crate::store::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<MessageSendReceipt, ApiError> {
     if request.from.starts_with("external/") && upload_owner.is_none() {
         return Err(ApiError::bad(St3Error::new(
@@ -13708,7 +13710,10 @@ fn accept_message_receipt_with_upload_owner(
     // A repeated key returns the first claim and says it appended nothing.
     let (record, appended) = match &device_signature {
         Some(signature) => state.store.append_signed_message(&input, signature),
-        None => state.store.append_claim_outcome(&input),
+        None => match assistant_authorization {
+            Some(authorization) => state.store.append_assistant_claim_outcome(&input, authorization),
+            None => state.store.append_claim_outcome(&input),
+        },
     }
     .map_err(|error| {
         if let Some(staged) = staged.as_ref() {

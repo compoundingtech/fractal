@@ -2641,6 +2641,7 @@ pub(super) struct ClientSession {
     /// person and device key share an actor, so only this subject names the exact grant.
     pub(super) pairing_grant: Option<String>,
     grant_expires_at: Option<u128>,
+    assistant_write: Option<crate::store::assistant_write::AssistantWriteAuthorization>,
     pub(super) transport: &'static str,
     /// Server-established harness or local peer provenance, never a client header.
     pub(super) local_peer: bool,
@@ -2657,6 +2658,7 @@ impl ClientSession {
             authority_actor: authority_actor.into(),
             pairing_grant: None,
             grant_expires_at: None,
+            assistant_write: None,
             transport,
             local_peer: false,
             custom_forms: true,
@@ -2693,6 +2695,7 @@ impl ClientSession {
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
             grant_expires_at: None,
+                assistant_write: None,
                 transport: "unix",
                 local_peer: false,
                 custom_forms,
@@ -2710,6 +2713,7 @@ impl ClientSession {
             authority_actor: person.into(),
             pairing_grant: None,
             grant_expires_at: None,
+            assistant_write: None,
             transport: "unix",
             local_peer: false,
             custom_forms,
@@ -2724,6 +2728,7 @@ impl ClientSession {
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
             grant_expires_at: None,
+            assistant_write: None,
             transport: "fabric-loopback",
             local_peer: false,
             custom_forms: false,
@@ -2967,6 +2972,7 @@ fn paired_client_session(
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
         grant_expires_at: Some(expires_at),
+        assistant_write: None,
         transport,
         local_peer: false,
         custom_forms,
@@ -10658,7 +10664,7 @@ async fn dispatch_action(
         "custom.reply" => {
             let result = state
                 .store
-                .reply_custom_subject(&crate::store::custom::ReplyRequest {
+                .reply_custom_subject_authorized(&crate::store::custom::ReplyRequest {
                     subject: parameter_string(p, "target_id")?,
                     registration: parameter_string(p, "registration")?,
                     revision: parameter_string(p, "revision")?,
@@ -10671,7 +10677,7 @@ async fn dispatch_action(
                     .map_err(|_| validation("reply fields must be an object"))?,
                     actor: authority_actor.clone(),
                     idempotency_key: request.idempotency_key.clone(),
-                })
+                }, session.assistant_write.as_ref())
                 .map_err(ApiError::bad)?;
             signal_changed(state);
             Ok(vec![result.subject])
@@ -10708,7 +10714,7 @@ async fn dispatch_action(
             let target = parameter_string(p, "target_id")?;
             let result = state
                 .store
-                .finish_person_step(
+                .finish_person_step_authorized(
                     &PersonStepResponse {
                         delegation: None,
                         subject: target,
@@ -10741,6 +10747,7 @@ async fn dispatch_action(
                             .transpose()?,
                     },
                     action == "work.cancel-ask",
+                    session.assistant_write.as_ref(),
                 )
                 .map_err(|error| {
                     if error.code == "forbidden" {
@@ -10761,7 +10768,7 @@ async fn dispatch_action(
             if let Some(session_id) = session_id.as_deref() {
                 validate_message_session(state, snapshot, &to, session_id)?;
             }
-            let result = accept_message(
+            let result = accept_message_receipt_with_upload_owner(
                 state,
                 MessageSendRequest {
                     idempotency_key: request.idempotency_key.clone(),
@@ -10797,8 +10804,10 @@ async fn dispatch_action(
                         })
                     })
                     .transpose()?,
+                None,
+                session.assistant_write.as_ref(),
             )?
-            .0;
+            .message;
             Ok(vec![result.subject])
         }
         "message.read" | "message.close" => {
@@ -21883,6 +21892,7 @@ mission "example/zero-run" state="ready" {
             authority_actor: "person/alex".into(),
             pairing_grant: None,
             grant_expires_at: None,
+            assistant_write: None,
             transport: "paired",
             local_peer: false,
             custom_forms: false,

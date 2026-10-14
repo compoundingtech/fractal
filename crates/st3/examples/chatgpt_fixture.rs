@@ -7,6 +7,7 @@ use st3::{api::AppState,store::Store,model::{ClaimInput,PersonAskRequest}};
 async fn main() -> anyhow::Result<()> {
     let root=PathBuf::from(std::env::args().nth(1).expect("explicit scratch state directory"));
     std::fs::create_dir_all(&root)?;
+    st3::store::assistant_write_gate::install(&root.join("mutation-gate"))?;
     let store=Arc::new(Store::open(&root.join("store.sqlite"),"prototype")?);
     store.bind_fleet("3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69")?;
     store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate()?.0))?;
@@ -15,6 +16,8 @@ async fn main() -> anyhow::Result<()> {
     store.apply_internal(&intent,"prototype-seed")?;
     let ask=store.ask_person(&PersonAskRequest {legacy_request:None,person:"person/ada".into(),title:"Choose a prototype answer".into(),reason:"Exercise approved typed answer".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("prototype-ask".into()),incarnation:None,
         request:Some(json!({"version":1,"type":"choice","question":"Which option?","why_person":"The owner chooses.","answers":[{"id":"yes","label":"Yes","consequence":"Record yes."},{"id":"no","label":"No","consequence":"Record no."}]})),idempotency_key:"prototype-ask-seed".into()})?;
+    let expiry_ask=store.ask_person(&PersonAskRequest {legacy_request:None,person:"person/ada".into(),title:"Choose an expiry-test answer".into(),reason:"Exercise expiry after owner approval".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("expiry-ask".into()),incarnation:None,
+        request:Some(json!({"version":1,"type":"choice","question":"Which option?","why_person":"The owner chooses.","answers":[{"id":"yes","label":"Yes","consequence":"Record yes."},{"id":"no","label":"No","consequence":"Record no."}]})),idempotency_key:"expiry-ask-seed".into()})?;
     let home=root.join("home");
     let transcript=home.join(".codex/sessions/2026/10/14/prototype.jsonl");
     std::fs::create_dir_all(transcript.parent().unwrap())?;
@@ -33,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let local=root.join("st3.sock");let gateway=root.join("st3-client.sock");
     let app=st3::api::router(state.clone());let fabric=st3::api::fabric_router(state);
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    std::fs::write(root.join("fixture.json"),json!({"pairing_url":format!("http://{}",listener.local_addr()?),"ask_id":ask.subject,"session_id":format!("session/{}",&hex::encode(Sha256::digest(b"agent/prototype.worker:native-pty:prototype"))[..24])}).to_string())?;
+    std::fs::write(root.join("fixture.json"),json!({"pairing_url":format!("http://{}",listener.local_addr()?),"ask_id":ask.subject,"expiry_ask_id":expiry_ask.subject,"session_id":format!("session/{}",&hex::encode(Sha256::digest(b"agent/prototype.worker:native-pty:prototype"))[..24])}).to_string())?;
     tokio::try_join!(st3::api::serve_unix(&local,app),st3::api::serve_unix(&gateway,fabric.clone()),async {axum::serve(listener,fabric).await.map_err(anyhow::Error::from)})?;
     Ok(())
 }

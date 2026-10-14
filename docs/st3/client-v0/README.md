@@ -1156,7 +1156,7 @@ fails closed. Deployment owner identity is external configuration, never a hardc
 identity; public examples and tests use `person/operator`. Management routes are
 `GET /v1/client/assistant/grants/{id}`, `POST .../{id}/revoke`, and `POST .../{id}/policy`.
 Responses use the normal snapshot envelope with an `AssistantGrant` value. Policy updates
-increment the policy revision. The standalone ChatGPT prototype explicitly sets
+increment the policy revision. The standalone ChatGPT adapter requires
 `minimal_read_mode=caller-bound-allow`: the scoped bearer grant and its disclosure consent
 authorize reads without a per-read signature or approval key. Grant projections include exact
 scope, consent, issuer as a concrete `PersonId` and revoked status, never the bearer or credential
@@ -1179,22 +1179,29 @@ Capability discovery advertises `assistant.grants.v1` to the trusted-local confi
 and does not substitute ordinary person grants on older servers.
 
 The original slice-B proof-gated mode remains a legacy branch capability; the standalone
-prototype does not use it, does not send its proof header, and has no SCG dependency.
+adapter does not use it, does not send its proof header, and has no SCG dependency.
 In consent-at-grant mode, the same six scoped reads authorize against the current grant on
 every request and revalidate it immediately before returning the response. Envelope budgets
 default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
 `response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
 
-The prototype adds `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
+The adapter uses `attention-rich`, `missions-rich`, `agents-rich` and `attention-content`
 under `/v1/client/assistant/`. Rich pages include titles and alert question/options/evidence;
 the exact-alert reader binds an owner alert ID and episode. `POST .../propose` accepts only
 closed typed actions. `work.done` creates a daemon-owned structured owner ask whose digest
 binds the whole request, including alert ID, episode, option, fence and idempotency key. The
 owner answers with `st work done <approval-id> --as person/ada --answer approve --episode ...`;
 an identical MCP retry executes through the existing fenced, idempotent action path.
-`message.send` is low-risk: it requires its explicit grant scope, an exact owner-allowlisted
-agent recipient, and the ChatGPT confirmation card; it does not create another st approval.
-`custom.reply` is likewise grant-scoped at the daemon boundary.
+`message.send` is low-risk: it requires its explicit grant scope and an exact owner-allowlisted
+agent recipient. Its non-read-only tool annotation asks ChatGPT to show a confirmation card;
+the daemon does not treat the advisory card as execution authorization or create another
+st approval. `custom.reply` is likewise grant-scoped at the daemon boundary.
+
+Execution carries the original assistant grant and policy revision through the action worker.
+The message append, person-answer transaction, and custom-reply transaction recheck the
+authoritative grant, revocation, expiry, exact scope, policy revision, recipient, and owner
+approval where required. A worker that survives an unconfirmed-send timeout cannot use
+the owning person's unrestricted session to bypass a changed assistant policy.
 
 `crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
 Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.
@@ -1207,13 +1214,17 @@ paths return an empty 404.
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
 ```sh
-nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p st3-client-codegen && cargo build -j 2 -p st-chatgpt -p st3 --bin st-chatgpt --bin st3 --example chatgpt_fixture && python3 scripts/chatgpt-prototype-e2e.py'
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p st3-client-codegen && cargo build -j 2 -p st-chatgpt -p st3 --features st3/test-support --bin st-chatgpt --bin st3 --example chatgpt_fixture && cargo test -j 2 -p st-chatgpt && cargo test -j 2 -p st3 --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
 ```
 
 The script starts the repository API harness with its own persistent store, paired gateway,
 and invented `person/ada` owner; it writes evidence to `tmp/chatgpt-e2e-results.json` and
 terminates its processes. Real ChatGPT access remains human-gated: start the Secure MCP Tunnel
 with the intended personal Platform org/workspace association, then create the dev-mode app.
+The scripted race cases use a scheduling gate compiled only with `test-support`, installed
+by the isolated fixture. Normal and release daemon builds contain no gate. The Rust crate
+tests cover tool schemas, input validation, credential permissions, tunnel HTTP responses,
+and daemon API/transaction authorization independently of the script.
 
 
 ### Person declaration access

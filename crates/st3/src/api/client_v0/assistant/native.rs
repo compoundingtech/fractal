@@ -1,4 +1,4 @@
-//! Prototype: daemon-owned, durable approval asks; adapter holds only an assistant bearer.
+//! Daemon-owned approval asks and transaction-bound assistant write provenance.
 use super::*;
 
 pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(snapshot): Extension<ClientSnapshot>,
@@ -21,8 +21,18 @@ pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(sna
         return Err(forbidden("proposal scope is absent"));
     }
     let owner = owning_person(&state)?.to_owned();
+    let policy = effective(&state,&granted)?;
+    let authorization = crate::store::assistant_write::AssistantWriteAuthorization {
+        grant_subject: grant_subject.into(), actor: session.actor.clone(), owner: owner.clone(),
+        policy_revision: fields(&policy)?["policy_revision"].as_u64().ok_or_else(|| forbidden("assistant policy revision absent"))?,
+        scope: required_scope.into(),
+        recipient: if request.action_type == "message.send" { Some(parameter_string(&request.parameters,"to")?) } else { None },
+        approval_subject: None,
+    };
     if matches!(request.action_type.as_str(), "message.send" | "custom.reply") {
-        let policy = effective(&state,&granted)?;
+        if request.parameters.get("signature").is_some() {
+            return Err(forbidden("assistant writes cannot supply person signatures"));
+        }
         if request.action_type == "message.send" {
             let to = parameter_string(&request.parameters,"to")?;
             if !fields(&policy)?["recipient_allowlist"].as_array().is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&to))) {
@@ -31,6 +41,10 @@ pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(sna
         }
         let mut owner_session = ClientSession::local(Some(&owner))?;
         owner_session.actor = session.actor.clone();
+        owner_session.pairing_grant = current_session.pairing_grant.clone();
+        owner_session.grant_expires_at = current_session.grant_expires_at;
+        owner_session.assistant_write = Some(authorization);
+        drop(_guard);
         let result = super::super::action(State(state.clone()),Extension(snapshot),Extension(owner_session),Json(request)).await;
         audit(&state,"grant-authorized-write",&session.actor,session.transport,fields(&granted)?["grant_id"].as_str(),&result)?;
         return result;
@@ -49,6 +63,12 @@ pub(in crate::api) async fn propose(State(state): State<AppState>, Extension(sna
     // Execute via the same fenced, idempotent typed action path as the owner's CLI/UI.
     let mut owner_session = ClientSession::local(Some(&owner))?;
     owner_session.actor = session.actor.clone();
+    owner_session.pairing_grant = current_session.pairing_grant.clone();
+    owner_session.grant_expires_at = current_session.grant_expires_at;
+    owner_session.assistant_write = Some(crate::store::assistant_write::AssistantWriteAuthorization {
+        approval_subject: Some(subject), ..authorization
+    });
+    drop(_guard);
     let result = super::super::action(State(state.clone()),Extension(snapshot),Extension(owner_session),Json(request)).await;
     audit(&state,"approved-write",&session.actor,session.transport,fields(&granted)?["grant_id"].as_str(),&result)?;
     result

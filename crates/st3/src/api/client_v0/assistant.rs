@@ -292,6 +292,7 @@ fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: PRINCIPAL.into(),
         pairing_grant: Some(granted.subject.clone()),
         grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,
+        assistant_write: None,
         conversation_blocks:false, local_peer:false, scopes })
 }
 

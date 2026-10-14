@@ -2,6 +2,9 @@ mod trace_principal;
 #[cfg(test)]
 mod accountable_tests;
 pub mod custom;
+pub mod assistant_write;
+#[cfg(feature = "test-support")]
+pub mod assistant_write_gate;
 pub mod declarations;
 pub mod directive_notes;
 pub(crate) mod observer_subscription_detail;
@@ -11247,6 +11250,21 @@ impl Store {
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), St3Error> {
         self.graph.append_claim_outcome(input)
+    }
+
+    pub(crate) fn append_assistant_claim_outcome(
+        &self,
+        input: &ClaimInput,
+        authorization: &assistant_write::AssistantWriteAuthorization,
+    ) -> Result<(ClaimRecord, bool), St3Error> {
+        if input.kind != "message.sent" || authorization.scope != "write.assistant.messages"
+            || authorization.recipient.as_deref() != input.fields.get("to").and_then(Value::as_str)
+        { return Err(St3Error::new("forbidden", "assistant authorization does not bind this message")); }
+        #[cfg(feature = "test-support")]
+        let _gate = assistant_write_gate::pause()?;
+        let admission = |transaction: &Connection| assistant_write::authorize(transaction, &self.origin, authorization);
+        append_claim_with_commit_context(&self.graph, input, None, None, None, None,
+            ClaimCommitContext { admission: Some(&admission), signature: None })
     }
 
     #[cfg(test)]
