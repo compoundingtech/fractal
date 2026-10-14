@@ -10,6 +10,7 @@ use rusqlite::{Connection, Transaction};
 use serde_json::{Value, json};
 
 use super::checkpoint::{DropPlan, SealedSet};
+use super::checkpoint_staging::{CheckpointClaimFacts, StagedPlanner};
 use super::{ReplicatedClaimAdmission, Store, append_claim_record_tx};
 use crate::claim::{ClaimInput, ClaimRecord, ReplicaBatch};
 use crate::error::Error;
@@ -164,6 +165,19 @@ pub trait Runtime: Send + Sync {
 
     /// Decide what a checkpoint drops from `sealed`: a pure function of the sealed claims.
     fn plan_checkpoint_drops(&self, sealed: &SealedSet) -> DropPlan;
+
+    /// What the staged planner reads of one sealed claim's body, computed while the capture
+    /// holds the body. A runtime with no checkpoint rules reads nothing.
+    fn checkpoint_claim_facts(&self, _claim: &ClaimRecord) -> CheckpointClaimFacts {
+        CheckpointClaimFacts::default()
+    }
+
+    /// Decide what a checkpoint drops from a staged set, by marking its staged claims: the same
+    /// decision `plan_checkpoint_drops` makes from the set in memory. Marking nothing drops
+    /// nothing.
+    fn plan_staged_checkpoint_drops(&self, _planner: &StagedPlanner<'_>) -> Result<()> {
+        Ok(())
+    }
 
     /// Empty every projection, and every local table that refers to claims, on a copy of the
     /// store that a checkpoint proof is about to cut down to its sealed set.
