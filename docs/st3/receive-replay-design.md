@@ -4,8 +4,9 @@ Draft design for [#2861](https://github.com/compoundingtech/smalltalk/issues/286
 Rebuild a private projection, copy it into an unpublished generation in bounded pages,
 and publish that generation with a small transaction in the same database as the claim log.
 Receive acknowledges durable admission and reports projection pending; it never performs a
-full rebuild while retaining the live writer. Implementation requires storage and reader
-routing approval before changing the persisted format.
+full rebuild while retaining the live writer in the proposed activated path. Current behavior
+is unchanged until an approved conversion and capability gate. Implementation requires storage,
+reader routing and client contract approval.
 
 ## Source and reported incident
 
@@ -46,8 +47,8 @@ Choose staged generations with one atomic root publication. Reject two shortcuts
 
 1. Clearing live tables and committing successive rebuild batches exposes missing or mixed
    projections. Yielding between those batches does not make them readable.
-2. Building a scratch database and then copying all rows, renaming all live tables, rebuilding
-   their indexes, or replacing the database file under one final writer merely moves the
+2. Building a scratch database and then copying all rows, rebuilding populated indexes,
+   or replacing the database file under one final writer merely moves the
    unbounded work to publication. Replacing the database also risks losing concurrently
    admitted claims and local operational state.
 
@@ -57,15 +58,40 @@ atomic across a set of attached databases; an attached scratch database plus a r
 not a durable cross-database swap. See [SQLite WAL limitations](https://www.sqlite.org/wal.html).
 
 The present flat tables have no generation selector or complete connection routing contract.
-There is no demonstrated format-free constant-work swap in this source. The proposed root,
-private generation namespaces, page cursors and complete mutation journal are persisted storage
-changes. The curator must take this recommendation and its mixed-build/rollback implications
-to Nathan before implementation or a format hold. No schema or rules version is reserved here.
-A docs-only commit does not grant those changes. Initial conversion may bind the existing flat
-tables as generation zero; it must not copy or add columns to every existing row during open.
-The complete logical table, trigger, digest and foreign-key routing still needs an audit before
-that can be a migration plan. Downgrade to a flat-table-only binary requires a separately
-qualified conversion or roll-forward decision, not merely swapping the executable.
+A format-free table-name swap is **unproved**, not shown impossible. The separable disposable
+spike in [the source audit](receive-replay-source-audit.md#disposable-table-name-swap-spike)
+checks global index names/`INDEXED BY`, ALTER rewrites, foreign keys/triggers/views, statement
+caches and populated cleanup. It is UNRUN. If the complete alternative is qualified, reconsider
+the storage decision instead of assuming generations are necessary. A quick rename alone is
+not a proof of the full publication hold or unchanged query semantics.
+
+The provisional generation design proposes persisted routing, root and journal state. Initial
+conversion might name existing flat tables as generation zero without copying every row, but
+the complete logical table, trigger, digest and foreign-key inventory must first be closed.
+No format-free constant-work swap or safe migration is demonstrated here.
+
+### Existing storage transition and fail-closed owner join
+
+At the pinned baseline, `st-storage-version::STORAGE_VERSION` is 19 and
+`smallclaims::store::reject_old_schema` rejects a nonempty database above that supported version.
+[#2390](https://github.com/compoundingtech/smalltalk/pull/2390) proposes the existing 19→20
+signature-candidate transition and fleet format hold; it is not a landed generation-routing
+capability. Join its storage owner and curator's Nathan decision before proposing activation.
+Reuse that reviewed transition/hold if it can carry this format safely; reserve no second bump.
+
+The required gate is stronger than rejecting version 20 in an old version-19 binary: every
+binary allowed to open an active nonzero generation must understand and enforce its routing
+marker before any read, mutation, schema maintenance or recovery. A flat-only version-20 binary
+would not fail closed merely because `user_version` remains 20. Its exclusion/refusal must be
+proved in the combined owner plan; no existing marker or compatibility guarantee is assumed.
+Until that join is resolved, nonzero activation is forbidden. Do not silently introduce another
+version or lower a marker to admit an old binary.
+
+Before an approved conversion, the current receive/full-replay path is unchanged. Once activated,
+an unavailable or failed stage cannot escape into inline live replay. Disabling a feature flag
+after conversion does not make a flat-only binary safe. Downgrade requires an explicitly reviewed
+conversion or forward recovery; snapshots, fleet ordering and old-binary refusal are part of the
+format decision. Existing projection rows and incident divergence are not repaired by this note.
 
 A bounded resumable rebuild remains an alternative **only** if it receives the same unpublished
 namespace and visibility fence. Rebuilding in place while declaring the graph unavailable
@@ -102,6 +128,58 @@ counts/bytes, output manifest and refusal reason. Each scratch page and its curs
 atomically. Only complete certified capture can enter the build phase. Every material source
 change outside the certificate invalidates it; ordinary later admissions are handled by the
 complete tail protocol below. A fixed capture target prevents endless chasing in one phase.
+
+## Proposed client contract
+
+At the baseline, `smallclaims::replication::ReplicationReceiveResponse` contains only `receipt`,
+`changed` and `store_index`. There is no emitted projection-pending field. `ApiError::into_response`
+currently emits `code`, `message` and `details`; unknown store codes are normally mapped to 422.
+The following shapes are proposed contract changes, not current behavior or generated models.
+
+For a read with no certified root, or an authority-dependent mutation refused **before admission**,
+propose HTTP 503 with the existing error envelope and this bounded value:
+
+```json
+{
+  "code": "projection-not-ready",
+  "message": "the certified projection is not ready",
+  "details": {
+    "retryable": true,
+    "applied": false,
+    "admission": "not-admitted",
+    "stage_id": "opaque-stage-id"
+  }
+}
+```
+
+`stage_id` is bounded metadata, not authority or an input oracle. Preserve the transport's
+request/snapshot metadata. Add an explicit 503 mapping rather than inheriting 422 accidentally.
+Clients may wait on a stage-change signal and repeat the **same idempotency key**. A read must
+not silently label an old cut as current. A mutation already admitted cannot return this
+`applied=false` refusal: retain/query its operation receipt and report pending completion;
+dropping the waiter neither cancels it nor grants a fresh attempt.
+
+For receive, propose an optional `projection` member alongside the unchanged receipt fields:
+
+```json
+{
+  "receipt": "existing typed receipt, unchanged",
+  "changed": false,
+  "store_index": 0,
+  "projection": { "state": "pending", "stage_id": "opaque-stage-id" }
+}
+```
+
+This is shape notation; the existing receipt remains its actual typed object. Proposed states
+are `pending`, `published` and `refused`; published includes the certified output cut/root,
+refused includes a fixed bounded reason, and pending never claims current projection authority.
+Admission acknowledgment is truthful in each case. Historical absence means projection status
+unknown, **not published**. Older peers/clients that cannot safely decode or represent the added
+state stay on the pre-activation capability path or refuse; do not silently send a new state to
+strict old decoders. Rust, Swift/iOS, TypeScript, CLI/peer relay and paired-contract handling need
+owner review, regenerated models and controls for historical absence, every state, invalid values,
+admitted-pending and not-admitted retry semantics. Put both contract changes in the same Nathan
+question as the proposed persisted generation format; this note implements neither.
 
 ## Generation state and concurrency
 
@@ -146,7 +224,9 @@ Use existing background fairness, releasing every page, rather than overriding p
 Every read and write that addresses a projected table needs a generation-binding contract.
 Existing raw SQL must be audited and routed; installing read-only views is insufficient for
 writers, foreign keys, custom reducers, triggers, digest maintenance and operational overlays.
-The generation inventory must include those dependencies and all `after_projection` work.
+The [counted source audit and demonstrated non-claim inputs](receive-replay-source-audit.md)
+include those dependencies and all `after_projection` work; dynamic routing and journal closure
+remain unqualified.
 No root can be sealed while any hook or logical table remains outside that inventory.
 
 ## Bounded publication and truthful reads
@@ -168,10 +248,16 @@ or drain an arbitrary backlog while retaining the writer.
 
 The final commit updates the active root, complete table/digest manifest, truthful projection
 frontier, fixed publication time and health together. Metadata has a fixed inventory/byte cap;
-if it does not fit, sealing refuses. It performs no row copy, full digest scan, reducer, cache
-construction or observer delivery. Post-commit notifications run after the writer guard returns.
-Caches and subscription frames carry the generation/cut; an old cache cannot label new source
-metadata as the same view. Current effect guards remain fresh and outside pinned read snapshots.
+if it does not fit, sealing refuses. It performs no row copy, full digest scan, reducer or cache
+construction. Existing bounded transaction finalizers and native committed-authority observers
+remain part of the native commit boundary: committed index updates precede synchronous observers,
+which finish before success acknowledgment; lent observers finish inside guard drop before the
+connection returns. Observer panic refuses acknowledgment and stops the writer. Charge their
+work and cleanup to the full acquired-to-returned hold and retain the parent permit until real
+callback/guard completion. Only deferred publication, subscription and effect notifications run
+after physical writer return. Caches and subscription frames carry the generation/cut; an old
+cache cannot label new source metadata as the same view. Current effect guards remain fresh and
+outside pinned read snapshots.
 
 A reader pins a certified root in its short SQL snapshot. It returns that view's own cut/time,
 which can precede the latest native admission. If none is qualified, it returns truthful retryable
@@ -205,7 +291,11 @@ A hold exceeding the qualified ceiling is retained as a failure, not hidden by r
 Bound scratch/candidate disk and retained-input bytes with an explicit owner quota before
 capture, cap per-page memory, and make WAL growth part of admission accounting. Exhaustion
 ends or pauses preparation with an actionable reason and keeps the old root. No default disk
-quota is selected without measured store sizes and storage-owner review. Old generations are
+quota is selected without measured store sizes and storage-owner review. Account for scratch,
+active/hidden/retired projections, retained inputs and WAL together. ZFS snapshots can retain
+retired blocks after SQLite deletion; cleanup completion does not prove byte reclamation.
+Coordinate the combined reserve with [#2849 sorter/read spill](https://github.com/compoundingtech/smalltalk/issues/2849)
+and the storage owner. Old generations are
 removed by resumable bounded key-range deletes, then a bounded empty-table retirement; DROP of
 a populated generation must not become the next long writer loan.
 
@@ -251,7 +341,7 @@ terminal outcomes, raw hold/VM/byte tuples and cleanup receipts separately.
 | Limits, disk pressure and cancellation | Bounded pages/refusal, actual writer/delegated cleanup, fair foreground progress, no inline fallback |
 | Admission dependency and lost wake | Current-thread and multithread parent/child permit sharing; 32 parked non-writing callbacks still let a 33rd mutation commit; wake in the Pending-to-wait gap retained |
 | Request disappearance | Dropping HTTP waiter preserves admitted mutation; pre-admission cancellation submits no callback; started child retains permit until physical completion/panic cleanup |
-| Staged proof and final acknowledgment | Scratch plan/proof finishes with live writer held and has no live-writer admission; acknowledgment follows the actual fenced native swap commit and retained result |
+| Staged proof and final acknowledgment | Scratch plan/proof finishes with live writer held and has no live-writer admission; acknowledgment follows the actual fenced native swap commit, retained result, finalizers and native authority observers; observer panic refuses acknowledgment |
 
 The full replay oracle belongs only to isolated qualification. It may not run as a live production
 read or final swap check. Cached digest equality alone is insufficient; the fixture also compares
@@ -295,9 +385,18 @@ Source references: [writer admission](https://github.com/compoundingtech/smallta
 [admission liveness](https://github.com/compoundingtech/smalltalk/blob/db44d827faf34aa0e88cf6bb92f60532ee0eca0a/docs/st3/writer-admission-liveness.md).
 The owner has no overlapping replay/format edit and supplied no native or implementation GO.
 Its required Linux gate negative remains adverse; isolated passes do not establish causal
-independence. This design does not waive that result or adopt the candidate as a landed API.
+independence. Bounding replay is independent of #2644 landing; worker admission is not a
+prerequisite workaround for the live writer defect. This design does not waive that result or
+adopt the candidate as a landed API.
 
-Intake reviews this design and the complete generation/input inventory first. The curator routes
+[#2859](https://github.com/compoundingtech/smalltalk/issues/2859) telemetry must land before
+implementation qualification, retaining the named guard and full acquired-to-returned hold.
+Telemetry alone neither diagnoses the reported request nor bounds replay.
+
+Intake reviews this design and the complete generation/input inventory first. F1/F3 experiment
+and interleaving results remain absent; the source recipes are dormant review inputs. Nathan
+routing is held until Intake-required decision evidence exists. A docs-only proposal may land
+without approving its storage or wire changes. The curator routes
 the persisted-generation recommendation and any format hold to Nathan. Only then can an
 implementation mission choose exact format/rules transitions, limits, conversion, mixed-build
 ordering, rollback and the control run. This note does not change runtime code, claim shapes,
