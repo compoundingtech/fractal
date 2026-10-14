@@ -2010,6 +2010,105 @@ command = ["evidence-sign"]
         .unwrap()
     }
 
+    fn program_tile_registry() -> Registry {
+        Registry::parse(
+            "[tiles.atlas]\nuid=1001\ngid=1001\nagent=\"agent/fleet/fixture/atlas\"\nperson=\"person/ada\"\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn program_and_tile_uid_collision_is_refused_with_readable_registry() {
+        for cgroup in [
+            "/system.slice/ci-evidence.service".to_owned(),
+            crate::tiles::registry::tools_cgroup("atlas"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let registry = program_tile_registry();
+            let gateway = Gateway::new(
+                config(root.path()),
+                1000,
+                None,
+                Box::new(TestKernel(cgroup)),
+            )
+            .unwrap()
+            .with_tiles(move || Ok(Some(registry.clone())));
+            let (server, _client) = UnixStream::pair().unwrap();
+            let error = gateway.connection_from_peer(&server, 7, 1001).unwrap_err();
+            assert!(format!("{error:#}").contains("both a person"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn unreadable_registry_keeps_program_unit_identity_without_tile_privilege() {
+        for (cgroup, expected_program) in [
+            ("/system.slice/ci-evidence.service".to_owned(), true),
+            (crate::tiles::registry::tools_cgroup("atlas"), false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let gateway = Gateway::new(
+                config(root.path()),
+                1000,
+                None,
+                Box::new(TestKernel(cgroup)),
+            )
+            .unwrap()
+            .with_tiles(|| anyhow::bail!("fixture registry unreadable"));
+            let (server, client) = UnixStream::pair().unwrap();
+            server
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let worker = std::thread::spawn(move || gateway.connection_from_peer(&server, 7, 1001));
+            protocol::send(&client, &Request::Hello { attestation: None }, &[]).unwrap();
+            let (reply, _) = protocol::recv::<Reply>(&client).unwrap().unwrap();
+            let Reply::Hello { caller, .. } = reply else {
+                panic!("expected Hello");
+            };
+            if expected_program {
+                assert_eq!(
+                    caller,
+                    CallerView::Program {
+                        program: "program/ci1/evidence".into(),
+                        person: "person/ada".into(),
+                    }
+                );
+            } else {
+                assert!(
+                    matches!(caller, CallerView::Unidentified { .. }),
+                    "{caller:?}"
+                );
+            }
+            drop(client);
+            worker.join().unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn tile_only_uid_is_refused_when_registry_is_unreadable() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = config(root.path());
+        config.programs.clear();
+        let gateway = Gateway::new(
+            config,
+            1000,
+            None,
+            Box::new(TestKernel(crate::tiles::registry::tools_cgroup("atlas"))),
+        )
+        .unwrap()
+        .with_tiles(|| anyhow::bail!("fixture registry unreadable"));
+        let (server, _client) = UnixStream::pair().unwrap();
+        let error = gateway.connection_from_peer(&server, 7, 1001).unwrap_err();
+        let reason = format!("{error:#}");
+        assert!(
+            reason.contains("read root's tile registry")
+                && reason.contains("fixture registry unreadable"),
+            "{reason}"
+        );
+    }
+
     #[test]
     fn program_enrollment_rejects_ambiguous_uid_principal_unit_and_command() {
         let root = tempfile::tempdir().unwrap();

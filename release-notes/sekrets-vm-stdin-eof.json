@@ -1,32 +1,32 @@
 {
   "version": 1,
-  "summary": "Close fixture stdin explicitly and bound program VM calls without accepting timeouts as refusals.",
+  "summary": "Bound sekrets VM stdin and add composed Program/tile caller refusal controls.",
   "replay": {
     "status": "none",
-    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+    "detail": "Test/docs only: explicit fixture stdin EOF, timeouts rejected as refusal results, and composed Program/tile UID and registry-error controls. No production caller, credential, storage or client contract change; native results remain unqualified."
   },
   "schema": {
     "status": "none",
-    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+    "detail": "Test/docs only: explicit fixture stdin EOF, timeouts rejected as refusal results, and composed Program/tile UID and registry-error controls. No production caller, credential, storage or client contract change; native results remain unqualified."
   },
   "rules": {
     "status": "none",
-    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+    "detail": "Test/docs only: explicit fixture stdin EOF, timeouts rejected as refusal results, and composed Program/tile UID and registry-error controls. No production caller, credential, storage or client contract change; native results remain unqualified."
   },
   "compatibility": {
     "status": "none",
-    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+    "detail": "Test/docs only: explicit fixture stdin EOF, timeouts rejected as refusal results, and composed Program/tile UID and registry-error controls. No production caller, credential, storage or client contract change; native results remain unqualified."
   },
   "downtime": {
     "status": "none",
-    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+    "detail": "Test/docs only: explicit fixture stdin EOF, timeouts rejected as refusal results, and composed Program/tile UID and registry-error controls. No production caller, credential, storage or client contract change; native results remain unqualified."
   },
   "manual": {
     "status": "none",
-    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+    "detail": "Test/docs only: explicit fixture stdin EOF, timeouts rejected as refusal results, and composed Program/tile UID and registry-error controls. No production caller, credential, storage or client contract change; native results remain unqualified."
   },
   "recovery": {
     "status": "none",
-    "detail": "VM fixture only: explicit stdin EOF and a bounded timeout rejected as a refusal result; no production caller, credential, storage or client contract change. Native VM outcome remains unqualified."
+    "detail": "Test/docs only: explicit fixture stdin EOF, timeouts rejected as refusal results, and composed Program/tile UID and registry-error controls. No production caller, credential, storage or client contract change; native results remain unqualified."
   }
 }

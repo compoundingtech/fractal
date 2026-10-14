@@ -39,6 +39,16 @@ or reused/exited original process does not inherit this grant. UIDs must be
 non-root and distinct from person mappings. Program names are literal three-part
 identities; no wildcard program enrollment/grant exists.
 
+With a readable root tile registry, a UID enrolled as both a Program and a tile
+is refused, even from the enrolled system unit. If that registry cannot be read,
+a configured Program is judged only by its exact system-unit and process-birth
+checks: a process in the tile slice is unidentified, not a Program or agent. A
+tile-only UID is refused when its registry cannot be read. Missing registry data
+does not enroll a tile or supply a grant. Existing tile classification is captured
+per connection; unlike Program requests, it has no per-request PID-start recheck.
+Transfer of a tile connection is an existing tile-boundary follow-up, not a
+newly qualified Program behavior.
+
 `command` is the **entire** accepted argv. Added flags, another script, a shell,
 login or profile-management request is refused. An explicit profile grant is also
 required; mapping to Ada does not give ownership of Nathan's profiles. Profile
