@@ -33,8 +33,10 @@ fn isolated_command(binary: &Path, root: &Path) -> Command {
     let mut command = Command::new(binary);
     command
         .env_clear()
-        // otelite's no-export child uses `env`; preserve only the executable search path.
+        // otelite's no-export child uses `env`. Daemon startup also needs the
+        // declared shell when the check account has no interactive login shell.
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .envs(std::env::var_os("SHELL").map(|shell| ("SHELL", shell)))
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("state"))
@@ -387,7 +389,6 @@ fn daemon_exports_allocator_heap_and_resident_memory() {
         .env("OTEL_METRIC_EXPORT_INTERVAL", "100")
         .env("OTEL_TRACES_EXPORTER", "none")
         .env("OTEL_LOGS_EXPORTER", "none")
-        .env("SHELL", std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
         .args(["run", "--out"])
         .arg(root.path().join("capture"))
         .args(["--protocol", "http/json", "--", "sh", "-c",
