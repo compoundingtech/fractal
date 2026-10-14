@@ -1,0 +1,63 @@
+{
+  "status": "proposed contract for source review; no executable repair or native qualification",
+  "base": "0faa8b2d4bb1773ce7d3b9728677478bd1ed8030",
+  "problem": "The predecessor when-idle policy counts a working agentless external hold as active work, preventing an additive successor while the unchanged predicate remains false.",
+  "preserved_policy": "A candidate cannot override the predecessor cutover policy. The existing hold is never completed, failed, released or reset to permit adoption.",
+  "proposed_admission": {
+    "proposal": "Current source generation, current candidate revision, draining status and every required approval must be rechecked in the adoption writer.",
+    "scope": "Only an exactly compatible working agentless step with no claimant, incarnation, lease, submitted worker result or person blocker can be a passive hold candidate.",
+    "predicate": "Require at least one immutable read-only graph predicate. Exclude mechanical, LLM, human and deadline gates; declarations, products, mission outputs, nested/used/after missions, loops and finally work. Effective interpolated predicate/dependency inputs must stay equal in the successor, not merely their authored hash.",
+    "runtime": "Require no selected owned declaration or active runtime in the declaring scope. Preserve active workers and all their leases. A nonterminal descendant blocks a passive-hold exception; pending descendants must not be cancelled as a consequence of that exception.",
+    "writer": "Recheck proposal, root/run/generation lifecycle, exact compatible scope and its attempt, assignment, readiness, backoff, results and lease state immediately before cutover publication. Unexpected storage errors remain errors; a now-busy drain is a truthful no-adoption result.",
+    "clock": "Admission and clock conservation are one repair. A predicate-only exception is not acceptable. A legacy working hold with no recoverable canonical clock cannot silently receive a fresh budget."
+  },
+  "proposed_clock_contract": {
+    "field": "A registered, bounded, versioned execution_clock object on step-run.carried, only for an actually carried agentless working scope.",
+    "capture": "Writer-current canonical source subject, attempt and cut after fresh proposal/scope checks. Do not copy an earlier enriched view.",
+    "contents": [
+      "original open interval start, if running",
+      "elapsed time in CLOSED intervals only",
+      "paused-until and spent-wait budget, when applicable",
+      "separate timeout extension budget",
+      "format/version and source attempt binding"
+    ],
+    "arithmetic": "StepTiming.elapsed includes the current running interval. Copying that total together with its old open start would double-count; store closed elapsed and let the successor fold add its open interval exactly once.",
+    "custody": "Keep source attribution, attempt, readiness, claimant absence and delivery/wake budgets. Do not fabricate a work.claimed event or a new runtime incarnation.",
+    "emitters": [
+      "adopt_mission_revision_inner",
+      "adopt_declared_mission_revision_tx"
+    ],
+    "reader": "The canonical timing fold and extension reader consume the registered seed. No polling, historical full scan, cross-subject unbounded replay or direct stored-state repair.",
+    "legacy": "Claims without the new field keep their existing interpretation. A missing or malformed seed is not permission to invent a start, restore an obsolete declaration or reset consumed budget.",
+    "dedupe": "Repeated request keys publish no new seed; repeated compatible revisions conserve the same accumulated clock and separate extension budget.",
+    "replay": "Successor clock, waited time and extension must survive canonical replication, reopen, replay, rollback and trimming. No old run or checkpoint is rewritten."
+  },
+  "required_contract_disposition": {
+    "claim_registry": "The existing carry claim schema is closed and has no clock fields. A new field requires an explicit registered schema change; it cannot be private optional metadata.",
+    "checkpoint": "Current subject timing proof considers work.* attempts and timing pairs. It must include pure agentless attempts and all new started/elapsed/wait/extension answers. Actual clock/checkpoint custody must be joined before changing rules or allocating a digest version.",
+    "mixed_builds": "Older members cannot admit an unregistered carry field or verify its changed timing semantics. Review and document the all-member publication/deployment requirement and rollback behavior; this design authorizes no deployment.",
+    "owner": "Existing launch ownership confirms no held clock/checkpoint edit, but has no named clock/checkpoint owner receipt. Absence of that receipt is not fleet-wide vacancy or contract approval.",
+    "review": "The existing source-review step must select the finite clock/schema/rules contract and source ownership before executable source and hosted qualification."
+  },
+  "controls": {
+    "qualified_baseline_only": [
+      "Authored private installed-binary daemon: unchanged working false external hold, exactly 12 draining samples, additive unrelated work absent, old when-idle policy retained despite candidate restart-active.",
+      "Independent private restart-active run: unchanged agentless working scope loses original start and spent elapsed at carry. This demonstrates the conservation boundary; it is not validation of proposed source."
+    ],
+    "authored_unrun": [
+      "Actual Store/reconciler compatible false-hold carry with execution start, elapsed, waited and extension conservation and no fabricated claimant.",
+      "Changed or generation-dependent hold predicate stays draining with no writes.",
+      "Pending review and active claimed work retain generation, status, incarnation and lease.",
+      "Nonterminal descendant remains intact, including pending work.",
+      "Private fixed-source native oracle permits unrelated work while the original hold stays false and its clock persists."
+    ],
+    "required_before_acceptance": [
+      "Both supported revision writers, repeated revision, review completion and stale/cancelled proposal negative cases.",
+      "Effectful gates, selected scope declarations, incompatible scope and actual private active-worker negative cases.",
+      "Late retry, reassignment, release, new descendant and changed input after capture: fresh writer refusal and no partial cutover.",
+      "Clock arithmetic, paused/spent-wait budget, extension conservation, retries and timeout at the original deadline.",
+      "Replica/reopen/replay/trim parity, malformed and legacy snapshots, exact request dedupe, checkpoint proof and mixed-build refusal."
+    ]
+  },
+  "alternative_if_contract_not_selected": "Keep the current when-idle drain boundary intact and preserve the held run. Use separately authorized independent work operationally. This is a design-only deferral with an unresolved defect, not executable repair, generic force, false hold completion or defect closure."
+}
