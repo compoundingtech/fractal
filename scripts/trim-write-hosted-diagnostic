@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""One hosted diagnostic cohort. No assertion changes, retry or production store input."""
+import ctypes, datetime, hashlib, json, os, pathlib, signal, subprocess, sys, time
+SOURCE='e9956673e61ef018cc3928818fe17c91fb36798f'
+TREE='d296f28ece1ebdf9d159c994966c44c3f7c5509f'
+CASE='store::tombstones_tests::a_trim_never_makes_a_write_wait_long'
+END=datetime.datetime(2026,10,14,22,25,tzinfo=datetime.timezone.utc).timestamp()
+root=pathlib.Path(os.environ['RUNNER_TEMP'])/'trim-write-hosted'
+root.mkdir(exist_ok=True)
+active=None; active_group=None; stop=False; reports=[]; cleanup_reports=[]; cleanup_deadlines={}
+# Reap only adopted descendants from each dedicated phase process group.
+
+def stamp(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
+def save(name,x): (root/name).write_text(json.dumps(x,indent=2)+'\n')
+def sha(path):
+ h=hashlib.sha256()
+ with open(path,'rb') as f:
+  for data in iter(lambda:f.read(1048576),b''):h.update(data)
+ return h.hexdigest()
+def check(args): return subprocess.check_output(args,text=True,timeout=15).strip()
+def terminate(sig,frame):
+ global stop
+ stop=True
+signal.signal(signal.SIGTERM,terminate);signal.signal(signal.SIGINT,terminate)
+def group_alive(pgid):
+ try:os.killpg(pgid,0);return True
+ except ProcessLookupError:return False
+
+def group_members(pgid):
+ members=[]
+ for p in pathlib.Path('/proc').iterdir():
+  if not p.name.isdigit():continue
+  try:
+   fields=(p/'stat').read_text().rsplit(')',1)[1].split()
+   if int(fields[2])==pgid:members.append({'pid':int(p.name),'parent':int(fields[1]),'session':int(fields[3]),'state':fields[0]})
+  except (FileNotFoundError,ProcessLookupError):continue
+ return members
+
+def close_owned_group(label):
+ global active_group
+ if active_group is None:return {'label':label,'closed':True,'group':None}
+ pgid=active_group;before=group_members(pgid)
+ deadline=cleanup_deadlines.setdefault(pgid,time.monotonic()+10)
+ # start_new_session gave this phase its own session/group. Never signal another session or a cache daemon group.
+ if any(p['session']!=pgid for p in before):
+  return {'label':label,'group':pgid,'closed':False,'error':'session identity mismatch; refused signal'}
+ for sig in (signal.SIGTERM,signal.SIGKILL):
+  if not group_alive(pgid):break
+  try:os.killpg(pgid,sig)
+  except ProcessLookupError:break
+  end=min(deadline,time.monotonic()+5)
+  while time.monotonic()<end:
+   if active is not None and active.pid==pgid and active.poll() is None:
+    try:active.wait(timeout=0.05)
+    except subprocess.TimeoutExpired:pass
+   # Subreaper adopts this phase's orphaned descendants. Reap only children in this owned group.
+   for p in group_members(pgid):
+    if p['parent']==os.getpid() and (active is None or p['pid']!=active.pid):
+     try:os.waitpid(p['pid'],os.WNOHANG)
+     except ChildProcessError:pass
+   if not group_alive(pgid):break
+   time.sleep(0.05)
+ closed=not group_alive(pgid);after=group_members(pgid)
+ receipt={'label':label,'group':pgid,'closed':closed,'before_count':len(before),'before':before[:64],'after_count':len(after),'after':after[:64],'signal_bound_seconds':10}
+ cleanup_reports.append(receipt);save('cleanup.json',cleanup_reports)
+ if closed:active_group=None
+ return receipt
+
+def diagnostic_samples(label,path):
+ try:
+  data=json.loads((root/path).read_text())
+  assert isinstance(data,dict) and set(data)=={'sample_limit','total_writes','longest_append_ns','samples'}
+  assert type(data['sample_limit']) is int and data['sample_limit']==20
+  total=data['total_writes'];maximum=data['longest_append_ns'];rows=data['samples']
+  assert type(total) is int and total>=0 and type(maximum) is int and maximum>=0
+  assert isinstance(rows,list) and len(rows)==min(total,20)
+  for i,row in enumerate(rows):
+   assert isinstance(row,list) and len(row)==2 and type(row[0]) is int and row[0]==i
+   assert type(row[1]) is int and 0<=row[1]<=maximum
+  if total<=20:assert max((row[1] for row in rows),default=0)==maximum
+  print(json.dumps({'diagnostic_label':label,'retained_samples':len(rows),'total_writes':total,'longest_append_ns':maximum,'scope':'first20 actual appends only; not every append if total>20'}),flush=True)
+  for ordinal,elapsed in rows:print(json.dumps({'diagnostic_label':label,'ordinal':ordinal,'append_ns':elapsed,'total_writes':total,'longest_append_ns':maximum}),flush=True)
+  return {'valid':True,'count':len(rows),'total_writes':total,'longest_append_ns':maximum}
+ except Exception as e:
+  result={'valid':False,'error':repr(e)};print(json.dumps({'diagnostic_label':label,'sample_error':result}),flush=True);return result
+def host():
+ return {'at':stamp(),'loadavg':pathlib.Path('/proc/loadavg').read_text().strip(),
+  'cpu':pathlib.Path('/proc/stat').read_text().splitlines()[0],
+  'memory':pathlib.Path('/proc/meminfo').read_text(),'disk':pathlib.Path('/proc/diskstats').read_text(),
+  'pressure':{k:pathlib.Path('/proc/pressure/'+k).read_text() for k in ('cpu','memory','io')},
+  'free_bytes':os.statvfs(root).f_bavail*os.statvfs(root).f_frsize}
+def phase(label,args,bound,samples=None):
+ global active,active_group
+ if stop or time.time()>=END:return None
+ env=dict(os.environ);env.pop('ST3_TRIM_WRITE_DIAGNOSTIC_FILE',None)
+ if samples:env['ST3_TRIM_WRITE_DIAGNOSTIC_FILE']=str(root/samples)
+ assert check(['git','rev-parse','HEAD'])==SOURCE
+ assert not check(['git','status','--porcelain','--untracked-files=no'])
+ started=time.time();reason='natural'
+ with open(root/(label+'.stdout'),'wb') as out,open(root/(label+'.stderr'),'wb') as err,open(root/(label+'.host.jsonl'),'w') as samples_out:
+  active=subprocess.Popen(args,env=env,stdout=out,stderr=err,start_new_session=True)
+  active_group=active.pid
+  while active.poll() is None:
+   context=host();samples_out.write(json.dumps(context)+'\n');samples_out.flush()
+   if stop or time.time()>=END or time.time()-started>=bound:
+    reason='phase_or_absolute_deadline_or_signal';close_owned_group(label+'-timeout');break
+   if context['free_bytes']<10*1024**3:
+    reason='sampled_free_disk_floor';close_owned_group(label+'-disk-stop');break
+   time.sleep(1)
+  closure=close_owned_group(label)
+  code=active.poll()
+  if code is not None:active=None
+ record={'label':label,'command':args,'start_unix':started,'end':stamp(),'exit':code,'reason':reason,'samples':samples,'sample_file_exists':bool(samples and (root/samples).exists())}
+ record['cleanup']=closure
+ if samples:record['sample_validation']=diagnostic_samples(label,samples)
+ reports.append(record);save('phases.json',reports)
+ print(json.dumps(record),flush=True)
+ if not closure['closed']:raise RuntimeError('owned process group did not close')
+ if reason!='natural':raise RuntimeError(reason)
+ return code
+try:
+ assert ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)==0, "cannot establish own child subreaper"
+ assert time.time()<END,'dated measurement window already closed'
+ assert check(['git','rev-parse','HEAD'])==SOURCE
+ assert check(['git','rev-parse','HEAD^{tree}'])==TREE
+ assert not check(['git','status','--porcelain','--untracked-files=no'])
+ tools={k:{'path':check(['which',k]),'version':check([k,'--version'])} for k in ('cargo','rustc','cargo-nextest')}
+ for tool in tools.values():tool['sha256']=sha(pathlib.Path(tool['path']).resolve())
+ save('runtime.json',{'at':stamp(),'head':SOURCE,'tree':TREE,'original':'f51971b5d62c21e235c5349ddd752641a9fe3a40','controller_sha256':sha(__file__),'tools':tools,'host':host(),'runner':{k:os.environ.get(k) for k in ('RUNNER_NAME','RUNNER_OS','RUNNER_ARCH','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_SHA')},'diagnostic_limit':'first20 actual appends only plus total and overall max; not complete trace','deadline_unix':END})
+ code=phase('build',['cargo','test','--locked','--release','-p','st3','--lib','--no-run','--message-format=json','--jobs','2'],2400)
+ assert code==0,('build',code)
+ binaries=[]
+ for line in (root/'build.stdout').read_text().splitlines():
+  try:obj=json.loads(line)
+  except ValueError:continue
+  if obj.get('reason')=='compiler-artifact' and obj.get('profile',{}).get('test') and obj.get('executable') and obj.get('target',{}).get('name')=='st3':binaries.append(pathlib.Path(obj['executable']))
+ assert len(binaries)==1,binaries
+ binary=binaries[0]; frozen=sha(binary)
+ save('binary.json',{'path':str(binary),'sha256':frozen,'head':SOURCE,'tree':TREE})
+ base=['cargo','nextest','run','--locked','--release','-p','st3','--lib','--build-jobs','2','--retries','0','--no-fail-fast','--success-output','immediate','--failure-output','immediate']
+ for i in range(20):
+  assert sha(binary)==frozen
+  code=phase(f'alone-{i+1:02}',base+['--test-threads','1','-E','test(='+CASE+')'],180,f'alone-{i+1:02}.samples.json')
+  if code is None:break
+  assert sha(binary)==frozen
+ if len([r for r in reports if r['label'].startswith('alone-')])==20 and not stop and time.time()<END:
+  phase('store-context',base+['--test-threads','4','-E','test(/^store::/)'],1800,'store-context.samples.json')
+  assert sha(binary)==frozen
+ save('summary.json',{'at':stamp(),'status':'natural_or_deadline_partial','phases':reports,'head':SOURCE,'tree':TREE,'no_pass_transfer':True,'threshold_ms':500,'cohort_complete':len(reports)==22 and reports[-1]['label']=='store-context'})
+except BaseException as e:
+ close_owned_group('exception');save('summary.json',{'at':stamp(),'status':'partial_or_setup_failure','error':repr(e),'phases':reports,'head':SOURCE,'tree':TREE,'threshold_ms':500});raise
+finally:
+ closure=close_owned_group('finally')
+ save('controller-exit.json',{'at':stamp(),'pid':os.getpid(),'active_child':None if active is None else active.pid,'owned_group':active_group,'closure':closure})
+
+# Preserve every planned diagnostic attempt, then make adverse/incomplete cohorts visibly non-green.
+if len(reports)!=22 or reports[-1]['label']!='store-context' or any(r['exit']!=0 for r in reports) or any(not r.get('sample_validation',{}).get('valid') for r in reports if r['label']!='build') or any(not r['closed'] for r in cleanup_reports):
+ sys.exit(1)
