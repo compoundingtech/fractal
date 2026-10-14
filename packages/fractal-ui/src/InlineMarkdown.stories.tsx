@@ -10,7 +10,8 @@ import { AgentHoverCard, SidebarAgentRow } from './assistant-ui/sidebar/SidebarA
 import type { SidebarAgentRow as Row } from './assistant-ui/sidebar/model'
 import { QuestionForm } from './assistant-ui/questions/QuestionForm'
 import type { QuestionRequestView } from './assistant-ui/questions/model'
-import type { WorkLogCall } from './assistant-ui/taste/work-log'
+import type { WorkLogCall, WorkLogTurn } from './assistant-ui/taste/work-log'
+import { WorkLogV1 } from './assistant-ui/taste/WorkLogV1'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
@@ -24,6 +25,11 @@ const row: Row = {
   usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, children: [],
 }
 const call: WorkLogCall = { id: 'call-1', kind: 'run', title: 'bash', argsSummary: 'pnpm check', summary: 'Ran `pnpm check` in the *kit* package', status: 'success', startedAt: '2026-10-08T11:58:00.000Z', endedAt: '2026-10-08T11:58:04.000Z', detail: 'All checks passed.' }
+/** As the app projects production calls: the title is the agent's intent, and no args. A kit-projected call keeps its verbatim path as code. */
+const workTurn: WorkLogTurn = { durationMs: undefined, running: false, failed: false, interrupted: false, foldable: false, calls: [
+  { id: 'call-2', kind: 'run', title: 'Checking **generated** `dist/` output', status: 'success', startedAt: '2026-10-08T11:58:00.000Z', endedAt: '2026-10-08T11:58:02.000Z', detail: 'ok' },
+  { id: 'call-3', kind: 'read', title: 'read_file', argsSummary: 'src/__init__.py', status: 'success', startedAt: '2026-10-08T11:58:02.000Z', endedAt: '2026-10-08T11:58:03.000Z' },
+] }
 const settled: QuestionRequestView = {
   id: 'ask-settled', source: 'ask', agentLabel: 'Sample agent', title: 'Run `pnpm check` first?', askedAt: '2026-10-08T11:50:00.000Z', answerable: true, allowChatRedirect: false,
   questions: [{ id: 'checks', header: '`check` scope', prompt: 'Should `pnpm check` cover the **app** too?', kind: 'single', allowOther: true, allowNote: true, options: [{ id: 'kit', label: 'Kit only', description: 'Skips `apps/`' }, { id: 'all', label: 'Kit and *app*' }] }],
@@ -56,6 +62,7 @@ function Surfaces({ scheme }: Args) {
     <section aria-label="Hover card" data-surface="hover-card"><AgentHoverCard row={row} now={storyNow} /></section>
     <section aria-label="Error overlay" data-surface="error-overlay"><ErrorOverlay id="error-1" title="Check failed" detail="`pnpm check` exited with **1**" /></section>
     <section aria-label="Tool detail" data-surface="tool-detail"><ToolDetailPreview call={call} /></section>
+    <section aria-label="Work log" data-surface="work-log"><WorkLogV1 turn={workTurn} /></section>
     <section aria-label="Settled question" data-surface="settled-question"><QuestionForm request={settled} variant="transcript" now={storyNow} /></section>
   </div></Frame>
 }
@@ -82,7 +89,7 @@ export const CorpusTableLight: Story = { ...CorpusTable, args: { scheme: 'light'
 /** No adopted surface shows a marker, its code carries the shared inline-code class, and its names and tooltips are plain text. */
 export const AdoptedSurfaces: Story = { render: args => <Surfaces {...args} />, play: async ({ canvasElement }) => {
   const sections = canvasElement.querySelectorAll<HTMLElement>('[data-surface]')
-  await expect(sections).toHaveLength(5)
+  await expect(sections).toHaveLength(6)
   const codeClasses: string[] = []
   for (const section of sections) {
     await expect(section.textContent).not.toMatch(/`|\*\*/)
@@ -96,7 +103,12 @@ export const AdoptedSurfaces: Story = { render: args => <Surfaces {...args} />, 
   }
   const canvas = within(canvasElement)
   await expect(canvas.getByRole('region', { name: 'Run pnpm check first?' })).toBeVisible()
-  await expect(canvas.getByText('kit', { selector: 'strong' })).toBeVisible()
+  await expect(within(canvasElement.querySelector<HTMLElement>('[data-surface="hover-card"]')!).getByText('kit', { selector: 'strong' })).toBeVisible()
+  const work = within(canvasElement.querySelector<HTMLElement>('[data-surface="work-log"]')!)
+  await expect(work.getByText('generated', { selector: 'strong' })).toBeVisible()
+  await expect(work.getByText('dist/', { selector: 'code' })).toBeVisible()
+  await expect(work.getByText('src/__init__.py', { selector: 'code' })).toBeVisible()
+  await expect(work.getByText('Checking', { exact: false, selector: '[title]' })).toHaveAttribute('title', 'Checking generated dist/ output')
 } }
 export const AdoptedSurfacesLight: Story = { ...AdoptedSurfaces, args: { scheme: 'light' } }
 

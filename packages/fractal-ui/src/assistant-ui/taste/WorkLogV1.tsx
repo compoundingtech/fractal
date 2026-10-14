@@ -5,7 +5,7 @@ import { surfaceVars as surface, textVars as ink, borderVars as border, accentVa
 import { Icon } from '../composition/Icons'
 import { ErrorOverlay } from '../composition/ErrorOverlay'
 import { HighlightedSource } from '../composition/Markdown'
-import { InlineMarkdown } from '../composition/InlineMarkdown'
+import { InlineMarkdown, toPlainText } from '../composition/InlineMarkdown'
 import type { WorkLogCall, WorkLogTurn } from './work-log'
 import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, workLogOutputLanguage } from './work-log'
 
@@ -54,12 +54,14 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   const expandable = hasOutput || call.rawInput !== undefined
   const displayed = interactive ? expandable && (open || hasOutput && preview && call.status !== 'error') : hasOutput
   const result = call.detail ?? ''
-  const label = call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}`
+  // The title is agent-authored intent (or a tool name); the args are a verbatim command or path and stay code.
+  const label = call.argsSummary === undefined ? toPlainText(call.title) : `${toPlainText(call.title)} ${call.argsSummary}`
+  const name = <><InlineMarkdown text={call.title} />{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.kind === 'run' ? <HighlightedSource code={call.argsSummary} language="bash" /> : call.argsSummary}</code></>}</>
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   const state = call.status === 'running' ? 'Running' : call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : 'OK'
-  const row = <><Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'success' ? 'check' : 'stop'} spinning={call.status === 'running'} size={14} /><Icon name={call.kind === 'read' ? 'search' : call.kind === 'run' ? 'drawer' : 'pencil'} size={14} /><span title={label} {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span>{expandable && interactive && <span data-row-disclosure={displayed ? 'open' : 'closed'} {...stylex.props(styles.disclosure)}><Icon name={displayed ? 'chevron-down' : 'chevron-right'} size={12} /></span>}<span {...stylex.props(styles.callState)}>{state}{duration === undefined ? '' : ` · ${duration}`}</span></>
-  return <div data-tool-status={call.status}>{expandable && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && (renderDetail === undefined ? <DefaultCallDetail call={call} /> : renderDetail(call))}</div>
+  const row = <><Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'success' ? 'check' : 'stop'} spinning={call.status === 'running'} size={14} /><Icon name={call.kind === 'read' ? 'search' : call.kind === 'run' ? 'drawer' : 'pencil'} size={14} /><span title={label} {...stylex.props(styles.callLabel)}>{name}</span>{expandable && interactive && <span data-row-disclosure={displayed ? 'open' : 'closed'} {...stylex.props(styles.disclosure)}><Icon name={displayed ? 'chevron-down' : 'chevron-right'} size={12} /></span>}<span {...stylex.props(styles.callState)}>{state}{duration === undefined ? '' : ` · ${duration}`}</span></>
+  return <div data-tool-status={call.status}>{expandable && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{name}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && (renderDetail === undefined ? <DefaultCallDetail call={call} /> : renderDetail(call))}</div>
 }
 function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
   const [rawOpen, setRawOpen] = React.useState(false)

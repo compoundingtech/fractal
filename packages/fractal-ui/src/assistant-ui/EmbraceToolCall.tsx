@@ -119,16 +119,16 @@ const ToolPresentation = ({ name, input, output, mediaType, status, variant, cal
   const target = toolString(input, ['path', 'file_path', 'pattern', 'query', 'question', 'url', 'description'])
     || (kind === 'run' ? toolString(input, ['command', 'cmd']).trim().split(/\s+/).slice(0, 2).join(' ') : '')
   const verb = verbs[kind][status === 'running' ? 1 : 0]
-  const label = `${verb} ${target || name}`
+  const intent = toolString(input, ['question', 'description'])
   // Questions and descriptions are agent prose; paths, patterns, queries and commands stay verbatim.
-  const prose = target !== '' && target === toolString(input, ['question', 'description'])
+  const verbatim = target !== '' && target === intent ? undefined : target || name
   const promoted = status === 'error' || status === 'interrupted' || kind === 'edit' || kind === 'write' || kind === 'question'
     || /^(?:diff --git |--- [^\n]+\n\+\+\+ )/m.test(toolOutput(output))
   const header = <>
     <span aria-hidden="true" {...stylex.props(styles.indicator, status === 'error' && styles.error, status === 'interrupted' && styles.warning)}>
       {status === 'running' ? '◌' : status === 'success' ? '✓' : status === 'error' ? '!' : '■'}
     </span>
-    <span {...stylex.props(styles.label)} title={prose ? `${verb} ${toPlainText(target)}` : label}>{prose ? <>{verb} <InlineMarkdown text={target} /></> : label}</span>
+    <span {...stylex.props(styles.label)} title={`${verb} ${verbatim ?? toPlainText(intent)}`}>{verb} {verbatim ?? <InlineMarkdown text={intent} />}</span>
     {!callSeen ? <span {...stylex.props(styles.caption)}>Start not loaded</span> : null}
     <span {...stylex.props(styles.status, status === 'error' && styles.error, status === 'interrupted' && styles.warning)}>{status}</span>
   </>
