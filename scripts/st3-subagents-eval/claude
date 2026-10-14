@@ -59,7 +59,16 @@ argv = sys.argv[1:]
 if argv[:1] in (["plugin"], ["mcp"]) or "--version" in argv:
     sys.exit(1)
 settings = json.loads(option(argv, "--settings") or "{}")
+mcp = json.loads(option(argv, "--mcp-config") or "{}")
 receipt("started", argv=argv)
+# An isolated model of a harness retaining launch settings without child lifecycle hooks.
+# Keep the actual launch argv receipt distinct from these intentionally reduced settings.
+if os.environ.get("ST3_SUBAGENTS_EVAL_OLD_SETTINGS") == "1":
+    for event in ("SubagentStart", "SubagentStop", "SessionEnd"):
+        settings.get("hooks", {}).pop(event, None)
+receipt("effective-settings", hooks=sorted(settings.get("hooks", {})),
+        agent_dir=os.environ.get("ST_DRIVER_AGENT_DIR"),
+        old_settings_model=os.environ.get("ST3_SUBAGENTS_EVAL_OLD_SETTINGS") == "1")
 
 cwd = str(WORKSPACE)
 projects = Path.home() / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
@@ -82,13 +91,13 @@ def append(path, row):
         stream.write(json.dumps(row) + "\n")
 
 
-def hooks(event, payload):
+def hooks(event, payload, environment=None):
     base = {"session_id": session_id, "transcript_path": str(transcript()), "cwd": cwd,
             "hook_event_name": event}
     for group in settings.get("hooks", {}).get(event, []):
         for hook in group.get("hooks", []):
             result = subprocess.run(["bash", "-c", hook["command"]], input=json.dumps({**base, **payload}),
-                                    capture_output=True, text=True, timeout=60)
+                                    capture_output=True, text=True, timeout=60, env=environment)
             receipt("hook", hook_event=event, exit=result.returncode, stderr=result.stderr[-2000:])
 
 
@@ -175,6 +184,26 @@ def apply(op):
         hooks("SessionEnd", {"reason": op.get("reason", "other")})
     elif name == "session-start":
         start_session(op.get("source", "clear"))
+    elif name == "foreign-hooks":
+        foreign = str(uuid.uuid4())
+        # A delayed predecessor also carries its retired wrapper authority. Borrowing the
+        # current wrapper's sequence would synthesize a current parent PreToolUse instead.
+        current_seq = int(os.environ["ST_CLAUDE_SESSION_SEQ"])
+        if current_seq < 1:
+            raise RuntimeError("foreign hook proof needs an established wrapper sequence")
+        retired = {**os.environ, "ST_CLAUDE_SESSION": "retired-wrapper-" + foreign,
+                   "ST_CLAUDE_SESSION_SEQ": str(current_seq - 1)}
+        receipt("foreign-hook-authority", current_sequence=current_seq,
+                retired_sequence=current_seq - 1)
+        for event, payload in [
+            ("SessionEnd", {"reason": "clear"}),
+            ("SubagentStart", {"agent_id": "foreign-child", "agent_type": "general-purpose"}),
+            ("SubagentStop", {"agent_id": op["id"], "agent_type": "general-purpose"}),
+            ("Stop", {"background_tasks": []}),
+            ("PreToolUse", {"tool_name": "Agent", "tool_use_id": "foreign-launch",
+                            "tool_input": {"description": "foreign launch"}}),
+        ]:
+            hooks(event, {**payload, "session_id": foreign}, environment=retired)
     elif name == "claim-ready":
         listed = subprocess.run([os.environ["ST3_BIN"], "work", "ls", "--as", os.environ["ST_AGENT"], "--json"],
                                 capture_output=True, text=True, timeout=60)
@@ -202,6 +231,29 @@ def stop(*_):
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGHUP, stop)
 start_session("startup")
+# Hooks alone do not make a healthy Claude seat: keep the real MCP channel initialized
+# throughout this eval so automatic channel recovery does not replace its parent harness.
+server = mcp.get("mcpServers", {}).get("st3")
+if not server:
+    raise RuntimeError("the subagent stand-in requires the st3 MCP channel")
+channel = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE, text=True, bufsize=1,
+                           env={**os.environ, **server.get("env", {})})
+channel.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "protocolVersion": "2025-06-18", "capabilities": {"experimental": {"claude/channel": {}}},
+    "clientInfo": {"name": "subagent-claude-stub", "version": "0"}}}) + "\n")
+channel.stdin.flush()
+receipt("mcp", initialize=json.loads(channel.stdout.readline()))
+channel.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+channel.stdin.flush()
+
+
+def read_channel():
+    for line in channel.stdout:
+        receipt("mcp-frame", frame=json.loads(line))
+
+
+threading.Thread(target=read_channel, daemon=True).start()
 receipt("ready", session=session_id)
 offset = int(OFFSET.read_text()) if OFFSET.exists() else 0
 while not stopping:
@@ -210,10 +262,12 @@ while not stopping:
         op = json.loads(lines[offset])
         try:
             apply(op)
-            receipt("applied", op=op, session=session_id)
+            receipt("applied", op=op, session=session_id, running=sorted(running))
         except Exception as error:  # noqa: BLE001 - every failure is evidence
             receipt("failed", op=op, error=str(error))
         offset += 1
         OFFSET.write_text(str(offset))
     time.sleep(0.2)
+channel.stdin.close()
+channel.wait(timeout=10)
 receipt("ended")

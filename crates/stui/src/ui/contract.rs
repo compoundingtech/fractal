@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clients")
+    PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clients")
 }
 
 fn hex(color: Color) -> String {
@@ -96,10 +96,13 @@ pub fn words() -> Value {
     .collect::<Vec<_>>();
     let agent = [
         AgentState::NeedsYou,
+        AgentState::NeedsLogin,
         AgentState::Fault,
         AgentState::Working,
+        AgentState::Compacting,
         AgentState::Idle,
         AgentState::Starting,
+        AgentState::Down,
         AgentState::Stopped,
         AgentState::Unknown,
     ]
@@ -161,6 +164,12 @@ fn files() -> Vec<(&'static str, Value)> {
                 "../../../../fixtures/clients/transcripts/deliveries.json"
             )),
         ),
+        (
+            "transcripts/noise.expected.json",
+            conversation_of(include_str!(
+                "../../../../fixtures/clients/transcripts/noise.json"
+            )),
+        ),
     ]
 }
 
@@ -200,4 +209,23 @@ fn the_shared_client_contract_matches_stui() {
             "{name} no longer matches stui; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p stui contract and update the iOS app"
         );
     }
+}
+
+#[test]
+fn agent_branch_and_checkout_label_match_the_phone() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../fixtures/clients/agent-launch.json"
+    ))
+    .unwrap();
+    for case in fixture["branches"].as_array().unwrap() {
+        assert_eq!(
+            st3_client::agent_branch(case["name"].as_str().unwrap()),
+            case["branch"]
+        );
+    }
+    let checkout = serde_json::from_value(fixture["checkout"].clone()).unwrap();
+    assert_eq!(
+        st3_client::checkout_label(&checkout),
+        fixture["checkout_label"]
+    );
 }

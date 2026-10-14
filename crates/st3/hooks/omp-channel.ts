@@ -45,8 +45,8 @@ const HELLO_TIMEOUT_MS = 5000;
 // result it never saw. So a message that arrives during a running turn is held and steered when
 // the batch's last `tool_call` returns its `tool_result` (omp announces every call of a batch
 // before any runs, and awaits the handler), or when the run ends. Either way it lands where the
-// steer would have. A message never waits longer than this behind a running tool call: a longer
-// command is backgrounded as before. It was chosen below st3's 15-second work-wake retry.
+// steer would have. Ordinary tool calls wait at most this long; native asks and approvals
+// instead hold mail outside omp until the person answers, cancels, or the session ends.
 const HOLD_MAX_MS = 10_000;
 
 type Frame = {
@@ -134,6 +134,20 @@ type Stash = {
   holdTimer?: ReturnType<typeof setTimeout>;
   /** Serializes handoffs so omp receives messages in arrival order. */
   handoff?: Promise<void>;
+  /** Subagents of this process between their `agent_start` and their end, by omp agent ID. */
+  subagents?: Map<string, OpenSubagent>;
+  /** Reports each busy subagent while any runs, so st ends only one that stopped running. */
+  subagentHeartbeat?: NodeJS.Timeout;
+};
+
+type OpenSubagent = {
+  frame: Record<string, unknown>;
+  /** The subagent session's newest context, asked whether the session is still busy. */
+  ctx: ExtensionContext;
+  reportedAt: number;
+  /** Human waits belong to this subagent, never to the top-level seat. */
+  pendingAsks: Set<string>;
+  pendingApproval: boolean;
 };
 
 /**
@@ -194,6 +208,38 @@ const terminalProviderError = (event: AgentEndFrame): ProviderError | undefined 
     return error;
   }
   return undefined;
+};
+
+/** How a subagent's run ended: an error fails it, an abort interrupts it. */
+const subagentOutcome = (event: AgentEndFrame): "completed" | "failed" | "interrupted" => {
+  if (!Array.isArray(event.messages)) return "completed";
+  for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+    const message = event.messages[index];
+    if (!message || typeof message !== "object") continue;
+    if (!("role" in message) || message.role !== "assistant") continue;
+    if (!("stopReason" in message)) return "completed";
+    if (message.stopReason === "error") return "failed";
+    if (message.stopReason === "aborted") return "interrupted";
+    return "completed";
+  }
+  return "completed";
+};
+
+/** A subagent's tool calls and messages report it at most this often. */
+const SUBAGENT_PROGRESS_MS = 10_000;
+/**
+ * While a subagent's session is busy, as in a long tool call or a nested subagent, it reports at
+ * least this often. st ends a subagent unreported for five minutes (`SILENT_GRACE_MS`).
+ */
+const SUBAGENT_HEARTBEAT_MS = 60_000;
+const SUBAGENT_SILENT_MS = 5 * 60_000;
+const SUBAGENT_ACTIVITY = new Set(["message_end", "tool_execution_start", "tool_execution_end"]);
+
+/** Reject rather than truncate identities: truncation would merge distinct subagents. */
+const subagentText = (value: unknown, maxBytes: number) => {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text && Buffer.byteLength(text, "utf8") <= maxBytes ? text : undefined;
 };
 
 /**
@@ -548,7 +594,12 @@ export default function (pi: ExtensionAPI) {
         if (child.stdin.destroyed) return;
         child.stdin.write(JSON.stringify(frame) + "\n");
       };
-      send({ type: "session", sessionId: nativeSessionId });
+      const sessionFile = ctx.sessionManager.getSessionFile?.();
+      const sessionBinding = {
+        sessionId: nativeSessionId,
+        ...(typeof sessionFile === "string" ? { sessionFile } : {}),
+      };
+      send({ type: "session", ...sessionBinding });
 
       // Historical channels can fail their API request while Tokio still waits on a
       // blocking stdin read during shutdown. Wake that read so exit reaches the existing
@@ -605,7 +656,7 @@ export default function (pi: ExtensionAPI) {
             send({ type: "delivered", meta: accepted.meta });
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
-          send({ type: "ready", sessionId: nativeSessionId });
+          send({ type: "ready", ...sessionBinding });
           state.todoReady = true;
           observeTodoBranch(ctx, true);
           // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
@@ -720,7 +771,9 @@ export default function (pi: ExtensionAPI) {
       if (!hydrate) return;
       // A branch hydration binds its observation provenance on the existing channel. It must
       // not restart delivery, discard held mail, or reset ask/approval authority.
-      sendFrame({ type: "session", sessionId: nativeSession });
+      const sessionFile = ctx.sessionManager.getSessionFile?.();
+      sendFrame({ type: "session", sessionId: nativeSession,
+        ...(typeof sessionFile === "string" ? { sessionFile } : {}) });
       state.todoSession = nativeSession;
       state.todoFingerprint = undefined;
       state.todoBranchKey = undefined;
@@ -836,6 +889,13 @@ export default function (pi: ExtensionAPI) {
       }
       if (!idleProof(ctx)) return;
       clearInterval(poller);
+      // Restored asks need this idle observation to drive their existing retry handshake,
+      // but retain their own delivery fence until reopening or timeout resolves it.
+      if (!state.restoringAsk) {
+        state.running = false;
+        toolCallsInFlight().clear();
+        if (heldMessages().length > 0) void release();
+      }
       sendFrame({ type: "state", state: "idle" });
     }, IDLE_POLL_MS);
     poller.unref?.();
@@ -844,6 +904,7 @@ export default function (pi: ExtensionAPI) {
   // Holding mail during a running turn; `HOLD_MAX_MS` explains why and where it is released.
   const toolCallsInFlight = () => (state.toolCallsInFlight ??= new Set<string>());
   const heldMessages = () => (state.held ??= []);
+  const humanBlocked = () => Boolean(state.pendingAskToolCallId || state.pendingApproval);
   const clearHoldTimer = () => {
     if (state.holdTimer !== undefined) clearTimeout(state.holdTimer);
     state.holdTimer = undefined;
@@ -874,10 +935,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
     try {
-      // `deliverAs` is required only while a turn is streaming, and an idle send that carries
-      // one is rejected, so the idle proof selects the call shape. It never selects the
-      // policy. Not optional-chained: reading a missing idle proof as "idle" would silently
-      // turn every mid-turn delivery into a plain send.
+      // Positive idle selects a plain send; streaming delivery retains the requested mode.
+      // Not optional-chained: reading a missing idle proof as "idle" would silently turn
+      // every mid-turn delivery into a plain send. This selects timing, not message policy.
       if (first.ctx.isIdle()) {
         await pi.sendUserMessage(content);
       } else {
@@ -906,9 +966,15 @@ export default function (pi: ExtensionAPI) {
     if (state.restoringAsk) return Promise.resolve();
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     clearHoldTimer();
-    const batch = heldMessages().splice(0);
+    if (humanBlocked()) return Promise.resolve();
+    // A deferred boundary may release only its eligible prefix, never a newer batch's mail.
+    const last = heldMessages().at(-1);
+    if (!last) return Promise.resolve();
     const deliver = async () => {
-      const current = batch.filter((message) => message.channel === state.child);
+      if (humanBlocked()) return;
+      const end = heldMessages().indexOf(last);
+      if (end < 0) return;
+      const current = heldMessages().splice(0, end + 1).filter((message) => message.channel === state.child);
       if (current.length > 0) await handOff(current);
     };
     state.handoff = (state.handoff ?? Promise.resolve()).then(deliver, deliver);
@@ -917,6 +983,7 @@ export default function (pi: ExtensionAPI) {
 
   /** Bound the wait behind a running tool call, never the wait for the model to finish streaming. */
   const armHoldCap = () => {
+    if (humanBlocked()) return;
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
     if (state.restoringAsk) return;
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
@@ -932,7 +999,13 @@ export default function (pi: ExtensionAPI) {
   /** Deliver a message from the channel now, or hold it while omp is running a turn. */
   const receive = (message: HeldMessage): Promise<void> => {
     heldMessages().push(message);
-    if (state.running || toolCallsInFlight().size > 0) {
+    if (!state.pendingAskToolCallId && !state.pendingApproval && !state.restoringAsk &&
+      idleProof(message.ctx)) {
+      state.running = false;
+      toolCallsInFlight().clear();
+      return release();
+    }
+    if (humanBlocked() || state.running || toolCallsInFlight().size > 0) {
       armHoldCap();
       return Promise.resolve();
     }
@@ -975,6 +1048,7 @@ export default function (pi: ExtensionAPI) {
     clearTimeout(pending.timer);
     state.restoringAsk = undefined;
     state.pendingAskToolCallId = pending.toolCallId;
+    clearHoldTimer();
     toolCallsInFlight().add(pending.toolCallId);
     cancelSettle();
     sendFrame({ type: "state", state: "active", blockedOn: "human", ask: "question" });
@@ -1093,6 +1167,86 @@ export default function (pi: ExtensionAPI) {
   // Keep delivery, receipt evidence and label authority on the top-level seat (#852).
   const isSubagent = (ctx: ExtensionContext | undefined): boolean =>
     (ctx as { agent?: { kind?: unknown } } | undefined)?.agent?.kind === "sub";
+  // A subagent session reports only its runs: st records them on the seat as its subagents, with
+  // a lease the seat's driver renews while the run lasts. A run starts at `agent_start` and ends at
+  // the `agent_end` that does not continue, or when its session shuts down first. Between them it
+  // reports progress at each `turn_end`, at its messages and tool calls, and each minute while omp
+  // says its session is busy; st ends a run that stops reporting. omp names the subagent in
+  // `ctx.agent` (`id`, `name`).
+  const subagentBusy = (ctx: ExtensionContext): boolean => {
+    try {
+      return ctx.isIdle() === false;
+    } catch {
+      return false;
+    }
+  };
+  const reportSubagent = (open: OpenSubagent, now: number) => {
+    open.reportedAt = now;
+    sendFrame({ ...open.frame, event: "progress" });
+  };
+  const closeSubagent = (id: string): boolean => {
+    const closed = state.subagents?.delete(id) ?? false;
+    if (!state.subagents?.size) {
+      clearInterval(state.subagentHeartbeat);
+      state.subagentHeartbeat = undefined;
+    }
+    return closed;
+  };
+  const heartbeat = () => {
+    const now = Date.now();
+    for (const [id, open] of state.subagents ?? []) {
+      // Native omp keeps foreground tools (including asks and approvals) inside the busy run.
+      // Event caches are not liveness evidence: a lost resolution must not renew an idle child.
+      const busy = subagentBusy(open.ctx);
+      if (!busy) {
+        open.pendingAsks.clear();
+        open.pendingApproval = false;
+      }
+      if (busy) reportSubagent(open, now);
+      // st has ended a run this quiet; forget it so the heartbeat stops with the last run.
+      else if (now - open.reportedAt >= SUBAGENT_SILENT_MS) closeSubagent(id);
+    }
+  };
+  const observeSubagent = (event: string, payload: unknown, ctx: ExtensionContext) => {
+    const agent = record(record(ctx)?.agent);
+    const id = subagentText(agent?.id, 256);
+    if (!id) return;
+    const name = subagentText(agent?.name, 128);
+    const frame = { type: "subagent", id, ...(name ? { name } : {}) };
+    const running = (state.subagents ??= new Map<string, OpenSubagent>());
+    const open = running.get(id);
+    if (open) open.ctx = ctx;
+    const now = Date.now();
+    const tool = record(payload);
+    const callId = subagentText(tool?.toolCallId, 256);
+    if (open) {
+      if ((event === "tool_call" || event === "tool_execution_start") &&
+        tool?.toolName === "ask" && callId) open.pendingAsks.add(callId);
+      if ((event === "tool_result" || event === "tool_execution_end") && callId) {
+        open.pendingAsks.delete(callId);
+      }
+      if (event === "tool_approval_requested") open.pendingApproval = true;
+      if (event === "tool_approval_resolved") open.pendingApproval = false;
+    }
+    if (event === "agent_start") {
+      running.set(id, { frame, ctx, reportedAt: now, pendingAsks: new Set(), pendingApproval: false });
+      sendFrame({ ...frame, event: "start" });
+      state.subagentHeartbeat ??= setInterval(heartbeat, SUBAGENT_HEARTBEAT_MS).unref();
+    } else if (event === "turn_end" && open) {
+      reportSubagent(open, now);
+    } else if (SUBAGENT_ACTIVITY.has(event)) {
+      if (open && now - open.reportedAt >= SUBAGENT_PROGRESS_MS) reportSubagent(open, now);
+    } else if (event === "agent_end") {
+      const end = record(payload) ?? {};
+      if (end.willContinue === true) return;
+      if (open && (open.pendingAsks.size || open.pendingApproval) &&
+        subagentBusy(ctx) && subagentOutcome(end) === "completed") return;
+      closeSubagent(id);
+      sendFrame({ ...frame, event: "end", outcome: subagentOutcome(end) });
+    } else if (event === "session_shutdown" && closeSubagent(id)) {
+      sendFrame({ ...frame, event: "end", outcome: "interrupted" });
+    }
+  };
   const register = pi.on.bind(pi) as unknown as (
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
@@ -1101,7 +1255,14 @@ export default function (pi: ExtensionAPI) {
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
   ) => register(event, (payload, ctx) => {
-    if (isSubagent(ctx)) return;
+    if (isSubagent(ctx)) {
+      try {
+        observeSubagent(event, payload, ctx);
+      } catch {
+        // Observability fails open: a subagent's report never takes its session down.
+      }
+      return;
+    }
     jobContext = ctx;
     return handler(payload, ctx);
   });
@@ -1119,6 +1280,8 @@ export default function (pi: ExtensionAPI) {
     sendContext(ctx);
     const end = event as AgentEndFrame;
     if (end.willContinue !== true) {
+      state.pendingAskToolCallId = undefined;
+      state.pendingApproval = false;
       state.running = false;
       toolCallsInFlight().clear();
       // Nothing runs now, so held mail is handed over at once, exactly as a message arriving at
@@ -1130,6 +1293,10 @@ export default function (pi: ExtensionAPI) {
     // one print-mode run). Nothing is claimed from those — least of all about a credential.
     if (end.willContinue === true) {
       cancelSettle();
+      // Background work can continue after foreground streaming stops. A positive idle proof
+      // releases held mail without declaring the background job terminal; transient retries
+      // remain active until that same proof, and newer activity fences this poll.
+      watchSettle(ctx);
       return;
     }
     // The typed turn result, on every turn that ACTUALLY ended and in both directions. It is one
@@ -1211,6 +1378,7 @@ export default function (pi: ExtensionAPI) {
     const question = firstAskQuestion(event);
     if (!question || typeof event.toolCallId !== "string") return;
     state.pendingAskToolCallId = event.toolCallId;
+    clearHoldTimer();
     cancelSettle();
     sendFrame({
       type: "state",
@@ -1228,6 +1396,9 @@ export default function (pi: ExtensionAPI) {
   onWidened("tool_result", async (rawEvent, ctx) => {
     const event = rawEvent as ToolResultFrame;
     sendTimeline("tool_result", rawEvent);
+    const answeredAsk = typeof event.toolCallId === "string" &&
+      event.toolCallId === state.pendingAskToolCallId;
+    if (answeredAsk) state.pendingAskToolCallId = undefined;
     if (typeof event.toolCallId === "string") {
       const calls = toolCallsInFlight();
       calls.delete(event.toolCallId);
@@ -1235,13 +1406,9 @@ export default function (pi: ExtensionAPI) {
       // this batch boundary, and after the batch's commands have run.
       if (calls.size === 0 && heldMessages().length > 0) await release();
     }
-    if (
-      typeof event.toolCallId !== "string" ||
-      event.toolCallId !== state.pendingAskToolCallId
-    ) {
-      return;
-    }
-    state.pendingAskToolCallId = undefined;
+    if (!answeredAsk) return;
+    if (state.pendingApproval) return;
+    armHoldCap();
     if (idleProof(ctx)) {
       sendFrame({ type: "state", state: "idle" });
       return;
@@ -1278,6 +1445,7 @@ export default function (pi: ExtensionAPI) {
   type ApprovalFrame = { toolName?: unknown };
   onWidened("tool_approval_requested", async (rawEvent) => {
     state.pendingApproval = true;
+    clearHoldTimer();
     if (state.pendingAskToolCallId) return;
     const event = rawEvent as ApprovalFrame;
     const tool = typeof event.toolName === "string" ? event.toolName : "unknown";
@@ -1293,6 +1461,8 @@ export default function (pi: ExtensionAPI) {
   onWidened("tool_approval_resolved", async (_event, ctx) => {
     state.pendingApproval = false;
     if (state.pendingAskToolCallId) return;
+    if (toolCallsInFlight().size === 0) await release();
+    else armHoldCap();
     if (idleProof(ctx)) {
       sendFrame({ type: "state", state: "idle" });
       return;

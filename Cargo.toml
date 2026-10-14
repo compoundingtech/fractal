@@ -1,8 +1,9 @@
-# The root stays a real package (not a virtual manifest): `flake.nix` reads
-# `package.version` out of this file as the single source of truth for the
-# build, and a virtual root has no `[package]` to read.
+# The root remains a package while the legacy st2 runner is present.
+# Shared release identity lives in workspace.package so retiring st2 does not
+# change the current binaries' release stamps.
 [workspace]
 members = [
+  "examples/client-tui",
   "components/github-issue",
   "components/github-pr",
   "components/pty-stats",
@@ -12,6 +13,7 @@ members = [
   "crates/smallclaims",
   "crates/st-drivers",
   "crates/st-runtime",
+  "crates/st-storage-version",
   "crates/st-resource-protocol",
   "crates/st2-resource-providers",
   "crates/st2-resource-wasip2",
@@ -23,10 +25,12 @@ members = [
   "crates/st3-feed",
   "crates/st3-migrate",
   "crates/st3-schema",
+  "crates/st3-terminal-direct",
   "crates/st3-ui-model",
   "crates/stui",
 ]
 default-members = [
+  "examples/client-tui",
   ".",
   "crates/agent-spec",
   "crates/smallclaims",
@@ -40,11 +44,15 @@ default-members = [
   "crates/st3-feed",
   "crates/st3-migrate",
   "crates/st3-schema",
+  "crates/st3-terminal-direct",
   "crates/st3-ui-model",
   "crates/stui",
 ]
 
 exclude = ["vendor/libghostty-vt-sys"]
+
+[workspace.package]
+version = "0.1.0"
 
 [workspace.dependencies]
 ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
@@ -68,8 +76,9 @@ debug = 0
 
 [package]
 name = "st2"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
+build = "crates/st-drivers/build.rs"
 description = "Harness-agnostic runner: reconcile a unified catalog+inbox folder of rendered agent specs, keep their ptys running, and deliver messages by moving inbox files."
 license = "MIT"
 # Every file in tests/ is a module of one test binary; see tests/integration.rs.
@@ -114,7 +123,6 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 kdl = "6"
 libc = "0.2"
-notify = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -123,23 +131,11 @@ st2-resource-providers = { path = "crates/st2-resource-providers", optional = tr
 st2-resource-wasip2 = { path = "crates/st2-resource-wasip2", optional = true, features = ["runtime"] }
 st2-wire = { package = "st-wire", path = "crates/st-wire" }
 tempfile = "3"
-toml = "0.9"
-opentelemetry = "0.30"
-opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
-opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
-# `experimental_use_tracing_span_context` stamps the active tracing span's trace/span ids onto
-# emitted log records — required so logs correlate with spans without manual context plumbing.
-opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_use_tracing_span_context"] }
 tracing = "0.1"
-tracing-opentelemetry = "0.31"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "registry", "std"] }
-tungstenite = "0.30"
 
 [dev-dependencies]
 libc = "0.2"
 parking_lot = "0.12"
-toml = "0.9"
-wat = "1"
 
 [features]
 # Sandbox wasm resource-profile resolvers (`agent-spec/profile_wasm`). Off by default: the
