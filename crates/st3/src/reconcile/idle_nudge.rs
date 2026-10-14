@@ -1,5 +1,5 @@
 //! A seat that holds claimed work, has finished its turn, and has nothing set to wake it is
-//! idle-holding. After `idle_nudge_after` (30 minutes by default) in that state, st sends it one
+//! idle-holding. After `idle_nudge_after` (15 minutes by default) in that state, st sends it one
 //! message naming each such step, its goal, its last progress, how long the seat has been idle and
 //! what it waits on, and asks it to continue, set a watch, or release the step. The nudge is
 //! recorded on each step it names.
@@ -30,7 +30,7 @@ use crate::store::WORK_NUDGED_KIND;
 use serde_json::json;
 
 /// The default idle time before a nudge.
-pub const IDLE_NUDGE_AFTER_MS: u64 = 30 * 60_000;
+pub const IDLE_NUDGE_AFTER_MS: u64 = 15 * 60_000;
 /// The default time a wait holds after it last woke its seat.
 pub const IDLE_NUDGE_QUIET_WATCH_MS: u64 = 2 * 60 * 60_000;
 /// The least time between two quiet nudges about one step.

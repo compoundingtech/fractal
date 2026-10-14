@@ -2440,6 +2440,7 @@ export type Work = ResourceHeader & {
   person_answers?: Array<PersonAnswerRecord>;
   progress_at?: (Timestamp | null);
   readiness_epoch: number;
+  stalled_at_unix_ms?: number | null;
   state: WorkState;
   submitted_incarnation?: string | null;
   timeout_ms?: number | null;

@@ -160,6 +160,9 @@ mod watches;
 mod idle_holds;
 mod declared_waits;
 pub use declared_waits::{WORK_WAIT_ENDED_KIND, WaitTarget, WaitWake, describe_wait};
+mod quiet_claims;
+pub use quiet_claims::{STALLED_GRACE_MS, STEP_QUIET_CONDITION, STEP_STALLED_CONDITION};
+pub(crate) use quiet_claims::quiet_episode;
 mod idle_mail;
 pub use idle_holds::WORK_NUDGED_KIND;
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -9213,6 +9216,7 @@ impl Store {
                         format!("step run `{subject}` has an active lease"),
                     ));
                 }
+                // `Store::check_work_holder` restates these holder checks for a wait's setup.
                 if action != "claim"
                     && (!lease_valid || current.claimant.as_deref() != Some(actor.as_str()))
                 {
@@ -32848,6 +32852,7 @@ fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
         not_before_unix_ms: not_before.and_then(|value| value.parse().ok()),
         nudged_at_unix_ms: None,
         waiting_on: None,
+        stalled_at_unix_ms: None,
         created_at_unix_ms: created.parse().unwrap_or(0),
         updated_at_unix_ms: updated.parse().unwrap_or(0),
         person_answers: Vec::new(),
@@ -32910,6 +32915,7 @@ fn enrich_step_queue_at(
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
     enrich_step_nudge_at(connection, view, snapshot_unix_ms)?;
     declared_waits::enrich_declared_wait_at(connection, view, snapshot_unix_ms)?;
+    quiet_claims::enrich_stalled_at(connection, view, snapshot_unix_ms)?;
     enrich_step_wake_at(connection, view, snapshot_unix_ms)?;
     enrich_step_definition(connection, view)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
@@ -43839,7 +43845,7 @@ version 2
             "  report-to \"agent/ops/starter\"\n  report-completed \"true\"\n",
         );
         assert_eq!(named["report_to"], "agent/ops/starter");
-        assert_eq!(named["stalled_after_ms"], 30 * 60_000);
+        assert_eq!(named["stalled_after_ms"], 3 * 60 * 60_000);
         assert_eq!(named["report_completed"], true);
         // The mission's own reporter and limit apply when the start names none.
         let inherited = start("watched/1", &watched, "");
@@ -44082,7 +44088,7 @@ mission "parent" state="ready" report-to="agent/ops/watcher" report-stalls=#fals
         assert_eq!(created.body["fields"]["report_stalls"], false);
         assert_eq!(
             run_report_fields(&created.body),
-            Some(("agent/ops/watcher".into(), 1_800_000, false, false))
+            Some(("agent/ops/watcher".into(), 10_800_000, false, false))
         );
         // Omission inherits the pinned mission revision; it is not an implicit re-enable.
         let inherited = store
@@ -44158,7 +44164,7 @@ mission "parent" state="ready" report-to="agent/ops/watcher" report-stalls=#fals
         assert!(latest.body["fields"].get("report_stalls").is_none());
         assert_eq!(
             run_report_fields(&latest.body),
-            Some(("agent/ops/watcher".into(), 1_800_000, false, true))
+            Some(("agent/ops/watcher".into(), 10_800_000, false, true))
         );
         // Old client responses, requests and creation/change claims still mean stalls=true.
         let old_view = serde_json::json!({"run": run.subject, "report_to": "agent/ops/watcher",
@@ -44176,7 +44182,7 @@ mission "parent" state="ready" report-to="agent/ops/watcher" report-stalls=#fals
         let old_claim = json!({"fields": {"report_to": "agent/ops/watcher"}});
         assert_eq!(
             run_report_fields(&old_claim),
-            Some(("agent/ops/watcher".into(), 1_800_000, false, true))
+            Some(("agent/ops/watcher".into(), 10_800_000, false, true))
         );
     }
 
