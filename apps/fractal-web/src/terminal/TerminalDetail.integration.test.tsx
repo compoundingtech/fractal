@@ -205,6 +205,30 @@ describe('raw terminal', () => {
     expect(host.querySelector('[aria-roledescription="terminal"]')?.textContent).toContain('raw prompt$ l')
   })
 
+  it('returns the emulator viewport from scrollback to live output with Latest, without typing', async () => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    const session = opened[0]!
+    await live(session, Array.from({ length: 12 }, (_, line) => `line${line}`).join('\r\n'))
+    const grid = () => host.querySelector('[aria-roledescription="terminal"]')?.textContent ?? ''
+    expect(grid()).toContain('line11')
+    await act(async () => {
+      host.querySelector('[aria-roledescription="terminal"]')!.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaMode: 1, deltaY: -6 }))
+    })
+    await paint()
+    expect(grid()).not.toContain('line11')
+    const latest = [...host.querySelectorAll('button')].find((button) => button.textContent === 'Latest')!
+    await act(async () => latest.click())
+    await paint()
+    expect(grid()).toContain('line11')
+    expect(session.sent).toEqual([])
+    expect(chip()?.textContent).toBe('Click to type')
+    await session.emit({ _tag: 'Data', bytes: utf8.encode('\r\nline12') })
+    await paint()
+    expect(grid()).toContain('line12')
+  })
+
   it('drops keys while reconnecting instead of queueing them, and says so', async () => {
     const { opened, port } = rawSessions()
     await mount({ terminal: observed({ value: screen }), terminalRaw: port })

@@ -28,6 +28,8 @@ export type PtyFrame = typeof PtyFrame.Type
 /** A malformed or oversized binary frame. */
 export class PtyProtocolError extends Schema.TaggedError<PtyProtocolError>()('PtyProtocolError', { message: Schema.String }) {}
 const maxFrameSize = 16 * 1024 * 1024
+/** Largest DATA payload per WebSocket message; st3 caps inbound messages at 64 KiB. */
+export const ptyDataChunkBytes = 16 * 1024
 
 /** Encode one complete frame with its network-order header. */
 export const encodePtyFrame = (frame: PtyFrame): Uint8Array => {
@@ -306,6 +308,8 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
   const state = yield* SubscriptionRef.make<PtyState>({ _tag: 'Connecting', attempt: 1 })
   let current: PtyState = yield* SubscriptionRef.get(state)
   let size = options.size
+  // A resize refused before the first GEOMETRY ack is flushed once the stream is live.
+  let resizePending = false
   let liveSocket: PtySocket | undefined
   let writable = false
   let disposed = false
@@ -355,6 +359,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
       if (ended || disposed) return
       try {
         socket.send(encodePtyFrame({ _tag: 'Attach', ...size }).buffer as ArrayBuffer)
+        resizePending = false
         Queue.offerUnsafe(events, { _tag: 'SocketOpened' })
       } catch (cause) {
         lose(String(cause))
@@ -392,6 +397,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
           if (event._tag === 'Geometry') {
             writable = !ended
             options.onOutput(event)
+            if (resizePending && write({ _tag: 'Resize', ...size })) resizePending = false
           }
           if (event._tag === 'SocketLost') break
         }
@@ -424,10 +430,15 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
   }))
   return {
     state,
-    send: (bytes: Uint8Array) => write({ _tag: 'Data', bytes }),
+    send: (bytes: Uint8Array) => {
+      for (let start = 0; start < bytes.length; start += ptyDataChunkBytes) {
+        if (!write({ _tag: 'Data', bytes: bytes.subarray(start, start + ptyDataChunkBytes) })) return false
+      }
+      return true
+    },
     resize: (next: PtySize) => {
       size = next
-      write({ _tag: 'Resize', ...next })
+      resizePending = !write({ _tag: 'Resize', ...next })
     },
     resetInputModes: () => write({ _tag: 'ResetInputModes' }),
   } satisfies PtySession

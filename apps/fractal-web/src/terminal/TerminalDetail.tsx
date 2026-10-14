@@ -108,7 +108,7 @@ export const TerminalDetail = React.memo(
       return (
         <div {...stylex.props(styles.root)}>
           <RenderProfiler id="terminal">
-            <TerminalPane screen={rawScreen} state={paneState} controls={controls}>
+            <TerminalPane screen={rawScreen} state={paneState} controls={controls} onLatest={() => raw.handle?.view.scroll('bottom')}>
               <RawTerminalSurface
                 handle={raw.handle}
                 screen={rawScreen}

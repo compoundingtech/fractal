@@ -3,7 +3,7 @@ import * as Effect from 'effect/Effect'
 import * as Result from 'effect/Result'
 import * as SubscriptionRef from 'effect/SubscriptionRef'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { encodePtyFrame, makePtyFrameReader, openPtySession, PtyAttachFailure, ptyBackoffMillis, ptyFallback, ptyStreamUrl, ptyTransition, requestPtyAttachment, type PtyFrame, type PtyOutput, type PtySession, type PtySocket, type PtyState } from './pty.ts'
+import { encodePtyFrame, makePtyFrameReader, openPtySession, PtyAttachFailure, ptyBackoffMillis, ptyDataChunkBytes, ptyFallback, ptyStreamUrl, ptyTransition, requestPtyAttachment, type PtyFrame, type PtyOutput, type PtySession, type PtySocket, type PtyState } from './pty.ts'
 const bytes = Uint8Array.of(0, 128, 255)
 const frames: PtyFrame[] = [
   { _tag: 'Data', bytes }, { _tag: 'Attach', rows: 24, cols: 80 },
@@ -166,6 +166,35 @@ it.live('speaks binary PTY, reconnects with a fresh grant, and detaches on scope
   expect(session!.send(bytes)).toBe(false)
   yield* Effect.promise(() => vi.advanceTimersByTimeAsync(60000))
   expect(gateway.requests).toHaveLength(2)
+}))
+
+it.live('splits large input under the 64 KiB server message cap and flushes a resize made before the attach ack', () => Effect.gen(function* () {
+  const gateway = new Gateway()
+  yield* Effect.gen(function* () {
+    const session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, size: { rows: 24, cols: 80 }, onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
+    yield* settle
+    const socket = gateway.sockets[0]!
+    expect(read(new Uint8Array(socket.sent[0]!))).toEqual([{ _tag: 'Attach', rows: 24, cols: 80 }])
+    // The debounced resize lands after ATTACH but before GEOMETRY: refused now, sent once on the ack.
+    session.resize({ rows: 30, cols: 100 })
+    session.resize({ rows: 31, cols: 101 })
+    expect(socket.sent).toHaveLength(1)
+    socket.socket.onmessage?.({ data: encodePtyFrame({ _tag: 'Geometry', rows: 24, cols: 80 }).buffer })
+    yield* settle
+    expect(socket.sent.slice(1).flatMap(buffer => read(new Uint8Array(buffer)))).toEqual([{ _tag: 'Resize', rows: 31, cols: 101 }])
+    socket.socket.onmessage?.({ data: encodePtyFrame({ _tag: 'Geometry', rows: 31, cols: 101 }).buffer })
+    yield* settle
+    expect(socket.sent).toHaveLength(2)
+    // Past the largest admitted paste (64 KiB encoded, markers included): its frame alone would exceed the cap.
+    const paste = concatenate([new TextEncoder().encode('\x1b[200~'), new Uint8Array(64 * 1024).fill(97), new TextEncoder().encode('\x1b[201~')])
+    expect(session.send(paste)).toBe(true)
+    const messages = socket.sent.slice(2)
+    for (const message of messages) expect(message.byteLength).toBeLessThanOrEqual(ptyDataChunkBytes + 5)
+    expect(Math.max(...messages.map(message => message.byteLength))).toBeLessThan(64 * 1024)
+    const frames = messages.flatMap(buffer => read(new Uint8Array(buffer)))
+    expect(frames.every(frame => frame._tag === 'Data')).toBe(true)
+    expect(concatenate(frames.map(frame => (frame._tag === 'Data' ? frame.bytes : new Uint8Array())))).toEqual(paste)
+  }).pipe(Effect.scoped)
 }))
 
 it.effect('decodes attach failures and maps malformed envelopes and network errors', () => Effect.gen(function* () {
