@@ -72,5 +72,5 @@ const styles = stylex.create({
 })
 /** Shared tooltip surface; portal ownership and trigger behavior stay with each caller. */
 export const tooltipStyles = stylex.create({
-  tooltip: { zIndex: 50, borderRadius: r.control, backgroundColor: text.fg, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, color: surface.raised, boxShadow: elevation.popover, maxWidth: g.tooltipMax },
+  tooltip: { zIndex: 50, borderRadius: r.control, backgroundColor: text.fg, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, color: surface.raised, boxShadow: elevation.popover, width: 'max-content', maxWidth: g.tooltipMax, whiteSpace: 'normal', overflowWrap: 'break-word', textAlign: 'start' },
 })
