@@ -825,7 +825,9 @@ ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo 
 nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
 ```
 
-It is a step of its own and no required check until its numbers are stable. "Without the hog" is
+The Performance workflow runs it as the `perf-load-hog` job, admitted exactly as `perf-load` is, with
+`continue-on-error` and its table in the step summary and the `perf-load-hog-logs` artifact. It is
+no required check until its numbers are stable. "Without the hog" is
 the host's load as it was: on a shared host that is not an idle machine, and the report gives the
 load average. Keep a Mac's load average under 10 outside the test window.
 

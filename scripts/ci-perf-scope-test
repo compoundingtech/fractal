@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory() as tmp:
 workflow = (ROOT / '.github/workflows/perf.yml').read_text()
 assert '  merge_group:' not in workflow, 'optional loads must not add merge-queue work'
 conditions = {}
-for job in ['scope', 'perf-load']:
+for job in ['scope', 'perf-load', 'perf-load-hog']:
     match = re.search(r'^  ' + job + r':\n.*?^    if: (.+)$', workflow, re.M | re.S)
     assert match, job
     raw = match.group(1).splitlines()[0]
@@ -130,6 +130,8 @@ def admits(job, event='pull_request', action='synchronize', label='', result='su
     assert all(isinstance(node, allowed) for node in ast.walk(tree))
     return eval(compile(tree, '<generated-perf-admission>', 'eval'), {'__builtins__': {}}, context)
 
+assert conditions['perf-load-hog'] == conditions['perf-load'], 'the hog run is admitted exactly as the load is'
+assert re.search(r'^  perf-load-hog:\n(?:    .*\n)*?    continue-on-error: true$', workflow, re.M), 'the hog run reports without failing the workflow'
 assert not admits('perf-load'), 'only successful explicit false may skip the load'
 for result in ['failure', 'timed_out', 'cancelled', 'skipped', '']:
     assert admits('perf-load', result=result, output=''), result
@@ -137,7 +139,7 @@ for output in ['true', '', 'unexpected']:
     assert admits('perf-load', output=output), output
 assert not admits('perf-load', result='failure', output='', cancelled=True)
 for action in ['labeled', 'unlabeled']:
-    for job in ['scope', 'perf-load']:
+    for job in ['scope', 'perf-load', 'perf-load-hog']:
         assert not admits(job, action=action, label='reviewed', output='true', result='failure')
         assert admits(job, action=action, label='ci-perf', output='true')
 assert 'nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3' in workflow
