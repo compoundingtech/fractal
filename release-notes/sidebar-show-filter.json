@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The Fractal web sidebar gains a Show menu beside agent search: check Waiting for answer to see agents with an open st question or attention item, and check machines to see agents on any of them. Each choice shows a count, writes the matching is:asking or machine: search token, and typed tokens update the menu. The machine choice is remembered in this browser; the Needs me toggle and Host select are replaced by the menu.",
+  "replay": {
+    "status": "none",
+    "detail": "Fractal web sidebar only; reads existing st agent ask and attention fields, no daemon or schema change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Fractal web sidebar only; reads existing st agent ask and attention fields, no daemon or schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Fractal web sidebar only; reads existing st agent ask and attention fields, no daemon or schema change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Saved sidebar filters keep working; the retired Needs me and Host values are ignored, and a corrupt remembered machine list is ignored, leaving the saved search as it was."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Fractal web sidebar only; reads existing st agent ask and attention fields, no daemon or schema change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Fractal web sidebar only; reads existing st agent ask and attention fields, no daemon or schema change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Fractal web sidebar only; reads existing st agent ask and attention fields, no daemon or schema change."
+  }
+}
