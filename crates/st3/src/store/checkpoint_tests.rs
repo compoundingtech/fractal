@@ -1837,12 +1837,21 @@ fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
     let [after_trim, without_trim] =
         [&trimmed, &untrimmed].map(|store| store.checkpoint_sealed_set(second).unwrap());
     assert_eq!(sealed_digest(&after_trim), sealed_digest(&without_trim));
-    // A seal reads only the identities, and they give the same digest as the whole set.
+    // A seal reads only the identities, and they give the same digest as the whole set at
+    // every page size, though the trimmed node's identities alternate between its envelopes
+    // and its tombstones.
     for (store, set) in [(&trimmed, &after_trim), (&untrimmed, &without_trim)] {
         assert_eq!(
             store.checkpoint_sealed_identities(second, None).unwrap(),
             SealedIdentities::of(set)
         );
+        for page in [1, 2, 3, 5] {
+            assert_eq!(
+                store.checkpoint_sealed_identities_paged(second, None, page).unwrap(),
+                SealedIdentities::of(set),
+                "identities differ at page {page}"
+            );
+        }
     }
     assert_eq!(after_trim.envelope_tombstones.len(), plan.envelopes.len());
     assert!(after_trim.claims.len() < without_trim.claims.len());
@@ -1850,6 +1859,55 @@ fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
     assert!(after_trim.claims.is_empty(), "{:?}", after_trim.claims);
     assert_eq!(after_trim.drop_digest, plan.drop_digest);
     assert_eq!(without_trim.drop_digest, plan.drop_digest);
+}
+
+/// While a trim records its tombstones, a dropped envelope is both a row and a tombstone. A seal
+/// counts its identity once, at every page size.
+#[test]
+fn a_seal_counts_an_envelope_once_while_its_tombstone_is_recording() {
+    let store = Store::open_memory("alder").unwrap();
+    write_history(&store);
+    let first = now_ms() + 1_000;
+    let before = store.checkpoint_sealed_identities(first, None).unwrap();
+    let plan = plan_drops(&store.checkpoint_sealed_set(first).unwrap());
+    assert!(!plan.envelopes.is_empty());
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        record_checkpoint_tombstones_tx(&transaction, &checkpoint_name(first), &plan.envelopes, &plan.claims)
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    for page in [1, 2, 3, 64] {
+        assert_eq!(store.checkpoint_sealed_identities_paged(first, None, page).unwrap(), before, "page {page}");
+    }
+}
+
+/// Each identity page seeks the identity key and reads it in order: no table scan and no sort,
+/// so a page costs its rows, wherever it starts.
+#[test]
+fn seal_identity_pages_seek_the_identity_key() {
+    let store = Store::open_memory("alder").unwrap();
+    let connection = store.readers.get();
+    for (sql, parameters) in [
+        (SEALED_IDENTITY_ENVELOPES_SQL, 6),
+        (SEALED_IDENTITY_TOMBSTONES_SQL, 5),
+    ] {
+        let mut values: Vec<rusqlite::types::Value> =
+            vec![0_i64.into(), "alder".to_owned().into(), 1_i64.into(), "hash".to_owned().into()];
+        values.extend(std::iter::repeat_n(rusqlite::types::Value::from(64_i64), parameters - 4));
+        let plan: Vec<String> = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let outer = &plan[0];
+        assert!(outer.starts_with("SEARCH") && outer.contains("INDEX"), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.starts_with("SCAN")), "{plan:?}");
+    }
 }
 
 /// Nearly every claim cites the claim before it on its subject. A walk from a runtime's
@@ -2206,6 +2264,7 @@ fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
             }),
             profile: None,
             wait: None,
+            holder: smallclaims::windows::holds::Holder::current(),
             enqueued: std::time::Instant::now(),
             done: done.clone(),
         },
@@ -2895,6 +2954,133 @@ fn review_reader_retains_durable_history_and_every_referenced_drop_candidate() {
     let description = super::checkpoint_rules::rules_description().split("\nreview=").next().unwrap();
     legacy.update(description.as_bytes());
     assert_ne!(hex::encode(legacy.finalize()),rules_digest());
+}
+
+#[test]
+fn staged_review_reader_retains_every_reference_and_predecessor_like_in_memory() {
+    use smallclaims::store::checkpoint_staging::{StagedPlan, without_reference_plan};
+
+    for kind in st3_schema::review::KINDS.into_iter().chain(["gate.requested"]) {
+        for retain_references in [true, false] {
+            let store = Store::open_memory("ada").unwrap();
+            let mut references = serde_json::Map::new();
+            let mut candidates = BTreeSet::new();
+            let mut uncited = BTreeSet::new();
+            let mut predecessor = String::new();
+            for name in [
+                "binding_claim", "previous_binding", "request", "verdict",
+                "carry_forward_from", "attempt_receipt", "observation",
+                "evidence", "finding_refs", "authorization_evidence", "predecessor", "uncited",
+            ] {
+                let array = matches!(name, "evidence" | "finding_refs" | "authorization_evidence");
+                let mut targets = Vec::new();
+                // Two distinct array entries catch extraction of only the first citation.
+                for entry in 0..if array { 2 } else { 1 } {
+                    let subject = format!("agent/tester/{name}-{entry}");
+                    for position in 0..3 {
+                        store.set_write_clock_at(T + position).unwrap();
+                        let claim = store.append_claim(&input(
+                            &subject, "harness.observed", None,
+                            json!({"state":"idle", "incarnation_id":"tester"}),
+                            &format!("{name}-{entry}-{position}"),
+                        )).unwrap();
+                        if position == 1 {
+                            targets.push(claim.id);
+                        }
+                        store.seal_local_batches().unwrap();
+                    }
+                }
+                match name {
+                    "uncited" => uncited.extend(targets),
+                    "predecessor" => {
+                        predecessor = targets.remove(0);
+                        candidates.insert(predecessor.clone());
+                    }
+                    _ => {
+                        candidates.extend(targets.iter().cloned());
+                        references.insert(name.into(), if array {
+                            json!(targets)
+                        } else {
+                            json!(targets[0])
+                        });
+                    }
+                }
+            }
+            if kind == "gate.requested" {
+                references.extend([
+                    ("gate_subject".into(), json!("gate-operation/tester")),
+                    ("generation".into(), json!("run-generation/tester")),
+                    ("episode".into(), json!(1)),
+                    ("change".into(), json!({"kind":"future.review","subject":"resource/tester/review"})),
+                    ("head".into(), json!({"kind":"git.commit","sha":"a".repeat(64)})),
+                    ("scope".into(), json!({"coverage":["implementation"]})),
+                    ("author".into(), json!("agent/alex")),
+                    ("delta_ref".into(), json!(uncited.first().unwrap())),
+                ]);
+                assert!(st3_schema::review::REQUEST_FIELDS.iter().all(|name| references.contains_key(*name)));
+            }
+            store.set_write_clock_at(T + 3).unwrap();
+            let history = store.append_claim(&input(
+                "agent/reviewer", "harness.observed", None,
+                json!({"state":"idle","incarnation_id":"reviewer"}), "review-history",
+            )).unwrap();
+            // Like the hand-built reader fixture above, exercise every reference extractor
+            // independently of admission requirements. Seal after installing the planner input
+            // so the real capture reads its body and predecessor from the sealed envelope.
+            let body = if retain_references {
+                json!({"fields":references})
+            } else {
+                json!({"fields":{}})
+            };
+            let predecessors = if retain_references {
+                vec![predecessor.clone()]
+            } else {
+                Vec::new()
+            };
+            store.connection.write().execute(
+                "UPDATE claims SET subject=?1,kind=?2,body=?3,predecessors=?4 WHERE id=?5",
+                params![
+                    "gate-operation/tester", kind, serde_json::to_string(&body).unwrap(),
+                    serde_json::to_string(&predecessors).unwrap(), history.id,
+                ],
+            ).unwrap();
+            store.seal_local_batches().unwrap();
+            // Keep the writer-newest-envelope guard off all eligible citation targets.
+            store.set_write_clock_at(CUT - 1).unwrap();
+            store.append_claim(&input(
+                "agent/operator", "harness.observed", None,
+                json!({"state":"idle","incarnation_id":"operator"}), "newest-envelope",
+            )).unwrap();
+            store.seal_local_batches().unwrap();
+
+            let sealed = store.checkpoint_sealed_set(CUT).unwrap();
+            let memory = plan_drops(&sealed);
+            let scratch = tempfile::tempdir().unwrap();
+            let staged = store.checkpoint_staged_set(CUT, None, scratch.path()).unwrap();
+            // Compare the actual staged decisions ourselves, not only its summary or the
+            // staging implementation's optional reference-plan assertion.
+            let staged_plan = without_reference_plan(|| store.plan_staged_checkpoint(&staged)).unwrap();
+            assert_eq!(staged_plan, StagedPlan::of(&memory), "{kind}, citations={retain_references}");
+            let staged_dropped = staged.dropped_claims(0, usize::MAX >> 1).unwrap()
+                .into_iter().map(|claim| claim.id).collect::<BTreeSet<_>>();
+            let memory_dropped = dropped(&memory);
+            assert_eq!(staged_dropped, memory_dropped, "{kind}, citations={retain_references}");
+            let all = sealed.claims.iter().map(|claim| claim.claim.id.clone()).collect::<BTreeSet<_>>();
+            let staged_retained = all.difference(&staged_dropped).cloned().collect::<BTreeSet<_>>();
+            let memory_retained = all.difference(&memory_dropped).cloned().collect::<BTreeSet<_>>();
+            assert_eq!(staged_retained, memory_retained, "{kind}, citations={retain_references}");
+            assert!(staged_retained.contains(&history.id), "durable history: {kind}");
+            for candidate in &candidates {
+                // gate.requested citations are preserved, but its ordinary predecessors
+                // are not the durable-review predecessor fence.
+                let retained = retain_references && (kind != "gate.requested" || candidate != &predecessor);
+                assert_eq!(staged_retained.contains(candidate), retained, "{kind}: {candidate}");
+                assert_eq!(memory_retained.contains(candidate), retained, "{kind}: {candidate}");
+            }
+            assert!(uncited.is_subset(&staged_dropped), "uncited eligible claims: {kind}");
+            assert!(uncited.is_subset(&memory_dropped), "uncited eligible claims: {kind}");
+        }
+    }
 }
 
 /// `slot_of` as it was before the policy file, to show the policy groups claims into the same

@@ -17,6 +17,7 @@ pub mod conversation;
 pub mod demo;
 mod direct;
 pub mod doc;
+pub mod checklist;
 mod edit;
 mod glass;
 mod hover;
@@ -26,11 +27,13 @@ mod hyperlinks;
 mod terminal_tab;
 pub use glass::set_glasses_version;
 pub use lastrun::log_panics as lastrun_log_panics;
+pub use lastrun::note_exit as lastrun_note_exit;
 mod glass_store;
 mod lastrun;
 pub(crate) mod open_timing;
 pub mod layout;
 pub mod live;
+pub(crate) mod slo;
 pub mod pane;
 mod drafts_store;
 mod prefs;
@@ -380,6 +383,7 @@ pub struct Ui {
     quit: bool,
     /// Live: actions become `effects` for the live loop instead of demo edits.
     live: bool,
+    quality: slo::Draw,
     effects: Vec<Effect>,
     /// Updates marked read from here, so each is sent once.
     updates_read: HashSet<String>,
@@ -579,6 +583,44 @@ impl Ui {
         })
     }
 
+    fn quality_visible(&self) -> u8 {
+        let frame = self.frame.borrow();
+        let mut visible =
+            if self.glasses.is_none() && frame.area.width >= 20 && frame.area.height >= 6 {
+                1
+            } else {
+                0
+            };
+        for pane in &frame.panes {
+            if !pane.entry_visible(pane.top, pane.total, &frame.covers) {
+                continue;
+            }
+            if pane.key == "list:home" || pane.key.starts_with("home:") {
+                visible |= 1;
+            }
+            if pane.key == "list:agents"
+                || pane.key == "agent-header"
+                || pane.key.starts_with("agent:")
+                || pane.key.starts_with("details:agent/")
+            {
+                visible |= 2;
+            }
+        }
+        visible
+    }
+
+    fn terminal_ready_visible(&self, target: &str) -> bool {
+        let ready = self
+            .terminal_view(target)
+            .and_then(|view| view.native.as_ref())
+            .is_some_and(|native| native.presented());
+        ready
+            && self.frame.borrow().panes.iter().any(|pane| {
+                pane.key.strip_prefix("terminal:") == Some(target)
+                    && pane.entry_visible(pane.top, pane.total, &self.frame.borrow().covers)
+            })
+    }
+
     /// Call only after the terminal successfully presented this frame.
     pub(crate) fn visible_messages(&self) -> HashSet<String> {
         if self.help
@@ -677,6 +719,7 @@ impl Ui {
             demo: None,
             quit: false,
             live: false,
+            quality: slo::Draw::new(Instant::now()),
             effects: Vec::new(),
             updates_read: HashSet::new(),
             acted: HashSet::new(),
@@ -1084,6 +1127,14 @@ impl Ui {
         shown.then_some(self.usage_hours)
     }
 
+    pub(crate) fn inventories_wanted(&self) -> crate::feed::Inventories {
+        self.glasses.as_ref().map_or_else(|| crate::feed::Inventories {
+            clients: self.clients_wanted(), usage_hours: self.usage_wanted(),
+            machines: self.tab == 3, devices: self.tab == 3,
+            sessions: self.tab == 1 || self.tab == 3, terminals: false,
+        }, |glasses| glasses.inventories_wanted(self.tab, self.usage_hours))
+    }
+
     /// Details beside the conversation, or in its place when the pane is too narrow for both;
     /// for the agent shown, not every agent (Nathan, 2026-10-03).
     fn toggle_details(&mut self) {
@@ -1107,6 +1158,28 @@ impl Ui {
 
     pub(crate) fn conversation_failed(&mut self, target: &str, error: &str) {
         self.stalled.insert(target.to_owned(), error.to_owned());
+    }
+
+    /// What is on screen, as kinds and counts only, for a slow-turn note: which pane has focus,
+    /// whether Home or the palette floats over it, and how much st has sent.
+    pub(crate) fn slow_context(&self) -> String {
+        let pane = self
+            .focused_pane()
+            .map(|pane| pane.key())
+            .map(|key| key.split(':').next().unwrap_or("").to_owned())
+            .unwrap_or_else(|| "none".to_owned());
+        let area = self.frame.borrow().area;
+        format!(
+            "pane {pane}, {}x{}, home {}, palette {}, terminal {}, agents {}, missions {}, attention {}",
+            area.width,
+            area.height,
+            self.home_open(),
+            self.palette_open(),
+            self.native_terminal().is_some(),
+            self.world.agents.items().len(),
+            self.world.missions.items().len(),
+            self.world.attention.items().len(),
+        )
     }
 
     /// The agent whose message box has the keyboard: the selected agent while the Agents tab
@@ -3841,6 +3914,16 @@ impl Ui {
 
     /// Dispatch the outer terminal's decoded input, shared by the live and demo loops.
     fn input_event(&mut self, event: Event) -> bool {
+        if self.live
+            && matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release)
+            && (self.editing
+                || self.chat.as_ref().is_some_and(|chat| chat.editing)
+                || self.new_mission.is_some()
+                || self.find.is_some()
+                || self.palette_open())
+        {
+            self.quality.key();
+        }
         if let Event::Mouse(mouse) = event
             && mouse.kind == MouseEventKind::Moved
         {

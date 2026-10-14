@@ -18,7 +18,7 @@ not close an unresolved delivery alert.
 
 Boots and channel reconnects hold earlier mail, including old probe messages.
 Those messages stay in the mailbox and contribute to the aged unread count
-in doctor and stui. Preview and close that backlog with the commands in
+in doctor and the terminal UI. Preview and close that backlog with the commands in
 [seat deploys](seat-deploys.md), including
 `st conversations cleanup --all --older-than 1h`. Cleanup does not count as a
 successful native probe; recovery still requires a fresh recipient read.
@@ -47,11 +47,10 @@ is a point of a series and stays in the probe's local `events.jsonl`. A send sto
 in flight once its deadline passes or it raises an alert, even while it keeps retrying,
 and that publishes at once. A heartbeat waits, for at most one deadline, until no send
 is in flight, and a report that showed a send in flight is replaced as soon as it
-resolves, so doctor never sees a stale wait as overdue. On one production fleet the probe published about 2,700 versions a day per
-node (one every 32 seconds); this bounds it at 288 heartbeats plus outcome changes.
+resolves, so doctor never sees a stale wait as overdue.
 `st doctor`
 shows each direction's latest message, measured latency or pending age, overdue
-results, missing configured source nodes, and heartbeats older than 90 seconds.
+results, missing configured source nodes, and heartbeats older than 15 minutes.
 A reported success must match the actual sender, recipient and accepted read
 claim in the graph; a document alone cannot manufacture a successful read.
 A late receipt remains visible until the next probe completes successfully.

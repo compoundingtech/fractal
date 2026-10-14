@@ -114,7 +114,8 @@ pub(super) fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Va
                     target(kind, "max", &row["max_ms"]);
                 }
             }
-            "database" => {}
+            // The writer-hold row's windows go out under `transaction`; its holders are not gauges.
+            "database" | "writer-hold" => {}
             _ => {
                 let owner = if population.is_some() { "reported" } else { "owner" };
                 series(owner, &row["windows"]);

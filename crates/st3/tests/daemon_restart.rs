@@ -31,6 +31,13 @@ struct Daemon {
 
 impl Daemon {
     fn new(root: &Path) -> Self {
+        // These APIs run in process. Subprocess daemon fixtures own their stdout log.
+        let log = std::fs::File::create(root.join("daemon.log")).unwrap();
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_env_filter("st3=debug")
+            .with_writer(std::sync::Mutex::new(log))
+            .try_init();
         Self {
             root: root.to_path_buf(),
             socket: root.join("st3.sock"),
@@ -414,7 +421,7 @@ async fn native_exit_stops_provider_and_driver_with_daemon_down() {
     }
     // Exercise both transient Unix-socket errors that previously retried forever.
     for missing_socket in [false, true] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -466,7 +473,7 @@ async fn native_exit_retries_past_stop_budget_without_signal_and_reports_on_reco
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -514,7 +521,7 @@ async fn native_exit_signal_after_provider_end_bounds_an_in_flight_request() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -601,7 +608,7 @@ async fn a_quiet_idle_seat_ages_stale_and_recovers_new_evidence_after_daemon_res
     use sha2::{Digest as _, Sha256};
     use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
 
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/quiet-cedar";
     let incarnation = "quiet-cedar:one";
@@ -753,7 +760,7 @@ async fn title_fallback_converts_a_slash_seat_id_to_its_dot_pty_id() {
 async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/title-cedar";
     let mut daemon = Daemon::new(root);
@@ -839,7 +846,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-claude";
     let incarnation = "4242:2026-09-27T12:00:00.000Z";
@@ -967,7 +974,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-omp";
     let incarnation = "4343:2026-09-27T12:00:00.000Z";
@@ -1061,7 +1068,7 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-todo";
     let mut daemon = Daemon::new(root);
@@ -1171,7 +1178,7 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
         return;
     }
     use sha2::Digest as _;
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/drain-accounts";
     let incarnation = "account-runtime";
@@ -1239,7 +1246,7 @@ async fn an_omp_ask_clears_without_poisoning_the_next_incarnation() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/human-omp";
     let incarnation = "human-1";
@@ -1327,7 +1334,7 @@ fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let socket = root.path().join("st3.sock");
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     let started = Instant::now();
@@ -1355,7 +1362,7 @@ async fn a_cli_command_waits_out_a_daemon_restart() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.start().await;
@@ -1394,7 +1401,7 @@ async fn a_cli_command_tries_a_bound_listener_before_refusing_startup() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let startup = st3::startup::Startup::begin(&daemon.socket).unwrap();
@@ -1431,7 +1438,7 @@ async fn doctor_reports_starting_without_failing_an_answering_api() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     fn response(value: Value) -> axum::Json<st3::model::ApiResponse<Value>> {
@@ -1510,7 +1517,7 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
     }
     for driver in ["omp", "pi"] {
         for transport in ["poll", "push"] {
-            let root = tempfile::tempdir().unwrap();
+            let root = st3::test_support::evidence_tempdir();
             let root = root.path();
             let seat = "agent/receipt-worker";
             let graph = root.join("graph.db");
@@ -1670,7 +1677,7 @@ async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
     }
     for driver in ["omp", "pi"] {
         for transport in ["push", "poll"] {
-            let root = tempfile::tempdir().unwrap();
+            let root = st3::test_support::evidence_tempdir();
             let root = root.path();
             let seat = "agent/replay-worker";
             let mut daemon = Daemon::new(root);
@@ -1803,7 +1810,7 @@ impl ClaudeChannelFixture {
             .env("ST_CLAUDE_SESSION_SEQ", "1");
         command
     }
-    async fn open(
+    fn spawn_protocol(
         &self,
         root: &Path,
         daemon: &Daemon,
@@ -1821,7 +1828,7 @@ impl ClaudeChannelFixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut input = channel.stdin.take().unwrap();
+        let input = channel.stdin.take().unwrap();
         let (sender, received) = std::sync::mpsc::channel::<Value>();
         let output = channel.stdout.take().unwrap();
         std::thread::spawn(move || {
@@ -1832,6 +1839,19 @@ impl ClaudeChannelFixture {
                 }
             }
         });
+        (channel, input, received)
+    }
+    fn open_protocol(
+        &self,
+        root: &Path,
+        daemon: &Daemon,
+        wrapper: &str,
+    ) -> (
+        Child,
+        std::process::ChildStdin,
+        std::sync::mpsc::Receiver<Value>,
+    ) {
+        let (channel, mut input, received) = self.spawn_protocol(root, daemon, wrapper);
         writeln!(
             input,
             "{}",
@@ -1850,6 +1870,19 @@ impl ClaudeChannelFixture {
         )
         .unwrap();
         input.flush().unwrap();
+        (channel, input, received)
+    }
+    async fn open(
+        &self,
+        root: &Path,
+        daemon: &Daemon,
+        wrapper: &str,
+    ) -> (
+        Child,
+        std::process::ChildStdin,
+        std::sync::mpsc::Receiver<Value>,
+    ) {
+        let (channel, input, received) = self.open_protocol(root, daemon, wrapper);
         let client = st3::client::Client::new(st3::client::Endpoint::Unix(daemon.socket.clone()));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1877,13 +1910,897 @@ impl ClaudeChannelFixture {
     }
 }
 
+/// Force a native activity publication to commit while the real channel's startup
+/// claim is in flight. This is a publisher/Store ordering control, not a hook eval.
+async fn delayed_channel_initialization_preserves_activity(activity: &str, legacy: bool) {
+    let root = st3::test_support::evidence_tempdir();
+    let root = root.path();
+    let mut daemon = Daemon::new(root);
+    declare_claude(&daemon, "agent/quartz");
+    daemon.observe_running("agent/quartz", "wrapper-activity");
+    let requests = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let release = Arc::new(Notify::new());
+    let committed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let captured = requests.clone();
+    let release_request = release.clone();
+    let recorded = committed.clone();
+    let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let captured = captured.clone();
+            let release = release_request.clone();
+            let recorded = recorded.clone();
+            async move {
+                if request.method() != axum::http::Method::POST
+                    || request.uri().path() != "/v1/claims"
+                {
+                    return next.run(request).await;
+                }
+                let (parts, body) = request.into_parts();
+                let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                let input: Value = serde_json::from_slice(&bytes).unwrap();
+                let startup = input["idempotency_key"].as_str().is_some_and(|key| {
+                    key.starts_with("channel-ready:") || key.starts_with("channel-initialized:")
+                });
+                if startup {
+                    let count = {
+                        let mut requests = captured.lock().unwrap();
+                        requests.push(input);
+                        requests.len()
+                    };
+                    if count == 1 {
+                        release.notified().await;
+                    }
+                }
+                let response = next
+                    .run(axum::extract::Request::from_parts(
+                        parts,
+                        axum::body::Body::from(bytes),
+                    ))
+                    .await;
+                if startup {
+                    recorded.store(
+                        response.status().is_success(),
+                        std::sync::atomic::Ordering::Release,
+                    );
+                }
+                response
+            }
+        },
+    ));
+    daemon.start_isolated_app(app).await;
+    let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-activity");
+    let (mut channel, mut input, received) =
+        fixture.open_protocol(root, &daemon, "wrapper-activity");
+    wait_until(
+        "startup POST is held before commit",
+        Duration::from_secs(5),
+        || requests.lock().unwrap().len() == 1,
+    )
+    .await;
+    let legacy_claim = if legacy {
+        let request = requests.lock().unwrap()[0].clone();
+        let key = request["idempotency_key"].as_str().unwrap();
+        let epoch = key.rsplit(':').next().unwrap();
+        let mut fields = BTreeMap::from([
+            ("state".into(), json!("ready")),
+            ("driver".into(), json!("claude")),
+            ("transport".into(), json!("claude-channel")),
+            ("incarnation_id".into(), json!("wrapper-activity")),
+        ]);
+        st3::suspension::annotate_quiescence(&mut fields);
+        Some(
+            daemon
+                .store
+                .append_claim(&ClaimInput {
+                    subject: "agent/quartz".into(),
+                    kind: "harness.observed".into(),
+                    actor: Some("agent/quartz".into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!(
+                        "channel-ready:agent/quartz:wrapper-activity:{epoch}"
+                    )),
+                })
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    daemon.append(
+        "agent/quartz",
+        "harness.observed",
+        json!({
+            "state": activity, "driver": "claude", "incarnation_id": "wrapper-activity",
+        }),
+    );
+    assert_eq!(
+        daemon
+            .store
+            .current_harness("agent/quartz")
+            .unwrap()
+            .unwrap()
+            .state,
+        activity
+    );
+    let before = daemon
+        .store
+        .current_harness("agent/quartz")
+        .unwrap()
+        .unwrap();
+    release.notify_one();
+    wait_until(
+        "actual startup claim commits",
+        Duration::from_secs(5),
+        || committed.load(std::sync::atomic::Ordering::Acquire),
+    )
+    .await;
+    let after = daemon
+        .store
+        .current_harness("agent/quartz")
+        .unwrap()
+        .unwrap()
+        .state;
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(5)).unwrap()["id"],
+        2,
+        "acknowledged startup must keep MCP requests responsive"
+    );
+    drop(input);
+    wait_until("EOF closes the channel", Duration::from_secs(5), || {
+        channel.try_wait().unwrap().is_some()
+    })
+    .await;
+    assert!(channel.try_wait().unwrap().unwrap().success());
+    assert_eq!(requests.lock().unwrap().len(), 1, "only the initialization transition may POST");
+    let selected = daemon
+        .store
+        .current_harness("agent/quartz")
+        .unwrap()
+        .unwrap();
+    let claims = daemon.store.claims_for("agent/quartz", None).unwrap();
+    eprintln!("selected harness after startup: {selected:?}; actual claims: {claims:?}");
+    assert_eq!(
+        selected.claim, before.claim,
+        "component initialization changed the selected activity claim"
+    );
+    let diagnostics: Vec<_> = claims
+        .iter()
+        .filter(|claim| {
+            claim.kind == "harness.diagnostic"
+                && claim.body["fields"]["code"] == "claude-channel-initialized"
+        })
+        .collect();
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "component initialization must commit exactly once"
+    );
+    assert!(diagnostics[0].body["fields"].get("state").is_none());
+    if let Some(legacy) = legacy_claim {
+        let retained = claims.iter().find(|claim| claim.id == legacy.id).unwrap();
+        assert_eq!(
+            retained.body, legacy.body,
+            "legacy idempotency input changed"
+        );
+        for request in requests.lock().unwrap().iter() {
+            assert!(
+                request["idempotency_key"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("channel-initialized:")
+            );
+            assert_eq!(request["kind"], "harness.diagnostic");
+        }
+    }
+    daemon.stop().await;
+    assert_eq!(
+        after, activity,
+        "late channel initialization replaced native activity"
+    );
+}
+
+// Exercise the real provider wrapper, local hook spool, channel, API and Store.
+// The provider initializes MCP but deliberately has no SessionStart/Stop hooks.
+async fn channel_readiness_without_start_hook(native_activity: Option<bool>, late: bool) {
+    use sha2::{Digest as _, Sha256};
+    use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+    let root = st3::test_support::evidence_tempdir();
+    let root = root.path();
+    let seat = "agent/grove/hookless-cedar";
+    let incarnation = "hookless-cedar:one";
+    let mut daemon = Daemon::new(root);
+    declare_claude(&daemon, seat);
+    daemon.observe_running(seat, incarnation);
+    daemon.start_admitted_protocol().await;
+    let provider = r#"
+import json, os, subprocess, sys, time
+channel = subprocess.Popen([sys.argv[1], 'driver', 'claude-mcp', '--subject', os.environ['ST_AGENT']],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+channel.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize'}) + '\n')
+channel.stdin.flush()
+assert json.loads(channel.stdout.readline())['id'] == 1
+channel.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
+channel.stdin.flush()
+time.sleep(300)
+"#;
+    let mut driver = TestSeat(Some(
+        seat_command(root, &daemon.socket)
+            .env("ST_AGENT", seat)
+            .env("ST3_MAILBOX_TRANSPORT", "push")
+            .args([
+                "driver",
+                "claude",
+                "--subject",
+                seat,
+                "--",
+                "python3",
+                "-c",
+                provider,
+                test_env!("CARGO_BIN_EXE_st3-fixture"),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    wait_until(
+        "hookless provider initializes its admitted channel",
+        Duration::from_secs(10),
+        || daemon.has_diagnostic(seat, incarnation, "claude-channel-attached"),
+    )
+    .await;
+    let dir = root
+        .join("drivers")
+        .join(&hex::encode(Sha256::digest(seat.as_bytes()))[..24])
+        .join("observations");
+    let owned =
+        st_drivers::harness_state::read(&st_drivers::harness_state::harness_state_path(&dir), None)
+            .unwrap();
+    let mut writer = Writer::new(
+        &dir,
+        "grove/hookless-cedar",
+        "claude",
+        Some("grove/hookless-cedar".into()),
+    )
+    .with_ownership(
+        owned.evidence_incarnation.unwrap(),
+        owned.ownership_sequence.unwrap(),
+    );
+    let fallback_count = || {
+        daemon
+            .store
+            .claims_for(seat, None)
+            .unwrap()
+            .iter()
+            .filter(|c| {
+                c.kind == "harness.observed"
+                    && c.body["fields"]["reason"] == "channelInitializedWithoutNativeState"
+            })
+            .count()
+    };
+    assert_eq!(fallback_count(), 0, "readiness must wait for its grace");
+    if late || native_activity.is_none() {
+        wait_until(
+            "hookless channel becomes ready after the grace",
+            Duration::from_secs(22),
+            || {
+                daemon
+                    .store
+                    .current_harness(seat)
+                    .unwrap()
+                    .is_some_and(|h| h.state == "ready")
+            },
+        )
+        .await;
+        assert_eq!(fallback_count(), 1);
+    }
+    if let Some(working) = native_activity {
+        let state = if working { "working" } else { "idle" };
+        writer
+            .observe(Observation::new(
+                if working {
+                    Activity::Active
+                } else {
+                    Activity::Idle
+                },
+                BlockedOn::None,
+                InputBuffer::Empty,
+            ))
+            .unwrap();
+        wait_until(
+            "the actual native hook state commits",
+            Duration::from_secs(5),
+            || {
+                daemon
+                    .store
+                    .current_harness(seat)
+                    .unwrap()
+                    .is_some_and(|h| h.state == state)
+            },
+        )
+        .await;
+        // Cross the entire fallback grace for an early hook; late hooks only need
+        // subsequent driver ticks to demonstrate there is no recurring readiness POST.
+        tokio::time::sleep(Duration::from_secs(if late { 3 } else { 16 })).await;
+        assert_eq!(
+            daemon.store.current_harness(seat).unwrap().unwrap().state,
+            state
+        );
+        assert_eq!(fallback_count(), usize::from(late));
+    } else {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(fallback_count(), 1, "steady ticks must not republish ready");
+    }
+    assert_alive(&mut driver, "hookless provider driver");
+    driver.stop();
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialized_hookless_claude_seat_becomes_ready() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    channel_readiness_without_start_hook(None, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialized_claude_readiness_does_not_displace_late_idle() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    channel_readiness_without_start_hook(Some(false), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialized_claude_readiness_preserves_early_idle() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    channel_readiness_without_start_hook(Some(false), false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialized_claude_readiness_preserves_early_working() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    channel_readiness_without_start_hook(Some(true), false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_claude_channel_initialization_preserves_idle() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    delayed_channel_initialization_preserves_activity("idle", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_claude_channel_initialization_preserves_working() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    delayed_channel_initialization_preserves_activity("working", false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialized_claude_channel_preserves_legacy_readiness_key() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    delayed_channel_initialization_preserves_activity("idle", true).await;
+}
+
+async fn initialized_channel_still_rejects_a_foreign_binding(replace_token: bool) {
+    let root = st3::test_support::evidence_tempdir();
+    let root = root.path();
+    let mut daemon = Daemon::new(root);
+    declare_claude(&daemon, "agent/quartz");
+    daemon.observe_running("agent/quartz", "wrapper-fence");
+    daemon.start_admitted_protocol().await;
+    let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-fence");
+    let (mut channel, input, _) = fixture.open(root, &daemon, "wrapper-fence").await;
+    let replacement = if replace_token {
+        let (channel, input, _) = fixture.open(root, &daemon, "wrapper-fence").await;
+        Some((channel, input))
+    } else {
+        daemon.observe_running("agent/quartz", "successor-fence");
+        None
+    };
+    wait_until(
+        "the real channel rejects revoked ownership",
+        Duration::from_secs(15),
+        || channel.try_wait().unwrap().is_some(),
+    )
+    .await;
+    let status = channel.try_wait().unwrap().unwrap();
+    let mut error = String::new();
+    channel
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut error)
+        .unwrap();
+    drop(input);
+    if let Some((mut replacement, input)) = replacement {
+        drop(input);
+        wait_until("the admitted replacement accepts EOF", Duration::from_secs(5), || {
+            replacement.try_wait().unwrap().is_some()
+        }).await;
+        assert!(replacement.try_wait().unwrap().unwrap().success());
+    }
+    daemon.stop().await;
+    assert!(
+        !status.success(),
+        "revoked channel reported success: {error}"
+    );
+    assert!(
+        error.contains("stale-mailbox-session"),
+        "wrong revocation result: {error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialized_claude_channel_rejects_a_successor_incarnation() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    initialized_channel_still_rejects_a_foreign_binding(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialized_claude_channel_rejects_a_replacement_token() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    initialized_channel_still_rejects_a_foreign_binding(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_mcp_rejects_resumed_incarnation_mismatch_before_binding() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = st3::test_support::evidence_tempdir();
+    let root = root.path();
+    let mut daemon = Daemon::new(root);
+    declare_claude(&daemon, "agent/quartz");
+    daemon.observe_running("agent/quartz", "wrapper-current");
+    let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-current");
+    let bind_seen = Arc::new(AtomicBool::new(false));
+    let seen = bind_seen.clone();
+    let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(
+        axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let seen = seen.clone();
+                async move {
+                    if request.uri().path() == "/v1/mailbox/bind" {
+                        seen.store(true, Ordering::SeqCst);
+                    }
+                    next.run(request).await
+                }
+            },
+        ),
+    );
+    daemon.start_isolated_app(app).await;
+    let resume = st_drivers::reexec::write_state(
+        root,
+        "mismatched-channel",
+        &json!({
+            "initialized":true,
+            "fence":st3::mailbox::Fence::new("agent/quartz", "wrapper-retired", "delivery"),
+            "attempted":[], "confirmed":[], "accepted":[],
+            "lines":st_drivers::reexec::LineBuffer::default(),
+        }),
+    )
+    .unwrap();
+    let mut channel = fixture
+        .command(root, &daemon, "wrapper-current")
+        .args(["driver", "claude-mcp", "--subject", "agent/quartz"])
+        .env(st_drivers::reexec::CHANNEL_RESUME_ENV, resume)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until(
+        "the mismatched resumed channel refuses before binding",
+        Duration::from_secs(5),
+        || channel.try_wait().unwrap().is_some(),
+    )
+    .await;
+    let output = channel.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("the resumed Claude channel belongs to another runtime incarnation")
+    );
+    assert!(!bind_seen.load(Ordering::SeqCst));
+    assert!(
+        daemon
+            .store
+            .claims_for("agent/quartz", Some("harness.diagnostic"))
+            .unwrap()
+            .is_empty()
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_restarting() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = st3::test_support::evidence_tempdir();
+    let root = root.path();
+    let mut daemon = Daemon::new(root);
+    declare_claude(&daemon, "agent/quartz");
+    daemon.observe_running("agent/quartz", "wrapper-offline");
+    let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-offline");
+    let (mut channel, mut input, received) = fixture.spawn_protocol(root, &daemon, "wrapper-offline");
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize"})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    // Claude has a bounded startup timeout. The handshake cannot wait for a daemon or
+    // runtime projection, even though neither mail nor readiness is authorized offline.
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("MCP initialization waited for the daemon")["id"],
+        1
+    );
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    assert!(
+        daemon
+            .store
+            .claims_for("agent/quartz", Some("harness.observed"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(daemon.store.claims_for("agent/quartz", Some("harness.diagnostic")).unwrap().is_empty());
+    assert!(
+        received.try_recv().is_err(),
+        "offline initialization offered mail"
+    );
+    daemon.start_admitted_protocol().await;
+    daemon.send(
+        "message/quartz-offline",
+        "agent/quartz",
+        "OFFLINE START PROBE",
+    );
+    let notice = received
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the same channel did not attach after daemon startup");
+    assert_eq!(notice["method"], "notifications/claude/channel");
+    let envelope = notice["params"]["content"].as_str().unwrap();
+    fixture.append(
+        root,
+        json!({"type":"user","isMeta":true,"message":{"role":"user","content":envelope}}),
+    );
+    wait_until(
+        "offline-start mail has native receipts",
+        Duration::from_secs(10),
+        || {
+            daemon
+                .store
+                .latest_claim("message/quartz-offline", Some("message.read"))
+                .unwrap()
+                .is_some()
+        },
+    )
+    .await;
+    // A later daemon outage preserves the initialized stdio connection and its owner.
+    daemon.stop().await;
+    daemon.send(
+        "message/quartz-reconnected",
+        "agent/quartz",
+        "RECONNECT PROBE",
+    );
+    assert_alive(
+        &mut channel,
+        "the initialized Claude channel during an outage",
+    );
+    daemon.start_admitted_protocol().await;
+    let notice = received
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the initialized channel did not reconnect");
+    assert!(
+        notice["params"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("message/quartz-reconnected")
+    );
+    fixture.append(root, json!({"type":"user","isMeta":true,"message":{"role":"user","content":notice["params"]["content"]}}));
+    wait_until(
+        "reconnected mail has native receipts",
+        Duration::from_secs(10),
+        || {
+            daemon
+                .store
+                .latest_claim("message/quartz-reconnected", Some("message.read"))
+                .unwrap()
+                .is_some()
+        },
+    )
+    .await;
+    for message in ["message/quartz-offline", "message/quartz-reconnected"] {
+        for kind in ["message.staged", "message.delivered", "message.read"] {
+            assert_eq!(
+                daemon.store.claims_for(message, Some(kind)).unwrap().len(),
+                1,
+                "{message} {kind}"
+            );
+        }
+    }
+    assert_alive(&mut channel, "the same Claude channel after reconnection");
+    assert!(
+        received.try_recv().is_err(),
+        "reconnection duplicated a native offer"
+    );
+    drop(input);
+    wait_until(
+        "Claude EOF ends the channel",
+        Duration::from_secs(5),
+        || channel.try_wait().unwrap().is_some(),
+    )
+    .await;
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_mcp_answers_during_binding_retries_and_eof_cancels_attachment() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = st3::test_support::evidence_tempdir();
+    let root = root.path();
+    let mut daemon = Daemon::new(root);
+    declare_claude(&daemon, "agent/quartz");
+    daemon.observe_running("agent/quartz", "wrapper-binding");
+    let binding_seen = Arc::new(AtomicBool::new(false));
+    let seen = binding_seen.clone();
+    let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let seen = seen.clone();
+            async move {
+                if request.uri().path() == "/v1/mailbox/bind" {
+                    seen.store(true, Ordering::SeqCst);
+                    return axum::response::IntoResponse::into_response((
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "runtime ownership is not available yet",
+                    ));
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    daemon.start_isolated_app(app).await;
+    let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-binding");
+    let (mut channel, mut input, received) = fixture.spawn_protocol(root, &daemon, "wrapper-binding");
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize"})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("MCP initialization waited for binding")["id"],
+        1
+    );
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    wait_until(
+        "the channel retries mailbox binding",
+        Duration::from_secs(5),
+        || binding_seen.load(Ordering::SeqCst),
+    )
+    .await;
+    writeln!(
+        input,
+        "{}",
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+    )
+    .unwrap();
+    input.flush().unwrap();
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("MCP metadata waited for binding")["id"],
+        2
+    );
+    assert!(
+        daemon
+            .store
+            .claims_for("agent/quartz", Some("harness.observed"))
+            .unwrap()
+            .is_empty(),
+        "unbound MCP initialization reported readiness"
+    );
+    assert!(daemon.store.claims_for("agent/quartz", Some("harness.diagnostic")).unwrap().is_empty());
+    drop(input);
+    wait_until(
+        "EOF cancels the unbound channel",
+        Duration::from_secs(5),
+        || channel.try_wait().unwrap().is_some(),
+    )
+    .await;
+    assert!(channel.try_wait().unwrap().unwrap().success());
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    // The second POST either succeeds, or remains pending until EOF cancels the child.
+    // Exercise the actual channel loop, rather than manually calling the POST twice.
+    for recover in [true, false] {
+        let root = st3::test_support::evidence_tempdir();
+        let root = root.path();
+        let mut daemon = Daemon::new(root);
+        declare_claude(&daemon, "agent/quartz");
+        daemon.observe_running("agent/quartz", "wrapper-initialization");
+        let attempts = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let captured = attempts.clone();
+        let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let captured = captured.clone();
+                async move {
+                    if request.method() != axum::http::Method::POST
+                        || request.uri().path() != "/v1/claims"
+                    {
+                        return next.run(request).await;
+                    }
+                    let (parts, body) = request.into_parts();
+                    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                    let input: Value = serde_json::from_slice(&bytes).unwrap();
+                    if input["kind"] == "harness.diagnostic"
+                        && input["fields"]["code"] == "claude-channel-initialized"
+                    {
+                        let count = {
+                            let mut attempts = captured.lock().unwrap();
+                            attempts.push(input);
+                            attempts.len()
+                        };
+                        if count == 1 {
+                            return axum::response::IntoResponse::into_response((
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                "initialization publication temporarily unavailable",
+                            ));
+                        }
+                        if !recover {
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                    next.run(axum::extract::Request::from_parts(
+                        parts,
+                        axum::body::Body::from(bytes),
+                    ))
+                    .await
+                }
+            },
+        ));
+        daemon.start_isolated_app(app).await;
+        let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-initialization");
+        let (mut channel, mut input, received) =
+            fixture.open(root, &daemon, "wrapper-initialization").await;
+        wait_until(
+            "the failed initialization POST retries",
+            Duration::from_secs(5),
+            || attempts.lock().unwrap().len() >= 2,
+        )
+        .await;
+        writeln!(
+            input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("initialization POST blocked MCP metadata")["id"],
+            2
+        );
+        if recover {
+            wait_until(
+                "the retry publishes durable initialization",
+                Duration::from_secs(5),
+                || {
+                    !daemon
+                        .store
+                        .claims_for("agent/quartz", Some("harness.diagnostic"))
+                        .unwrap()
+                        .is_empty()
+                },
+            )
+            .await;
+            // Acknowledged initialization stops posting on subsequent ordinary ticks.
+            tokio::time::sleep(Duration::from_millis(2200)).await;
+            let claims = daemon
+                .store
+                .claims_for("agent/quartz", Some("harness.diagnostic"))
+                .unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].body["fields"]["code"], "claude-channel-initialized");
+            assert!(claims[0].body["fields"].get("state").is_none());
+        } else {
+            assert!(
+                daemon
+                    .store
+                    .claims_for("agent/quartz", Some("harness.diagnostic"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(
+            daemon.store.claims_for("agent/quartz", Some("harness.observed")).unwrap().is_empty(),
+            "component initialization must not publish native activity"
+        );
+        {
+            let attempts = attempts.lock().unwrap();
+            assert_eq!(
+                attempts.len(),
+                2,
+                "initialization retried after success or while a POST was still pending"
+            );
+            assert_eq!(
+                attempts[0], attempts[1],
+                "initialization retry mutated the claim or idempotency key"
+            );
+        }
+        drop(input);
+        wait_until(
+            "EOF cancels initialization publication",
+            Duration::from_secs(5),
+            || channel.try_wait().unwrap().is_some(),
+        )
+        .await;
+        assert!(channel.try_wait().unwrap().unwrap().success());
+        daemon.stop().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_idle_staged_mail_recovers_startup_binding_and_both_native_receipt_forms() {
     if st3::test_support::supervise_test() {
         return;
     }
     for mid_turn in [false, true] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         daemon.observe_running("agent/quartz", "first");
@@ -1974,7 +2891,7 @@ async fn claude_staged_mail_receipted_after_restart_is_not_injected_on_second_re
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "first");
@@ -2045,7 +2962,7 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "previous");
@@ -2129,7 +3046,7 @@ async fn claude_delivered_unread_mail_from_an_old_ledger_is_held_in_a_fresh_sess
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "replacement");
