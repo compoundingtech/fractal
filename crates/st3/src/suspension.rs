@@ -1,5 +1,5 @@
 //! Suspended seats: a running seat stops at a quiet boundary and later resumes its own native
-//! session on the same host.
+//! session on the same host or, for portable drivers, another fleet host.
 //!
 //! A suspension is a pair of fenced runtime actions on the seat, like a restart. A person or
 //! agent asks with `runtime.action.requested {action: suspend | resume}`; the seat's owner records
@@ -11,7 +11,8 @@
 //! resume:  restoring -> verifying   -> resumed           (failed: the seat stays suspended)
 //! ```
 //!
-//! The snapshot is the native session the seat's driver bound for the suspended incarnation, read
+//! The snapshot includes a host-local workspace bundle and, for portable drivers, native files.
+//! The native session is the one the driver bound for the suspended incarnation, read
 //! from its `harness.session-file` claim. Resume launches the driver with that session named in
 //! [`RESUME_ENV`]; the driver relaunches the harness on exactly that session or exits with a typed
 //! reason, and the resume completes only when the driver binds the same session again.
@@ -63,6 +64,10 @@ pub fn resume_completed_key(request: &str) -> String {
 pub struct Suspension {
     /// `suspend` or `resume`: the request this phase belongs to.
     pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_host: Option<String>,
     /// `quiescing`, `snapshotting`, `suspended`, `failed` (a refused suspend), `restoring`,
     /// `verifying` or `resumed`.
     pub phase: String,
@@ -102,9 +107,79 @@ impl Suspension {
     pub fn holds_seat(&self) -> bool {
         matches!(
             self.phase.as_str(),
-            "quiescing" | "snapshotting" | "suspended" | "restoring" | "verifying"
+            "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying"
         )
     }
+}
+
+/// Describe a publication against its running launch, or its existing suspension lineage.
+/// Manual deferral is available only to owned-set publication; this introduces no policy.
+pub(crate) fn publication_action(
+    store: &Store,
+    next: &crate::model::DesiredSubject,
+    owned: bool,
+    previous: impl FnOnce() -> Result<Option<crate::model::MemberSpec>>,
+) -> Result<Option<crate::model::PlannedAction>> {
+    if !matches!(next.kind.as_str(), "agent" | "stop") {
+        return Ok(None);
+    }
+    let Some(hold) = current(store, &next.subject)?.filter(Suspension::holds_seat) else {
+        return store.publication_action(next);
+    };
+    let suspension = hold
+        .suspend_operation_id
+        .as_deref()
+        .unwrap_or(&hold.operation_id);
+    // A stop does not compare launches, including when the prior declaration is legacy.
+    if next.kind == "stop" {
+        return Ok(Some(crate::model::PlannedAction {
+            subject: next.subject.clone(),
+            action: "stop".into(),
+            reason: format!("suspension {suspension}: the explicit stop would discard the hold"),
+        }));
+    }
+    let pending = crate::rollout::pending_manual_launch(store, &next.subject)?;
+    // Only a held agent publication needs its previous launch. Do not impose full-member
+    // deserialization on ordinary previews of legacy declarations without a suspension.
+    let previous = if pending.is_none() { previous()? } else { None };
+    let previous_member = pending
+        .as_ref()
+        .map(|(_, member)| member)
+        .or(previous.as_ref());
+    let same_launch = previous_member
+        .zip(next.member.as_ref())
+        .is_some_and(|(previous, next)| next.launch_changes(previous).is_empty());
+    let manual = owned
+        && next.kind == "agent"
+        && crate::rollout::manual(next)
+        && store
+            .rollout(&next.subject)?
+            .is_none_or(|operation| operation.phase == "superseded");
+    let (action, reason) = if same_launch || manual {
+        (
+            "hold-kept",
+            format!(
+                "suspension {suspension}: hold kept; {}",
+                if manual && !same_launch {
+                    "launch change stays pending until explicit rollout after resume"
+                } else {
+                    "declared launch unchanged; environment edits take effect only on explicit resume"
+                }
+            ),
+        )
+    } else {
+        (
+            "start-suspended",
+            format!(
+                "suspension {suspension}: would start a suspended agent; the declared launch changed"
+            ),
+        )
+    };
+    Ok(Some(crate::model::PlannedAction {
+        subject: next.subject.clone(),
+        action: action.into(),
+        reason,
+    }))
 }
 
 fn field<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
@@ -178,6 +253,7 @@ fn suspend_state(store: &Store, request: &ClaimRecord) -> Result<Suspension> {
         state.phase = "snapshotting".into();
         state.harness = field(snapshot, "harness").map(str::to_owned);
         state.native_session_id = field(snapshot, "native_session_id").map(str::to_owned);
+        state.source_host = field(snapshot, "source_host").map(str::to_owned);
         state.updated_at_unix_ms = snapshot.accepted_at_unix_ms;
     }
     if let Some(completed) = store.operation_claim(&suspend_completed_key(&request.id))? {
@@ -189,8 +265,8 @@ fn suspend_state(store: &Store, request: &ClaimRecord) -> Result<Suspension> {
 }
 
 /// Where the seat's latest suspend or resume stands, or `None` when it has none that still
-/// applies. A suspension belongs to the launch it was taken under: a stop, or a declaration that
-/// changes how the seat launches, ends it, and the seat then starts by the usual rules.
+/// applies. A stop or an applied launch change ends it. A pending manual publication still
+/// selects the incumbent launch for suspension and resume.
 pub fn current(store: &Store, subject: &str) -> Result<Option<Suspension>> {
     let requests = requests(store, subject)?;
     let Some(request) = requests.last() else {
@@ -199,8 +275,27 @@ pub fn current(store: &Store, subject: &str) -> Result<Option<Suspension>> {
     if store.selected_desired_kind(subject)?.as_deref() != Some("agent") {
         return Ok(None);
     }
-    let lineage = store.launch_lineage(subject)?;
-    if !evidence(request, 0).is_some_and(|token| lineage.iter().any(|item| item == token)) {
+    let lineage = store.suspension_lineage(subject)?;
+    let mut moved = false;
+    if action(request) == Some("resume") && field(request, "host").is_some() {
+        for token in &lineage {
+            if store.claim_by_id(token)?.is_some_and(|selected| {
+                selected.body.get("evidence").and_then(Value::as_array)
+                    .is_some_and(|items| items.iter().any(|id| id.as_str() == Some(&request.id)))
+            }) { moved = true; break; }
+        }
+    }
+    let mut applies = evidence(request, 0)
+        .is_some_and(|token| lineage.iter().any(|item| item == token));
+    if !applies
+        && let Some(token) = evidence(request, 0)
+        && let Some((incumbent, _)) = crate::rollout::pending_manual_launch(store, subject)?
+    {
+        let incumbent_lineage = store.suspension_lineage_from(&incumbent)?;
+        let request_lineage = store.suspension_lineage_from(token)?;
+        applies = request_lineage.iter().any(|token| incumbent_lineage.contains(token));
+    }
+    if !moved && !applies {
         return Ok(None);
     }
     if action(request) == Some("suspend") {
@@ -221,7 +316,20 @@ pub fn current(store: &Store, subject: &str) -> Result<Option<Suspension>> {
     state.requested_by = request.actor.clone();
     state.updated_at_unix_ms = request.accepted_at_unix_ms;
     state.requested_at_unix_ms = request.accepted_at_unix_ms;
-    state.phase = "restoring".into();
+    state.host = field(request, "host").map(str::to_owned);
+    state.source_host = field(request, "source_host").map(str::to_owned).or(state.source_host);
+    state.phase = if state.host.is_some() { "fencing-source" } else { "restoring" }.into();
+    for (suffix, phase) in [("transfer", "transferring"), ("restored", "restoring")] {
+        if let Some(claim) = store.operation_claim(&format!("agent-resume-{suffix}:{}", request.id))? {
+            state.phase = phase.into();
+            state.updated_at_unix_ms = claim.accepted_at_unix_ms;
+        }
+    }
+    // Placement is published only after full restoration. A crash before the separate phase
+    // receipt must still let the destination continue the strict resume, without another fetch.
+    if moved && matches!(state.phase.as_str(), "fencing-source" | "transferring") {
+        state.phase = "restoring".into();
+    }
     if let Some(failed) = store.operation_claim(&resume_failed_key(&request.id))? {
         // A resume that fails leaves the seat suspended on the same snapshot, with the reason.
         state.phase = "suspended".into();
@@ -264,6 +372,15 @@ pub fn bound_session(
         }))
 }
 
+/// Normalized authored selector scope supplied by the owner to its driver.
+pub const SELECTOR_SCOPE_ENV: &str = "ST3_NATIVE_SELECTOR_SCOPE";
+
+/// New refusals have a typed identity, so a stale legacy authored refusal cannot swallow
+/// a later permanent failure for the same session.
+pub fn typed_continue_unavailable_key(subject: &str, session: &str, reason: &str, scope: Option<&str>) -> String {
+    format!("{CONTINUE_UNAVAILABLE_CODE}:v2:{subject}:{session}:{reason}:{}", scope.unwrap_or("permanent"))
+}
+
 /// The key of the diagnostic a driver records once when it cannot continue `session`.
 pub fn continue_unavailable_key(subject: &str, session: &str) -> String {
     format!("{CONTINUE_UNAVAILABLE_CODE}:{subject}:{session}")
@@ -276,6 +393,8 @@ pub fn continue_session(
     store: &Store,
     subject: &str,
     harness: &str,
+    account: Option<&str>,
+    selector_scope: Option<&str>,
 ) -> Result<Option<(String, Option<String>)>> {
     let Some(bound) = store
         .claims_for(subject, Some("harness.session-file"))?
@@ -285,6 +404,11 @@ pub fn continue_session(
     else {
         return Ok(None);
     };
+    // Account directories also hold native sessions. Never carry a transcript between logins;
+    // only a relaunch on the account that bound it may continue it.
+    if field(&bound, "account_ref") != account {
+        return Ok(None);
+    }
     let Some(session) = field(&bound, "session_id").map(str::to_owned) else {
         return Ok(None);
     };
@@ -294,9 +418,18 @@ pub fn continue_session(
         .any(|claim| {
             claim.store_index > bound.store_index && field(claim, "action") == Some("fresh-context")
         });
-    let refused = store
-        .operation_claim(&continue_unavailable_key(subject, &session))?
-        .is_some();
+    let legacy_refusal = store.operation_claim(&continue_unavailable_key(subject, &session))?;
+    let refusals = store.claims_for(subject, Some("harness.diagnostic"))?;
+    let refused = refusals.iter().any(|claim| {
+        let legacy = legacy_refusal.as_ref().is_some_and(|legacy| legacy.id == claim.id);
+        let typed = field(claim, "session_id") == Some(session.as_str())
+            && field(claim, "code") == Some(CONTINUE_UNAVAILABLE_CODE);
+        (legacy || typed) && if field(claim, "status") == Some("authored-session-selection") {
+            selector_scope.is_some_and(|scope| field(claim, "selector_scope").is_none_or(|recorded| recorded == scope))
+        } else {
+            true
+        }
+    });
     if fresh_since || refused {
         return Ok(None);
     }
@@ -309,6 +442,16 @@ pub fn continue_session(
 /// rest is st's: a claimed step whose lease would lapse, and subagents st still records.
 pub fn blockers(store: &Store, subject: &str, incarnation: &str) -> Result<Vec<String>> {
     let mut blocking = Vec::new();
+    if let Some(harness) = store.current_harness(subject)?
+        && harness.incarnation_id == incarnation
+        && matches!(
+            harness.state.as_str(),
+            "unauthenticated" | "needs-login" | "blocked"
+        )
+        && harness.blocked_on.as_deref() == Some("human")
+    {
+        blocking.push("pending-ask".into());
+    }
     let harness = store
         .latest_observation(subject, "harness.observed")?
         .filter(|claim| field(claim, "incarnation_id") == Some(incarnation));
@@ -316,6 +459,13 @@ pub fn blockers(store: &Store, subject: &str, incarnation: &str) -> Result<Vec<S
         None => blocking.push("harness-unobserved".into()),
         Some(claim) => {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
+            // Older OMP drivers reported idle without observing their native jobs.
+            // Their existing `true` is not proof under the upgraded report contract.
+            if fields.get("driver").and_then(Value::as_str) == Some("omp")
+                && fields.get("background_jobs").is_none()
+            {
+                blocking.push("background-jobs-unreported".into());
+            }
             match fields.get("quiescent").and_then(Value::as_bool) {
                 Some(true) => {}
                 Some(false) => {
@@ -382,6 +532,9 @@ pub fn harness_quiescence(
 /// Add the driver's quiescence report to a `harness.observed` claim's fields, read from the
 /// state the same claim already carries. Every driver publishes through this.
 pub fn annotate_quiescence(fields: &mut std::collections::BTreeMap<String, Value>) {
+    if let Ok(operation) = std::env::var(crate::rollout::OPERATION_ENV) {
+        fields.insert("rollout_operation".into(), Value::String(operation));
+    }
     let text = |name: &str| {
         fields
             .get(name)
@@ -389,13 +542,20 @@ pub fn annotate_quiescence(fields: &mut std::collections::BTreeMap<String, Value
             .unwrap_or_default()
             .to_owned()
     };
-    let (quiescent, blocking) = harness_quiescence(
+    let (_, mut blocking) = harness_quiescence(
         &text("state"),
         &text("blocked_on"),
         &text("ask"),
         &text("input_buffer"),
     );
-    fields.insert("quiescent".into(), Value::Bool(quiescent));
+    if fields.get("driver").and_then(Value::as_str) == Some("omp") {
+        match fields.get("background_jobs").and_then(Value::as_u64) {
+            Some(0) => {}
+            Some(_) => blocking.push("background-jobs-running"),
+            None => blocking.push("background-jobs-unreported"),
+        }
+    }
+    fields.insert("quiescent".into(), Value::Bool(blocking.is_empty()));
     fields.insert(
         "blocking".into(),
         Value::Array(blocking.into_iter().map(Value::from).collect()),
@@ -405,6 +565,158 @@ pub fn annotate_quiescence(fields: &mut std::collections::BTreeMap<String, Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_move_survives_a_crash_after_placement_and_a_later_label_change() {
+        use crate::model::ClaimInput;
+        use serde_json::json;
+        let store = Store::open_memory("amber").unwrap();
+        let intent = crate::parse_intent("version 2\nagent \"sample\" { host \"amber\"; workspace \"/sample\"; harness \"omp\" { model \"canary\" } }", "amber").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: String::new(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(
+                &intent,
+                &preview.subject_tokens,
+                "declare",
+                Some("person/test"),
+            )
+            .unwrap();
+        let subject = "agent/amber.sample";
+        let token = store.selected_desired_token(subject).unwrap().unwrap();
+        let append = |kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: kind.into(),
+                    actor: Some("person/test".into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence,
+                    expected_subject: None,
+                    idempotency_key: key,
+                })
+                .unwrap()
+        };
+        let suspend = append(
+            "runtime.action.requested",
+            json!({"action": "suspend", "incarnation_id": "source-one"}),
+            vec![token.clone()],
+            None,
+        );
+        append(
+            "runtime.action.succeeded",
+            json!({"action": "suspend", "operation_status": "snapshotting", "harness": "omp", "native_session_id": "native", "source_host": "amber"}),
+            vec![suspend.id.clone()],
+            Some(suspend_snapshot_key(&suspend.id)),
+        );
+        append(
+            "runtime.action.succeeded",
+            json!({"action": "suspend", "operation_status": "suspended"}),
+            vec![suspend.id.clone()],
+            Some(suspend_completed_key(&suspend.id)),
+        );
+        let resume = append(
+            "runtime.action.requested",
+            json!({"action": "resume", "host": "jade", "source_host": "amber"}),
+            vec![token.clone(), suspend.id],
+            None,
+        );
+        let transferring = current(&store, subject).unwrap().unwrap();
+        crate::seat_snapshot::phase(&store, subject, &transferring, "transfer", "transferring")
+            .unwrap();
+        assert_eq!(
+            current(&store, subject).unwrap().unwrap().phase,
+            "transferring"
+        );
+        store
+            .place_resumed_seat(subject, &token, &resume.id, "jade", "person/test")
+            .unwrap();
+        // No restored receipt exists: this models a crash immediately after placement publication.
+        let restored = current(&store, subject).unwrap().unwrap();
+        assert_eq!(restored.phase, "restoring");
+        assert_eq!(restored.native_session_id.as_deref(), Some("native"));
+        let desired = store
+            .desired_subject_with_writer(subject)
+            .unwrap()
+            .unwrap()
+            .0;
+        let kdl = crate::graph::render_agent_desired_kdl(&desired.desired).unwrap();
+        assert!(
+            crate::parse_intent(&kdl, "jade")
+                .unwrap()
+                .subjects
+                .contains_key(subject)
+        );
+        store
+            .rename_agent(subject, Some("Renamed sample"), "rename")
+            .unwrap();
+        assert_eq!(
+            current(&store, subject).unwrap().unwrap().phase,
+            "restoring"
+        );
+    }
+
+    fn continuation_claim(store: &Store, kind: &str, fields: Value, key: Option<String>) {
+        store.append_claim(&crate::model::ClaimInput {
+            subject: "agent/example".into(), kind: kind.into(), actor: Some("agent/example".into()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: key,
+        }).unwrap();
+    }
+
+    #[test]
+    fn continuation_refusal_scope_repairs_legacy_and_keeps_later_failure_permanent() {
+        for legacy in [false, true] {
+            let store = Store::open_memory("node").unwrap();
+            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native","account_ref":"one"}), None);
+            let key = if legacy { continue_unavailable_key("agent/example", "native") } else {
+                typed_continue_unavailable_key("agent/example", "native", "authored-session-selection", Some("selector"))
+            };
+            let mut fields = json!({"code":CONTINUE_UNAVAILABLE_CODE,"status":"authored-session-selection","session_id":"native"});
+            if !legacy { fields["selector_scope"] = json!("selector"); }
+            continuation_claim(&store, "harness.diagnostic", fields, Some(key));
+            assert!(continue_session(&store, "agent/example", "omp", Some("one"), Some("selector")).unwrap().is_none());
+            assert_eq!(continue_session(&store, "agent/example", "omp", Some("one"), None).unwrap().unwrap().0, "native");
+            assert!(continue_session(&store, "agent/example", "omp", Some("two"), None).unwrap().is_none());
+            let permanent = typed_continue_unavailable_key("agent/example", "native", "transcript-missing", None);
+            continuation_claim(&store, "harness.diagnostic", json!({"code":CONTINUE_UNAVAILABLE_CODE,"status":"transcript-missing","session_id":"native"}), Some(permanent.clone()));
+            assert!(store.operation_claim(&permanent).unwrap().is_some());
+            assert!(continue_session(&store, "agent/example", "omp", Some("one"), None).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn continuation_fresh_context_wins_over_stale_authored_refusal() {
+        let store = Store::open_memory("node").unwrap();
+        continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native"}), None);
+        continuation_claim(&store, "harness.diagnostic", json!({"status":"authored-session-selection"}), Some(continue_unavailable_key("agent/example", "native")));
+        continuation_claim(&store, "runtime.action.requested", json!({"action":"fresh-context"}), None);
+        assert!(continue_session(&store, "agent/example", "omp", None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn continuation_concurrent_permanent_receipts_are_one_durable_refusal() {
+        let store = std::sync::Arc::new(Store::open_memory("node").unwrap());
+        continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native"}), None);
+        std::thread::scope(|threads| {
+            for _ in 0..8 {
+                let store = store.clone();
+                threads.spawn(move || continuation_claim(&store, "harness.diagnostic",
+                    json!({"code":CONTINUE_UNAVAILABLE_CODE,"status":"transcript-missing","session_id":"native"}),
+                    Some(typed_continue_unavailable_key("agent/example", "native", "transcript-missing", None))));
+            }
+        });
+        assert_eq!(store.claims_for("agent/example", Some("harness.diagnostic")).unwrap().len(), 1);
+        assert!(continue_session(&store, "agent/example", "omp", None, None).unwrap().is_none());
+    }
 
     #[test]
     fn unsaved_native_context_cannot_suspend_or_revive_an_older_session() {
@@ -472,5 +784,54 @@ mod tests {
             harness_quiescence("indeterminate", "none", "none", "empty"),
             (false, vec!["harness-indeterminate"])
         );
+    }
+}
+
+#[cfg(test)]
+mod background_job_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_omp_idle_is_unproven_until_the_upgraded_driver_reports_jobs() {
+        let store = Store::open_memory("node").unwrap();
+        for upgraded in [false, true] {
+            let mut fields = std::collections::BTreeMap::from([
+                ("driver".into(), Value::from("omp")),
+                ("state".into(), Value::from("idle")),
+                ("incarnation_id".into(), Value::from("fixture-one")),
+                ("quiescent".into(), Value::from(true)),
+            ]);
+            if upgraded {
+                fields.insert("background_jobs".into(), Value::from(0));
+            }
+            store
+                .append_claim(&crate::model::ClaimInput {
+                    subject: "agent/example".into(),
+                    kind: "harness.observed".into(),
+                    actor: Some("agent/example".into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            let blocking = blockers(&store, "agent/example", "fixture-one").unwrap();
+            assert_eq!(
+                blocking.iter().any(|reason| reason == "background-jobs-unreported"),
+                !upgraded
+            );
+        }
+    }
+
+    #[test]
+    fn omp_idle_requires_a_known_empty_native_job_snapshot() {
+        for (jobs, reason) in [(Value::from(1), Some("background-jobs-running")), (Value::Null, Some("background-jobs-unreported")), (Value::from(0), None)] {
+            let mut fields = std::collections::BTreeMap::from([
+                ("driver".into(), Value::from("omp")), ("state".into(), Value::from("idle")), ("background_jobs".into(), jobs),
+            ]);
+            annotate_quiescence(&mut fields);
+            assert_eq!(fields["quiescent"], reason.is_none());
+            assert_eq!(fields["blocking"], reason.map_or_else(|| serde_json::json!([]), |reason| serde_json::json!([reason])));
+        }
     }
 }

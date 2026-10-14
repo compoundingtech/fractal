@@ -6,12 +6,18 @@
         "activity": "33m",
         "details": {
           "claimed": "33m ago",
+          "effort": "high",
           "fault": null,
           "goal": "Cut over to the new store once a person approves.",
           "harness_state": "idle, waiting for review",
+          "model": "claude-sonnet-5-5",
           "next": "Move the atlas store › cleanup",
+          "next_mission": "mission/fleet/atlas/store-move",
           "queue": [
             "Atlas nightly build › build (tonight)"
+          ],
+          "queue_missions": [
+            "mission/fleet/atlas/store-move"
           ],
           "queued": 1,
           "runtime": "running · incarnation 3",
@@ -47,11 +53,15 @@
         "activity": "12m",
         "details": {
           "claimed": "12m ago",
+          "effort": "high",
           "fault": null,
           "goal": "Draft the pricing page and get feedback.",
           "harness_state": "idle, waiting for feedback",
+          "model": "claude-sonnet-5-5",
           "next": "A new pricing page › publish",
+          "next_mission": "mission/fleet/atlas/store-move",
           "queue": [],
+          "queue_missions": [],
           "queued": 0,
           "runtime": "running · incarnation 3",
           "under": null
@@ -72,11 +82,15 @@
         "activity": "8m",
         "details": {
           "claimed": "1h ago",
+          "effort": null,
           "fault": "401 Unauthorized: the API key expired at 08:40.",
           "goal": "Tag this week's release.",
           "harness_state": "exited 4 times in 10 minutes",
+          "model": "gpt-5.5-codex",
           "next": "Weekly release › publish",
+          "next_mission": "mission/fleet/release/weekly",
           "queue": [],
+          "queue_missions": [],
           "queued": 0,
           "runtime": "restarts paused",
           "under": null
@@ -97,12 +111,18 @@
         "activity": "now",
         "details": {
           "claimed": "standing",
+          "effort": "high",
           "fault": null,
           "goal": "Keep Robin's fleet moving; answer questions.",
           "harness_state": "working",
+          "model": "claude-sonnet-5-5",
           "next": null,
+          "next_mission": null,
           "queue": [
             "Rotate harbor's signing keys › report"
+          ],
+          "queue_missions": [
+            "mission/fleet/atlas/store-move"
           ],
           "queued": 1,
           "runtime": "running · incarnation 3",
@@ -124,11 +144,15 @@
         "activity": "1m",
         "details": {
           "claimed": "4m ago",
+          "effort": "high",
           "fault": null,
           "goal": "Review pull request #218.",
           "harness_state": "working",
+          "model": "claude-sonnet-5-5",
           "next": "Review harbor #218 › route",
+          "next_mission": "mission/fleet/atlas/store-move",
           "queue": [],
+          "queue_missions": [],
           "queued": 0,
           "runtime": "running · incarnation 3",
           "under": "Chief of Staff"
@@ -149,11 +173,15 @@
         "activity": "19m",
         "details": {
           "claimed": null,
+          "effort": null,
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "model": null,
           "next": null,
+          "next_mission": null,
           "queue": [],
+          "queue_missions": [],
           "queued": 0,
           "runtime": null,
           "under": null
@@ -174,11 +202,15 @@
         "activity": "3h",
         "details": {
           "claimed": null,
+          "effort": null,
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "model": null,
           "next": null,
+          "next_mission": null,
           "queue": [],
+          "queue_missions": [],
           "queued": 0,
           "runtime": null,
           "under": null
@@ -199,11 +231,15 @@
         "activity": "2d",
         "details": {
           "claimed": null,
+          "effort": null,
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "model": null,
           "next": null,
+          "next_mission": null,
           "queue": [],
+          "queue_missions": [],
           "queued": 0,
           "runtime": null,
           "under": null
@@ -224,11 +260,15 @@
         "activity": "1h",
         "details": {
           "claimed": null,
+          "effort": null,
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "model": null,
           "next": null,
+          "next_mission": null,
           "queue": [],
+          "queue_missions": [],
           "queued": 0,
           "runtime": null,
           "under": null
@@ -249,11 +289,15 @@
         "activity": "5m",
         "details": {
           "claimed": null,
+          "effort": null,
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "model": null,
           "next": null,
+          "next_mission": null,
           "queue": [],
+          "queue_missions": [],
           "queued": 0,
           "runtime": null,
           "under": null
@@ -279,6 +323,8 @@
         "actions": [],
         "age": "33m",
         "agent": "agent/example/atlas/builder",
+        "blocked": null,
+        "conversations": [],
         "id": "attention/1",
         "kind": {
           "because": "cut-over cannot start until you answer; the old store stays read-only meanwhile",
@@ -312,6 +358,8 @@
         "actions": [],
         "age": "12m",
         "agent": "agent/example/docs/writer",
+        "blocked": null,
+        "conversations": [],
         "id": "attention/2",
         "kind": {
           "excerpt": [
@@ -339,6 +387,8 @@
         "actions": [],
         "age": "1h",
         "agent": "agent/example/planner",
+        "blocked": null,
+        "conversations": [],
         "id": "attention/3",
         "kind": {
           "kind": "launch",
@@ -411,6 +461,8 @@
         "actions": [],
         "age": "8m",
         "agent": "agent/example/release/captain",
+        "blocked": null,
+        "conversations": [],
         "id": "attention/4",
         "kind": {
           "because": "the weekly release cannot tag until this seat is back",
@@ -430,6 +482,8 @@
         "actions": [],
         "age": "19m",
         "agent": "agent/example/rekey/worker",
+        "blocked": null,
+        "conversations": [],
         "id": "attention/5",
         "kind": {
           "changes": [
@@ -456,6 +510,8 @@
         "actions": [],
         "age": "2h",
         "agent": "agent/example/cos",
+        "blocked": null,
+        "conversations": [],
         "id": "attention/6",
         "kind": {
           "body": "Usage this week is **up 18%**, almost all from the atlas store move (reruns of the compare step).\n\nNo action needed; it should fall back once the cut-over is done.",
@@ -468,6 +524,50 @@
         "tier": "later",
         "title": "Weekly usage is up 18%",
         "waiting": null
+      }
+    ]
+  },
+  "clients": {
+    "state": "ready",
+    "value": [
+      {
+        "client": "stui 0.1.0+1ecae71",
+        "connected": true,
+        "device": null,
+        "follows": [
+          "glass:main",
+          "conversation:agent/lark/planner"
+        ],
+        "member": "lark",
+        "older": false,
+        "via": "local",
+        "when": "since 2h",
+        "who": "person/robin"
+      },
+      {
+        "client": "smalltalk-ios 1.0 (42)",
+        "connected": true,
+        "device": "Robin's phone",
+        "follows": [
+          "now",
+          "terminal:terminal/agent/lark/planner"
+        ],
+        "member": "lark",
+        "older": false,
+        "via": "gateway",
+        "when": "since 12m",
+        "who": "person/robin"
+      },
+      {
+        "client": "stui 0.0.9+77d0a13",
+        "connected": false,
+        "device": null,
+        "follows": [],
+        "member": "lark",
+        "older": true,
+        "via": "tailscale",
+        "when": "seen 3m ago",
+        "who": "person/robin"
       }
     ]
   },
@@ -1055,6 +1155,7 @@
         "kdl": "version 2\n\nmission \"fleet/atlas/store-move\" state=\"ready\" {\n  goal \"Move every row to the new store without losing a value.\"\n  goal \"Prove the two stores agree before anything cuts over.\"\n  goal \"Leave the old store readable until a person says otherwise.\"\n  constraint \"Never write to the old store.\"\n\n  step \"snapshot\" { assigned-to \"agent/example/atlas/builder\" }\n  step \"convert\" {\n    assigned-to \"agent/example/atlas/builder\"\n    depends-on { step \"snapshot\" completed }\n    gate \"conversion-check\" { exec \"atlas-cli check --converted\" }\n  }\n  step \"compare\" {\n    assigned-to \"agent/example/atlas/builder\"\n    depends-on { step \"convert\" completed }\n  }\n  step \"cut-over\" {\n    agentless\n    depends-on { step \"compare\" completed }\n    gate \"cut-over-review\" type=\"human\" {\n      reviewer \"person/robin\"\n      question \"The row counts agree and the contract check passed. Cut over?\"\n      review \"doc/atlas/compare-report\"\n    }\n  }\n  step \"cleanup\" {\n    assigned-to \"agent/example/atlas/builder\"\n    depends-on { step \"cut-over\" completed }\n  }\n}\n",
         "outcome": null,
         "parent": null,
+        "step_metadata": {},
         "steps": [
           {
             "after": [],
@@ -1068,9 +1169,11 @@
             "goals": [
               "Finish the snapshot step and record what it produced."
             ],
+            "id": "step-run/demo/snapshot",
             "name": "snapshot",
             "note": null,
             "owner": "Atlas Builder",
+            "seat": "Atlas Builder",
             "state": "done"
           },
           {
@@ -1089,9 +1192,11 @@
             "goals": [
               "Finish the convert step and record what it produced."
             ],
+            "id": "step-run/demo/convert",
             "name": "convert",
             "note": "conversion check passed",
             "owner": "Atlas Builder",
+            "seat": "Atlas Builder",
             "state": "done"
           },
           {
@@ -1108,9 +1213,11 @@
             "goals": [
               "Finish the compare step and record what it produced."
             ],
+            "id": "step-run/demo/compare",
             "name": "compare",
             "note": "0 mismatches in 1,204,881 rows",
             "owner": "Atlas Builder",
+            "seat": "Atlas Builder",
             "state": "done"
           },
           {
@@ -1129,9 +1236,11 @@
             "goals": [
               "Switch reads and writes to the new store once a person approves."
             ],
+            "id": "step-run/demo/cut-over",
             "name": "cut-over",
             "note": "waiting for your review",
             "owner": null,
+            "seat": null,
             "state": "needs_you"
           },
           {
@@ -1148,9 +1257,11 @@
             "goals": [
               "Finish the cleanup step and record what it produced."
             ],
+            "id": "step-run/demo/cleanup",
             "name": "cleanup",
             "note": null,
             "owner": "Atlas Builder",
+            "seat": "Atlas Builder",
             "state": "pending"
           }
         ],
@@ -1174,6 +1285,7 @@
         "kdl": null,
         "outcome": null,
         "parent": null,
+        "step_metadata": {},
         "steps": [
           {
             "after": [],
@@ -1187,9 +1299,11 @@
             "goals": [
               "Finish the draft step and record what it produced."
             ],
+            "id": "step-run/demo/draft",
             "name": "draft",
             "note": "asked for your feedback",
             "owner": "Docs Writer",
+            "seat": "Docs Writer",
             "state": "needs_you"
           },
           {
@@ -1206,9 +1320,11 @@
             "goals": [
               "Finish the publish step and record what it produced."
             ],
+            "id": "step-run/demo/publish",
             "name": "publish",
             "note": null,
             "owner": "Docs Writer",
+            "seat": "Docs Writer",
             "state": "pending"
           }
         ],
@@ -1232,6 +1348,7 @@
         "kdl": null,
         "outcome": null,
         "parent": null,
+        "step_metadata": {},
         "steps": [
           {
             "after": [],
@@ -1245,9 +1362,11 @@
             "goals": [
               "Finish the changelog step and record what it produced."
             ],
+            "id": "step-run/demo/changelog",
             "name": "changelog",
             "note": null,
             "owner": "Release Captain",
+            "seat": "Release Captain",
             "state": "done"
           },
           {
@@ -1266,9 +1385,11 @@
             "goals": [
               "Finish the tag step and record what it produced."
             ],
+            "id": "step-run/demo/tag",
             "name": "tag",
             "note": "seat keeps restarting",
             "owner": "Release Captain",
+            "seat": "Release Captain",
             "state": "failed"
           },
           {
@@ -1285,9 +1406,11 @@
             "goals": [
               "Finish the publish step and record what it produced."
             ],
+            "id": "step-run/demo/publish",
             "name": "publish",
             "note": null,
             "owner": "Release Captain",
+            "seat": "Release Captain",
             "state": "pending"
           }
         ],
@@ -1311,6 +1434,7 @@
         "kdl": null,
         "outcome": null,
         "parent": null,
+        "step_metadata": {},
         "steps": [
           {
             "after": [],
@@ -1324,9 +1448,11 @@
             "goals": [
               "Finish the review step and record what it produced."
             ],
+            "id": "step-run/demo/review",
             "name": "review",
             "note": null,
             "owner": "Harbor Reviewer",
+            "seat": "Harbor Reviewer",
             "state": "working"
           },
           {
@@ -1343,9 +1469,11 @@
             "goals": [
               "Finish the route step and record what it produced."
             ],
+            "id": "step-run/demo/route",
             "name": "route",
             "note": null,
             "owner": "Harbor Reviewer",
+            "seat": "Harbor Reviewer",
             "state": "pending"
           }
         ],
@@ -1369,6 +1497,7 @@
         "kdl": null,
         "outcome": null,
         "parent": null,
+        "step_metadata": {},
         "steps": [
           {
             "after": [],
@@ -1382,9 +1511,11 @@
             "goals": [
               "Finish the inventory step and record what it produced."
             ],
+            "id": "step-run/demo/inventory",
             "name": "inventory",
             "note": null,
             "owner": "Rekey Worker",
+            "seat": "Rekey Worker",
             "state": "done"
           },
           {
@@ -1401,9 +1532,11 @@
             "goals": [
               "Finish the rotate step and record what it produced."
             ],
+            "id": "step-run/demo/rotate",
             "name": "rotate",
             "note": "queued for Rekey Worker, which finishes harbor/nightly first",
             "owner": null,
+            "seat": null,
             "state": "ready"
           },
           {
@@ -1420,9 +1553,11 @@
             "goals": [
               "Finish the report step and record what it produced."
             ],
+            "id": "step-run/demo/report",
             "name": "report",
             "note": null,
             "owner": "Rekey Worker",
+            "seat": "Rekey Worker",
             "state": "pending"
           }
         ],
@@ -1446,6 +1581,7 @@
         "kdl": null,
         "outcome": null,
         "parent": null,
+        "step_metadata": {},
         "steps": [
           {
             "after": [],
@@ -1459,9 +1595,11 @@
             "goals": [
               "Finish the watch step and record what it produced."
             ],
+            "id": "step-run/demo/watch",
             "name": "watch",
             "note": "standing; wakes on merged changes",
             "owner": "Docs Writer",
+            "seat": "Docs Writer",
             "state": "waiting"
           }
         ],
@@ -1483,6 +1621,7 @@
         "kdl": null,
         "outcome": null,
         "parent": null,
+        "step_metadata": {},
         "steps": [
           {
             "after": [],
@@ -1496,9 +1635,11 @@
             "goals": [
               "Finish the build step and record what it produced."
             ],
+            "id": "step-run/demo/build",
             "name": "build",
             "note": null,
             "owner": "Atlas Indexer",
+            "seat": "Atlas Indexer",
             "state": "done"
           },
           {
@@ -1515,9 +1656,11 @@
             "goals": [
               "Finish the test step and record what it produced."
             ],
+            "id": "step-run/demo/test",
             "name": "test",
             "note": null,
             "owner": "Atlas Indexer",
+            "seat": "Atlas Indexer",
             "state": "done"
           }
         ],

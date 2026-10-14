@@ -1,7 +1,7 @@
 //! stui's mission semantics, independent of its collection model and terminal UI.
 
 use st3_client::MissionStep;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One word naming who has to move, shared by every mission surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -29,6 +29,18 @@ pub enum Word {
 }
 
 impl Word {
+    /// Really running, or about to: an agent is doing a step now, or one waits its turn on a busy
+    /// agent. A count of "active missions" counts these and nothing else (Nathan, 2026-10-11:
+    /// "54 active", when most of them were stuck, paused or waiting on a person).
+    pub fn is_active(self) -> bool {
+        matches!(self, Word::Working | Word::Queued)
+    }
+
+    /// Open, and not moving: a step nobody takes or whose owner is not moving.
+    pub fn is_stuck(self) -> bool {
+        matches!(self, Word::Stalled | Word::Unstaffed | Word::Unclaimed)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Word::Decision => "needs you",
@@ -80,6 +92,10 @@ pub enum StepState {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Step {
+    /// Stable step-run identity, including when several open runs share a path.
+    pub id: String,
+    /// The claimant, else assignee; absent for agentless or unassigned steps.
+    pub seat: Option<String>,
     pub name: String,
     pub state: StepState,
     pub owner: Option<String>,
@@ -93,6 +109,18 @@ pub struct Step {
     pub blockers: Vec<String>,
 }
 
+/// Raw step facts, independent of state-specific blocker presentation and queue notes.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct StepMetadata {
+    /// st retains the last reason even after a step moves on or ends.
+    pub blocked_reason: Option<String>,
+    pub last_progress: Option<String>,
+    /// How long ago st nudged the step's holder for idling while holding it with nothing set to
+    /// wake it, as an age label such as `40m`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nudged: Option<String>,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Mission {
     pub id: String,
@@ -102,6 +130,9 @@ pub struct Mission {
     pub host: String,
     pub goals: Vec<String>,
     pub steps: Vec<Step>,
+    /// Metadata for the same steps, keyed by stable step-run ID rather than display path.
+    /// Values are retained verbatim, regardless of state or display text policies.
+    pub step_metadata: BTreeMap<String, StepMetadata>,
     pub agents: Vec<String>,
     pub decision: Option<String>,
     pub worktree: Option<String>,
@@ -262,6 +293,19 @@ pub fn adapt<'a>(
         .clone()
         .map(|mission| {
             let work = mission_steps(mission);
+            let step_metadata = work
+                .iter()
+                .map(|step| {
+                    (
+                        step.id.clone(),
+                        StepMetadata {
+                            blocked_reason: step.blocked_reason.clone(),
+                            last_progress: step.last_progress.clone(),
+                            nudged: step.nudged_at.as_deref().map(|at| display.age(at, now)),
+                        },
+                    )
+                })
+                .collect();
             let decision = attention
                 .clone()
                 .find(|item| {
@@ -361,6 +405,10 @@ pub fn adapt<'a>(
                         None
                     };
                     Step {
+                        id: step.id.clone(),
+                        seat: (!step.agentless)
+                            .then(|| step.claimant.clone().or_else(|| step.assignee.clone()))
+                            .flatten(),
                         name: step.path.clone(),
                         state,
                         owner: if state == StepState::NeedsYou {
@@ -423,6 +471,7 @@ pub fn adapt<'a>(
                 host: String::new(),
                 goals: vec![],
                 steps,
+                step_metadata,
                 agents: active_agents,
                 kdl: None,
                 outcome: run_outcome(mission, now, display),

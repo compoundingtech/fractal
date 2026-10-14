@@ -1,5 +1,4 @@
-use crate::text;
-use ratatui::text::Line;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -60,17 +59,51 @@ pub struct Selection {
     pub head: (usize, u16),
 }
 
+/// A displayed line's text and whether wrapping joined it to the previous line.
+/// Implement this for an embedding UI's line type; the `ratatui` feature supplies its `Line`
+/// implementation. Plain strings start their own lines.
+pub trait SelectionLine {
+    fn plain_text(&self) -> Cow<'_, str>;
+
+    /// `Some(" ")` for wrapping at a space, `Some("")` inside a word, `None` for a real newline.
+    fn continuation(&self) -> Option<&str> {
+        None
+    }
+}
+
+impl SelectionLine for str {
+    fn plain_text(&self) -> Cow<'_, str> {
+        Cow::Borrowed(self)
+    }
+}
+
+impl SelectionLine for String {
+    fn plain_text(&self) -> Cow<'_, str> {
+        Cow::Borrowed(self)
+    }
+}
+
+impl<T: SelectionLine + ?Sized> SelectionLine for &T {
+    fn plain_text(&self) -> Cow<'_, str> {
+        (*self).plain_text()
+    }
+
+    fn continuation(&self) -> Option<&str> {
+        (*self).continuation()
+    }
+}
+
 impl Selection {
     /// The selected text as the person would paste it: without the edge stui draws beside a
     /// message, the indent its body sits at, or the fences it draws around code.
-    pub fn text(&self, lines: &[Line<'_>]) -> String {
+    pub fn text<L: SelectionLine>(&self, lines: &[L]) -> String {
         let (start, end) = order(self.anchor, self.head);
-        let mut out = Vec::new();
+        let mut out: Vec<String> = Vec::new();
         for line in start.0..=end.0.min(lines.len().saturating_sub(1)) {
             let Some(line_text) = lines.get(line) else {
                 break;
             };
-            let plain = text::plain(line_text);
+            let plain = line_text.plain_text();
             let from = if line == start.0 { start.1 as usize } else { 0 };
             let to = if line == end.0 {
                 end.1 as usize + 1
@@ -81,16 +114,26 @@ impl Selection {
             if fence(&piece) {
                 continue;
             }
-            out.push(piece.trim_end().to_owned());
+            let piece = piece.trim_end();
+            // A line drawn only because the one before it wrapped is copied onto that line: the
+            // clipboard gets the real newlines, not the pane's (Nathan, 2026-10-03).
+            match (line_text.continuation(), out.last_mut()) {
+                (Some(join), Some(previous)) if line > start.0 => {
+                    previous.push_str(join);
+                    previous.push_str(piece.trim_start());
+                }
+                _ => out.push(piece.to_owned()),
+            }
         }
         dedent(out).join("\n")
     }
 }
 
-/// The display columns a message's edge ("▎ ", after any indent) takes at a line's start.
+/// The display columns a message's edge ("▎ ", or "● " on the first row of mail to the person,
+/// after any indent) takes at a line's start.
 fn edge(line: &str) -> usize {
     let indent = line.len() - line.trim_start_matches(' ').len();
-    match line[indent..].strip_prefix('▎') {
+    match line[indent..].strip_prefix(['▎', '●']) {
         Some(rest) if rest.is_empty() || rest.starts_with(' ') => indent + 2,
         _ => 0,
     }
@@ -164,4 +207,27 @@ pub fn columns(line: &str, from: usize, to: usize) -> String {
         column += width;
     }
     out
+}
+
+/// Cut to `max` columns, ending in `…` when anything was dropped.
+pub fn truncate(text: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if UnicodeWidthStr::width(text) <= max {
+        return text.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut output = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        let w = character.width().unwrap_or(0);
+        if used + w + 1 > max {
+            break;
+        }
+        used += w;
+        output.push(character);
+    }
+    output.push('…');
+    output
 }

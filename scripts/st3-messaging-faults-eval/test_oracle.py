@@ -15,12 +15,16 @@ class OracleTests(unittest.TestCase):
     def setUp(self):
         self.proof = {
             "case": "daemon-restart", "read_after_clear_ms": 900,
-            "received_copies": 1, "graph_read_claims": 1, "read_receipt_matches_graph": True,
+            "received_copies": 1, "warmup_received_copies": 1,
+            "graph_read_claims": 1, "read_receipt_matches_graph": True,
             "provider_starts": 1, "expected_provider_starts": 1,
             "provider_pids_before": [123], "provider_pids_after": [123],
             "incarnation_before": "123:one", "incarnation_after": "123:one",
             "delivery_after": {"state": "current"}, "sender_message_status": "closed",
             "seat_images_after": ["/next/st3"], "daemon_image": "/next/st3",
+            "recovered_received_copies": 1, "recovered_read_claims": 1,
+            "recovered_sender_status": "closed", "recovered_recipient_status": "closed",
+            "recovered_receipt_matches_graph": True, "recovered_read_after_clear_ms": 900,
         }
 
     def test_independent_evidence_agrees(self):
@@ -32,6 +36,7 @@ class OracleTests(unittest.TestCase):
             ({"projected_message_files": 1}, "file-mailbox messages"),
             ({"driver_catalog_files": 1}, "fabricated catalogs"),
             ({"received_copies": 2}, "received 2 copies"),
+            ({"warmup_received_copies": 2}, "already-read warmup mail reached the provider 2 times"),
             ({"read_after_clear_ms": None}, "not read"),
             ({"read_after_clear_ms": 10001}, "limit 10000"),
             ({"delivered_during_outage": True}, "before the injected outage cleared"),
@@ -45,6 +50,16 @@ class OracleTests(unittest.TestCase):
             ({"delivery_after": {"state": "stale"}}, "report is stale"),
             ({"seat_images_after": ["/next/st3", "/old/st3"]}, "still run a replaced binary: /old/st3"),
             ({"sender_message_status": "sent"}, "not converged"),
+            ({"recovered_received_copies": 0}, "exactly one native offer and read"),
+            ({"recovered_received_copies": 2}, "exactly one native offer and read"),
+            ({"recovered_read_claims": 0}, "exactly one native offer and read"),
+            ({"recovered_read_claims": 2}, "exactly one native offer and read"),
+            ({"recovered_receipt_matches_graph": False}, "recovered reader receipt"),
+            ({"recovered_sender_status": "sent"}, "both mailboxes"),
+            ({"recovered_recipient_status": "sent"}, "both mailboxes"),
+            ({"recovered_read_after_clear_ms": -1}, "recovery missed"),
+            ({"recovered_read_after_clear_ms": 10001}, "recovery missed"),
+            ({"recovered_read_after_clear_ms": None}, "recovery missed"),
         ]:
             with self.subTest(change=change):
                 proof = copy.deepcopy(self.proof)

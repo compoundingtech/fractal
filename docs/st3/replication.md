@@ -5,7 +5,7 @@ Fleet replication is optional. A node outside a fleet is a complete local-only s
 `st fleet create` or `st fleet join`. It reports “intentionally local-only after leaving its
 fleet” only when `st fleet leave` has recorded that explicit decision in `left-fleet.json`.
 
-A laptop running only stui can instead be a [paired client device](client-only.md), with no daemon
+A laptop running only the terminal UI can instead be a [paired client device](client-only.md), with no daemon
 or replica. Devices read and act through a member's client gateway and are not sync peers.
 
 Replication makes the logical authority equal across configured nodes. It does not make the SQLite files byte-identical.
@@ -24,6 +24,41 @@ its own digest so a mismatch names the source. Local receipt metadata, physical 
 lease overlays and live reachability are excluded explicitly. Retained history and checkpoint
 tombstones represent the same logical source identity.
 
+Owner-read relay routes use each observer's latest `transport.observed` claim for each peer.
+The nominal lifetime of an `up` link is two hours after its `last_success_at` (or its original
+claim timestamp for legacy observations). Receiving or replaying a claim does not renew it.
+Readers tolerate at most five minutes of clock skew in either direction: observations more
+than five minutes ahead are discarded; those within the allowance expire after two hours plus
+five minutes of timestamp age. Thus even the most-ahead accepted clock cannot extend a link
+beyond two hours and ten minutes of real elapsed time, plus the five-second gateway cache.
+Only a successful live exchange refreshes a stable `up`, at most once every 15 minutes. The
+real refresh interval can be 15-16 minutes with the worker's 30-60-second exchange cadence;
+the two-hour window leaves room for quiet sync and propagation. A down or unknown observation
+never renews an earlier success. Old nodes publish status changes only: their observations
+expire on upgraded readers even while they keep exchanging. Direct listening routes and the
+existing unseen-owner fallback remain usable; relayed path ordering improves once that
+observer upgrades and supplies bounded live refreshes.
+
+This refresh cadence adds at most 96 claims per healthy directed link per day (30 times fewer
+than a 30-second refresh), excluding actual status changes. For six fully connected listening
+nodes, 30 directed links add at most 2,880 claims/day. The unchanged checkpoint retention rule
+keeps the newest observation per origin/subject after the D+2 cut; a two-to-three-day pre-cut
+window holds roughly 5,760-8,640 refresh claims, plus each retained newest claim. These are
+arithmetic bounds, not measured saturated-daemon costs.
+
+Gateways cache filtered links and sealed membership for at most five seconds, including
+per-item `reaches()` checks. Links involving current dial-out members never support
+bidirectional owner routes, even while fresh. Dial-out owners return `remote-unavailable`
+with `details.reason = "dial-out-owner"` and an explicit no-inbound-route message across
+conversation, terminal, raw attach, workspace and attachment reads, without trying listening
+peers as relays. The member's published mode overrides a configured direct URL. Correct an
+incorrect mode on the owning member with `st fleet mode listening`. This restarts installed
+services; without installed services (or with `--no-service`), restart `st3 replication-worker`
+as the command instructs. The restarted worker enables its listener and publishes the new
+mode/endpoints. Other nodes see it after replication and at most five seconds of membership
+caching. Reverse owner-RPC and PTY transport over a dial-out connection
+requires separate transport support.
+
 Uploaded bytes in `local_blobs` are staged locally until a durable claim references them.
 Claim admission promotes those bytes into `blobs` in the claim's transaction; every column of
 `blobs` remains in the shared digest. Unreferenced uploads never enter envelopes and cannot be
@@ -38,14 +73,14 @@ an upgrade. Equal envelope inventories alone cannot prove equal claim admission.
 
 `store::tests::canonical_audit::every_shared_projection_agrees_after_shuffle_restart_and_checkpoint`
 checks both invariants by comparing shared rows, selected readers and per-table digest oracles
-across isolated stores. `shared_folds_never_order_by_local_arrival` rejects raw shared arrival
-folds, and `every_persistent_table_has_a_projection_scope` rejects unclassified tables. A new
-shared table must join the shuffle test's inventory and history fixture,
-the canonical ordering guard, and the production digest registry in the same change. A new
-shared claim-derived view must compare its answer at the same explicit time and recipients.
+across isolated stores. `every_persistent_table_has_a_projection_scope` rejects unclassified
+tables. A new shared table must join the shuffle test's inventory and history fixture and the
+production digest registry in the same change. A new shared claim-derived view must compare
+its answer at the same explicit time and recipients. Local pagination metadata may order by
+local arrival; shared winner selection must remain independent of that order.
 
-The [canonical projections audit](canonical-projections-audit.md) records the original gaps and
-local exceptions. Modern status reports a graph digest over the complete projection registry,
+The [data-authority reference](data-authority.md) classifies shared projections and local
+exceptions. Status reports a graph digest over the complete projection registry,
 plus one digest for every table. The original six-table hash remains a compatibility field on
 the peer protocol; it cannot prove that every shared outcome agrees.
 
@@ -65,8 +100,7 @@ compare all shared rows and digests through creation, review, draining, cancella
 
 Documents record a sortable encoding of the complete binding claim key at admission.
 `document_canonical_latest(name,binding_key DESC)` serves latest selection and history order;
-readers never sort a name's entire claim history for each returned version. Schema 15 backfills
-the keys once, choosing the earliest canonical binding for each repeated name/hash. The key is
+readers never sort a name's entire claim history for each returned version. The earliest canonical binding is retained for each repeated name/hash. The key is
 a shared derived column and is digested with the document row. The fleet-size regression builds
 260,000 claims and 10,000 document versions, then requires latest listings, history pages,
 lookup and cursor reads to finish within two seconds and verifies the indexed latest query plan.
@@ -84,6 +118,11 @@ unknown claim alone does not degrade its envelope or mark a projection unhealthy
 as a fault. At daemon startup, admission retries those original records using the upgraded
 registry, then the canonical projector rebuilds their shared rows. An earlier claim learned
 on upgrade must sort by its original canonical key, never its new local arrival index.
+That admission seals and signs this node's new local batches first, so local membership claims
+decide it, but it builds no replication snapshot and skips the once-per-process search for
+batches skipped behind the sealing frontier. Both read every envelope or batch, about 15 s on a
+two-million-envelope store, and the daemon listens only after admission. The first export or
+replication activation after the daemon serves runs them on a read connection.
 
 The `authority_digest` is the build-independent log digest: it commits every stored envelope
 identity, including envelopes containing unprojected claims and checkpoint tombstones. Each
@@ -105,15 +144,40 @@ uses one registry without document bindings, exchanges unknown claims and later 
 in both directions, then reopens the older store with the current registry. It requires equal
 log digests before upgrade and equal graph and every table digest after canonical replay.
 
+`work.submitted.submitted_incarnation` is an optional registry field recording the validated
+submitting lease incarnation. The actor, subject, attempt and evidence stay on the immutable
+claim; `claimant` and `claim_incarnation` still describe the cleared post-submission lease.
+Legacy submission claims replay without the field. Work detail reads expose the current
+attempt's `submitted_incarnation`, including submissions without a summary. Missing or null
+means unknown, and validators must never accept unknown as a matching incarnation.
+`model::work_submission_matches` compares the claim's subject, attempt, actor, nonempty
+incarnation and evidence references together.
+
+An older member without this registry field rejects it at schema admission
+with `unknown-claim-field`, retains the original signed submission as a waiting unknown record,
+and continues projecting known claims. Its work projection cannot establish that submission's
+completion or incarnation until upgrade. Upgrade completion validators' members before relying
+on these receipts, and confirm waiting claims have been admitted after restart. No database
+schema migration or claim rewrite is required. The signed two-member regression
+`store::fleet_admission_tests::submitted_incarnation_waits_on_older_members_and_legacy_submissions_replay`
+checks legacy replay, waiting records, continued known-claim exchange, preserved receipt bytes,
+and graph/table convergence after upgrading the older registry.
+
 ## Projection digest coverage and cost
 
-`store/projection_digest.rs::TABLES` lists the shared tables: operations, blobs, documents,
-desired, message_index, mission_revisions, mission_definitions, mission_runs,
-mission_run_deadlines, mission_run_after, run_generations, step_runs, revision_proposals,
-planning_sessions, planning_candidates and planning_previews. Every column joins the digest
-by default. Only document/message/mission-revision arrival indexes and the effective step lease
-expiry/change timestamps are excluded. Those step timestamps include member-local renewals;
-the original durable lease facts remain covered through their authenticated claim identity.
+`store/projection_digest.rs::TABLES` lists 24 shared tables:
+
+`operations`, `blobs`, `documents`, `desired`, `arrangements`, `arrangement_registers`,
+`message_index`, `resource_observations`, `glass_heads`, `person_directive_notes`,
+`custom_registrations`, `custom_sources`, `custom_dependencies`, `mission_revisions`,
+`mission_definitions`, `mission_runs`, `mission_run_deadlines`, `mission_run_after`,
+`run_generations`, `step_runs`, `revision_proposals`, `planning_sessions`,
+`planning_candidates`, `planning_previews`.
+
+Every column joins the digest by default. Only document, message and mission-revision
+arrival indexes, `arrangements.changed_index`, and the effective step lease expiry/change
+timestamps are excluded. Those step timestamps include member-local renewals; the original
+durable lease facts remain covered through their authenticated claim identity.
 `planning_previews.store_index` is an originating preview input and is covered.
 
 The `claim_sources` digest covers admitted claim identities and immutable acceptance times,
@@ -167,10 +231,9 @@ peer. `st replication diff PEER` and `st doctor` also name them. Table differenc
 only when inventories and claim registries agree, no claims wait for a newer build, projection
 is current and local committed batches are sealed. Old peers omit `projection_digests`;
 exchanges and heals then compare their unchanged six-table compatibility hash. Old peers cannot
-verify full projection coverage. Modern peers compare complete maps. SQLite schema 14 adds the
-transactional digest machinery and rebuilds shared projections once, correcting older stored
-creation/change dates from claim facts. New writer connections must register the projection
-functions, including isolated checkpoint proof connections.
+verify full projection coverage. Modern peers compare complete maps. The transactional digest machinery derives creation/change dates from claim facts.
+New writer connections must register the projection functions, including isolated
+checkpoint proof connections.
 
 The indexed `resource_observations` projection participates in the complete shared table digest
 and canonical replay audit. The projection version identifying its layout is included in the
@@ -178,13 +241,13 @@ runtime schema compatibility identity alongside the claim vocabulary digest. Mix
 without this projection continue exchanging admitted claim authority, but do not compare their
 incompatible projection maps as if they represented the same graph. After upgrade, the table is
 backfilled from retained admitted `resource.observed` claims and projection comparisons resume.
-This changes no claim or resource vocabulary and requires no new replication payload fields.
+This projection is independent of the claim/resource vocabulary and replication payload fields.
 
 
 ## Add any machine
 
 Install st on the new machine and configure the person who operates it, as described in the
-[README](../../README.md#run-the-daemon). On an existing listening member, invite the new name:
+[README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
 
 ```sh
 st fleet invite beacon
@@ -332,10 +395,21 @@ interface addresses stop being advertised.
 An HTTP link can return silently without changing either machine's addresses. For five minutes
 after a successful outbound exchange, a failed dialer's retry wait probes that same HTTP route
 every three seconds, with a one-second timeout. The probe uses `HEAD` on the existing exchange
-route: any HTTP response, including an older build's `405`, wakes a signed exchange at once.
-It neither exports an inventory nor records a failure. A route that has never worked, a replaced
-route, or a peer absent for more than five minutes keeps the long retry schedule. Transport life
-only schedules an exchange; the exchange still authenticates every claim and peer.
+route: any HTTP response, including an older build's `405`, caps that retry wait at 30 seconds
+without resetting its failure count. It neither exports an inventory nor records a failure.
+Probes do not extend their own eligibility window. Only authenticated activity, including an
+overload answer, keeps the 30-second cap active; a peer that answers probes but keeps failing
+signed exchanges returns to the long retry schedule after five minutes. A route that has never
+worked or a replaced route keeps the long retry schedule. Graph wakes
+still leave intentionally absent peers alone. Transport life only schedules an exchange;
+the exchange still authenticates every claim and peer.
+
+`st replication status` shows each outbound worker's `exchange`, `overload`, `heal`, `backoff`
+or `idle` phase, the last attempt time, and the next retry time during a wait. JSON carries
+these additive fields under each peer's `worker`. They are host-local memory and create no
+replicated claims; after a daemon restart they are absent until the worker reports again.
+An overload poll is a wait for the same signed request; a backoff follows a failed exchange
+or unavailable route.
 
 The same recovery applies to every member. A server may be absent for hours just as a laptop
 may be asleep. On daemon start, wake from sleep, network change or Fabric recovery, a member
@@ -345,6 +419,55 @@ backlog drains. The other side need not open a second connection or wait for its
 An absent member is shown with its last exchange time, and doctor and delivery attention wait
 for contact before judging its routes. Invalid signatures, rejected membership and corrupt
 records remain faults.
+
+## Exchange deadlines and overload
+
+Each HTTP request retains a 20-second caller deadline. After authentication, the responder
+allows 15 seconds of backend receive, projection/wake and export work before returning either
+the ordinary signed exchange or HTTP 503 with a signed `PeerResponse` value:
+
+```json
+{"code":"replication-overloaded","retry_after_ms":5000}
+```
+
+The response HMAC and member signature bind the body to the exact request digest, as for
+existing signed errors. The convenience `Retry-After: 5` header is not authoritative; callers
+use the verified body and clamp the delay to 5–30 seconds. Neither a 503 nor an unsigned probe
+claims inventory equality or completed receipt. Accepted envelopes remain in the durable log.
+
+A responder admits at most four backend exchange jobs, with one in flight for each peer.
+Identical retries share that job; a different request from a busy peer gets overload without
+starting more work. The job survives a cancelled response and completes receive and export.
+A completed answer is retained until delivered or evicted when other peers need the bounded
+cache. Receipt remains idempotent if a lost or evicted answer must be recomputed. Once delivered,
+a later identical inventory starts a fresh export, so quiet peers still discover new envelopes.
+An undelivered completed answer has no time expiry; a later identical request can consume it
+before the following exchange obtains a fresh inventory. Failed jobs return a signed 500 and
+are removed so a retry can recompute them. Invalid request JSON still returns signed 422.
+Backend failures no longer synchronously record a responder-side failure before sending headers;
+the initiating worker records its failed exchange. Worker status reporting is best effort with
+a one-second timeout per phase or poll. Reported round-trip time includes overload polling.
+Local store operations run on blocking threads so their disk waits cannot block the response timer.
+
+New callers poll the identical signed body after authenticated overload, for at most 60 HTTP
+attempts or five minutes per logical request, whichever comes first. Exhausting this budget
+enters visible backoff for an alive peer. The compact algorithm has at most two logical signed
+exchange phases; overload polls are additional HTTP attempts inside each phase. Checkpoint manifest paging and local daemon operations keep their separate limits.
+Ordinary successful exchange payloads, inventory proofs and the peer API version are unchanged.
+Older callers understand the existing signed non-success response envelope and safely retry
+with their existing failure policy; overload polling and the shorter alive-peer retry policy
+require an upgraded initiating worker. Older responders continue answering ordinary requests
+without needing new fields. Worker status uses a separate local API endpoint: an older daemon
+returns 404, which the worker ignores, rather than mistaking status updates for failures.
+
+The isolated slow-export proofs use a 25-second export, beyond the original HTTP deadline:
+`sync::worker::tests::slow_export_returns_signed_overload_and_preserves_interrupted_receipt`
+checks signed overload, cancellation after durable receipt, one admission despite retries and
+both directions' notes. `authenticated_overload_polls_have_separate_time_and_request_bounds`
+checks the polling limit with an injected clock. The real daemon fixture
+`fleet::rejoin_slow_exports_preserve_live_claims_and_show_overload_retry` extends the checkpoint
+starvation fixture with slow exports, CLI phase/deadline checks and later live notes in both
+directions. The original normal-path fixture continues asserting at most four HTTP requests.
 
 ## Protocol
 
@@ -358,11 +481,40 @@ One exchange sends an inventory of envelope identities. An identity is `(writer,
 
 The inventory is a set, not a high-water cursor. Sparse delivery and two candidates at one writer sequence are valid.
 
-The inventory is compact. It carries one digest per writer range of 256 sequences, and it lists identities only for ranges whose digests differ. A peer sends a range the other side lacks entirely, and it sends identities within a differing range only after the other side has listed that range. One two-phase exchange therefore converges both directions without sending the whole authority log. A peer without range digests receives and sends the full identity list, as before.
+The inventory is compact. It carries one digest per writer range of 256 sequences, and it lists identities only for ranges whose digests differ. A peer sends a range the other side lacks entirely, and it sends identities within a differing range only after the other side has listed that complete range and verified its count and digest. An ordinary two-phase exchange makes progress in both directions without sending the whole authority log. A peer without range digests receives and sends the full identity list, as before.
 
 Each inventory says how many envelopes its sender takes in one exchange, 4,096 for this build. A peer sends at most that many, and at most 512 to a peer whose inventory does not say, as older builds do not.
 
-Each missing envelope contains one base64-encoded CBOR payload. Receipt stores the outer envelope before it decodes the payload.
+Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
+A compact answer therefore lists the differing ranges that hold a live envelope first and the
+payloadless ones after, and each answer starts each group at a different range, so successive
+exchanges list every differing range within the 512-identity listing. Live differences settle in
+one two-phase exchange however many tombstone ranges differ, and no exchange carries a whole
+inventory. Builds before this one ran an extra full-inventory round whenever a compact round made
+no progress; on a fleet whose stores hold a million envelopes, each such round sent about 228 MB
+each way, and tombstone-only differences made it run on nearly every exchange. This build never
+asks for a full inventory. It still answers an older peer's request without range digests with
+its complete identity list, so members may upgrade in any order, and those answers stop once
+every member runs this build. A pair of members with only tombstone differences reports no
+progress, so the worker rests rather than loops. Importing older or losing checkpoint lineages
+remains separate ([#1433](https://github.com/compoundingtech/smalltalk/issues/1433),
+[#1052](https://github.com/compoundingtech/smalltalk/issues/1052)); live-envelope convergence
+does not assert equal tombstone inventories.
+
+`sync::worker::tests::checkpoint_tombstones_do_not_starve_later_live_ranges` proves later notes
+transfer in both directions behind differing tombstone ranges in one compact round, that no
+request lists a whole inventory, and that a new write still transfers after a quiet
+tombstone-only comparison. `store::compact_listing_puts_live_ranges_first_and_reaches_every_payloadless_range_in_turn`
+proves the listing order. The joined-daemon regression
+`fleet::rejoin_exchanges_live_claims_beyond_differing_checkpoint_tombstones` exercises the same
+path through real isolated daemons and workers.
+
+Each missing envelope contains one base64-encoded CBOR payload on the JSON wire. Receipt stores
+its decoded bytes in SQLite before admission interprets the CBOR. Malformed base64 stays as
+exact TEXT evidence, so receipt does not discard an invalid envelope. Existing TEXT payloads
+remain readable while the daemon converts them to BLOBs in bounded, restartable writer-queue
+transactions. Export restores the same base64 wire representation; hashes and signatures still
+commit the same original bytes.
 
 An exchange body larger than 64 KiB travels deflate-compressed (`Content-Encoding: deflate`), which shrinks a page of envelopes to about a third. A requester asks for compressed answers with `Accept-Encoding: deflate`; a peer's answer carries the same header when it takes compressed requests, and the requester then compresses its push. Signatures cover the uncompressed JSON, and an inflated body may not exceed the 64 MB exchange limit. An older build neither asks nor says, so it exchanges plain JSON.
 
@@ -381,7 +533,7 @@ An unknown or invalid record stays in `replica_records`. It does not block a val
 
 Admission commits once per pass over the pending envelopes, so one disk flush covers an exchange. Each envelope is admitted in its own savepoint, so an invalid one is rolled back and recorded alone.
 
-A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. History arrives older than the node's own claims, so the node cannot extend its projection incrementally; projecting after every exchange would replay the whole graph each time. Meanwhile `st now`, `st missions ls` and stui say the node is syncing.
+A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. History arrives older than the node's own claims, so the node cannot extend its projection incrementally; projecting after every exchange would replay the whole graph each time. Meanwhile `st now`, `st missions ls` and the terminal UI say the node is syncing.
 
 Person-work asks, completions and cancellations rebuild only their owning mission run tree.
 Standalone asks embed their run and generation in the asking claim; indexed lookups recover
@@ -423,9 +575,24 @@ batch), and then applies local lease renewals again. Replaying over the rows an 
 left behind made the graph depend on how that projection ran: it could apply a run's old terminal
 state over the revision that reopened the run, so two nodes holding the same claims showed
 different graphs. A rule that reads other claims finds them by subject, never by the batch it
-arrived in, since a writer may put related claims in separate batches. The replay reads every
-claim before it projects any, so a claim that fails to project is quarantined without ending the
-replay.
+arrived in, since a writer may put related claims in separate batches. Each replay read statement
+finishes before its claims are projected, so a claim's savepoint rollback cannot abort a read
+statement that is still stepping. A claim that fails to project is quarantined without ending
+the replay.
+
+The base fold selects only `intent.desired`, `doc.bound` and `mission.published`, copying at most
+256 bodies before each fold page. The selected canonical ID order is sorted once in a temporary
+SQLite table; ordinal lookups then fetch body pages without sorting the remaining history
+again. Event positions are inserted separately without
+decoding message, work or observation bodies; repaired originals and the case-sensitive `glass/`
+prefix remain excluded. Base-stage progress counts those selected bodies, not the whole claim
+log. This bounds copied body count, not body bytes, SQLite work or the full replay transaction.
+The full replay still holds the writer through its commit.
+
+Heal request handlers compare a committed claim-index/graph-generation point to decide whether
+to notify readers. This point does not enumerate peers, envelopes or graph rows, and is an
+invalidation hint only. A replay may notify conservatively even when its final legacy digest
+matches. Heal equality, admission and completion continue to use their existing contracts.
 
 A replay from nothing is not the normal path. A projection extends the graph with the claims it
 admits. A claim that reaches part of the graph out of the replay's order rebuilds only that part
@@ -446,7 +613,8 @@ other kind only add events and operations, whose order does not matter.
 The graph is replayed from nothing only in these cases:
 
 - a stale or unhealthy projection;
-- an operation whose digests conflict;
+- an operation whose digests conflict, except `message.sent` receipts, which reconcile
+  only the affected operation from its indexed claims and checkpoint tombstones;
 - an operation claim without a digest;
 - a work claim that carries an operation;
 - a heal;
@@ -454,6 +622,35 @@ The graph is replayed from nothing only in these cases:
 
 A rebuilt part costs what its own history costs, while a replay holds the store's only writer for
 as long as the whole graph takes.
+
+Routine work actions, including `work.extended`, project incrementally. An extension preserves
+the attempt's execution budget and lease on its own node and its peers; an out-of-order extension
+can rebuild its run tree. The extension regression checks newer local state, full-replay parity
+and restart without requiring a full-store replay for the work action.
+
+The extension correction uses checkpoint rules v6 and a new shared projection compatibility
+identity. Mixed builds continue authority sync and defer incompatible graph comparisons. On
+upgrade, `work_extended_projection_rules=1` records a successful canonical rebuild of just the
+roots with retained extension claims; unresolved roots leave the migration pending. Existing v5
+certificates and tombstones remain historical authority, and their certified manifests can still
+be adopted. All checkpoint participants must use v6 before the next cut verifies.
+
+Scheduled occurrence deduplication uses checkpoint rules v7 and a new projection compatibility
+identity. Competing creation claims for one occurrence select one initial definition in canonical
+order, without combining steps from different child revisions. Upgrade rebuilds only run trees
+with multiple creation claims, once; ordinary run trees keep their projections. Historical
+checkpoint certificates remain authority, and mixed builds continue exchanging claim authority
+while deferring incompatible graph comparisons.
+
+Incremental catch-up projection commits at most 128 newly admitted claims per transaction and
+returns the writer between chunks, so queued messages and lease renewals can run. Each commit
+records the frontier actually projected. Admissions and catch-up deferrals advance a generation;
+the final pass clears only the generation it observed while holding the writer, so it cannot
+overwrite a newer deferral. Sync comparisons remain deferred until the pass has
+reached its starting backlog and no later admitted claims remain. A dirty aggregate still
+rebuilds from its complete canonical history; the chunk limit does not bound that history or a
+fallback replay. The regression interleaves local writes with committed prefixes and checks the
+final graph against canonical replay.
 
 The first start of a build with this rule replays from nothing once. A run that this node created
 could show as over in its old graph while its claims say it runs. Starting that work again long
@@ -523,7 +720,7 @@ a disk flush. `/v1/replication/status` carries the same numbers as `timings`.
 A node is catching up while a peer measured in the last five minutes holds more envelopes than one
 exchange carries. During that time its projections can show early history as current: a request
 that a later envelope resolves still looks open. Every client page then carries a `sync` notice,
-`st now` and the other product commands print a `SYNCING` line before their items, and stui shows
+`st now` and the other product commands print a `SYNCING` line before their items, and the terminal UI shows
 `⟳ Syncing` with the same line.
 
 Two nodes are in sync only when they hold the same envelopes and project the same graph from
@@ -544,7 +741,7 @@ peer	node-b	up
 
 While any peer has diverged, `st doctor` fails its replication check, every client page carries a
 `sync` notice in the `diverged` state, `st now` and the other product commands print a `DIVERGED`
-line, and stui's header shows `⚠ diverged`. A shorter difference shows as `graphs differ` and fails
+line, and the terminal UI's header shows `⚠ diverged`. A shorter difference shows as `graphs differ` and fails
 nothing. A comparison stands until the next exchange at which both nodes hold the same envelopes;
 the first one that finds equal graphs clears it. Like the envelope difference, comparisons live in
 memory and the first exchanges after a restart rebuild them.
@@ -644,7 +841,10 @@ it keeps sets every field a reader takes from the dropped one:
   counts each series from its start, and a series' total never changes. A session's cumulative
   reading keeps its newest and its largest; a context reading keeps its newest. Per-response
   claims from older builds stay;
-- `harness.limits` readings, keeping each seat's newest.
+- `harness.limits` readings, keeping each seat's newest and every reading within an hour of the
+  newest of its account group.
+
+[Retention](retention.md) lists every kind's class and the rules.
 
 Every model response also goes to OpenTelemetry when `[observations.otlp]` is set: an
 `st.usage.response` log with its agent, mission run, step, model, account, tokens and cost, and

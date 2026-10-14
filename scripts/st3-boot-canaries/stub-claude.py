@@ -51,14 +51,15 @@ if argv[:1] in (["plugin"], ["mcp"]) or "--version" in argv:
     sys.exit(1)
 settings = json.loads(option(argv, "--settings") or "{}")
 mcp = json.loads(option(argv, "--mcp-config") or "{}")
-receipt("started", argv=argv)
+receipt("started", argv=argv, disable_autoupdater=os.environ.get("DISABLE_AUTOUPDATER"))
 
 # `--resume ID` continues that session in this project, as Claude does; Claude refuses an ID with
 # no transcript here.
 resumed = option(argv, "--resume")
 session_id = resumed or str(uuid.uuid4())
 cwd = str(Path.cwd())
-projects = Path.home() / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
+config_root = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+projects = config_root / "projects" / re.sub(r"[^A-Za-z0-9]", "-", cwd)
 projects.mkdir(parents=True, exist_ok=True)
 transcript = projects / f"{session_id}.jsonl"
 if resumed and not transcript.is_file():
@@ -113,6 +114,13 @@ def turn(prompt, answer):
 
 
 server = mcp.get("mcpServers", {}).get("st3")
+# Fault injection belongs to this private workspace, never to a shared provider setting.
+channel_mode = Path.cwd() / "claude-channel-mode"
+mode = channel_mode.read_text().strip() if channel_mode.exists() else ""
+if mode in ("missing", "missing-once"):
+    server = None
+    if mode == "missing-once":
+        channel_mode.write_text("healthy")
 channel = None
 if server:
     channel = subprocess.Popen([server["command"], *server.get("args", [])], stdin=subprocess.PIPE,
@@ -129,9 +137,11 @@ hooks("SessionStart", {"source": "resume" if resumed else "startup", "model": "c
 append("user", "canary transcript probe")
 append("assistant", "canary transcript answer")
 status_line()
-if channel:
+initialized = False
+if channel and mode != "uninitialized":
     channel.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
     channel.stdin.flush()
+    initialized = True
 turn("canary first turn", "canary first answer")
 
 notices = []
@@ -164,6 +174,10 @@ signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGHUP, stop)
 next_status = time.monotonic() + 5
 while running:
+    if channel and not initialized and not channel_mode.exists():
+        channel.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        channel.stdin.flush()
+        initialized = True
     with lock:
         pending, notices[:] = list(notices), []
     for notice in pending:

@@ -28,6 +28,10 @@ const SESSION = "ST_OMP_CHANNEL_SESSION";
 const SEQ = "ST_OMP_CHANNEL_SEQ";
 const EXPECTED_NATIVE_SESSION = "ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION";
 const RESUME_GENERATION = "ST_OMP_CHANNEL_RESUME_GENERATION";
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+const PENDING_ASK = "ST3_OMP_PENDING_ASK";
+const PENDING_ASK_TIMEOUT_MS = 120_000;
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 
 // omp starts the session even if st is slow to answer. Restored context is worth a short wait
 // and never worth a hung agent.
@@ -41,8 +45,8 @@ const HELLO_TIMEOUT_MS = 5000;
 // result it never saw. So a message that arrives during a running turn is held and steered when
 // the batch's last `tool_call` returns its `tool_result` (omp announces every call of a batch
 // before any runs, and awaits the handler), or when the run ends. Either way it lands where the
-// steer would have. A message never waits longer than this behind a running tool call: a longer
-// command is backgrounded as before. It was chosen below st3's 15-second work-wake retry.
+// steer would have. Ordinary tool calls wait at most this long; native asks and approvals
+// instead hold mail outside omp until the person answers, cancels, or the session ends.
 const HOLD_MAX_MS = 10_000;
 
 type Frame = {
@@ -82,6 +86,15 @@ type Stash = {
   seq?: string;
   expectedNativeSession?: string;
   resumeGeneration?: string;
+  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+  restoringAsk?: {
+    toolCallId: string;
+    ready: boolean;
+    firstIdle: boolean;
+    retried: boolean;
+    timer?: NodeJS.Timeout;
+  };
+  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
   child?: childProcess.ChildProcess;
   reconnectTimer?: ReturnType<typeof setTimeout>;
   reconnectAttempt?: number;
@@ -97,6 +110,13 @@ type Stash = {
   lastCostUsd?: number;
   label?: string;
   accepted?: Map<string, { content: string; meta?: Record<string, unknown>; read?: boolean }>;
+  /** Todo observation state is fenced by the channel binding, not the extension instance. */
+  todoFingerprint?: string;
+  todoBranchKey?: string;
+  todoLeafKey?: string;
+  todoNextPollAt?: number;
+  todoSession?: string;
+  todoReady?: boolean;
 
   /** The structured `ask` tool call currently waiting for its matching result. */
   pendingAskToolCallId?: string;
@@ -114,6 +134,20 @@ type Stash = {
   holdTimer?: ReturnType<typeof setTimeout>;
   /** Serializes handoffs so omp receives messages in arrival order. */
   handoff?: Promise<void>;
+  /** Subagents of this process between their `agent_start` and their end, by omp agent ID. */
+  subagents?: Map<string, OpenSubagent>;
+  /** Reports each busy subagent while any runs, so st ends only one that stopped running. */
+  subagentHeartbeat?: NodeJS.Timeout;
+};
+
+type OpenSubagent = {
+  frame: Record<string, unknown>;
+  /** The subagent session's newest context, asked whether the session is still busy. */
+  ctx: ExtensionContext;
+  reportedAt: number;
+  /** Human waits belong to this subagent, never to the top-level seat. */
+  pendingAsks: Set<string>;
+  pendingApproval: boolean;
 };
 
 /**
@@ -176,6 +210,38 @@ const terminalProviderError = (event: AgentEndFrame): ProviderError | undefined 
   return undefined;
 };
 
+/** How a subagent's run ended: an error fails it, an abort interrupts it. */
+const subagentOutcome = (event: AgentEndFrame): "completed" | "failed" | "interrupted" => {
+  if (!Array.isArray(event.messages)) return "completed";
+  for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+    const message = event.messages[index];
+    if (!message || typeof message !== "object") continue;
+    if (!("role" in message) || message.role !== "assistant") continue;
+    if (!("stopReason" in message)) return "completed";
+    if (message.stopReason === "error") return "failed";
+    if (message.stopReason === "aborted") return "interrupted";
+    return "completed";
+  }
+  return "completed";
+};
+
+/** A subagent's tool calls and messages report it at most this often. */
+const SUBAGENT_PROGRESS_MS = 10_000;
+/**
+ * While a subagent's session is busy, as in a long tool call or a nested subagent, it reports at
+ * least this often. st ends a subagent unreported for five minutes (`SILENT_GRACE_MS`).
+ */
+const SUBAGENT_HEARTBEAT_MS = 60_000;
+const SUBAGENT_SILENT_MS = 5 * 60_000;
+const SUBAGENT_ACTIVITY = new Set(["message_end", "tool_execution_start", "tool_execution_end"]);
+
+/** Reject rather than truncate identities: truncation would merge distinct subagents. */
+const subagentText = (value: unknown, maxBytes: number) => {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text && Buffer.byteLength(text, "utf8") <= maxBytes ? text : undefined;
+};
+
 /**
  * Compile-time coupling to the pinned pi declarations for the surfaces the context producer reads.
  *
@@ -204,6 +270,113 @@ const pinnedTelemetrySurface: {
 };
 void pinnedTelemetrySurface;
 
+type TodoStatus = "pending" | "in_progress" | "completed" | "blocked";
+type TodoTask = { content: string; status: TodoStatus; blocker?: string };
+type TodoPhase = { name: string; tasks: TodoTask[] };
+type TodoSnapshot = {
+  phases: TodoPhase[];
+  totals: Record<TodoStatus | "abandoned", number>;
+  truncated: boolean;
+};
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+const todoStatus = (value: unknown): value is TodoStatus =>
+  value === "pending" || value === "in_progress" || value === "completed" || value === "blocked";
+const utf8Prefix = (value: string, limit: number): string => {
+  let bytes = 0;
+  let prefix = "";
+  for (const character of value) {
+    bytes += Buffer.byteLength(character, "utf8");
+    if (bytes > limit) break;
+    prefix += character;
+  }
+  return prefix;
+};
+
+/** Count the full native snapshot before applying the claim's source-order bounds. */
+const boundedTodo = (raw: unknown): TodoSnapshot | undefined => {
+  if (!Array.isArray(raw)) return undefined;
+  const snapshot: TodoSnapshot = {
+    phases: [], totals: { pending: 0, in_progress: 0, completed: 0, blocked: 0, abandoned: 0 }, truncated: false,
+  };
+  let taskCount = 0;
+  for (const rawPhase of raw) {
+    const phase = record(rawPhase);
+    if (!phase || typeof phase.name !== "string" || !Array.isArray(phase.tasks)) return undefined;
+    const name = utf8Prefix(phase.name, 128);
+    const output: TodoPhase = { name, tasks: [] };
+    const includePhase = snapshot.phases.length < 16;
+    if (includePhase) snapshot.phases.push(output);
+    if (!includePhase || name !== phase.name) snapshot.truncated = true;
+    for (const rawTask of phase.tasks) {
+      const task = record(rawTask);
+      if (!task || typeof task.content !== "string" ||
+        (!todoStatus(task.status) && task.status !== "abandoned") ||
+        (task.blocker !== undefined && typeof task.blocker !== "string")) return undefined;
+      // OMP's dropped tasks have no corresponding approved claim status. Omit, never relabel.
+      if (task.status === "abandoned") { snapshot.totals.abandoned++; continue; }
+      if (!todoStatus(task.status)) return undefined;
+      snapshot.totals[task.status]++;
+      if (!includePhase || taskCount >= 100) { snapshot.truncated = true; continue; }
+      const content = utf8Prefix(task.content, 512);
+      const blocker = typeof task.blocker === "string" ? utf8Prefix(task.blocker, 512) : undefined;
+      if (content !== task.content || blocker !== task.blocker) snapshot.truncated = true;
+      output.tasks.push(blocker === undefined ? { content, status: task.status } : { content, status: task.status, blocker });
+      taskCount++;
+    }
+  }
+  // Reserve 4 KiB for authenticated session/incarnation provenance added by the Rust producer.
+  // JSON escaping can expand each byte sixfold; drop only trailing items, never alter totals.
+  let serializedBytes = Buffer.byteLength(JSON.stringify(snapshot), "utf8");
+  if (serializedBytes > 60 * 1024 && !snapshot.truncated) {
+    snapshot.truncated = true;
+    serializedBytes--; // `true` is one byte shorter than `false`.
+  }
+  while (serializedBytes > 60 * 1024) {
+    const last = snapshot.phases.at(-1);
+    if (!last) break;
+    const removed = last.tasks.length > 0 ? last.tasks.pop() : snapshot.phases.pop();
+    const siblings = last.tasks.length > 0 || (removed === last && snapshot.phases.length > 0);
+    serializedBytes -= Buffer.byteLength(JSON.stringify(removed), "utf8") + (siblings ? 1 : 0);
+  }
+  return snapshot;
+};
+
+type BranchTodo = { key: string; observedAt: string; sourceOp: string; snapshot: TodoSnapshot };
+const branchTodo = (ctx: ExtensionContext): BranchTodo | null | undefined => {
+  try {
+    // Native OMP's read-only session manager exposes getBranch(), root-to-current-leaf.
+    // Never use getEntries(): that includes unrelated branches.
+    const entries = ctx.sessionManager.getBranch();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = record(entries[i]);
+      if (!entry) continue;
+      let details: Record<string, unknown> | undefined;
+      let sourceOp: string;
+      if (entry.type === "custom" && entry.customType === "user_todo_edit") {
+        details = record(entry.data);
+        sourceOp = "user_edit";
+      } else {
+        const message = record(entry.message);
+        if (entry.type !== "message" || message?.role !== "toolResult" ||
+          message.toolName !== "todo" || message.isError === true) continue;
+        details = record(message.details);
+        if (details?.op === "view" || typeof details?.op !== "string") continue;
+        sourceOp = details.op;
+      }
+      const snapshot = boundedTodo(details?.phases);
+      if (!snapshot || typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp))) continue;
+      return {
+        key: `${entry.id}:${entry.timestamp}`, observedAt: new Date(entry.timestamp).toISOString(), sourceOp, snapshot,
+      };
+    }
+    return null; // Readable branch with no snapshot is known empty.
+  } catch {
+    return undefined; // An unreadable branch is not evidence of an empty list.
+  }
+};
+
 /**
  * Read the channel configuration once and unexport it.
  *
@@ -225,6 +398,18 @@ const stash = (): Stash => {
       expectedNativeSession: process.env[EXPECTED_NATIVE_SESSION],
       resumeGeneration: process.env[RESUME_GENERATION],
     };
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+    const pendingAsk = process.env[PENDING_ASK];
+    if (pendingAsk?.trim()) {
+      globals.__stOmpChannel.restoringAsk = {
+        toolCallId: pendingAsk,
+        ready: false,
+        firstIdle: false,
+        retried: false,
+      };
+    }
+    delete process.env[PENDING_ASK];
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     delete process.env[BIN];
     delete process.env[IDENTITY];
     delete process.env[RUNTIME_ID];
@@ -257,9 +442,25 @@ const seatLabel = (label: string): string => {
 
 export default function (pi: ExtensionAPI) {
   const state = stash();
+  let jobContext: ExtensionContext | undefined;
+  let lastStateFrame: Record<string, unknown> | undefined;
+  let lastBackgroundJobs: number | null | undefined;
+  const backgroundJobs = (): number | null => {
+    try {
+      const snapshot = (jobContext as ExtensionContext & {
+        getAsyncJobSnapshot?: () => { running?: unknown } | null;
+      } | undefined)?.getAsyncJobSnapshot?.();
+      return Array.isArray(snapshot?.running) ? snapshot.running.length : null;
+    } catch { return null; }
+  };
   const applyLabel = async (ctx: ExtensionContext) => {
     if (!state.label) return;
-    try { await pi.setSessionName(state.label); }
+    // Seat replay after reconnect must not append another title change to the session.
+    try {
+      if (typeof pi.getSessionName !== "function" || pi.getSessionName() !== state.label) {
+        await pi.setSessionName(state.label);
+      }
+    }
     catch { ctx.ui?.notify?.("st: could not update the session name", "warning"); }
   };
   const { bin, identity, runtimeId, session, seq } = state;
@@ -331,6 +532,8 @@ export default function (pi: ExtensionAPI) {
       state.pendingAskToolCallId = undefined;
       state.pendingApproval = false;
       resetHold();
+      lastStateFrame = undefined;
+      lastBackgroundJobs = undefined;
     }
 
     cancelSettle();
@@ -342,12 +545,24 @@ export default function (pi: ExtensionAPI) {
       channelEnv[EXPECTED_NATIVE_SESSION] = expectedNativeSession;
     }
     if (resumeGeneration) channelEnv[RESUME_GENERATION] = resumeGeneration;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+    if (state.restoringAsk) channelEnv[PENDING_ASK] = state.restoringAsk.toolCallId;
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     const child = childProcess.spawn(
       bin,
       ["driver", "omp-channel", "--identity", identity],
       { stdio: ["pipe", "pipe", "inherit"], env: channelEnv },
     );
     state.child = child;
+    state.todoFingerprint = undefined;
+    state.todoBranchKey = undefined;
+    state.todoLeafKey = undefined;
+    state.todoNextPollAt = undefined;
+    state.todoSession = nativeSessionId;
+    state.todoReady = false;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+    armPendingAskTimeout(ctx);
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 
     return new Promise<string>((resolve) => {
       let settled = false;
@@ -379,7 +594,12 @@ export default function (pi: ExtensionAPI) {
         if (child.stdin.destroyed) return;
         child.stdin.write(JSON.stringify(frame) + "\n");
       };
-      send({ type: "session", sessionId: nativeSessionId, path: ctx.sessionManager.getSessionFile?.() ?? null });
+      const sessionFile = ctx.sessionManager.getSessionFile?.();
+      const sessionBinding = {
+        sessionId: nativeSessionId,
+        ...(typeof sessionFile === "string" ? { sessionFile } : {}),
+      };
+      send({ type: "session", ...sessionBinding });
 
       // Historical channels can fail their API request while Tokio still waits on a
       // blocking stdin read during shutdown. Wake that read so exit reaches the existing
@@ -389,7 +609,9 @@ export default function (pi: ExtensionAPI) {
           if (keepalive !== undefined) clearInterval(keepalive);
           return;
         }
+        if (lastStateFrame && backgroundJobs() !== lastBackgroundJobs) sendFrame(lastStateFrame);
         if (legacyChannel) send({ type: "keepalive" });
+        if (state.todoReady) observeTodoBranch(ctx, false, true);
       }, 1000);
       keepalive.unref?.();
 
@@ -434,7 +656,15 @@ export default function (pi: ExtensionAPI) {
             send({ type: "delivered", meta: accepted.meta });
             if (accepted.read) send({ type: "read", meta: accepted.meta });
           }
-          send({ type: "ready", sessionId: nativeSessionId });
+          send({ type: "ready", ...sessionBinding });
+          state.todoReady = true;
+          observeTodoBranch(ctx, true);
+          // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+          if (state.restoringAsk) {
+            state.restoringAsk.ready = true;
+            retryPendingAsk();
+          }
+          // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
           // Every fresh channel needs the provider's idle proof, including reconnects
           // during an idle session where no further turn boundary will arrive.
           watchSettle(ctx);
@@ -511,7 +741,68 @@ export default function (pi: ExtensionAPI) {
   const sendFrame = (frame: Record<string, unknown>) => {
     const child = state.child;
     if (!child || !child.stdin || child.stdin.destroyed) return;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+    if (frame.type === "state" && frame.state === "idle" && state.restoringAsk) {
+      state.restoringAsk.firstIdle = true;
+      retryPendingAsk();
+      return;
+    }
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
+    if (frame.type === "state") {
+      lastStateFrame = frame;
+      lastBackgroundJobs = backgroundJobs();
+      frame = { ...frame, backgroundJobs: lastBackgroundJobs };
+    }
     child.stdin.write(JSON.stringify(frame) + "\n");
+  };
+  const emitTodo = (ctx: ExtensionContext, snapshot: TodoSnapshot, observedAt: string, sourceOp: string, force = false) => {
+    if (!state.todoReady || !state.child || state.child.stdin?.destroyed) return;
+    const nativeSession = ctx.sessionManager.getSessionId();
+    if (state.todoSession !== nativeSession) return;
+    const fingerprint = JSON.stringify(snapshot);
+    if (!force && state.todoFingerprint === fingerprint) return;
+    sendFrame({ type: "todo", session: nativeSession, observed_at: observedAt, source_op: sourceOp, ...snapshot });
+    state.todoFingerprint = fingerprint;
+  };
+  const observeTodoBranch = (ctx: ExtensionContext, hydrate = false, polling = false) => {
+    if (!state.todoReady || !state.child || state.child.stdin?.destroyed) return;
+    const nativeSession = ctx.sessionManager.getSessionId();
+    if (state.todoSession !== nativeSession) {
+      if (!hydrate) return;
+      // A branch hydration binds its observation provenance on the existing channel. It must
+      // not restart delivery, discard held mail, or reset ask/approval authority.
+      const sessionFile = ctx.sessionManager.getSessionFile?.();
+      sendFrame({ type: "session", sessionId: nativeSession,
+        ...(typeof sessionFile === "string" ? { sessionFile } : {}) });
+      state.todoSession = nativeSession;
+      state.todoFingerprint = undefined;
+      state.todoBranchKey = undefined;
+      state.todoLeafKey = undefined;
+    }
+    let leafKey: string | undefined;
+    try {
+      // Native OMP exposes this O(1) index lookup on ReadonlySessionManager. /todo appends
+      // user_todo_edit through appendCustomEntry, which advances the same branch leaf.
+      if (typeof ctx.sessionManager.getLeafId === "function") {
+        leafKey = `${nativeSession}:${ctx.sessionManager.getLeafId() ?? ""}`;
+        if (!hydrate && state.todoLeafKey === leafKey) return;
+      }
+    } catch { return; }
+    // Older providers without a leaf indicator still observe events immediately, but never
+    // rebuild an unchanged idle branch every second.
+    if (polling && leafKey === undefined && Date.now() < (state.todoNextPollAt ?? 0)) return;
+    state.todoNextPollAt = Date.now() + 30_000;
+    const source = branchTodo(ctx);
+    if (source === undefined) return;
+    state.todoLeafKey = leafKey;
+    const key = source?.key ?? "";
+    if (!hydrate && state.todoBranchKey === key) return;
+    state.todoBranchKey = key;
+    const snapshot = source?.snapshot ?? {
+      phases: [], totals: { pending: 0, in_progress: 0, completed: 0, blocked: 0, abandoned: 0 }, truncated: false,
+    };
+    emitTodo(ctx, snapshot, source?.observedAt ?? new Date().toISOString(),
+      hydrate ? "hydrate" : source?.sourceOp ?? "hydrate", hydrate);
   };
   const boundedTimelineString = (value: unknown, limit = 16_384): string | undefined =>
     typeof value === "string" ? value.slice(0, limit) : undefined;
@@ -598,6 +889,13 @@ export default function (pi: ExtensionAPI) {
       }
       if (!idleProof(ctx)) return;
       clearInterval(poller);
+      // Restored asks need this idle observation to drive their existing retry handshake,
+      // but retain their own delivery fence until reopening or timeout resolves it.
+      if (!state.restoringAsk) {
+        state.running = false;
+        toolCallsInFlight().clear();
+        if (heldMessages().length > 0) void release();
+      }
       sendFrame({ type: "state", state: "idle" });
     }, IDLE_POLL_MS);
     poller.unref?.();
@@ -606,6 +904,7 @@ export default function (pi: ExtensionAPI) {
   // Holding mail during a running turn; `HOLD_MAX_MS` explains why and where it is released.
   const toolCallsInFlight = () => (state.toolCallsInFlight ??= new Set<string>());
   const heldMessages = () => (state.held ??= []);
+  const humanBlocked = () => Boolean(state.pendingAskToolCallId || state.pendingApproval);
   const clearHoldTimer = () => {
     if (state.holdTimer !== undefined) clearTimeout(state.holdTimer);
     state.holdTimer = undefined;
@@ -636,10 +935,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
     try {
-      // `deliverAs` is required only while a turn is streaming, and an idle send that carries
-      // one is rejected, so the idle proof selects the call shape. It never selects the
-      // policy. Not optional-chained: reading a missing idle proof as "idle" would silently
-      // turn every mid-turn delivery into a plain send.
+      // Positive idle selects a plain send; streaming delivery retains the requested mode.
+      // Not optional-chained: reading a missing idle proof as "idle" would silently turn
+      // every mid-turn delivery into a plain send. This selects timing, not message policy.
       if (first.ctx.isIdle()) {
         await pi.sendUserMessage(content);
       } else {
@@ -664,10 +962,19 @@ export default function (pi: ExtensionAPI) {
 
   /** Hand every held message to omp now, in arrival order. */
   const release = (): Promise<void> => {
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+    if (state.restoringAsk) return Promise.resolve();
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     clearHoldTimer();
-    const batch = heldMessages().splice(0);
+    if (humanBlocked()) return Promise.resolve();
+    // A deferred boundary may release only its eligible prefix, never a newer batch's mail.
+    const last = heldMessages().at(-1);
+    if (!last) return Promise.resolve();
     const deliver = async () => {
-      const current = batch.filter((message) => message.channel === state.child);
+      if (humanBlocked()) return;
+      const end = heldMessages().indexOf(last);
+      if (end < 0) return;
+      const current = heldMessages().splice(0, end + 1).filter((message) => message.channel === state.child);
       if (current.length > 0) await handOff(current);
     };
     state.handoff = (state.handoff ?? Promise.resolve()).then(deliver, deliver);
@@ -676,6 +983,10 @@ export default function (pi: ExtensionAPI) {
 
   /** Bound the wait behind a running tool call, never the wait for the model to finish streaming. */
   const armHoldCap = () => {
+    if (humanBlocked()) return;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+    if (state.restoringAsk) return;
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     if (state.holdTimer !== undefined) return;
     if (heldMessages().length === 0 || toolCallsInFlight().size === 0) return;
     state.holdTimer = setTimeout(() => {
@@ -688,12 +999,63 @@ export default function (pi: ExtensionAPI) {
   /** Deliver a message from the channel now, or hold it while omp is running a turn. */
   const receive = (message: HeldMessage): Promise<void> => {
     heldMessages().push(message);
-    if (state.running || toolCallsInFlight().size > 0) {
+    if (!state.pendingAskToolCallId && !state.pendingApproval && !state.restoringAsk &&
+      idleProof(message.ctx)) {
+      state.running = false;
+      toolCallsInFlight().clear();
+      return release();
+    }
+    if (humanBlocked() || state.running || toolCallsInFlight().size > 0) {
       armHoldCap();
       return Promise.resolve();
     }
     return release();
   };
+
+  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+  // Retry is a terminal action, not a model prompt. Rust owns the raw F5 write.
+  const retryPendingAsk = () => {
+    const pending = state.restoringAsk;
+    if (!pending || !pending.ready || !pending.firstIdle || pending.retried) return;
+    const child = state.child;
+    if (!child?.stdin || child.stdin.destroyed) return;
+    pending.retried = true;
+    sendFrame({ type: "retry_pending_ask", toolCallId: pending.toolCallId });
+  };
+  const armPendingAskTimeout = (ctx: ExtensionContext) => {
+    const pending = state.restoringAsk;
+    if (!pending || pending.timer !== undefined) return;
+    pending.timer = setTimeout(() => {
+      if (state.restoringAsk !== pending) return;
+      state.restoringAsk = undefined;
+      sendFrame({ type: "delivery_ready" });
+      sendFrame({
+        type: "diagnostic",
+        code: "pending_ask_resume_timeout",
+        toolCallId: pending.toolCallId,
+        message: `Interrupted ask ${pending.toolCallId} did not reopen within ${PENDING_ASK_TIMEOUT_MS}ms; releasing held mail`,
+      });
+      if (idleProof(ctx)) {
+        sendFrame({ type: "state", state: "idle" });
+      }
+      void release();
+    }, PENDING_ASK_TIMEOUT_MS);
+    pending.timer.unref?.();
+  };
+  const observePendingAsk = (event: { toolName?: unknown; toolCallId?: unknown }) => {
+    const pending = state.restoringAsk;
+    if (!pending || event.toolName !== "ask" || event.toolCallId !== pending.toolCallId) return;
+    clearTimeout(pending.timer);
+    state.restoringAsk = undefined;
+    state.pendingAskToolCallId = pending.toolCallId;
+    clearHoldTimer();
+    toolCallsInFlight().add(pending.toolCallId);
+    cancelSettle();
+    sendFrame({ type: "state", state: "active", blockedOn: "human", ask: "question" });
+    sendFrame({ type: "delivery_ready" });
+    armHoldCap();
+  };
+  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 
   /** A turn's calls are over when the turn ends, answered or not: a blocked call has no result. */
   const endTurnToolCalls = (event: unknown) => {
@@ -791,7 +1153,7 @@ export default function (pi: ExtensionAPI) {
     sendFrame({
       type: "session",
       sessionId: ctx.sessionManager.getSessionId(),
-      path: ctx.sessionManager.getSessionFile?.() ?? null,
+      sessionFile: ctx.sessionManager.getSessionFile?.(),
     });
     const reading = usageReading(ctx);
     if (!reading && !compaction) return;
@@ -812,6 +1174,86 @@ export default function (pi: ExtensionAPI) {
   // Keep delivery, receipt evidence and label authority on the top-level seat (#852).
   const isSubagent = (ctx: ExtensionContext | undefined): boolean =>
     (ctx as { agent?: { kind?: unknown } } | undefined)?.agent?.kind === "sub";
+  // A subagent session reports only its runs: st records them on the seat as its subagents, with
+  // a lease the seat's driver renews while the run lasts. A run starts at `agent_start` and ends at
+  // the `agent_end` that does not continue, or when its session shuts down first. Between them it
+  // reports progress at each `turn_end`, at its messages and tool calls, and each minute while omp
+  // says its session is busy; st ends a run that stops reporting. omp names the subagent in
+  // `ctx.agent` (`id`, `name`).
+  const subagentBusy = (ctx: ExtensionContext): boolean => {
+    try {
+      return ctx.isIdle() === false;
+    } catch {
+      return false;
+    }
+  };
+  const reportSubagent = (open: OpenSubagent, now: number) => {
+    open.reportedAt = now;
+    sendFrame({ ...open.frame, event: "progress" });
+  };
+  const closeSubagent = (id: string): boolean => {
+    const closed = state.subagents?.delete(id) ?? false;
+    if (!state.subagents?.size) {
+      clearInterval(state.subagentHeartbeat);
+      state.subagentHeartbeat = undefined;
+    }
+    return closed;
+  };
+  const heartbeat = () => {
+    const now = Date.now();
+    for (const [id, open] of state.subagents ?? []) {
+      // Native omp keeps foreground tools (including asks and approvals) inside the busy run.
+      // Event caches are not liveness evidence: a lost resolution must not renew an idle child.
+      const busy = subagentBusy(open.ctx);
+      if (!busy) {
+        open.pendingAsks.clear();
+        open.pendingApproval = false;
+      }
+      if (busy) reportSubagent(open, now);
+      // st has ended a run this quiet; forget it so the heartbeat stops with the last run.
+      else if (now - open.reportedAt >= SUBAGENT_SILENT_MS) closeSubagent(id);
+    }
+  };
+  const observeSubagent = (event: string, payload: unknown, ctx: ExtensionContext) => {
+    const agent = record(record(ctx)?.agent);
+    const id = subagentText(agent?.id, 256);
+    if (!id) return;
+    const name = subagentText(agent?.name, 128);
+    const frame = { type: "subagent", id, ...(name ? { name } : {}) };
+    const running = (state.subagents ??= new Map<string, OpenSubagent>());
+    const open = running.get(id);
+    if (open) open.ctx = ctx;
+    const now = Date.now();
+    const tool = record(payload);
+    const callId = subagentText(tool?.toolCallId, 256);
+    if (open) {
+      if ((event === "tool_call" || event === "tool_execution_start") &&
+        tool?.toolName === "ask" && callId) open.pendingAsks.add(callId);
+      if ((event === "tool_result" || event === "tool_execution_end") && callId) {
+        open.pendingAsks.delete(callId);
+      }
+      if (event === "tool_approval_requested") open.pendingApproval = true;
+      if (event === "tool_approval_resolved") open.pendingApproval = false;
+    }
+    if (event === "agent_start") {
+      running.set(id, { frame, ctx, reportedAt: now, pendingAsks: new Set(), pendingApproval: false });
+      sendFrame({ ...frame, event: "start" });
+      state.subagentHeartbeat ??= setInterval(heartbeat, SUBAGENT_HEARTBEAT_MS).unref();
+    } else if (event === "turn_end" && open) {
+      reportSubagent(open, now);
+    } else if (SUBAGENT_ACTIVITY.has(event)) {
+      if (open && now - open.reportedAt >= SUBAGENT_PROGRESS_MS) reportSubagent(open, now);
+    } else if (event === "agent_end") {
+      const end = record(payload) ?? {};
+      if (end.willContinue === true) return;
+      if (open && (open.pendingAsks.size || open.pendingApproval) &&
+        subagentBusy(ctx) && subagentOutcome(end) === "completed") return;
+      closeSubagent(id);
+      sendFrame({ ...frame, event: "end", outcome: subagentOutcome(end) });
+    } else if (event === "session_shutdown" && closeSubagent(id)) {
+      sendFrame({ ...frame, event: "end", outcome: "interrupted" });
+    }
+  };
   const register = pi.on.bind(pi) as unknown as (
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
@@ -819,7 +1261,18 @@ export default function (pi: ExtensionAPI) {
   const onWidened = (
     event: string,
     handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
-  ) => register(event, (payload, ctx) => isSubagent(ctx) ? undefined : handler(payload, ctx));
+  ) => register(event, (payload, ctx) => {
+    if (isSubagent(ctx)) {
+      try {
+        observeSubagent(event, payload, ctx);
+      } catch {
+        // Observability fails open: a subagent's report never takes its session down.
+      }
+      return;
+    }
+    jobContext = ctx;
+    return handler(payload, ctx);
+  });
 
   // Registered only now that every helper above is initialized: a use-before-declaration in this
   // file is the defect class that once shipped green through the type gate.
@@ -834,6 +1287,8 @@ export default function (pi: ExtensionAPI) {
     sendContext(ctx);
     const end = event as AgentEndFrame;
     if (end.willContinue !== true) {
+      state.pendingAskToolCallId = undefined;
+      state.pendingApproval = false;
       state.running = false;
       toolCallsInFlight().clear();
       // Nothing runs now, so held mail is handed over at once, exactly as a message arriving at
@@ -845,6 +1300,10 @@ export default function (pi: ExtensionAPI) {
     // one print-mode run). Nothing is claimed from those — least of all about a credential.
     if (end.willContinue === true) {
       cancelSettle();
+      // Background work can continue after foreground streaming stops. A positive idle proof
+      // releases held mail without declaring the background job terminal; transient retries
+      // remain active until that same proof, and newer activity fences this poll.
+      watchSettle(ctx);
       return;
     }
     // The typed turn result, on every turn that ACTUALLY ended and in both directions. It is one
@@ -868,6 +1327,7 @@ export default function (pi: ExtensionAPI) {
       captureCost(event);
       sendContext(ctx);
       if (name === "message_end") sendTimeline(name, event);
+      if (name === "message_end") observeTodoBranch(ctx);
       if (name === "turn_end") endTurnToolCalls(event);
     });
   }
@@ -914,6 +1374,9 @@ export default function (pi: ExtensionAPI) {
   onWidened("tool_call", async (rawEvent) => {
     // Pinned pi declarations do not know OMP's tool events; the handler validates fields below.
     const event = rawEvent as ToolCallFrame;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+    observePendingAsk(event);
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     sendTimeline("tool_call", rawEvent);
     if (typeof event.toolCallId === "string") {
       toolCallsInFlight().add(event.toolCallId);
@@ -922,6 +1385,7 @@ export default function (pi: ExtensionAPI) {
     const question = firstAskQuestion(event);
     if (!question || typeof event.toolCallId !== "string") return;
     state.pendingAskToolCallId = event.toolCallId;
+    clearHoldTimer();
     cancelSettle();
     sendFrame({
       type: "state",
@@ -931,9 +1395,17 @@ export default function (pi: ExtensionAPI) {
       reason: question,
     });
   });
+  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+  onWidened("tool_execution_start", async (rawEvent) => {
+    observePendingAsk(rawEvent as ToolCallFrame);
+  });
+  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
   onWidened("tool_result", async (rawEvent, ctx) => {
     const event = rawEvent as ToolResultFrame;
     sendTimeline("tool_result", rawEvent);
+    const answeredAsk = typeof event.toolCallId === "string" &&
+      event.toolCallId === state.pendingAskToolCallId;
+    if (answeredAsk) state.pendingAskToolCallId = undefined;
     if (typeof event.toolCallId === "string") {
       const calls = toolCallsInFlight();
       calls.delete(event.toolCallId);
@@ -941,13 +1413,9 @@ export default function (pi: ExtensionAPI) {
       // this batch boundary, and after the batch's commands have run.
       if (calls.size === 0 && heldMessages().length > 0) await release();
     }
-    if (
-      typeof event.toolCallId !== "string" ||
-      event.toolCallId !== state.pendingAskToolCallId
-    ) {
-      return;
-    }
-    state.pendingAskToolCallId = undefined;
+    if (!answeredAsk) return;
+    if (state.pendingApproval) return;
+    armHoldCap();
     if (idleProof(ctx)) {
       sendFrame({ type: "state", state: "idle" });
       return;
@@ -956,11 +1424,35 @@ export default function (pi: ExtensionAPI) {
     watchSettle(ctx);
   });
 
+  onWidened("tool_execution_end", async (rawEvent, ctx) => {
+    const event = record(rawEvent);
+    if (event?.toolName !== "todo") {
+      // Eval's native bridge persists successful nested todo calls as user_todo_edit entries.
+      // This is also the human-edit path; neither needs result-text parsing.
+      observeTodoBranch(ctx);
+      return;
+    }
+    const result = record(event.result);
+    const details = record(result?.details);
+    if (event.isError === true || result?.isError === true ||
+      typeof details?.op !== "string" || details.op === "view") return;
+    const snapshot = boundedTodo(details.phases);
+    if (!snapshot) return;
+    state.todoBranchKey = branchTodo(ctx)?.key ?? "";
+    try {
+      state.todoLeafKey = typeof ctx.sessionManager.getLeafId === "function"
+        ? `${ctx.sessionManager.getSessionId()}:${ctx.sessionManager.getLeafId() ?? ""}`
+        : undefined;
+    } catch { state.todoLeafKey = undefined; }
+    emitTodo(ctx, snapshot, new Date().toISOString(), details.op);
+  });
+
   // Approval events are an independent human-blocking surface. omp's pinned pi typings do not
   // declare them, so register through the same widened `on` view.
   type ApprovalFrame = { toolName?: unknown };
   onWidened("tool_approval_requested", async (rawEvent) => {
     state.pendingApproval = true;
+    clearHoldTimer();
     if (state.pendingAskToolCallId) return;
     const event = rawEvent as ApprovalFrame;
     const tool = typeof event.toolName === "string" ? event.toolName : "unknown";
@@ -976,6 +1468,8 @@ export default function (pi: ExtensionAPI) {
   onWidened("tool_approval_resolved", async (_event, ctx) => {
     state.pendingApproval = false;
     if (state.pendingAskToolCallId) return;
+    if (toolCallsInFlight().size === 0) await release();
+    else armHoldCap();
     if (idleProof(ctx)) {
       sendFrame({ type: "state", state: "idle" });
       return;
@@ -992,6 +1486,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("context", async (event, ctx) => {
     if (isSubagent(ctx)) return;
+    observeTodoBranch(ctx);
     const texts = event.messages.flatMap((message) => {
       if (message.role !== "user") return [];
       return typeof message.content === "string" ? [message.content] : message.content.flatMap((part: { type: string; text?: string }) =>
@@ -1010,6 +1505,11 @@ export default function (pi: ExtensionAPI) {
     await open(ctx);
     await applyLabel(ctx);
   });
+  for (const event of ["session_tree", "session_branch"]) {
+    onWidened(event, async (_event, ctx) => {
+      observeTodoBranch(ctx, true);
+    });
+  }
   onWidened("session_start", async (_event, ctx) => {
     // Awaited before the session's first turn, which is what makes restored context reach the boot
     // prompt rather than the turn after it.
@@ -1040,6 +1540,10 @@ export default function (pi: ExtensionAPI) {
   // the named predecessor.
   onWidened("session_shutdown", async () => {
     state.shuttingDown = true;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+    clearTimeout(state.restoringAsk?.timer);
+    state.restoringAsk = undefined;
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     if (state.reconnectTimer !== undefined) clearTimeout(state.reconnectTimer);
     state.reconnectTimer = undefined;
     cancelSettle();

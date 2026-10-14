@@ -2,17 +2,38 @@
 //! The provider API stand-in consumes native handoffs without making model calls.
 #![cfg(target_os = "linux")]
 
+#[test]
+fn controller_death_cleanup() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let repo = std::path::PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = st3::test_support::command("python3")
+        .args(["-m", "unittest", "discover", "-s"])
+        .arg(repo.join("scripts/st3-messaging-faults-eval"))
+        .args(["-p", "test_*.py"])
+        .env("ST3_MFE_TEST_BINARY", test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("run messaging cleanup, oracle, readiness and timing regressions");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn run_case(case: &str) {
     use std::path::PathBuf;
-    use std::process::Command;
 
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let old = match std::env::var_os("ST3_MESSAGING_COMPAT_BIN") {
         Some(path) => PathBuf::from(path),
         None => {
             // Pin the real channel before reexec/reporting, rather than making a current
             // process pretend it is old. Nix caches this immutable package across CI runs.
-            let output = Command::new("timeout")
+            let output = st3::test_support::command("timeout")
                 .args(["10m", "bash"])
                 .arg(repo.join("scripts/messaging-compat-binary"))
                 .output()
@@ -51,15 +72,23 @@ fn run_case(case: &str) {
         tempfile::tempdir().unwrap()
     });
     let evidence = output_root.as_ref().unwrap().path().join("evidence");
+    // Debug executables can be hundreds of megabytes. Keep their per-case copies on Cargo's
+    // artifact filesystem while the Python fixture keeps its Unix sockets in a short /tmp root.
+    let scratch = tempfile::Builder::new()
+        .prefix("messaging-fault-scratch-")
+        .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
     // Double-fork out of the CI seat's ancestry. A sender is person/eval; an st harness
     // must never impersonate that sender. Captured pipes stay open until the eval exits.
-    let output = Command::new("setsid")
+    let output = st3::test_support::command("setsid")
         .args(["-f", "env", "-u", "ST_AGENT", "python3"])
         .arg(repo.join("scripts/st3-messaging-faults-eval/run"))
-        .arg(env!("CARGO_BIN_EXE_st3"))
+        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(&evidence)
         .arg("--old-binary")
         .arg(old)
+        .arg("--scratch")
+        .arg(scratch.path())
         .args(["--cases", case])
         .output()
         .expect("run the isolated messaging fault eval");
@@ -99,55 +128,88 @@ fn run_case(case: &str) {
 
 #[test]
 fn baseline() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("baseline");
 }
 
 #[test]
 fn daemon_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("daemon-restart");
 }
 
 #[test]
 fn binary_swap() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("binary-swap");
 }
 
 #[test]
 fn path_deploy() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("path-deploy");
 }
 
 #[test]
 fn link_seconds() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("link-seconds");
 }
 
 #[test]
 fn link_minutes() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("link-minutes");
 }
 
 #[test]
 fn receiver_down() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("receiver-down");
 }
 
 #[test]
 fn harness_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("harness-restart");
 }
 
 #[test]
 fn channel_killed() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("channel-killed");
 }
 
 #[test]
 fn old_channel() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("old-channel");
 }
 
 #[test]
 fn handoff_failed() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     run_case("handoff-failed");
 }

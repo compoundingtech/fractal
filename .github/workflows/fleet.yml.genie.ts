@@ -1,11 +1,36 @@
+import { withQueueWatch } from './queue-watch.ts'
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
+import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave, optionalQueueCacheSave } from './build-snapshot.ts'
+import { auditCaches } from './cache-audit.ts'
+import { readFileSync } from 'node:fs'
 import {
   defaultActionlintConfig,
   githubWorkflow,
   nixDevelopStep,
-  plainFlakeJob,
-  plainFlakeSetupSteps,
 } from '../../repos/effect-utils/genie/external.ts'
-import { buildEnv, commonSetupSteps, linuxStageRunner, linuxRunner, readOnlyBinaryCaches, workspacePreparationSteps } from './workspace-ci.ts'
+import {
+  afterPickRunner,
+  buildEnv,
+  commonSetupSteps,
+  fractalWebJobs,
+  nixCacheStep,
+  linuxRunner,
+  linuxStageJob as namespaceStageJob,
+  linuxStageRunner,
+  linuxStageRunsOn,
+  perfStoresCache,
+  mailStageRunsOn,
+  pickRunnerJob,
+  pickRunnerJobId,
+  primaryTestRunsOn,
+  pnpmStoreEnv,
+  supportingLinuxRunsOn,
+  supportingStageRunsOn,
+  secondaryStageRunsOn,
+  extraMergeTestRunsOn,
+  workspacePreparationSteps,
+  testArchiveConsumerSetup,
+} from './workspace-ci.ts'
 
 // Namespace offers nested virtualization on linux/amd64. Prove /dev/kvm can create a VM before
 // anything else; QEMU is also forbidden to fall back to emulation (nix/transport-isolation-vm.nix).
@@ -25,39 +50,47 @@ print(f"KVM API {version}: created a VM")
 EOF
 printf 'KVM: \\x60%s\\x60, CPU virtualization flag %s, VM creation succeeded\\n\\n| Phase | Elapsed |\\n| --- | --- |\\n' "$(ls -l /dev/kvm)" "$(grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo none)" >> "$GITHUB_STEP_SUMMARY"`
 
-// One Linux gate stage: its own runner and caches, the common setup, then scripts/ci-linux.
+// One Linux gate stage: its own runner (ci1 or Namespace, see pickRunnerJob) and caches, the common
+// setup, then scripts/ci-linux.
 const linuxStageJob = ({
   name,
   stage,
   setup,
   description,
   env = {},
+  before = [],
   extraLogs = '',
+  runsOn = supportingStageRunsOn,
 }: {
   name: string
   stage: string
   setup: readonly unknown[]
   description?: string
   env?: Record<string, string>
+  before?: readonly unknown[]
   extraLogs?: string
+  runsOn?: unknown
 }) => ({
   name,
-  'runs-on': linuxStageRunner,
+  ...afterPickRunner,
+  'runs-on': runsOn,
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
-  env: { ...buildEnv, ...env },
+  env: { ...buildEnv, ...env, CI_CACHE_DEV_SHELL: 'default' },
   steps: [
     ...setup,
     {
       name: 'Summarize tested revision',
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
     },
+    ...before,
     nixDevelopStep({ name: description ?? 'Run nextest', command: ['bash', 'scripts/ci-linux', stage] }),
     {
       name: 'Save Nix outputs to the local Nix cache',
-      if: 'success()',
+      if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`,
       run: 'bash scripts/ci-nix-cache save || echo "::warning::could not save the local Nix cache"',
     },
+    ...(setup === testArchiveConsumerSetup ? [] : buildSnapshotSave),
     {
       name: 'Retain stage logs and timings',
       uses: 'actions/upload-artifact@v4',
@@ -72,17 +105,18 @@ const linuxStageJob = ({
 })
 
 // Required gate. Label events belong to macos.yml so they never restart or cancel this workflow.
-export default githubWorkflow({
+export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
   name: 'Workspace CI',
   on: {
-    pull_request: {},
+    pull_request: { types: readyPullRequestTypes },
     // GitHub's merge queue runs the required checks on each queued entry; without this trigger the
     // queue never receives them and merges freeze.
     merge_group: {},
-    push: { branches: ['main'] },
+    // The queue's successful checks belong to the exact commit that lands on main. Main upkeep
+    // preserves perf-cost and fills missing default-branch caches without repeating this gate.
     workflow_dispatch: {},
   },
-  permissions: { contents: 'read' },
+  permissions: { contents: 'read', actions: 'read' },
   concurrency: {
     // PR updates replace stale checks; every other run has its own group so pending pushes survive.
     group: 'workspace-${{ github.event.pull_request.number || github.run_id }}-${{ github.event_name }}',
@@ -91,20 +125,90 @@ export default githubWorkflow({
   // actionlint must know the Namespace shape label the stage jobs use.
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
   },
   jobs: {
-    // Namespace runners are already authenticated. Manual runs record the platform resource limits
-    // alongside the CI workload so queue concurrency can be chosen from the actual account capacity.
+    [pickRunnerJobId]: pickRunnerJob,
+    // Non-required provenance only: it runs alongside the gate and has no signer or key.
+    // Retain the complete effective merge tree even after its ephemeral ref disappears.
+    'evidence-source': {
+      name: 'evidence-source',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      'continue-on-error': true,
+      permissions: { contents: 'read' },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        {
+          name: 'Retain effective tested source',
+          // Execute the workflow's embedded producer outside the checkout. It observes Git
+          // objects only; it never executes source or carries a production signing key.
+          run: `cat > "$RUNNER_TEMP/ci-evidence-source-producer.py" <<'EVIDENCE_SOURCE_PY'\n${readFileSync(new URL('../../scripts/ci-evidence-source', import.meta.url), 'utf8').trimEnd()}\nEVIDENCE_SOURCE_PY\npython3 "$RUNNER_TEMP/ci-evidence-source-producer.py"`,
+        },
+        {
+          name: 'Upload effective tested source',
+          uses: 'actions/upload-artifact@v4',
+          with: {
+            name: 'ci-evidence-source-${{ github.run_attempt }}',
+            path: '${{ runner.temp }}/ci-evidence-source/',
+            'if-no-files-found': 'error',
+            'retention-days': 14,
+          },
+        },
+      ],
+    },
+    // Start immediately on hosted capacity: no Nix setup, downloads or compilation.
+    'upgrade-impact': {
+      name: 'upgrade-impact',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        { name: 'Test release and PR classification safety', run: 'python3 scripts/release_notes_test.py' },
+        {
+          name: 'Require a fresh fragment on the effective PR or queue merge',
+          env: {
+            IMPACT_BASE_SHA: '${{ github.event.merge_group.base_sha }}',
+            IMPACT_PR_NUMBER: '${{ github.event.pull_request.number }}',
+            IMPACT_QUEUE_REF: '${{ github.event.merge_group.head_ref }}',
+          },
+          run: `if [ -n "$IMPACT_PR_NUMBER" ]; then
+  impact_pr_base=$(git rev-parse "$GITHUB_SHA^1")
+  python3 scripts/check-release-impact --base "$impact_pr_base" --source "$GITHUB_SHA" --pr-number "$IMPACT_PR_NUMBER"
+elif [ -n "$IMPACT_BASE_SHA" ]; then
+  python3 scripts/check-release-impact --base "$IMPACT_BASE_SHA" --source "$GITHUB_SHA" --queue-ref "$IMPACT_QUEUE_REF"
+else
+  echo "Manual dispatch has no PR/queue delta; classification safety tests passed."
+fi`,
+        },
+      ],
+    },
+    // Watch queue refs on GitHub-hosted capacity, even when both workload pools are occupied.
+    // Manual runs retain the existing Namespace capacity report.
     'namespace-capacity': {
       name: 'namespace-capacity',
-      if: "github.event_name == 'workflow_dispatch'",
-      'runs-on': linuxRunner,
-      'timeout-minutes': 5,
+      if: "github.event_name == 'workflow_dispatch' || github.event_name == 'merge_group'",
+      'runs-on': `\${{ fromJSON(github.event_name == 'merge_group' && '["ubuntu-latest"]' || format('${JSON.stringify(linuxRunner).replaceAll('${{ github.run_id }}', '{0}').replaceAll("${{ github.event_name == 'merge_group' && 1 || 3 }}", '{1}')}', github.run_id, github.event_name == 'merge_group' && 1 || 3)) }}`,
+      'timeout-minutes': 120,
+      permissions: { contents: 'read', actions: 'write' },
       defaults: { run: { shell: 'bash' } },
       steps: [
         {
+          name: 'Cancel superseded merge groups',
+          if: "github.event_name == 'merge_group'",
+          env: {
+            GH_TOKEN: '${{ github.token }}',
+            REPOSITORY: '${{ github.repository }}',
+            RUN_ID: '${{ github.run_id }}',
+            QUEUE_REF: '${{ github.event.merge_group.head_ref }}',
+            QUEUE_SHA: '${{ github.event.merge_group.head_sha }}',
+          },
+          // Embed trusted workflow source: this job never checks out or executes queued PR code.
+          run: `python3 - <<'QUEUE_WATCH_PY'\n${readFileSync(new URL('../../scripts/ci-queue-watch', import.meta.url), 'utf8')}\nQUEUE_WATCH_PY`,
+        },
+        {
           name: 'Record Namespace platform capacity',
+          if: "github.event_name == 'workflow_dispatch'",
           run: `nsc workspace concurrency --output json | jq '{concurrency: [.concurrency[] | {platforms, limits, activeConcurrency}]}' > "$RUNNER_TEMP/namespace-capacity.json"
 cat "$RUNNER_TEMP/namespace-capacity.json"
 printf 'Measured at %s\\n\\n' "$(date -u +%FT%TZ)" >> "$GITHUB_STEP_SUMMARY"
@@ -114,6 +218,7 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
         },
         {
           name: 'Retain Namespace capacity evidence',
+          if: "github.event_name == 'workflow_dispatch'",
           uses: 'actions/upload-artifact@v4',
           with: {
             name: 'namespace-capacity',
@@ -123,29 +228,139 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
         },
       ],
     },
-    'genie-freshness': plainFlakeJob({
+    'genie-freshness': {
       name: 'genie-freshness',
-      runsOn: linuxRunner,
+      env: { CI_CACHE_DEV_SHELL: 'genie' },
+      ...afterPickRunner,
+      'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
-      nix: { binaryCaches: readOnlyBinaryCaches },
-      step: nixDevelopStep({ name: 'Check generated files', flake: '.#genie', command: ['genie', '--check'] }),
-    }),
-    // The Linux gate runs as three jobs on separate runners, each with its own caches.
+      steps: [
+        ...commonSetupSteps.filter((step) => !('id' in step && step.id === 'cargo-cache') && step !== buildSnapshotPrepare && step !== buildSnapshotRestore),
+        { name: 'Check frozen workspace dependency license coverage', run: 'python3 scripts/ci-fractal-web-licenses-test && python3 scripts/ci-fractal-web-licenses --check-lockfile' },
+        nixDevelopStep({ name: 'Check runner selection and generated files', flake: '.#genie', command: ['bash', '-c', 'python3 scripts/ci-ready-pr-test && python3 scripts/ci-draft-admission-test && python3 scripts/ci-workflow-concurrency-test && python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'] }),
+        { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
+      ],
+    },
+    // Check the shared client and its iOS consumer before merge.
+    'typescript-client': {
+      name: 'typescript-client',
+      // Keep generated-file validation ahead of its consumers.
+      needs: ['pick-runner', 'genie-freshness'],
+      if: "${{ !cancelled() && needs.genie-freshness.result == 'success' }}",
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 10,
+      defaults: { run: { shell: 'bash' } },
+      env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        // Node 24, as in the workspace shell; schema tests use its native TypeScript loading.
+        { uses: 'actions/setup-node@v4', with: { 'node-version': '24.18.0' } },
+        {
+          name: 'Fingerprint the locked dependencies',
+          id: 'lockfiles',
+          // ci1's Nix runner lacks the Node 20 helper used by GitHub's hashFiles expression.
+          run: `lockfiles_hash=$(sha256sum pnpm-lock.yaml | cut -d ' ' -f1)
+printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
+        },
+        {
+          name: 'Cache the locked TypeScript and Effect toolchain',
+          id: 'typescript-cache',
+          uses: 'actions/cache@v5',
+          with: {
+            path: pnpmStoreEnv.pnpm_config_store_dir,
+            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}',
+          },
+        },
+        // Corepack provisions the root manifest's pnpm@12.7.0; the workspace forbids install scripts.
+        { name: 'Install the frozen workspace', env: pnpmStoreEnv, run: 'corepack enable\npnpm install --frozen-lockfile' },
+        { name: 'Check the client, shared views and iOS consumers', run: 'bash scripts/ci-typescript-client' },
+      ],
+    },
+    'linux-test-build': {
+      name: 'linux-test-build',
+      ...afterPickRunner,
+      'runs-on': linuxStageRunsOn,
+      'timeout-minutes': 120,
+      env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
+      outputs: {
+        'artifact-id': '${{ steps.upload.outputs.artifact-id }}',
+        'manifest-sha256': '${{ steps.archive.outputs.manifest-sha256 }}',
+        'producer-attempt': '${{ steps.archive.outputs.producer-attempt }}',
+      },
+      steps: [
+        ...workspacePreparationSteps.slice(0, -2).map((step: any) =>
+          step.id === 'cargo-cache' || step.id === 'nix-cache'
+            ? { ...step, with: { ...step.with, key: step.with.key.replace('${{ github.job }}', 'linux-tests'),
+                'restore-keys': step.with['restore-keys'].replaceAll('${{ github.job }}', 'linux-tests') } }
+            : step),
+        { ...nixDevelopStep({ name: 'Compile and archive each selected target group once',
+          command: ['python3', 'scripts/ci-test-archive', 'build'] }), id: 'archive' },
+        {
+          name: 'Publish this run attempt’s exact-source test archives', id: 'upload',
+          uses: 'actions/upload-artifact@v4',
+          with: { name: 'linux-test-archives-${{ github.run_attempt }}',
+            path: '${{ runner.temp }}/ci-test-archives', 'if-no-files-found': 'error',
+            'compression-level': 0, 'retention-days': 3 },
+        },
+        ...buildSnapshotSave,
+      ],
+    },
+    // Four merge partitions (two for other events) reuse the one producer archive.
     // `linux-gate` below is the single required check that collects them.
-    'linux-tests': linuxStageJob({
-      name: 'linux-tests',
-      stage: 'tests',
-      setup: workspacePreparationSteps,
-      // CI_RUN_ID keeps the messaging-fault evidence under target/messaging-faults and a failed
-      // boot canary's evidence under target/boot-canaries.
-      env: { CI_RUN_ID: '${{ github.run_id }}' },
-      extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
-    }),
+    'linux-tests': {
+      ...linuxStageJob({
+        name: 'linux-tests',
+        stage: 'tests',
+        setup: testArchiveConsumerSetup,
+        runsOn: primaryTestRunsOn,
+        // CI_RUN_ID keeps the messaging-fault evidence under target/messaging-faults and a failed
+        // boot canary's evidence under target/boot-canaries.
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: "${{ github.event_name == 'merge_group' && 'hash:1/4' || 'hash:1/2' }}", CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+        before: [nixDevelopStep({ name: 'Prove shards form the complete selected inventory', command: ['python3', 'scripts/ci-test-partitions'] })],
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() }}",
+    },
+    'linux-tests-shard-2': {
+      ...linuxStageJob({
+        name: 'linux-tests-shard-2',
+        stage: 'tests',
+        runsOn: secondaryStageRunsOn,
+        setup: testArchiveConsumerSetup,
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: "${{ github.event_name == 'merge_group' && 'hash:2/4' || 'hash:2/2' }}", CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() }}",
+    },
+    'linux-tests-shard-3': {
+      ...linuxStageJob({
+        name: 'linux-tests-shard-3', stage: 'tests', setup: testArchiveConsumerSetup,
+        runsOn: extraMergeTestRunsOn,
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:3/4', CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
+    },
+    'linux-tests-shard-4': {
+      ...linuxStageJob({
+        name: 'linux-tests-shard-4', stage: 'tests', setup: testArchiveConsumerSetup,
+        runsOn: extraMergeTestRunsOn,
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_PARTITION: 'hash:4/4', CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() && github.event_name == 'merge_group' }}",
+    },
     'linux-clippy': linuxStageJob({
       name: 'linux-clippy',
       stage: 'clippy',
       setup: commonSetupSteps,
-      description: 'Run clippy and the generated-client check',
+      description: 'Run the Clippy warning ratchet and generated-client check',
+      // Compare to the event's immutable base, including queued merges and main pushes.
+      env: { CLIPPY_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}' },
     }),
     'linux-fleet-compat': linuxStageJob({
       name: 'linux-fleet-compat',
@@ -153,42 +368,83 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       setup: commonSetupSteps,
       description: 'Run fleet compatibility against the pinned older st3',
     }),
+    'mail-redelivery-canaries': {
+      ...namespaceStageJob({
+        name: 'mail-redelivery-canaries',
+        stage: 'mail-redelivery-canaries',
+        runsOn: mailStageRunsOn,
+        description: 'Require every harness to hold old mail across boot and reconnect',
+        setup: testArchiveConsumerSetup,
+        // Restore shared fixtures, but keep main-upkeep as their single cache writer.
+        cacheSaveSetup: [nixCacheStep],
+        env: { CI_RUN_ID: '${{ github.run_id }}', CI_TEST_THREADS: '8' },
+        extraLogs: 'target/messaging-faults/\ntarget/boot-canaries/',
+      }),
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() }}",
+    },
     'linux-gate': {
       name: 'linux-gate',
-      needs: ['linux-tests', 'linux-clippy', 'linux-fleet-compat'],
+      needs: [pickRunnerJobId, 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
-      'runs-on': linuxRunner,
+      // Aggregation needs no build caches and must not queue behind the work it summarizes.
+      'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
       steps: [
         {
           name: 'Require every Linux stage to pass',
-          env: { RESULTS: '${{ join(needs.*.result, \' \') }}' },
-          run: `echo "stage results: $RESULTS"
+          // The stages only: pick-runner is skipped whenever ci1 is off.
+          env: { RESULTS: '${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}', EVENT: '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
+          run: `set -eu
+set -- $RESULTS
+[ "$#" = 7 ] || { echo "incomplete base-stage results"; exit 1; }
+if [ "$EVENT" = merge_group ]; then
+  set -- $MERGE_RESULTS
+  [ "$#" = 2 ] || { echo "incomplete merge-shard results"; exit 1; }
+  RESULTS="$RESULTS $MERGE_RESULTS"
+else
+  [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
+fi
+echo "stage results: $RESULTS"
 for result in $RESULTS; do
   [ "$result" = success ] || exit 1
 done`,
         },
       ],
     },
+    // The cost check: SQLite work per daemon request on a small and a ten times larger generated
+    // store. Counts, not timings, so a lightly optimized build only speeds up the generation.
+    // Not part of linux-gate; it must finish before linux-tests does (docs/ci.md). The load test
+    // runs in perf.yml. It runs where the stages run, and skips merge-queue entries, which do not
+    // wait for it, so each queued entry still needs only its required jobs' capacity. A required
+    // perf-cost must run there too.
+    'perf-cost': namespaceStageJob({
+      name: 'perf-cost',
+      stage: 'cost',
+      runsOn: linuxStageRunner,
+      condition: "github.event_name != 'merge_group'",
+      setup: commonSetupSteps,
+      description: 'Run the cost check',
+      command: ['bash', 'scripts/ci-perf', 'cost'],
+      env: { CARGO_PROFILE_DEV_OPT_LEVEL: '1' },
+      extraLogs: '${{ runner.temp }}/perf/',
+      before: [perfStoresCache('cost')],
+    }),
     // st2's transport-isolation cascade tests need a real systemd user manager, which the
     // runner image lacks. A NixOS VM runs this job's prebuilt test binary; it compiles nothing.
     'isolation-vm': {
       name: 'isolation-vm',
-      'runs-on': linuxRunner,
+      needs: [pickRunnerJobId, 'linux-test-build'],
+      if: "${{ !cancelled() }}",
+      'runs-on': supportingLinuxRunsOn,
       'timeout-minutes': 60,
       defaults: { run: { shell: 'bash' } },
-      env: buildEnv,
+      env: { ...buildEnv, CI_CACHE_DEV_SHELL: 'default' },
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        // The VM's own warm cache also contains its driver; keep that primary entry.
+        ...testArchiveConsumerSetup.map((step: any) => step.id === 'nix-cache' ? nixCacheStep : step),
         { name: 'Probe KVM', run: kvmProbe },
-        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
-        {
-          name: 'Archive the st2 integration test binary',
-          run: `start=$SECONDS
-nix develop -c cargo nextest archive --locked -p st2 --test integration --archive-file "$RUNNER_TEMP/isolation.tar.zst"
-printf '| test archive build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
-        },
         {
           name: 'Build the NixOS VM test driver',
           run: `start=$SECONDS
@@ -198,9 +454,10 @@ printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
         {
           name: 'Run all three systemd-scope tests in the VM',
           env: {
-            ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/isolation.tar.zst',
+            ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
             ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
             ST_ISOLATION_TIMINGS: '${{ runner.temp }}/vm-timings.json',
+            ST_ISOLATION_BUILD_WORKSPACE: '${{ env.CI_TEST_BUILD_WORKSPACE }}',
           },
           run: `start=$SECONDS
 mkdir -p "$RUNNER_TEMP/vm-out"
@@ -208,7 +465,28 @@ mkdir -p "$RUNNER_TEMP/vm-out"
 jq -r '"| VM boot | \\(.boot_seconds)s |\\n| systemd-scope tests in VM (extract and run) | \\(.test_seconds)s |"' "$ST_ISOLATION_TIMINGS" >> "$GITHUB_STEP_SUMMARY"
 printf '| VM test driver total | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
+        // The sekrets gateway needs real Unix users, a login session and a user manager: a second
+        // VM runs it with this st binary (nix/sekrets-vm.nix).
+        {
+          name: 'Build the sekrets VM test driver',
+          run: `start=$SECONDS
+nix build --print-build-logs --out-link "$RUNNER_TEMP/sekrets-vm-driver" .#legacyPackages.x86_64-linux.sekrets-vm.driver
+printf '| sekrets VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+        },
+        {
+          name: 'Run the sekrets gateway test in the VM',
+          env: { ST_SEKRETS_BINARY: '${{ env.CI_SEKRETS_BINARY }}' },
+          run: `start=$SECONDS
+mkdir -p "$RUNNER_TEMP/sekrets-vm-out"
+"$RUNNER_TEMP/sekrets-vm-driver/bin/nixos-test-driver" --output_directory "$RUNNER_TEMP/sekrets-vm-out"
+printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
+        },
+        { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
       ],
     },
+    // Not yet a required check: the ruleset gains `fractal-web` after both PR and merge-group
+    // runs have emitted it successfully.
+    // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
+    ...fractalWebJobs,
   },
-})
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing."}))))

@@ -285,11 +285,21 @@ pub fn write_state<T: Serialize>(dir: &Path, name: &str, state: &T) -> Result<Pa
     Ok(path)
 }
 
+/// Inspect resume state before startup without consuming the provider's adoption record.
+pub fn peek_state<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    decode_state(path, &bytes)
+}
+
 /// Read and remove a state file written by [`write_state`].
 pub fn read_state<T: DeserializeOwned>(path: &Path) -> Result<T> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()));
     let _ = fs::remove_file(path);
-    let envelope: Envelope<T> = serde_json::from_slice(&bytes?)
+    decode_state(path, &bytes?)
+}
+
+fn decode_state<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<T> {
+    let envelope: Envelope<T> = serde_json::from_slice(bytes)
         .with_context(|| format!("decoding resume state {}", path.display()))?;
     anyhow::ensure!(
         READABLE_RESUME_FORMATS.contains(&envelope.format),
@@ -571,30 +581,76 @@ impl StdinReader {
 }
 
 /// Splits newline-delimited frames out of the bytes a [`StdinReader`] delivers.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct LineBuffer {
     pending: Vec<u8>,
+    #[serde(skip)]
+    read: usize,
+    #[serde(skip)]
+    scanned: usize,
+}
+
+impl Serialize for LineBuffer {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // The resume format contains only unread bytes, so old and new images
+        // can both resume without replaying the consumed prefix.
+        #[derive(Serialize)]
+        struct Unread<'a> {
+            pending: &'a [u8],
+        }
+        Unread {
+            pending: &self.pending[self.read..],
+        }
+        .serialize(serializer)
+    }
 }
 
 impl LineBuffer {
     pub fn push(&mut self, bytes: &[u8]) {
+        if self.read > 0 && self.read >= self.pending.len() / 2 {
+            self.pending.drain(..self.read);
+            self.scanned -= self.read;
+            self.read = 0;
+        }
         self.pending.extend_from_slice(bytes);
     }
 
     /// The next complete line without its newline.
     pub fn next_line(&mut self) -> Option<String> {
-        let end = self.pending.iter().position(|byte| *byte == b'\n')?;
-        let line = self.pending.drain(..=end).take(end).collect::<Vec<_>>();
-        Some(String::from_utf8_lossy(&line).into_owned())
+        let Some(end) = self.pending[self.scanned..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|end| self.scanned + end)
+        else {
+            self.scanned = self.pending.len();
+            return None;
+        };
+        let line = String::from_utf8_lossy(&self.pending[self.read..end]).into_owned();
+        self.read = end + 1;
+        self.scanned = self.read;
+        if self.read == self.pending.len() {
+            self.pending.clear();
+            self.read = 0;
+            self.scanned = 0;
+        }
+        Some(line)
+    }
+
+    /// Bytes retained for the next incomplete frame.
+    pub fn buffered_len(&self) -> usize {
+        self.pending.len() - self.read
     }
 
     /// Whatever is left once the writer closed the pipe without a final newline.
     pub fn finish(&mut self) -> Option<String> {
-        if self.pending.is_empty() {
+        if self.buffered_len() == 0 {
             return None;
         }
         let line = std::mem::take(&mut self.pending);
-        Some(String::from_utf8_lossy(&line).into_owned())
+        let text = String::from_utf8_lossy(&line[self.read..]).into_owned();
+        self.read = 0;
+        self.scanned = 0;
+        Some(text)
     }
 }
 
@@ -697,6 +753,41 @@ mod tests {
     }
 
     #[test]
+    fn a_line_buffer_compacts_and_resumes_only_unread_bytes() {
+        let mut lines: LineBuffer =
+            serde_json::from_value(serde_json::json!({"pending":b"first\nsecond\npar"})).unwrap();
+        assert_eq!(lines.next_line().as_deref(), Some("first"));
+        assert_eq!(lines.next_line().as_deref(), Some("second"));
+        assert_eq!(lines.next_line(), None);
+        assert_eq!(lines.buffered_len(), 3);
+        assert_eq!(
+            serde_json::to_value(&lines).unwrap(),
+            serde_json::json!({"pending":b"par"})
+        );
+        lines.push(b"tial\nlast");
+        assert_eq!(lines.next_line().as_deref(), Some("partial"));
+        assert_eq!(lines.finish().as_deref(), Some("last"));
+        lines.push(b"new\n");
+        assert_eq!(lines.next_line().as_deref(), Some("new"));
+        assert_eq!(lines.buffered_len(), 0);
+    }
+
+    #[test]
+    fn a_line_buffer_splits_a_large_batch_in_linear_time() {
+        let mut lines = LineBuffer::default();
+        let frame = b"a short frame\n";
+        let count = 300_000;
+        lines.push(&frame.repeat(count));
+        let started = Instant::now();
+        for _ in 0..count {
+            assert_eq!(lines.next_line().as_deref(), Some("a short frame"));
+        }
+        assert_eq!(lines.next_line(), None);
+        assert_eq!(lines.buffered_len(), 0);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
     fn resume_state_round_trips_once() {
         let temp = tempfile::tempdir().unwrap();
         let path = write_state(temp.path(), "driver", &vec!["a".to_string()]).unwrap();
@@ -705,6 +796,21 @@ mod tests {
         let state: Vec<String> = read_state(&path).unwrap();
         assert_eq!(state, ["a"]);
         assert!(!path.exists(), "the next image consumes its state file");
+    }
+
+    #[test]
+    fn startup_can_inspect_a_resume_fence_without_consuming_adoption_state() {
+        let root = tempfile::tempdir().unwrap();
+        let state = serde_json::json!({"incarnation":"worker:current"});
+        let path = write_state(root.path(), "driver", &state).unwrap();
+        for _ in 0..2 {
+            let peeked: serde_json::Value = peek_state(&path).unwrap();
+            assert_eq!(peeked, state);
+            assert!(path.exists());
+        }
+        let adopted: serde_json::Value = read_state(&path).unwrap();
+        assert_eq!(adopted, state);
+        assert!(!path.exists());
     }
 
     #[test]

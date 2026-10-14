@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 /// than an alias of [`crate::status::STATUS_STALE`]: retuning presence must not silently retune
 /// observed harness state.
 pub const HARNESS_STATE_STALE: Duration = Duration::from_secs(15 * 60);
-/// How often a live writer re-stamps a record it still has evidence for — the presence cadence, so
-/// wrappers piggyback on the wakeup they already own.
+/// How often a live writer re-stamps unchanged evidence it still holds. State changes
+/// publish immediately; quiet sessions retain the cadence used before the twenty-second refresh.
 pub const HARNESS_STATE_REFRESH: Duration = Duration::from_secs(5 * 60);
 /// Maximum accepted positive difference between the writer's UTC clock and the reader's clock.
 pub const HARNESS_STATE_FUTURE_SKEW: Duration = Duration::from_secs(60);
@@ -157,9 +157,16 @@ struct Record {
     /// Absent in records from writers predating the axis, which defaults to `none`.
     #[serde(default)]
     ask: Ask,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    background_jobs: Option<u64>,
     /// Diagnostic only. No consumer branches on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Positive credential evidence: true accepted, false rejected; absent proves neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_auth: Option<bool>,
+    #[serde(default)]
+    provider_auth_sequence: u64,
     /// `Ended` only: the exit outcome, e.g. `exit 0` or `signal 9`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exit: Option<String>,
@@ -205,6 +212,8 @@ pub struct Observation {
     pub blocked_on: BlockedOn,
     pub input_buffer: InputBuffer,
     pub ask: Ask,
+    pub background_jobs: Option<u64>,
+    pub provider_auth: Option<bool>,
     pub reason: Option<String>,
     pub exit: Option<String>,
 }
@@ -216,6 +225,8 @@ impl Observation {
             blocked_on,
             input_buffer,
             ask: Ask::None,
+            background_jobs: None,
+            provider_auth: None,
             reason: None,
             exit: None,
         }
@@ -223,6 +234,11 @@ impl Observation {
 
     pub fn with_ask(mut self, ask: Ask) -> Self {
         self.ask = ask;
+        self
+    }
+
+    pub fn with_provider_auth(mut self, accepted: bool) -> Self {
+        self.provider_auth = Some(accepted);
         self
     }
 
@@ -428,12 +444,25 @@ impl Writer {
             return Ok(false);
         }
         let now_ms = crate::message::now_ms();
+        let provider_auth = observation
+            .provider_auth
+            .or_else(|| own_record.and_then(|record| record.provider_auth));
+        let provider_auth_sequence = own_record
+            .map_or(0, |r| r.provider_auth_sequence)
+            .saturating_add(u64::from(
+                observation.provider_auth.is_some()
+                    && (self.interrupted
+                        || own_record.is_none_or(|r| r.provider_auth != observation.provider_auth)),
+            ));
         let unchanged = !self.interrupted
             && own_record.is_some_and(|current| {
-                current.state == observation.state
+                current.provider_auth_sequence == provider_auth_sequence
+                    && current.provider_auth == provider_auth
+                    && current.state == observation.state
                     && current.blocked_on == observation.blocked_on
                     && current.input_buffer == observation.input_buffer
                     && current.ask == observation.ask
+                    && current.background_jobs == observation.background_jobs
                     && current.reason == observation.reason
                     && current.exit == observation.exit
             });
@@ -475,6 +504,9 @@ impl Writer {
             blocked_on: observation.blocked_on,
             input_buffer: observation.input_buffer,
             ask: observation.ask,
+            background_jobs: observation.background_jobs,
+            provider_auth,
+            provider_auth_sequence,
             reason: observation.reason,
             exit: observation.exit,
             pty_session: self.pty_session.clone(),
@@ -543,6 +575,7 @@ pub struct Observed {
     pub blocked_on: BlockedOn,
     pub input_buffer: InputBuffer,
     pub ask: Ask,
+    pub background_jobs: Option<u64>,
     pub harness: Option<String>,
     pub since_ms: Option<u64>,
     /// When the owning driver last refreshed this evidence.
@@ -554,6 +587,8 @@ pub struct Observed {
     /// Driver-session identity that owns the source record.
     pub evidence_incarnation: Option<String>,
     pub exit: Option<String>,
+    pub provider_auth: Option<bool>,
+    pub provider_auth_sequence: u64,
     pub reason: Option<String>,
 }
 
@@ -566,6 +601,7 @@ impl Observed {
             blocked_on: BlockedOn::Unknown,
             input_buffer: InputBuffer::Unknown,
             ask: Ask::Unknown,
+            background_jobs: None,
             harness,
             since_ms: None,
             observed_at_ms: None,
@@ -573,6 +609,8 @@ impl Observed {
             transition_sequence: None,
             evidence_incarnation: None,
             exit: None,
+            provider_auth: None,
+            provider_auth_sequence: 0,
             reason: Some(reason.to_string()),
         }
     }
@@ -668,6 +706,7 @@ pub fn read_raw_at(
         blocked_on: record.blocked_on,
         input_buffer: record.input_buffer,
         ask: record.ask,
+        background_jobs: record.background_jobs,
         harness,
         since_ms: Some(record.since_ms),
         observed_at_ms: Some(record.written_at_ms),
@@ -675,6 +714,8 @@ pub fn read_raw_at(
         transition_sequence: Some(record.transitions),
         evidence_incarnation: Some(record.incarnation),
         exit: record.exit,
+        provider_auth: record.provider_auth,
+        provider_auth_sequence: record.provider_auth_sequence,
         reason: record.reason,
     }
 }
@@ -802,7 +843,7 @@ pub fn claim(
 /// Run `action` only while `incarnation` and `seq` are the exact current owner of an agent's
 /// harness record. The record lock stays held through the action so a successor cannot claim
 /// between the ownership check and the caller's related publication.
-pub(crate) fn with_current_ownership<T>(
+pub fn with_current_ownership<T>(
     agent_dir: &Path,
     incarnation: &str,
     seq: u64,
@@ -862,6 +903,9 @@ fn claim_locked(writer: &Writer, token: &str) -> anyhow::Result<u64> {
         blocked_on: BlockedOn::None,
         input_buffer: InputBuffer::Unknown,
         ask: Ask::None,
+        background_jobs: None,
+        provider_auth: None,
+        provider_auth_sequence: 0,
         reason: Some("superseded".to_string()),
         exit: None,
         pty_session: None,
@@ -1044,8 +1088,41 @@ mod tests {
     fn takeover(dir: &Path, harness: &'static str) -> Writer {
         let token = session_token();
         let seq = claim(dir, "example-linux.worker", harness, &token).unwrap();
-        Writer::new(dir, "example-linux.worker", harness, Some("worker".to_string()))
-            .with_ownership(token, seq)
+        Writer::new(
+            dir,
+            "example-linux.worker",
+            harness,
+            Some("worker".to_string()),
+        )
+        .with_ownership(token, seq)
+    }
+
+    #[test]
+    fn credential_evidence_survives_activity_and_is_fenced_to_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let seq = claim(dir.path(), "agent/example", "claude", "one").unwrap();
+        let mut writer = Writer::new(dir.path(), "agent/example", "claude", Some("pty".into()))
+            .with_ownership("one", seq);
+        writer.observe(active().with_provider_auth(false)).unwrap();
+        writer.observe(active()).unwrap();
+        let observed = read(&harness_state_path(dir.path()), None).unwrap();
+        assert_eq!(observed.provider_auth, Some(false));
+        assert_eq!(observed.provider_auth_sequence, 1);
+        writer.observe(active().with_provider_auth(true)).unwrap();
+        assert_eq!(
+            read(&harness_state_path(dir.path()), None)
+                .unwrap()
+                .provider_auth,
+            Some(true)
+        );
+        let next = claim(dir.path(), "agent/example", "claude", "two").unwrap();
+        let mut successor = Writer::new(dir.path(), "agent/example", "claude", Some("pty".into()))
+            .with_ownership("two", next);
+        successor.observe(active()).unwrap();
+        writer.observe(active().with_provider_auth(false)).unwrap();
+        let observed = read(&harness_state_path(dir.path()), None).unwrap();
+        assert_eq!(observed.provider_auth, None);
+        assert_eq!(observed.evidence_incarnation.as_deref(), Some("two"));
     }
 
     fn active() -> Observation {
@@ -1284,6 +1361,9 @@ mod tests {
                 blocked_on: BlockedOn::None,
                 input_buffer: InputBuffer::Unknown,
                 ask: Ask::None,
+                background_jobs: None,
+                provider_auth: None,
+                provider_auth_sequence: 0,
                 reason: None,
                 exit: None,
                 pty_session: None,
@@ -1490,6 +1570,9 @@ mod tests {
             blocked_on: BlockedOn::None,
             input_buffer: InputBuffer::Unknown,
             ask: Ask::None,
+            background_jobs: None,
+            provider_auth: None,
+            provider_auth_sequence: 0,
             reason: None,
             exit: None,
             pty_session: Some("worker".to_string()),
@@ -2271,5 +2354,23 @@ mod tests {
         );
         drop(held);
         assert!(probe(), "dropping the guard must release the record lock");
+    }
+}
+
+#[cfg(test)]
+mod background_job_tests {
+    use super::*;
+
+    #[test]
+    fn background_job_count_changes_survive_the_owned_record_and_heartbeat() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = Writer::new(root.path(), "example.worker", "omp", Some("fixture".into()));
+        for jobs in [Some(2), Some(0), None] {
+            let mut observation = Observation::new(Activity::Idle, BlockedOn::None, InputBuffer::Empty);
+            observation.background_jobs = jobs;
+            writer.observe(observation).unwrap();
+            writer.heartbeat().unwrap();
+            assert_eq!(read(&harness_state_path(root.path()), None).unwrap().background_jobs, jobs);
+        }
     }
 }
