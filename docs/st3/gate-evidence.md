@@ -358,7 +358,8 @@ Signer launch controls (`scripts/evidence-sign`): each resolved git and ssh-keyg
 by root and closed to group and others, in addition to the directory rules; git and ssh-keygen receive only PATH (the
 signer's own), LC_ALL, HOME, TMPDIR and git settings the signer sets itself (no system or global git configuration; HOME
 and TMPDIR are passed as given, so for a privileged integration only the fixed trusted launcher or profile may supply them,
-and passing them proves nothing about an arbitrary inherited path);
+and passing them proves nothing about an arbitrary inherited path; the "no global git configuration" setting needs Git 2.32 or
+newer, and the script does not check the version: the fixed launcher or install manifest that supplies the pinned git must);
 and the signer refuses to start when LD_PRELOAD, LD_AUDIT, DYLD_INSERT_LIBRARIES, GCONV_PATH, NLSPATH, PYTHONPATH,
 PYTHONSTARTUP or PYTHONHOME is set. The refusal is a tripwire, not a repair: the interpreter has started before the script
 runs. Scrubbing the environment, running a root-owned interpreter in isolated mode and fixing the ownership of the signer
