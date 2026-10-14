@@ -499,6 +499,8 @@ fn parse_mission_run_declaration(
             "mode",
             "input",
             "after",
+            "report-to",
+            "report-completed",
             "revision",
             "reset",
             "cancellation",
@@ -509,7 +511,14 @@ fn parse_mission_run_declaration(
     let has_creation = body.nodes().iter().any(|child| {
         matches!(
             child.name().value(),
-            "mission" | "workspace" | "requester" | "mode" | "input" | "after"
+            "mission"
+                | "workspace"
+                | "requester"
+                | "mode"
+                | "input"
+                | "after"
+                | "report-to"
+                | "report-completed"
         )
     });
     let creation = if has_creation {
@@ -571,6 +580,26 @@ fn parse_mission_run_declaration(
                 ));
             }
         }
+        let report_to = child_string(body, "report-to")?;
+        if let Some(report_to) = &report_to {
+            crate::mission::validate_report_to(report_to)?;
+        }
+        let report_completed = match child_string(body, "report-completed")?.as_deref() {
+            None => false,
+            Some("true") => true,
+            Some(other) => {
+                return Err(St3Error::new(
+                    "invalid-report-completed",
+                    format!("`report-completed` is `true` when present, not `{other}`"),
+                ));
+            }
+        };
+        if report_completed && report_to.is_none() {
+            return Err(St3Error::new(
+                "report-without-recipient",
+                format!("mission run `{subject}` sets `report-completed` but no `report-to` agent"),
+            ));
+        }
         Some(MissionRunCreation {
             mission,
             revision,
@@ -579,6 +608,8 @@ fn parse_mission_run_declaration(
             inputs,
             mode,
             after,
+            report_to,
+            report_completed,
         })
     } else {
         None
@@ -1316,21 +1347,6 @@ fn parse_planning_session_declaration(
             if let Some(effort) = &creation.planner.effort {
                 harness_body.nodes_mut().push(string_node("effort", effort));
             }
-            let arguments: &[&str] = match creation.planner.provider.as_str() {
-                "codex" => &[
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--dangerously-bypass-hook-trust",
-                ],
-                "claude" => &["--permission-mode", "bypassPermissions"],
-                _ => &[],
-            };
-            if !arguments.is_empty() {
-                let mut args = KdlNode::new("args");
-                for argument in arguments {
-                    args.entries_mut().push(kdl::KdlEntry::new(*argument));
-                }
-                harness_body.nodes_mut().push(args);
-            }
             harness.set_children(harness_body);
             agent_body.nodes_mut().push(harness);
             agent.set_children(agent_body);
@@ -1377,6 +1393,7 @@ fn parse_host(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: "host".into(),
             desired: canonical_node(&normalized)?,
@@ -1640,9 +1657,15 @@ fn parse_agent(
             serde_json::to_value(references).expect("resource references serialize");
     }
     normalize_agent_under(&mut desired, &host, context.owner_run.as_deref());
+    let accountable = st3_schema::accountable::from_desired(&desired)
+        .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
+    if accountable.is_some() && context.owner_run.is_some() {
+        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+    }
     insert_subject(
         context,
         DesiredSubject {
+            accountable,
             subject: subject.clone(),
             kind: "agent".into(),
             desired,
@@ -1696,6 +1719,7 @@ fn parse_agent(
         insert_subject(
             context,
             DesiredSubject {
+                accountable: None,
                 subject: task_subject,
                 kind: child.name().value().into(),
                 desired: canonical_node(child)?,
@@ -1772,6 +1796,7 @@ fn parse_standalone_member(
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: kind.into(),
             desired: canonical_node(node)?,
@@ -1821,6 +1846,7 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: kind.into(),
             desired,
@@ -2032,6 +2058,7 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject: subject.clone(),
             kind: "stop".into(),
             desired: json!({ "stop": subject }),
@@ -2783,6 +2810,17 @@ fn driver_member(
             property_string(message, "id")?.expect("validated message ID"),
         ]);
     }
+    if let Some(seed) = child_string(children, "seed")? {
+        if name != "omp" || !std::path::Path::new(&seed).is_absolute()
+            || seed.contains('\0') || seed.trim().is_empty()
+            || crate::native_resume::selector_scope(&name, &provider).is_some()
+            || [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV]
+                .iter().any(|key| environment.contains_key(*key))
+        {
+            return Err(St3Error::new("invalid-native-seed", "seed requires an absolute OMP transcript path and cannot accompany session selectors or resume environment"));
+        }
+        wrapper.extend(["--seed".into(), seed]);
+    }
     wrapper.push("--".into());
     wrapper.extend(provider);
     Ok(MemberSpec {
@@ -3000,6 +3038,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "identity",
         "name",
         "description",
+        "lifecycle",
         "host",
         "workspace",
         "checkout",
@@ -3018,6 +3057,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "bind-terminal",
         "one-shot",
         "handles-faults",
+        "accountable",
         "mission-authority",
         "queue-authority",
         "seat-authority",
@@ -3044,6 +3084,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "identity",
         "name",
         "description",
+        "lifecycle",
         "host",
         "workspace",
         "checkout",
@@ -3059,12 +3100,32 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "bind-terminal",
         "one-shot",
         "handles-faults",
+        "accountable",
         "mission-authority",
         "queue-authority",
         "seat-authority",
         "agent-authority",
     ] {
         unique_child(document, child)?;
+    }
+    if let Some(accountable) = unique_child(document, "accountable")? {
+        ensure_no_properties(accountable)?;
+        ensure_no_children(accountable)?;
+        let person = one_string(accountable)?;
+        if !st3_schema::accountable::person(&person) {
+            return Err(St3Error::new("invalid-accountable-root", "accountable must name one concrete person/NAME"));
+        }
+    }
+    if let Some(lifecycle) = unique_child(document, "lifecycle")? {
+        ensure_no_properties(lifecycle)?;
+        ensure_no_children(lifecycle)?;
+        let value = one_string(lifecycle)?;
+        if crate::model::AgentLifecycle::parse(&value).is_none() {
+            return Err(St3Error::new(
+                "invalid-agent-lifecycle",
+                format!("agent lifecycle `{value}` must be standing, owner, or bounded"),
+            ));
+        }
     }
     if let Some(flag) = unique_child(document, "handles-faults")? {
         ensure_bare(flag)?;
@@ -3481,7 +3542,8 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
             "account",
             "account-pool",
         ],
-        "pi" | "omp" => &["model", "effort", "args", "message"],
+        "pi" => &["model", "effort", "args", "message"],
+        "omp" => &["model", "effort", "args", "message", "seed"],
         "opencode" => &["model", "args", "message"],
         _ => return Err(St3Error::new("unknown-driver", "unknown typed driver")),
     };
@@ -4481,7 +4543,14 @@ fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3Error
 }
 
 pub(crate) fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Error> {
-    if node.name().value() == "account" {
+    validate_deferred_declaration_in(node, None)
+}
+
+/// `parent` is the enclosing node's name. An `account "NAME"` inside a harness block names an
+/// account a root declaration owns, the same reference a top-level seat makes, so a mission's agent
+/// may carry it; an `account` that declares one must stay at the root.
+fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Result<(), St3Error> {
+    if node.name().value() == "account" && parent != Some("harness") {
         return Err(St3Error::new(
             "account-inside-mission",
             "an account declaration must be at the root",
@@ -4496,7 +4565,7 @@ pub(crate) fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Err
     }
     if let Some(children) = node.children() {
         for child in children.nodes() {
-            validate_deferred_declaration(child)?;
+            validate_deferred_declaration_in(child, Some(node.name().value()))?;
         }
     }
     Ok(())
@@ -5227,9 +5296,13 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
         for child in children.as_array().ok_or_else(invalid)? {
             document.nodes_mut().push(render_desired_node(child)?);
         }
-        if !document.nodes().is_empty() {
+        if !document.nodes().is_empty() || name == "harness" {
             node.set_children(document);
         }
+    } else if name == "harness" {
+        // Older normalized trees omitted empty children. A validated harness
+        // always has a body, so recover that required syntax when rendering it.
+        node.set_children(KdlDocument::new());
     }
     Ok(node)
 }
@@ -6009,7 +6082,7 @@ mission "ada/outer" state="ready" {
 
     #[test]
     fn every_st3_eval_uses_the_current_graph_grammar() {
-        let evals = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let evals = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("evals/st3");
         let mut parsed = 0;
@@ -6043,7 +6116,7 @@ mission "ada/outer" state="ready" {
 
     #[test]
     fn work_wake_revision_fixtures_use_the_current_graph_grammar() {
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixtures = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("evals/st3/work-wake-reliability/fixtures");
         for name in ["revisable-v1.kdl", "revisable-v2.kdl", "revisable-v3.kdl"] {
@@ -6193,6 +6266,63 @@ version 2
             parse_intent(&unknown_field, "node").unwrap_err().code,
             "unknown-child"
         );
+    }
+
+    #[test]
+    fn a_missions_agent_names_an_account_the_way_a_top_level_seat_does() {
+        let mission = |harness_body: &str| {
+            format!(
+                r#"
+version 2
+
+mission "pinned" state="ready" {{
+  goal "Run on an account."
+  step "start" {{
+    agentless
+    agent "worker" {{
+      workspace "/tmp/example"
+      harness "claude" {{
+        model "claude-sonnet-5"
+        {harness_body}
+      }}
+    }}
+  }}
+}}
+"#
+            )
+        };
+        for body in [r#"account "example/claude-2""#, r#"account-pool "person/example""#] {
+            let source = mission(body);
+            parse_intent(&source, "node").unwrap_or_else(|error| panic!("{body}: {error:?}"));
+            parse_execution_intent(&source, "node", "run-1")
+                .unwrap_or_else(|error| panic!("{body} in a run: {error:?}"));
+        }
+
+        // The same reference at the top level is what a seat already does.
+        let top = r#"
+version 2
+
+agent "seat" {
+  workspace "/tmp/example"
+  harness "claude" {
+    model "claude-sonnet-5"
+    account "example/claude-2"
+  }
+}
+"#;
+        parse_intent(top, "node").unwrap();
+
+        // Declaring an account, in a step or beside a harness, stays root-only.
+        let declared = mission(r#"account "example/claude-2""#).replace(
+            "agentless",
+            "agentless\n    account \"example/claude-3\" {\n      provider \"anthropic\"\n    }",
+        );
+        assert_eq!(parse_intent(&declared, "node").unwrap_err().code, "account-inside-mission");
+        let beside = mission("").replace(
+            "      harness \"claude\"",
+            "      account \"example/claude-3\"\n      harness \"claude\"",
+        );
+        assert_eq!(parse_intent(&beside, "node").unwrap_err().code, "account-inside-mission");
     }
 
     #[test]
@@ -6354,6 +6484,41 @@ version 2
                 .is_err(),
                 "{invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn agent_lifecycle_is_optional_and_closed() {
+        for value in ["standing", "owner", "bounded"] {
+            let intent = parse_intent(
+                &format!("version 2\nagent \"example/purpose\" {{ lifecycle \"{value}\"; command \"true\" }}"),
+                "node",
+            ).unwrap();
+            let desired = &intent.subjects["agent/example/purpose"].desired;
+            assert_eq!(
+                crate::model::declared_agent_lifecycle(Some(desired)),
+                crate::model::AgentLifecycle::parse(value),
+            );
+        }
+        let intent = parse_intent(
+            "version 2\nagent \"example/purpose\" { command \"true\" }", "node",
+        ).unwrap();
+        assert_eq!(crate::model::declared_agent_lifecycle(
+            Some(&intent.subjects["agent/example/purpose"].desired),
+        ), None);
+        let invalid = parse_intent(
+            "version 2\nagent \"example/purpose\" { lifecycle \"unknown\"; command \"true\" }",
+            "node",
+        ).unwrap_err();
+        assert_eq!(invalid.code, "invalid-agent-lifecycle");
+        for invalid in [
+            "lifecycle #true", "lifecycle", "lifecycle \"owner\" extra=\"bounded\"",
+            "lifecycle \"standing\" {}", "lifecycle \"owner\"; lifecycle \"bounded\"",
+        ] {
+            assert!(parse_intent(
+                &format!("version 2\nagent \"example/purpose\" {{ {invalid}; command \"true\" }}"),
+                "node",
+            ).is_err(), "{invalid}");
         }
     }
 
@@ -6539,6 +6704,53 @@ message "external" {
             canonical_child_value(&intent.subjects["message/external"].desired, "to"),
             Some(&Value::String("agent/other/run/peer".into()))
         );
+    }
+
+    #[test]
+    fn native_seed_parser_is_omp_only_and_rejects_selection_conflicts() {
+        let declaration = |driver: &str, seed: &str, args: &str, env: &str| format!(
+            "version 2\nagent \"worker\" {{ workspace \"/tmp\"; {env} harness {driver:?} {{ seed {seed:?}; {args} }} }}\n"
+        );
+        let intent = parse_test_intent(&declaration("omp", "/transcript.jsonl", "", ""), "node").unwrap();
+        let member = intent.subjects.values().find_map(|subject| subject.member.as_ref()).unwrap();
+        let LaunchSpec::Argv(argv) = &member.launch else { panic!("typed launch expected"); };
+        assert!(argv.windows(2).any(|args| args == ["--seed", "/transcript.jsonl"]));
+        for driver in ["pi", "claude", "codex", "opencode"] {
+            assert!(parse_test_intent(&declaration(driver, "/transcript.jsonl", "", ""), "node").is_err());
+        }
+        assert_eq!(parse_test_intent(&declaration("omp", "relative.jsonl", "", ""), "node").unwrap_err().code, "invalid-native-seed");
+        for args in ["args \"--resume\" \"/other\";", "args \"--continue\";", "args \"--resume=/other\";", "args \"-r\" \"/other\";", "args \"--session\" \"native\";"] {
+            assert_eq!(parse_test_intent(&declaration("omp", "/transcript.jsonl", args, ""), "node").unwrap_err().code, "invalid-native-seed");
+        }
+        for key in [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV] {
+            assert_eq!(parse_test_intent(&declaration("omp", "/transcript.jsonl", "", &format!("env {{\n {key} \"native\"\n}}\n")), "node").unwrap_err().code, "invalid-native-seed");
+        }
+    }
+
+    #[test]
+    fn plain_harness_bodies_survive_normalization_and_legacy_rendering() {
+        for harness in ["claude", "codex", "pi", "omp", "opencode"] {
+            let source = format!(
+                "version 2\nagent \"worker\" {{ workspace \"/work\"; harness {harness:?} {{}} }}\n"
+            );
+            let intent = parse_test_intent(&source, "node").unwrap();
+            assert!(parse_test_intent(&source.replace("{}", ""), "node").is_err());
+            let desired = &intent.subjects["agent/node.worker"].desired;
+            let body = desired["children"].as_array().unwrap()
+                .iter().find(|child| child["name"] == "harness").unwrap();
+            assert!(body.get("children").is_none());
+            for explicit_empty in [false, true] {
+                let mut tree = desired.clone();
+                if explicit_empty {
+                    let body = tree["children"].as_array_mut().unwrap()
+                        .iter_mut().find(|child| child["name"] == "harness").unwrap();
+                    body.as_object_mut().unwrap().insert("children".into(), json!([]));
+                }
+                let node = render_desired_node(&tree).unwrap();
+                let restored = parse_test_intent(&format!("version 2\n{node}\n"), "node").unwrap();
+                assert_eq!(restored.subjects["agent/node.worker"].desired, *desired);
+            }
+        }
     }
 
     #[test]

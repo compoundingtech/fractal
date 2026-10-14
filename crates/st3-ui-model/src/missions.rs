@@ -29,6 +29,18 @@ pub enum Word {
 }
 
 impl Word {
+    /// Really running, or about to: an agent is doing a step now, or one waits its turn on a busy
+    /// agent. A count of "active missions" counts these and nothing else (Nathan, 2026-10-11:
+    /// "54 active", when most of them were stuck, paused or waiting on a person).
+    pub fn is_active(self) -> bool {
+        matches!(self, Word::Working | Word::Queued)
+    }
+
+    /// Open, and not moving: a step nobody takes or whose owner is not moving.
+    pub fn is_stuck(self) -> bool {
+        matches!(self, Word::Stalled | Word::Unstaffed | Word::Unclaimed)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Word::Decision => "needs you",
@@ -103,6 +115,10 @@ pub struct StepMetadata {
     /// st retains the last reason even after a step moves on or ends.
     pub blocked_reason: Option<String>,
     pub last_progress: Option<String>,
+    /// How long ago st nudged the step's holder for idling while holding it with nothing set to
+    /// wake it, as an age label such as `40m`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nudged: Option<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -285,6 +301,7 @@ pub fn adapt<'a>(
                         StepMetadata {
                             blocked_reason: step.blocked_reason.clone(),
                             last_progress: step.last_progress.clone(),
+                            nudged: step.nudged_at.as_deref().map(|at| display.age(at, now)),
                         },
                     )
                 })

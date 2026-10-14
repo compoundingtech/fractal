@@ -1,4 +1,5 @@
-import type { ReactNode, Ref } from 'react';
+import { useCallback, useRef, type ReactNode, type Ref } from 'react';
+import { quality } from './qualityNative';
 import * as Clipboard from 'expo-clipboard';
 import { ActionSheetIOS, Linking, Pressable, StyleSheet, Text, TextInput, View, type StyleProp, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
 import { fonts, theme } from './theme';
@@ -54,7 +55,9 @@ export function Button({ label, onPress, disabled = false, color = theme.accent,
 /** A text input. Prose (messages, titles, requests) gets iOS's autocorrect and spell check;
  *  a field for an identifier (a URL, a code, a path) turns them off. */
 export function Field(props: TextInputProps & { ref?: Ref<TextInput> }) {
-  return <TextInput placeholderTextColor={theme.overlay0} autoCorrect spellCheck {...props} style={[styles.field, props.multiline && styles.fieldMultiline, props.style]} />;
+  const keyHandler = useRef(props.onKeyPress); keyHandler.current = props.onKeyPress;
+  const onKeyPress = useCallback<NonNullable<TextInputProps['onKeyPress']>>(event => { quality.key(); keyHandler.current?.(event); }, []);
+  return <TextInput placeholderTextColor={theme.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, props.multiline && styles.fieldMultiline, props.style]} />;
 }
 
 /** A banner under the header: a problem to read, tap to dismiss when it can be. */

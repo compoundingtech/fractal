@@ -206,6 +206,10 @@ fn parse_mission(
             "revisions",
             "revision-reviewer",
             "revision-cutover",
+            "report-to",
+            "stalled-after",
+            "report-stalls",
+            "report-completed",
         ],
     )?;
     let id = first_string(node)?;
@@ -230,6 +234,7 @@ fn parse_mission(
             format!("mission `{id}` timeout must be greater than zero"),
         ));
     }
+    let (report_to, stalled_after_ms, report_completed, report_stalls) = parse_run_report(node, &id)?;
     let revisions_human_only = parse_revision_protection(node)?;
     let revision_reviewer = parse_revision_reviewer(node, revisions_human_only)?;
     let revision_cutover = match property_string(node, "revision-cutover")?.as_deref() {
@@ -518,6 +523,10 @@ fn parse_mission(
         inputs,
         max_active_runs,
         timeout_ms,
+        report_to,
+        stalled_after_ms,
+        report_stalls,
+        report_completed,
         revision_owners,
         revisions_human_only,
         revision_reviewer,
@@ -1056,6 +1065,18 @@ fn parse_loop_stop(node: &KdlNode, metrics: &BTreeSet<String>) -> Result<LoopSto
                         "duplicate-repeated-failure",
                         "repeated-failure repeats",
                     ));
+                }
+            }
+            "no-progress" => {
+                let value = child_integer_value(child)?;
+                if !(2..=100).contains(&value) {
+                    return Err(St3Error::new(
+                        "invalid-no-progress",
+                        "no-progress must be between 2 and 100",
+                    ));
+                }
+                if stop.no_progress.replace(value as u32).is_some() {
+                    return Err(St3Error::new("duplicate-no-progress", "no-progress repeats"));
                 }
             }
             "token-budget" => {
@@ -1813,6 +1834,9 @@ fn take_agent_constraints(
     let Some(children) = node.children_mut() else {
         return Ok(node);
     };
+    if children.nodes().iter().any(|child| child.name().value() == "accountable") {
+        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+    }
     let (constraint_nodes, other_nodes): (Vec<_>, Vec<_>) = children
         .nodes()
         .iter()
@@ -2541,6 +2565,84 @@ fn validate_id(value: &str, kind: &str) -> Result<(), St3Error> {
         return Err(St3Error::new(
             "invalid-mission-id",
             format!("{kind} ID `{value}` is invalid"),
+        ));
+    }
+    Ok(())
+}
+
+/// The mission's opt-in run report: who hears of a failed, cancelled or stalled run, how long a
+/// run may sit without progress before it counts as stalled, and whether a completed run is
+/// reported too. Only an agent can be named, and the stall limit and completion report mean
+/// nothing without one.
+fn parse_run_report(
+    node: &KdlNode,
+    id: &str,
+) -> Result<(Option<String>, Option<u64>, bool, bool), St3Error> {
+    let report_to = property_string(node, "report-to")?;
+    let stalled_after = property_string(node, "stalled-after")?;
+    let report_stalls = match node.get("report-stalls") {
+        None => true,
+        Some(KdlValue::Bool(value)) => *value,
+        Some(_) => {
+            return Err(St3Error::new(
+                "invalid-property",
+                "property `report-stalls` must be true or false",
+            ));
+        }
+    };
+    let report_completed = match node.get("report-completed") {
+        None => false,
+        Some(KdlValue::Bool(value)) => *value,
+        Some(_) => {
+            return Err(St3Error::new(
+                "invalid-property",
+                "property `report-completed` must be true or false",
+            ));
+        }
+    };
+    let Some(report_to) = report_to else {
+        if stalled_after.is_some() || report_completed || node.get("report-stalls").is_some() {
+            return Err(St3Error::new(
+                "report-without-recipient",
+                format!("mission `{id}` sets a run report option but no `report-to` agent"),
+            ));
+        }
+        return Ok((None, None, false, true));
+    };
+    validate_report_to(&report_to)?;
+    let stalled_after_ms = match stalled_after {
+        None => DEFAULT_STALLED_AFTER_MS,
+        Some(value) => parse_duration(&value)?,
+    };
+    if stalled_after_ms == 0 {
+        return Err(St3Error::new(
+            "invalid-stalled-after",
+            format!("mission `{id}` stalled-after must be greater than zero"),
+        ));
+    }
+    Ok((
+        Some(report_to),
+        Some(stalled_after_ms),
+        report_completed,
+        report_stalls,
+    ))
+}
+
+/// How long a reported run may go without progress before it counts as stalled.
+pub const DEFAULT_STALLED_AFTER_MS: u64 = 30 * 60_000;
+
+/// A run report goes to an agent. A person is reached through their own agent.
+pub fn validate_report_to(report_to: &str) -> Result<(), St3Error> {
+    let path = report_to.strip_prefix("agent/").unwrap_or_default();
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.contains("//")
+        || path.chars().any(char::is_whitespace)
+    {
+        return Err(St3Error::new(
+            "invalid-report-to",
+            format!("`report-to` names an agent such as `agent/ops/watcher`, not `{report_to}`"),
         ));
     }
     Ok(())
@@ -4089,6 +4191,79 @@ mission "observed" state="ready" {
         )
         .unwrap_err();
         assert_eq!(error.code, "invalid-mission-timeout");
+    }
+
+    #[test]
+    fn a_mission_reports_to_an_agent_with_a_default_stall_limit() {
+        let parse = |header: &str| {
+            crate::graph::parse_intent(
+                &format!("version 2\nmission \"watched\" state=\"ready\" {header} {{\n  goal \"Report.\"\n}}\n"),
+                "node",
+            )
+        };
+        let unset = parse("").unwrap();
+        let unset = &unset.missions["watched"];
+        assert_eq!(unset.report_to, None);
+        assert_eq!(unset.stalled_after_ms, None);
+        assert!(!unset.report_completed);
+        assert!(unset.report_stalls);
+        // An unset report changes nothing about the published definition.
+        assert!(!serde_json::to_string(unset).unwrap().contains("report"));
+
+        let default = parse(r#"report-to="agent/ops/watcher""#).unwrap();
+        let default = &default.missions["watched"];
+        assert_eq!(default.report_to.as_deref(), Some("agent/ops/watcher"));
+        assert_eq!(default.stalled_after_ms, Some(30 * 60_000));
+        assert!(!default.report_completed);
+        assert!(default.report_stalls);
+
+        let tuned = parse(
+            r#"report-to="agent/ops/watcher" stalled-after="45m" report-completed=#true"#,
+        )
+        .unwrap();
+        let tuned = &tuned.missions["watched"];
+        assert_eq!(tuned.stalled_after_ms, Some(45 * 60_000));
+        assert!(tuned.report_completed);
+        assert!(tuned.report_stalls);
+        let explicit_default = parse(r#"report-to="agent/ops/watcher" report-stalls=#true"#).unwrap();
+        assert_eq!(default.revision, explicit_default.missions["watched"].revision);
+        let muted = parse(r#"report-to="agent/ops/watcher" report-stalls=#false"#).unwrap();
+        let muted = &muted.missions["watched"];
+        assert!(!muted.report_stalls);
+        assert_eq!(muted.stalled_after_ms, Some(30 * 60_000));
+        assert_ne!(default.revision, muted.revision);
+        // Older stored definitions decode and serialize byte-for-byte without a new field.
+        let old = serde_json::to_value(default).unwrap();
+        assert!(old.get("report_stalls").is_none());
+        let replay: crate::model::MissionSpec = serde_json::from_value(old.clone()).unwrap();
+        assert!(replay.report_stalls);
+        assert_eq!(serde_json::to_value(replay).unwrap(), old);
+
+    }
+
+    #[test]
+    fn a_run_report_names_an_agent_and_its_options_need_one() {
+        for (header, code) in [
+            (r#"report-to="person/ada""#, "invalid-report-to"),
+            (r#"report-to="agent/""#, "invalid-report-to"),
+            (r#"report-to="agent/a b""#, "invalid-report-to"),
+            (r#"report-to="agent/ops/watcher" stalled-after="0m""#, "invalid-stalled-after"),
+            (r#"report-to="agent/ops/watcher" stalled-after="soon""#, "invalid-duration"),
+            (r#"stalled-after="30m""#, "report-without-recipient"),
+            (r#"report-completed=#true"#, "report-without-recipient"),
+            (r#"report-stalls=#false"#, "report-without-recipient"),
+            (r#"report-stalls=#true"#, "report-without-recipient"),
+            (r#"report-to="agent/ops/watcher" report-stalls="false""#, "invalid-property"),
+            (r#"report-to="agent/ops/watcher" report-stalls=0"#, "invalid-property"),
+            (r#"report-to="agent/ops/watcher" report-stalls=#false stalled-after="0m""#, "invalid-stalled-after"),
+        ] {
+            let error = crate::graph::parse_intent(
+                &format!("version 2\nmission \"bad\" state=\"ready\" {header} {{\n  goal \"Reject.\"\n}}\n"),
+                "node",
+            )
+            .unwrap_err();
+            assert_eq!(error.code, code, "{header}");
+        }
     }
 
     #[test]
