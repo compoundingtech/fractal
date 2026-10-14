@@ -325,6 +325,10 @@ published stable release for testing the next candidate. Each contains `commit`,
 checksums. Fleet CI downloads, verifies and extracts the published native archive instead of
 rebuilding an old workspace. Messaging consumes the pinned published archive too; Nix adjusts
 its Linux interpreter path for sandbox execution without recompiling the channel.
+`checks.st3-runtime-inputs` verifies that changing either the collector or the published
+archive wrapper changes the test derivation, but not the installed runtime. The baseline
+dimension substitutes the actual `nativeCheckInputs` dependency; it no longer needs a
+historical baseline flake input.
 
 The public-repository workflow runs `python3 scripts/compat-baseline-release check` on ready
 PRs, merge groups and main pushes (and manual dispatch). It paginates the actual published release

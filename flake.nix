@@ -830,7 +830,8 @@
         checks.st3-runtime-inputs =
           assert import ./nix/st3-runtime-input-tests.nix {
             inherit self system;
-            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils messaging-baseline; };
+            baseline = messagingCompat;
+            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
           };
           pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
         checks.st3-help = st3Help;
