@@ -1105,7 +1105,10 @@ export default function (pi: ExtensionAPI) {
     clearHoldTimer();
     toolCallsInFlight().add(pending.toolCallId);
     cancelSettle();
-    sendFrame({ type: "state", state: "active", blockedOn: "human", ask: "question" });
+    sendFrame({
+      type: "state", state: "active", blockedOn: "human", ask: "question",
+      reason: `reopened interrupted ask ${pending.toolCallId}`,
+    });
     sendFrame({ type: "delivery_ready" });
     armHoldCap();
   };

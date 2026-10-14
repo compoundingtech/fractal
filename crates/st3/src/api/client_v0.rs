@@ -2617,6 +2617,7 @@ const ACTIONS: &[&str] = &[
     "work.publish-mission",
     "agent.create",
     "agent.stop",
+    "agent.retire",
     "agent.start",
     "agent.suspend",
     "agent.resume",
@@ -2671,6 +2672,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "work.retry",
     "agent.create",
     "agent.stop",
+    "agent.retire",
     "agent.start",
     "agent.suspend",
     "agent.resume",
@@ -9858,7 +9860,12 @@ pub(super) struct ActionRequest {
 fn action_scope(action: &str) -> Option<&'static str> {
     if matches!(
         action,
-        "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume"
+        "agent.create"
+            | "agent.stop"
+            | "agent.retire"
+            | "agent.start"
+            | "agent.suspend"
+            | "agent.resume"
     ) {
         return Some("control.runtimes");
     }
@@ -11265,6 +11272,31 @@ async fn dispatch_action(
             )])
         }
         "terminal.detach" => Ok(vec![detach_terminal_attachment(state, session, request)?]),
+        "agent.retire" => {
+            require_creation_actor(session)?;
+            let parameters = serde_json::from_value::<st3_client::AgentRetireParameters>(p.clone())
+                .map_err(|error| validation(error.to_string()))?;
+            let agent = client_detail_id("agent", &parameters.agent);
+            let token = request
+                .fence
+                .runtime_desired_revision
+                .as_deref()
+                .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
+            state
+                .store
+                .retire_agent(
+                    &agent,
+                    authority_actor,
+                    &parameters.reason,
+                    token,
+                    request.fence.runtime_incarnation.as_deref(),
+                    &request.idempotency_key,
+                    &state.configured_peers,
+                )
+                .map_err(ApiError::bad)?;
+            signal_changed(state);
+            Ok(vec![agent])
+        }
         action @ ("agent.stop" | "agent.start") => {
             require_creation_actor(session)?;
             let agent = client_detail_id("agent", &parameter_string(p, "agent")?);
@@ -22512,6 +22544,50 @@ mission "example/zero-run" state="ready" {
         let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
         assert_eq!(birch["harness_state"], "indeterminate");
         assert_eq!(birch["state"], "waiting");
+    }
+
+    #[test]
+    fn a_seat_two_hosts_both_claim_says_st_cannot_tell_which_host_runs_it() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-rival-runtime");
+        let rival_root = tempfile::tempdir().unwrap();
+        let rival = test_state_named(rival_root.path(), "status-rival");
+        let subject = "agent/cedar";
+        let append = |store: &Store, kind: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        let runtime = json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"});
+        append(&state.store, "runtime.observed", runtime.clone());
+        append(&rival.store, "runtime.observed", runtime);
+        append(&state.store, "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        state.store.import_replication("status-rival", &rival.store.export_replication(0).unwrap()).unwrap();
+        let index = state.store.index().unwrap();
+        let mut cards = client_agent_resources(&state.store, false, "", index).unwrap();
+        for card in &mut cards {
+            let mut harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
+            harness.observed_at_unix_ms = client_now_ms() - 3_600_000;
+            card["_status_source"] = json!(harness);
+        }
+        overlay_agent_resources(&state.store, &mut cards, "").unwrap();
+        let card = cards.iter().find(|item| item["id"] == subject).unwrap();
+        assert_eq!(card["state"], "waiting");
+        assert_eq!(card["reachability"], "indeterminate");
+        assert_eq!(card["reason"], crate::api::AUTHORITY_INDETERMINATE_REASON);
+        // A seat that one host alone claims has no such reason.
+        let alone_root = tempfile::tempdir().unwrap();
+        let alone = test_state_named(alone_root.path(), "status-single-runtime");
+        append(&alone.store, "runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append(&alone.store, "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        let index = alone.store.index().unwrap();
+        let mut cards = client_agent_resources(&alone.store, false, "", index).unwrap();
+        overlay_agent_resources(&alone.store, &mut cards, "").unwrap();
+        let card = cards.iter().find(|item| item["id"] == subject).unwrap();
+        assert_eq!(card["reachability"], "reachable");
+        assert!(card["reason"].is_null());
     }
 
     #[test]
