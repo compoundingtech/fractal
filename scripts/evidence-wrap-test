@@ -47,7 +47,7 @@ def main(argv):
         home = tmp / 'home'
         (home / '.config/st').mkdir(parents=True)
         (home / '.config/st/evidence-sign.json').write_text(json.dumps(
-            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'scratch.git')}))
+            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'scratch.git'), 'test_clock': True}))
         repo = tmp / 'repo'
         git(tmp, 'init', '-q', str(repo))
         (repo / 'flake.lock').write_text('{"nodes":{}}\n')
@@ -146,6 +146,24 @@ def main(argv):
         }.items():
             refused = sign(bad)
             assert refused.returncode == 1 and b'refused' in refused.stderr, (label, refused.stderr)
+        # A caller's environment cannot move the clock, redirect git, or smuggle a program through the repository.
+        production = tmp / 'production-home'
+        (production / '.config/st').mkdir(parents=True)
+        (production / '.config/st/evidence-sign.json').write_text(json.dumps(
+            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'production.git')}))
+        marker = tmp / 'ran'
+        program = tmp / 'evil-ssh-keygen'
+        program.write_text(f'#!/bin/sh\ntouch {marker}\nexec ssh-keygen "$@"\n')
+        program.chmod(0o755)
+        hostile = subprocess.run([sys.executable, str(SIGN)], cwd=repo, input=json.dumps(good).encode(), capture_output=True,
+                                 env=dict(ENV, HOME=str(production), EVIDENCE_SIGN_NOW='1999-01-01T00:00:00Z',
+                                          GIT_DIR=str(tmp / 'elsewhere'), GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='gpg.ssh.program',
+                                          GIT_CONFIG_VALUE_0=str(program)))
+        assert hostile.returncode == 0, hostile.stderr
+        stamped = json.loads(hostile.stdout)
+        shown = git(tmp / 'production.git', 'cat-file', 'blob', git(tmp / 'production.git', 'ls-tree', '-r', stamped['record']).split()[2])
+        assert json.loads(shown)['predicate']['observed_at'] != '1999-01-01T00:00:00Z', 'a caller cannot set the signer clock'
+        assert not marker.exists(), 'a caller\'s GIT_CONFIG_* must not be able to name the program that signs'
         print('passed: the signer accepts extra named inputs, and refuses extra keys, a wrong flake.lock hash, an unknown commit and malformed fields')
 
         if write_fixture:
@@ -154,7 +172,7 @@ def main(argv):
             config_dir = fixture_home / '.config/st'
             config_dir.mkdir(parents=True)
             (config_dir / 'evidence-sign.json').write_text(json.dumps(
-                {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'fixture.git')}))
+                {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'fixture.git'), 'test_clock': True}))
             made = subprocess.run([sys.executable, str(SIGN)], cwd=repo, input=json.dumps(good).encode(), capture_output=True,
                                   env=dict(ENV, HOME=str(fixture_home), EVIDENCE_SIGN_NOW=DATE))
             answer = json.loads(made.stdout)
