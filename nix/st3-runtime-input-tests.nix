@@ -25,9 +25,10 @@ let
     name = "${old.name}-check-input-successor";
   });
   varyBaseline = derivation: derivation.overrideAttrs (old: {
-    nativeCheckInputs = map
+    # stdenv has folded enabled nativeCheckInputs into nativeBuildInputs here.
+    nativeBuildInputs = map
       (input: if input.outPath == baseline.outPath then baselineSuccessor else input)
-      old.nativeCheckInputs;
+      old.nativeBuildInputs;
   });
   runtime = result: result.packages.${system}.st3;
   checked = result: result.checks.${system}.st3;
@@ -35,7 +36,7 @@ in
 assert (runtime original).outPath == (runtime collectorChanged).outPath;
 assert (runtime original).outPath == (varyBaseline (runtime original)).outPath;
 assert (checked original).outPath != (checked collectorChanged).outPath;
-assert builtins.any (input: input.outPath == baseline.outPath) (checked original).nativeCheckInputs;
+assert builtins.any (input: input.outPath == baseline.outPath) (checked original).nativeBuildInputs;
 assert (checked original).outPath != (varyBaseline (checked original)).outPath;
 assert !(runtime original).doCheck;
 assert (checked original).doCheck;

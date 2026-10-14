@@ -327,7 +327,7 @@ rebuilding an old workspace. Messaging consumes the pinned published archive too
 its Linux interpreter path for sandbox execution without recompiling the channel.
 `checks.st3-runtime-inputs` verifies that changing either the collector or the published
 archive wrapper changes the test derivation, but not the installed runtime. The baseline
-dimension substitutes the actual `nativeCheckInputs` dependency; it no longer needs a
+dimension substitutes the actual test-only native dependency; it no longer needs a
 historical baseline flake input.
 
 The public-repository workflow runs `python3 scripts/compat-baseline-release check` on ready
