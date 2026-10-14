@@ -85,7 +85,8 @@ describe('rich page decode, fold and transcript mapping', () => {
       items, hasOlder: timeline.hasOlder, observation: timeline.observation,
     } }, {})
     expect(timeline.hasOlder).toBe(true)
-    expect(active).toMatchObject({ _tag: 'Observed', history: { _tag: 'Complete' } })
+    // Complete means the native history is exhausted, not merely that this page has settled.
+    expect(active).toMatchObject({ _tag: 'Observed', history: { _tag: 'Pending' } })
     expect(active._tag === 'Observed' && active.turns).toHaveLength(2)
   })
 })
