@@ -167,4 +167,3 @@ Existing people/agent/host callers keep their behavior. Upgrade the gateway befo
 adding `[programs]`: older gateways reject the unknown config and caller kind.
 Rollback removes program enrollment/grants first; never convert a program into a
 person mapping. No st graph/schema/replay or gateway DB migration is introduced.
-
