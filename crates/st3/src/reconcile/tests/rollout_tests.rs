@@ -358,6 +358,10 @@ impl Seat {
 }
 
 impl Seat {
+    fn publish_plain_default(&self, model: &str, key: &str) {
+        self.publish_plain(model, rollout::default_restart_policy().as_ref(), key);
+    }
+
     fn publish_plain(&self, model: &str, policy: Option<&Policy>, key: &str) {
         let source = format!(
             "version 2\nagent \"garden/orchard\" {{ host \"amber\"; workspace {:?}; harness \"claude\" {{ model {model:?}; }} }}",
@@ -379,6 +383,94 @@ impl Seat {
             self.store.clone(), self.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
         ).reconcile_once().unwrap();
     }
+}
+
+#[test]
+fn acceptance_2888_working_launch_change_waits_until_idle_then_restarts_exactly_once() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.publish_plain_default("second", "acceptance-working");
+    let expected = seat.desired().member.unwrap();
+    for _ in 0..3 {
+        seat.plain_step();
+        assert!(seat.runtime.stops.lock().is_empty());
+        assert!(seat.runtime.starts.lock().is_empty());
+    }
+    let status = rollout::status(&seat.store, SUBJECT).unwrap().unwrap();
+    assert_eq!(status["phase"], "pending");
+    assert_eq!(status["status"], "restart pending: launch changed");
+    assert!(status["alert"].is_null());
+    seat.busy(false);
+    for _ in 0..6 {
+        seat.plain_step();
+    }
+    assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
+    let starts = seat.runtime.starts.lock();
+    assert_eq!(starts.len(), 1);
+    assert_launch(&starts[0], &expected);
+    assert!(rollout::status(&seat.store, SUBJECT).unwrap().is_none());
+}
+
+#[test]
+fn acceptance_2888_idle_launch_change_restarts_without_waiting_for_deadline() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.busy(false);
+    seat.publish_plain_default("second", "acceptance-idle");
+    let expected = seat.desired().member.unwrap();
+    seat.plain_step();
+    assert!(seat.store.restart_cutover(SUBJECT).unwrap());
+    seat.plain_step();
+    assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
+    seat.plain_step();
+    assert_eq!(seat.runtime.starts.lock().len(), 1);
+    assert_launch(&seat.runtime.starts.lock()[0], &expected);
+    for _ in 0..3 {
+        seat.plain_step();
+    }
+    assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
+    assert_eq!(seat.runtime.starts.lock().len(), 1);
+}
+
+#[test]
+fn acceptance_2888_explicit_restart_now_restarts_a_working_seat() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.publish_plain("second", None, "acceptance-restart-now");
+    let expected = seat.desired().member.unwrap();
+    assert!(rollout::deferred_restart(&seat.store, SUBJECT).unwrap().is_none());
+    seat.plain_step();
+    assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
+    for _ in 0..5 {
+        seat.plain_step();
+    }
+    let starts = seat.runtime.starts.lock();
+    assert_eq!(starts.len(), 1);
+    assert_launch(&starts[0], &expected);
+}
+
+#[test]
+fn acceptance_2888_pending_changes_coalesce_into_exactly_one_newest_model_restart() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.publish_plain_default("second", "acceptance-pending-second");
+    seat.plain_step();
+    seat.publish_plain_default("third", "acceptance-pending-third");
+    let expected = seat.desired().member.unwrap();
+    for _ in 0..3 {
+        seat.plain_step();
+    }
+    assert!(seat.runtime.stops.lock().is_empty());
+    assert!(seat.runtime.starts.lock().is_empty());
+    seat.busy(false);
+    for _ in 0..6 {
+        seat.plain_step();
+    }
+    assert_eq!(*seat.runtime.stops.lock(), ["original-1"]);
+    let starts = seat.runtime.starts.lock();
+    assert_eq!(starts.len(), 1);
+    assert_launch(&starts[0], &expected);
+    let crate::model::LaunchSpec::Argv(argv) = &starts[0].launch else {
+        panic!("the fixture uses an argv native launch");
+    };
+    assert!(argv.windows(2).any(|pair| pair[0] == "--model" && pair[1] == "third"));
+    assert!(rollout::status(&seat.store, SUBJECT).unwrap().is_none());
 }
 
 #[test]
@@ -681,6 +773,17 @@ fn apply_restart_blocks_native_and_legacy_delivery_admission_and_keeps_receipt_r
     seat.plain_step();
     assert!(seat.store.restart_cutover(SUBJECT).unwrap());
     assert_eq!(seat.store.append_mailbox_receipt(&staged, &binding).unwrap().id, committed.id);
+    assert_eq!(seat.store.append_claim(&staged).unwrap().id, committed.id);
+    let settled = seat.store.message("message/already-read").unwrap().unwrap();
+    assert!(seat.store.rollout_message_allowed(&settled).unwrap());
+    let hold = seat.store.rollout_intake_hold(SUBJECT).unwrap();
+    assert!(seat.store.rollout_message_allowed_under(&hold, &settled).unwrap());
+    for kind in ["staged", "delivered"] {
+        let input = receipt("message/already-read", kind, &format!("settled-{kind}"));
+        assert!(seat.store.append_mailbox_receipt(&input, &binding).is_ok());
+        assert!(seat.store.append_claim(&input).is_ok());
+        assert_eq!(seat.store.message("message/already-read").unwrap().unwrap().status, "read");
+    }
     for (subject, native) in [("message/new-native", true), ("message/new-legacy", false)] {
         mail(subject);
         for kind in ["staged", "delivered"] {
@@ -695,6 +798,108 @@ fn apply_restart_blocks_native_and_legacy_delivery_admission_and_keeps_receipt_r
         assert_eq!(seat.store.message(subject).unwrap().unwrap().status, "sent");
     }
 }
+
+#[test]
+fn ordinary_rollout_drain_preserves_unfenced_staged_and_delivered_receipts() {
+    let seat = Seat::new();
+    let binding = seat.store.bind_mailbox(&crate::mailbox::Fence::new(
+        SUBJECT, "original-1", "delivery",
+    )).unwrap();
+    seat.publish(2, "second", Some(Policy::when_idle(1_800_000, false)), false);
+    seat.step();
+    seat.ack();
+    seat.step();
+    assert_eq!(seat.operation().phase, "draining");
+    assert!(!seat.store.restart_cutover(SUBJECT).unwrap());
+    for kind in ["staged", "delivered"] {
+        let subject = format!("message/legacy-drain-{kind}");
+        seat.store.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: "message.sent".into(),
+            actor: Some("person/operator".into()),
+            fields: serde_json::from_value(json!({
+                "status":"sent","from":"person/operator","to":SUBJECT,"content":"Tend the garden",
+            })).unwrap(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let receipt = ClaimInput {
+            subject: subject.clone(), kind: format!("message.{kind}"), actor: Some(SUBJECT.into()),
+            fields: BTreeMap::from([("status".into(), json!(kind))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        };
+        assert!(!seat.store.rollout_message_allowed(&seat.store.message(&subject).unwrap().unwrap()).unwrap());
+        assert_eq!(seat.store.append_mailbox_receipt(&receipt, &binding).unwrap_err().code,
+            "seat-rollout-draining");
+        seat.store.append_claim(&receipt).unwrap();
+        let message = seat.store.message(&subject).unwrap().unwrap();
+        assert_eq!(message.status, kind);
+        assert!(seat.store.rollout_message_allowed(&message).unwrap());
+        let hold = seat.store.rollout_intake_hold(SUBJECT).unwrap();
+        assert!(seat.store.rollout_message_allowed_under(&hold, &message).unwrap());
+    }
+}
+
+#[test]
+fn apply_restart_cutover_allows_only_authentic_restart_prepare_control_mail() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.publish_plain("second", Some(&Policy::when_idle(1_800_000, false)), "prepare-mail-intake");
+    seat.busy(false);
+    seat.plain_step();
+    assert!(seat.store.restart_cutover(SUBJECT).unwrap());
+    let binding = seat.store.bind_mailbox(&crate::mailbox::Fence::new(
+        SUBJECT, "original-1", "delivery",
+    )).unwrap();
+    let prepare = seat.store.append_claim(&ClaimInput {
+        subject: SUBJECT.into(), kind: "runtime.reconcile-decision".into(), actor: None,
+        fields: serde_json::from_value(json!({
+            "key":"restart-prepare","decision":"prepare","reason":"apply",
+            "restart_at_unix_ms":"9999999999999",
+        })).unwrap(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    for (case, tag, title, allowed) in [
+        ("prepare", Some(format!("{}{}", crate::handoff::PREPARE_TAG_PREFIX, prepare.id)),
+            "Prepare for restart", true),
+        ("ordinary-daemon", None, "Prepare for restart", false),
+        ("unknown-prepare", Some(format!("{}missing", crate::handoff::PREPARE_TAG_PREFIX)),
+            "Prepare for restart", false),
+        ("unrelated-daemon", Some(format!("{}{}", crate::handoff::PREPARE_TAG_PREFIX, prepare.id)),
+            "Unrelated work", false),
+    ] {
+        for kind in ["staged", "delivered"] {
+            for fenced in [false, true] {
+                let subject = format!("message/{case}-{kind}-{fenced}");
+                seat.store.append_claim(&ClaimInput {
+                    subject: subject.clone(), kind: "message.sent".into(), actor: Some("daemon/runtime".into()),
+                    fields: serde_json::from_value(json!({
+                        "status":"sent","from":"daemon/runtime","to":SUBJECT,"title":title,
+                        "content":crate::handoff::render_prepare("apply", 9999999999999, 0),
+                        "in_reply_to":null,"tags":tag.iter().collect::<Vec<_>>(),
+                    })).unwrap(), evidence: vec![prepare.id.clone()], expected_subject: None, idempotency_key: None,
+                }).unwrap();
+                let message = seat.store.message(&subject).unwrap().unwrap();
+                assert_eq!(seat.store.rollout_message_allowed(&message).unwrap(), allowed, "{case}");
+                let hold = seat.store.rollout_intake_hold(SUBJECT).unwrap();
+                assert_eq!(seat.store.rollout_message_allowed_under(&hold, &message).unwrap(), allowed, "{case}");
+                let receipt = ClaimInput {
+                    subject: subject.clone(), kind: format!("message.{kind}"), actor: Some(SUBJECT.into()),
+                    fields: BTreeMap::from([("status".into(), json!(kind))]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                };
+                let result = if fenced {
+                    seat.store.append_mailbox_receipt(&receipt, &binding)
+                } else {
+                    seat.store.append_claim(&receipt)
+                };
+                if allowed {
+                    result.unwrap();
+                    assert_eq!(seat.store.message(&subject).unwrap().unwrap().status, kind);
+                } else {
+                    assert_eq!(result.unwrap_err().code, "seat-rollout-draining");
+                    assert_eq!(seat.store.message(&subject).unwrap().unwrap().status, "sent");
+                }
+            }
+        }
+    }
+}
+
 
 #[test]
 fn apply_restart_blocked_leased_work_is_not_a_safe_point() {
@@ -2048,4 +2253,21 @@ fn resume_with_pending_manual_publication_launches_old_and_keeps_pending() {
     assert!(seat.store.rollout(SUBJECT).unwrap().is_none());
     seat.reconcile();
     assert_eq!(seat.runtime.starts.lock().len(), 1);
+}
+
+#[test]
+fn apply_restart_overdue_status_alerts_without_forcing_a_working_seat() {
+    let seat = Seat::new_with_owned_publication(false);
+    seat.publish_plain("second", Some(&Policy::when_idle(1, false)), "overdue-alert");
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    seat.plain_step();
+    let status = rollout::status(&seat.store, SUBJECT).unwrap().unwrap();
+    assert_eq!(status["status"], "restart pending: launch changed");
+    assert_eq!(status["phase"], "held");
+    assert!(status["alert"].as_str().is_some());
+    for _ in 0..3 {
+        seat.plain_step();
+    }
+    assert!(seat.runtime.stops.lock().is_empty());
+    assert!(seat.runtime.starts.lock().is_empty());
 }

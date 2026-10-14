@@ -10288,8 +10288,10 @@ impl Store {
             idempotency_key,
             actor,
             None,
-            publication::CommitChecks::default(),
-            defer_restart,
+            publication::CommitChecks {
+                defer_restart,
+                ..publication::CommitChecks::default()
+            },
         )
     }
 
@@ -10311,10 +10313,9 @@ impl Store {
             actor,
             None,
             publication::CommitChecks {
-                owned: None,
                 guard: Some(guard),
+                ..publication::CommitChecks::default()
             },
-            None,
         )
     }
 
@@ -10336,7 +10337,6 @@ impl Store {
             None,
             Some((response_key, &value)),
             publication::CommitChecks::default(),
-            None,
         )
     }
 
@@ -10348,9 +10348,8 @@ impl Store {
         actor: Option<&str>,
         local_receipt: Option<(&str, &Value)>,
         checks: publication::CommitChecks<'_>,
-        defer_restart: Option<&crate::rollout::Policy>,
     ) -> Result<ApplyResponse, St3Error> {
-        let publication::CommitChecks { owned, guard } = checks;
+        let publication::CommitChecks { owned, guard, defer_restart } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, St3Error> {
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
@@ -10584,7 +10583,9 @@ impl Store {
                 }
                 let mut restart_policy_changes = BTreeSet::new();
                 let requested_policy = json!(defer_restart);
-                for (subject, _) in intent.subjects.iter().filter(|(_, d)| d.kind == "agent") {
+                for (subject, _) in intent.subjects.iter().filter(|(_, d)| {
+                    owned_plan.is_none() && d.kind == "agent" && d.owner_run.is_none()
+                }) {
                     let Some(current) = current_desired_row_tx(transaction, subject).map_err(internal)? else {
                         continue;
                     };
@@ -10820,7 +10821,9 @@ impl Store {
                     }
                     let predecessors = intent_leaves_tx(transaction, subject).map_err(internal)?;
                     let mut body = serde_json::to_value(desired).map_err(internal)?;
-                    if desired.kind == "agent" && let Some(policy) = defer_restart {
+                    if owned_plan.is_none() && desired.kind == "agent" && desired.owner_run.is_none()
+                        && let Some(policy) = defer_restart
+                    {
                         body["deferred_restart"] = json!({
                             "policy": policy,
                             "deadline_unix_ms": smallclaims::store::now_ms().saturating_add(u128::from(policy.deadline_ms)),
@@ -59126,8 +59129,8 @@ fn append_claim_with_commit_context(
                     ("message.staged", "delivered" | "read" | "closed")
                     | ("message.delivered", "read" | "closed") | ("message.read", "closed"))
             }) || validate_message_transition(transaction, input)?;
-            // Native mailbox and legacy lifecycle posts share this writer admission fence.
-            // Recorded retries and settled receipts never admit another delivery.
+            // Fenced mailbox receipts honor rollout intake; legacy posts retain ordinary-drain
+            // behavior. Both routes fence fresh cutover delivery, not retries or settled receipts.
             if !settled_receipt && matches!(input.kind.as_str(), "message.staged" | "message.delivered") {
                 let unfenced;
                 let message = if let Some(message) = receipt_message.as_ref() {
@@ -59140,7 +59143,12 @@ fn append_claim_with_commit_context(
                     unfenced = message_view_tx(transaction, &input.subject, index).map_err(internal)?;
                     &unfenced
                 };
-                if !rollouts::message_allowed(transaction, message)? {
+                let allowed = if receipt_message.is_some() {
+                    rollouts::message_allowed(transaction, message)?
+                } else {
+                    rollouts::message_allowed_at_cutover(transaction, message)?
+                };
+                if !allowed {
                     return Err(St3Error::new("seat-rollout-draining", "new delivery waits for the seat cutover"));
                 }
             }

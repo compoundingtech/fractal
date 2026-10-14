@@ -1476,9 +1476,8 @@ impl Store {
             None,
             publication::CommitChecks {
                 owned: Some(options),
-                guard: None,
+                ..publication::CommitChecks::default()
             },
-            None,
         )
     }
 }

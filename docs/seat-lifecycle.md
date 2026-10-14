@@ -346,11 +346,11 @@ connects straight to the PTY session, so a busy daemon cannot stall it. If the d
 answer within a second, st attaches to the seat's newest PTY session on that host without it and
 says so.
 
-A running seat restarts immediately by default when you apply a declaration that changes how it launches: its
-workspace, harness, model, effort, arguments or command. A change to its label, environment or
-restart policy keeps the running process and takes effect the next time it starts; use `st agents
-restart agent/example/worker --as person/ada` to apply it now. Restart preserves the declaration,
-works for top-level and mission seats, and waits for a new running incarnation.
+A standalone working seat defers a launch-changing apply until its next proven idle point;
+an idle seat restarts promptly. Changes to workspace, harness, model, effort, arguments or command
+change its launch. A change to its label, environment or restart policy keeps the running process
+and takes effect the next time it starts; use `st agents restart agent/example/worker --as person/ada`
+to apply it now. Mission seats and owned revision cutover keep their existing behavior.
 
 Both `st apply` and the legacy `st agents apply` announce `WILL RESTART N running seats`
 and list those seats before publishing, including with `--dry-run`. The count compares the
@@ -358,7 +358,7 @@ running incarnation's launch receipt, not merely the previous declaration; stopp
 unchanged launches are excluded. JSON output includes `running_restart_count` and
 `running_restarts`, while the announcement goes to stderr.
 
-To defer a launch change until the next safe point:
+Safe-point deferral is the default for plain standalone apply; `--defer-restart` makes it explicit:
 
 ```sh
 st apply worker.kdl --dry-run --as person/ada
@@ -375,6 +375,7 @@ change remain answerable across a renewed wait, without weakening owner/run-gene
 Unknown harness state is not idle.
 The pending declaration and absolute deadline survive daemon restarts; the incumbent's
 rendered files stay unchanged while it waits, and harness servicing and ready-work wakes continue.
+A second launch change while pending replaces the target; one restart uses the newest launch.
 Plain publication keeps work and message intake open while pending or held. At the safe
 point, a durable desired-token/incarnation-fenced cutover barrier closes new work claims,
 person asks and fresh native or legacy message staging/delivery before rendering or stopping.
@@ -389,9 +390,10 @@ reopens intake and returns the change to pending/held; the original process stay
 the preparation fault remains visible. A perpetually busy seat can remain pending until its
 deadline. The default maximum wait is thirty minutes; a positive duration up to seven days
 is accepted. Expiry before cutover
-changes the visible rollout phase to `held` and leaves the original seat running. It never
-forces interruption or automatically retries that hold.
-`st agents show` reports the phase, blockers and reason; JSON also reports the deadline.
+changes the visible rollout phase to `held`, raises an alert, and leaves the original seat running.
+It never forces interruption or automatically retries that hold. `st agents show` reports
+`restart pending: launch changed`, the phase, blockers and reason; JSON also reports the deadline
+and alert. The stated alert age is the maximum wait (thirty minutes by default).
 
 Reapplying the same declaration and policy does not extend the deadline. Change the maximum
 wait to request a new bounded wait, or explicitly keep immediate behavior:

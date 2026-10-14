@@ -26,6 +26,11 @@ pub struct DeferredRestart {
     pub deadline_unix_ms: u128,
 }
 
+/// Unflagged apply waits for a safe point, alerting after thirty minutes without forcing.
+pub fn default_restart_policy() -> Option<Policy> {
+    Some(Policy::when_idle(1_800_000, false))
+}
+
 pub fn deferred_restart(store: &Store, subject: &str) -> Result<Option<DeferredRestart>> {
     let Some(token) = store.selected_desired_token(subject)? else {
         return Ok(None);
@@ -85,6 +90,8 @@ pub fn deferred_restart_status(store: &Store, subject: &str) -> Result<Option<se
         "mode": "when-idle",
         "kind": "apply-restart",
         "deadline_unix_ms": pending.deadline_unix_ms,
+        "status": "restart pending: launch changed",
+        "alert": if expired { Some("restart pending for the maximum wait; original seat keeps running") } else { None },
         "old_incarnation": incarnation,
         "blocking": blocking,
         "reason": if expired { "safe-point deadline reached; original seat keeps running; reapply with --restart-now to interrupt" } else { "launch change pending until idle with no open ask" },

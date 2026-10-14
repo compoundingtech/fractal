@@ -333,8 +333,50 @@ pub(super) fn message_allowed(
     connection: &Connection,
     message: &MessageView,
 ) -> Result<bool, St3Error> {
+    if message.status != "sent" {
+        return Ok(true);
+    }
     let hold = intake_hold(connection, &message.to)?;
     message_allowed_under(connection, &hold, message)
+}
+
+/// Legacy lifecycle receipts retain their ordinary-rollout admission behavior.
+pub(super) fn message_allowed_at_cutover(
+    connection: &Connection,
+    message: &MessageView,
+) -> Result<bool, St3Error> {
+    if message.status != "sent" || !restart_cutover(connection, &message.to).map_err(internal)? {
+        return Ok(true);
+    }
+    restart_prepare_message(connection, message)
+}
+
+fn restart_prepare_message(
+    connection: &Connection,
+    message: &MessageView,
+) -> Result<bool, St3Error> {
+    if message.from != "daemon/runtime"
+        || message.title.as_deref() != Some("Prepare for restart")
+        || message.in_reply_to.is_some()
+    {
+        return Ok(false);
+    }
+    for tag in &message.tags {
+        let Some(request) = tag.strip_prefix(crate::handoff::PREPARE_TAG_PREFIX) else {
+            continue;
+        };
+        let Some(prepare) = claim_by_id_tx(connection, request).map_err(internal)? else {
+            continue;
+        };
+        if prepare.subject == message.to
+            && prepare.kind == "runtime.reconcile-decision"
+            && prepare.body["fields"]["key"] == "restart-prepare"
+            && prepare.body["fields"]["decision"] == "prepare"
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What fences a seat's independent mail: an apply restart cutover, or a rollout holding intake.
@@ -356,15 +398,15 @@ fn message_allowed_under(
     hold: &IntakeHold,
     message: &MessageView,
 ) -> Result<bool, St3Error> {
+    if message.status != "sent" {
+        return Ok(true);
+    }
     if hold.cutover {
-        return Ok(false);
+        return restart_prepare_message(connection, message);
     }
     let Some(operation) = hold.operation.as_ref() else {
         return Ok(true);
     };
-    if message.status != "sent" {
-        return Ok(true);
-    }
     if message.from == "daemon/runtime"
         && message.tags.iter().any(|tag| {
             let Some(value) = tag.strip_prefix("st3-work:") else {

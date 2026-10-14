@@ -1420,8 +1420,8 @@ pub struct ApplyRequest {
     pub idempotency_key: String,
     #[serde(default)]
     pub actor: Option<String>,
-    /// Defer launch-change restarts until a proven safe point. None is immediate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Missing uses the safe-point default; explicit null requests immediate restart.
+    #[serde(default = "crate::rollout::default_restart_policy")]
     pub defer_restart: Option<crate::rollout::Policy>,
 }
 
@@ -3145,3 +3145,4 @@ mod person_inbox_tests {
         assert!(!PERSON_HAS_NO_INBOX.contains("NO REPLY"));
     }
 }
+
