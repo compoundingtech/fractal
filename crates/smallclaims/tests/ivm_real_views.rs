@@ -1155,7 +1155,7 @@ fn interrupted_trim_resume_and_checkpoint_step_fail_without_touching_persisted_s
     );
     assert!(
         n.store
-            .apply_stable_checkpoints(&[], &mut actions)
+            .apply_stable_checkpoints(&[], std::path::Path::new("unused-checkpoint-scratch"), &mut actions)
             .unwrap_err()
             .to_string()
             .contains("ivm-checkpoint-unavailable")
