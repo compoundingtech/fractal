@@ -377,6 +377,23 @@ impl Glasses {
             .any(|tab| matches!(Pane::parse(&tab.pane), Some(Pane::Machine(_))))
     }
 
+    pub(crate) fn inventories_wanted(&self, tab: usize, hours: u64) -> crate::feed::Inventories {
+        use crate::feed::Inventories;
+        let glass = self.glass();
+        let panes = (0..glass.layout.groups().len()).filter_map(|index| glass.shown(index))
+            .filter_map(|tab| Pane::parse(&tab.pane)).collect::<Vec<_>>();
+        let fleet = tab == 3 || panes.iter().any(|pane| matches!(pane, Pane::List(3)));
+        let machines = fleet || self.sidebar.shown || self.palette.is_some() || self.shows_machine();
+        Inventories {
+            clients: fleet || self.shows_machine(),
+            usage_hours: self.shows_usage().then_some(hours),
+            machines, devices: fleet,
+            sessions: fleet || tab == 1 || self.sidebar.shown || self.palette.is_some()
+                || panes.iter().any(|pane| matches!(pane, Pane::List(1))),
+            terminals: self.sidebar.shown || self.palette.is_some(),
+        }
+    }
+
     /// Whether a list or card of missions is on screen: a Missions list or a mission's card in a
     /// shown tab, the palette (which offers every mission) or the sidebar's Missions section.
     pub(crate) fn shows_missions(&self) -> bool {
@@ -583,6 +600,7 @@ enum Action {
     ToggleSimple,
     /// Agents open on their terminal, or on their conversation.
     ToggleTerminalFirst,
+    ToggleTerminalFallback,
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -959,6 +977,16 @@ impl Ui {
             "this device; the conversation is the default",
             "terminal conversation default view open agents attach tui".into(),
             Action::ToggleTerminalFirst,
+        ));
+        choices.push(start(
+            if self.terminal_fallback {
+                "Fabric only, no fallback".into()
+            } else {
+                "Fall back through the daemon".into()
+            },
+            "terminal routes on this device; daemon fallback is the default",
+            "terminal fabric direct daemon gateway fallback setting".into(),
+            Action::ToggleTerminalFallback,
         ));
         choices.extend(self.said_choices(name));
         let Some(glasses) = &self.glasses else {
@@ -2179,50 +2207,8 @@ impl Ui {
                 Hit::PaletteSection(1),
             );
             spans.push(Span::styled(working_text, bar(theme::fg(theme::WORKING))));
-            // Missions with work open: running, waiting their turn, or waiting on someone.
-            // The count comes from the mission rows: with the window not followed there is no count to
-            // show, and the bar says so rather than a stale number.
-            let followed = self.world.missions_followed && self.world.missions.ready().is_some();
-            let counted = |keep: fn(Word) -> bool| {
-                followed.then(|| {
-                    screens::mission_order(&self.world, false)
-                        .iter()
-                        .filter(|mission| keep(mission.word))
-                        .count()
-                })
-            };
-            let active = counted(Word::is_active);
-            let stuck = counted(Word::is_stuck).filter(|stuck| *stuck > 0);
-            spans.push(Span::styled(" · ", bar(theme::dim())));
-            x = area.x + Line::from(spans.clone()).width() as u16;
-            let active_text = match active.or(self.world.active_missions) {
-                Some(active) => format!("◇ {active} active"),
-                None => "◇ missions".to_owned(),
-            };
-            self.hit(
-                Rect {
-                    x,
-                    width: text::width(&active_text) as u16,
-                    ..area
-                },
-                Hit::PaletteSection(2),
-            );
-            spans.push(Span::styled(active_text, bar(theme::fg(theme::SAPPHIRE))));
-            // Stuck runs are not active, and not hidden: they are named beside the count.
-            if let Some(stuck) = stuck {
-                spans.push(Span::styled(" · ", bar(theme::dim())));
-                x = area.x + Line::from(spans.clone()).width() as u16;
-                let stuck_text = format!("▲ {stuck} stuck");
-                self.hit(
-                    Rect {
-                        x,
-                        width: text::width(&stuck_text) as u16,
-                        ..area
-                    },
-                    Hit::PaletteSection(2),
-                );
-                spans.push(Span::styled(stuck_text, bar(theme::fg(theme::FAULT))));
-            }
+            // No mission counts here (Nathan, 2026-10-12: until they become more meaningful); the
+            // missions list keeps them.
             let machines = self.world.machines.items();
             machines_shown = !machines.is_empty();
             if machines_shown {
@@ -2782,16 +2768,15 @@ impl Ui {
             KeyCode::Char('e') if control && conversation.is_some() => self.toggle_all_tools(),
             KeyCode::Char('p') if control && conversation.is_some() => self.toggle_simple(),
             KeyCode::Char('d') if control && conversation.is_some() => self.toggle_details(),
-            // Ctrl+R sends a message st never had again; with none to send it speaks into the box,
-            // as it does once the box is open (Nathan, 2026-10-05: it did nothing until a letter
-            // had opened the box).
+            // Ctrl+R tries again: it sends a message st never had again. Speaking into the box is
+            // Ctrl+Y, with the box open or not (Nathan, 2026-10-05: it did nothing until a letter
+            // had opened the box; 2026-10-14: Ctrl+R means retry, so voice moved off it).
             KeyCode::Char('r') if control && conversation.is_some() && self.live => {
                 if let Some(entry) = self.undelivered() {
                     self.effects.push(Effect::Resend { entry });
-                } else {
-                    self.start_voice();
                 }
             }
+            KeyCode::Char('y') if control && conversation.is_some() && self.live => self.start_voice(),
             // Backspace takes a message st never had back into the box, to change or delete.
             KeyCode::Backspace
                 if quiet
@@ -3013,6 +2998,7 @@ impl Ui {
             Action::NewMission => self.open_new_mission(),
             Action::ToggleSimple => self.toggle_simple(),
             Action::ToggleTerminalFirst => self.toggle_terminal_first(),
+            Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);
@@ -4347,7 +4333,7 @@ mod tests {
             first.contains("alerts") && first.contains("working") && first.contains("main"),
             "{first}"
         );
-        assert!(!first.contains("⌂") && first.contains("active"), "{first}");
+        assert!(!first.contains("⌂") && !first.contains("active") && !first.contains("stuck"), "{first}");
         // A glass with nothing open shows Home, under a bar for starting things.
         assert!(shown.contains("New terminal") && !shown.contains("New agent"), "{shown}");
         assert!(shown.contains("ctrl+k open"));
@@ -4591,6 +4577,16 @@ mod tests {
     }
 
     #[test]
+    fn terminal_fallback_defaults_on_and_the_palette_changes_it_locally() {
+        let mut ui = glass();
+        assert!(ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(!ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(ui.terminal_fallback);
+    }
+
+    #[test]
     fn a_terminal_first_device_attaches_an_agent_after_the_tab_stays_in_front() {
         // Nathan, 2026-10-07: a setting for the terminal as the default view; the conversation
         // stays the default, and flicking through tabs attaches nothing.
@@ -4704,7 +4700,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_speaks_in_a_conversation_without_the_box_open_first() {
+    fn ctrl_y_speaks_in_a_conversation_without_the_box_open_first() {
         let mut ui = glass();
         ui.live = true;
         ui.open_in_glass(
@@ -4712,12 +4708,12 @@ mod tests {
             Open::Tab,
         );
         assert!(!ui.editing, "the box is closed");
-        ctrl(&mut ui, 'r');
+        ctrl(&mut ui, 'y');
         // Without a speech helper (this test has none) it says so; before, it did nothing.
         let flash = ui.flash.as_ref().map(|(message, _)| message.as_str());
         assert!(
             flash.is_some_and(|message| message.contains("voice")),
-            "ctrl+r reached voice: {flash:?}"
+            "ctrl+y reached voice: {flash:?}"
         );
     }
 
@@ -5239,6 +5235,25 @@ mod tests {
         assert!(!ui.home_open());
         // The sidebar has no Usage section any more.
         assert!(SIDEBAR_SECTIONS.iter().all(|(_, name)| *name != "Usage"));
+    }
+
+    #[test]
+    fn inventory_demand_tracks_the_shown_sidebar_and_usage_overlay() {
+        let mut ui = glass();
+        let initial = ui.inventories_wanted();
+        assert!(!initial.terminals && initial.usage_hours.is_none());
+        ctrl(&mut ui, 's');
+        let sidebar = ui.inventories_wanted();
+        assert!(sidebar.machines && sidebar.sessions && sidebar.terminals);
+        ui.click(Hit::Usage);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(24));
+        ui.usage_period_next();
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.glasses.as_ref().unwrap().sidebar.focused);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168), "changing focus keeps the visible usage overlay followed");
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(ui.inventories_wanted().usage_hours, None);
     }
 
     #[test]
@@ -5835,11 +5850,6 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             })
         };
-        let active = hit_at(&ui, Hit::PaletteSection(2));
-        click(&mut ui, active);
-        assert_eq!(section(&ui), Some(2), "active opens the missions");
-        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        screen(&ui);
         let need = hit_at(&ui, Hit::Home);
         click(&mut ui, need);
         assert!(ui.home_open());
@@ -6612,19 +6622,6 @@ mod tests {
     }
 
     #[test]
-    fn the_top_bar_says_missions_instead_of_a_count_it_does_not_have() {
-        let mut ui = glass();
-        let top = |ui: &Ui| screen(ui).lines().next().unwrap().to_owned();
-        assert!(top(&ui).contains("active"), "{}", top(&ui));
-        ui.world.missions_followed = false;
-        let bar = top(&ui);
-        assert!(bar.contains("◇ missions") && !bar.contains("active"), "{bar}");
-        // st's own count stands in for the rows it does not send.
-        ui.world.active_missions = Some(57);
-        assert!(top(&ui).contains("◇ 57 active"), "{}", top(&ui));
-    }
-
-    #[test]
     fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
         let agent = "agent/example/atlas/builder";
         let mut ui = glass();
@@ -6655,49 +6652,12 @@ mod tests {
         ui.world.settled = false;
         ui.world.attention = Load::Ready(vec![]);
         let bar = top(&ui);
-        for word in ["working", "active", "nothing running", "alert", "Ctrl+K"] {
+        for word in ["working", "nothing running", "alert", "Ctrl+K"] {
             assert!(!bar.contains(word), "{word}: {bar}");
         }
         assert!(bar.contains("live"), "{bar}");
         ui.world.settled = true;
         assert!(top(&ui).contains("working"), "{}", top(&ui));
-    }
-
-    #[test]
-    fn the_top_bar_counts_only_missions_that_are_running_and_names_the_stuck_ones() {
-        let mut ui = glass();
-        let words = [
-            Word::Working,
-            Word::Queued,
-            Word::Decision,
-            Word::Stalled,
-            Word::Unstaffed,
-            Word::Unclaimed,
-            Word::Watching,
-            Word::Held,
-            Word::Idle,
-            Word::Done,
-            Word::Failed,
-            Word::Cancelled,
-        ];
-        if let Load::Ready(missions) = &mut ui.world.missions {
-            let template = missions[0].clone();
-            *missions = words
-                .iter()
-                .enumerate()
-                .map(|(index, word)| Mission {
-                    id: format!("mission/example/m{index}"),
-                    title: format!("Mission {index}"),
-                    word: *word,
-                    system: false,
-                    updated_at: chrono::Local::now().to_rfc3339(),
-                    ..template.clone()
-                })
-                .collect();
-        }
-        let bar = screen(&ui).lines().next().unwrap().to_owned();
-        assert!(bar.contains("◇ 2 active"), "{bar}");
-        assert!(bar.contains("▲ 3 stuck"), "{bar}");
     }
 
     #[test]
@@ -6735,6 +6695,17 @@ mod tests {
         assert_eq!(titles, ["Running", "Asks you", "Stuck"]);
         let all = screens::missions_list(&world, 60, "⠋", true);
         assert_eq!(all.ids.len(), 5);
+    }
+
+    #[test]
+    fn a_slow_turn_is_described_by_kinds_and_counts_never_names() {
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
+        screen(&ui);
+        let context = ui.slow_context();
+        assert!(context.starts_with("pane agent, 120x32"), "{context}");
+        assert!(context.contains("agents ") && context.contains("missions "), "{context}");
+        assert!(!context.contains("atlas") && !context.contains('/'), "{context}");
     }
 
     #[test]
@@ -7343,6 +7314,27 @@ mod tests {
         // A failure keeps it for the next try.
         ui.glass_saved(&local, sent[0].key(), Err("member restarting".into()));
         assert_eq!(ui.unsent_glass_writes(), sent);
+    }
+
+    #[test]
+    fn initial_subject_waits_for_a_restored_glass_then_opens_its_conversation_tab() {
+        let mut ui = glass();
+        let agent = ui.world.agents.items()[0].id.clone();
+        let before = tabs(&ui);
+        let mut subject = Some(agent.clone());
+        super::super::live::focus_initial_subject(&mut ui, &mut subject, true, false);
+        assert_eq!(tabs(&ui), before);
+        assert!(subject.is_some());
+        let world = ui.world.clone();
+        ui.glasses_from_graph(vec![graph_glass("0190-main", "r1", "main", &[WEEKLY])]);
+        ui.set_world(world);
+        super::super::live::focus_initial_subject(&mut ui, &mut subject, true, true);
+        assert_eq!(tabs(&ui).2, vec![vec![WEEKLY.to_owned(), format!("agent:{agent}")]]);
+        assert_eq!(ui.focus(), (1, Some(agent.clone())));
+        assert_eq!(ui.live_conversations()[0], agent);
+        assert!(!ui.editing);
+        assert!(ui.terminal.is_none());
+        assert!(subject.is_none());
     }
 
     #[test]

@@ -81,6 +81,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case attentionGet = "attention.get"
     case messagesList = "messages.list"
     case messagesGet = "messages.get"
+    case messageBodyGet = "message-body.get"
     case launchesList = "launches.list"
     case launchesGet = "launches.get"
     case launchVariantsList = "launch-variants.list"
@@ -145,6 +146,7 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .attentionGet: "/v1/client/attention/{id}",
     .messagesList: "/v1/client/messages",
     .messagesGet: "/v1/client/messages/{id}",
+    .messageBodyGet: "/v1/client/message-bodies/{id}",
     .launchesList: "/v1/client/launches",
     .launchesGet: "/v1/client/launches/{id}",
     .launchVariantsList: "/v1/client/launches/{id}/variants",
@@ -187,3 +189,6 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .glassesList: "/v1/client/glasses",
     .glassesGet: "/v1/client/glasses/{id}",
 ]
+
+/// Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043).
+public let st3SidebarArrangementUuid: String = "00000000-0000-7000-8000-000000000001"

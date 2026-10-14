@@ -171,7 +171,8 @@ impl CardReads {
              CROSS JOIN claims INDEXED BY claims_subject_kind_index
                ON claims.subject=subjects.value
              JOIN batches ON batches.id=claims.batch_id
-             WHERE {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2"
+             WHERE {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2
+               AND {UNREPAIRED_CLAIM}"
         ))?;
         // Each subject is folded as soon as its rows end, so a chunk holds one subject's
         // history at a time, as a one-subject read does.

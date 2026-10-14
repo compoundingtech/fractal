@@ -29,7 +29,7 @@ fn selected_labels_preserve_public_fields_and_indexed_batch() {
         run.steps[0].subject.clone(),
     ];
     let connection = store.readers.get();
-    let labels = rows(&connection, &subjects).unwrap();
+    let labels = read(&connection, &subjects).unwrap();
     assert_eq!(labels.len(), 1);
     let label = &labels[&run.steps[0].subject];
     assert_eq!(label.run, run.subject);
@@ -39,14 +39,7 @@ fn selected_labels_preserve_public_fields_and_indexed_batch() {
     assert_eq!(label.goal.as_deref(), Some("First goal"));
     assert_eq!(label.status, run.steps[0].status);
     assert_eq!(label.updated_at_unix_ms, run.steps[0].updated_at_unix_ms);
-    assert!(
-        rows(
-            &connection,
-            &vec!["step-run/absent".into(); MAX_SELECTED + 1]
-        )
-        .is_err()
-    );
-    assert!(rows(&connection, &[]).unwrap().is_empty());
+    assert!(read(&connection, &[]).unwrap().is_empty());
     let plan = connection
         .prepare(&format!("EXPLAIN QUERY PLAN {QUERY}"))
         .unwrap()
@@ -82,11 +75,11 @@ fn caller_snapshot_does_not_mix_labels_from_a_newer_source_cut() {
     let subjects = vec![run.steps[0].subject.clone()];
     let connection = store.readers.get();
     let snapshot = connection.unchecked_transaction().unwrap();
-    let before = rows(&snapshot, &subjects).unwrap();
+    let before = read(&snapshot, &subjects).unwrap();
     store
         .set_step_state(&subjects[0], "completed", None)
         .unwrap();
-    let old_cut = rows(&snapshot, &subjects).unwrap();
+    let old_cut = read(&snapshot, &subjects).unwrap();
     assert_eq!(old_cut[&subjects[0]].status, before[&subjects[0]].status);
     assert_eq!(
         old_cut[&subjects[0]].updated_at_unix_ms,
@@ -98,7 +91,7 @@ fn caller_snapshot_does_not_mix_labels_from_a_newer_source_cut() {
     );
     snapshot.commit().unwrap();
     assert_eq!(
-        rows(&connection, &subjects).unwrap()[&subjects[0]].status,
+        read(&connection, &subjects).unwrap()[&subjects[0]].status,
         "completed"
     );
 }

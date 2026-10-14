@@ -65,6 +65,7 @@ mission "catalog" state="ready" {
                 &step,
                 "claim",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(SEAT.into()),
                     incarnation: Some("chooser:one".into()),
                     summary: None,

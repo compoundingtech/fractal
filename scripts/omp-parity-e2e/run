@@ -3,15 +3,15 @@ set -euo pipefail
 umask 077
 
 usage() {
-  printf '%s\n' 'Usage: scripts/omp-parity-e2e/run --st3 BINARY --stui BINARY --out DIRECTORY [--corpus OMP.jsonl] [--keep]'
+  printf '%s\n' 'Usage: scripts/omp-parity-e2e/run --st3 BINARY --out DIRECTORY [--corpus OMP.jsonl] [--keep]'
 }
-ST3='' STUI='' OUT='' CORPUS='' KEEP=0
+ST3='' OUT='' CORPUS='' KEEP=0
 while (($#)); do
   case "$1" in
-    --st3|--stui|--out|--corpus)
+    --st3|--out|--corpus)
       (($# >= 2)) || { usage >&2; exit 2; }
       case "$1" in
-        --st3) ST3=$2;; --stui) STUI=$2;; --out) OUT=$2;; --corpus) CORPUS=$2;;
+        --st3) ST3=$2;; --out) OUT=$2;; --corpus) CORPUS=$2;;
       esac
       shift 2;;
     --keep) KEEP=1; shift;;
@@ -19,7 +19,7 @@ while (($#)); do
     *) usage >&2; exit 2;;
   esac
 done
-[[ -n "$ST3" && -n "$STUI" && -n "$OUT" ]] || { usage >&2; exit 2; }
+[[ -n "$ST3" && -n "$OUT" ]] || { usage >&2; exit 2; }
 mkdir -p -- "$OUT"
 OUT=$(realpath "$OUT")
 REPORT="$OUT/report.txt"
@@ -51,10 +51,8 @@ for dependency in curl jq node tmux realpath mktemp; do
   require "dependency $dependency" has_command "$dependency"
 done
 ST3=$(realpath "$ST3")
-STUI=$(realpath "$STUI")
 [[ -z "$CORPUS" ]] || CORPUS=$(realpath "$CORPUS")
 require 'st3 executable' test -x "$ST3"
-require 'stui executable' test -x "$STUI"
 ROOT=$(realpath "$(dirname "${BASH_SOURCE[0]}")/../..")
 FIXTURE="$ROOT/crates/st3/fixtures/native-records/omp-parity.jsonl"
 CHILD_FIXTURE="$ROOT/crates/st3/fixtures/native-records/omp-parity-child.jsonl"
@@ -321,7 +319,7 @@ done
 # Open the actual saved session through Ctrl+K's direct session-id affordance.
 # No host-wide fake OMP process: the fixture remains a historical session.
 export ST3_ENDPOINT="$SOCKET" ST3_PERSON='person/tester'
-printf -v UI_COMMAND '%q --local' "$STUI"
+printf -v UI_COMMAND '%q ui --local' "$ST3"
 check 'start isolated stui terminal' tmux -f /dev/null -S "$TMUX_SOCKET" new-session -d -s omp-e2e -n stui -x 240 -y 100 "$UI_COMMAND"
 TMUX_STARTED=1
 printf 'INFO monitor: tmux -S %s attach -t omp-e2e\n' "$TMUX_SOCKET" | tee -a "$REPORT"

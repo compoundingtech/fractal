@@ -72,7 +72,6 @@ WHEN OLD.id IS NOT NEW.id OR OLD.batch_id IS NOT NEW.batch_id
         AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id)
         AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
 END;
-DROP TRIGGER IF EXISTS directive_note_record_insert;
 CREATE TRIGGER IF NOT EXISTS directive_note_record_insert AFTER INSERT ON replica_records
 WHEN NEW.claim_id IS NOT NULL BEGIN
     INSERT OR IGNORE INTO local_directive_note_dirty
@@ -87,7 +86,6 @@ WHEN NEW.claim_id IS NOT NULL BEGIN
                     WHERE legacy_position.batch_id=claims.batch_id
                         AND legacy_position.store_index<claims.store_index)));
 END;
-DROP TRIGGER IF EXISTS directive_note_record_update;
 CREATE TRIGGER IF NOT EXISTS directive_note_record_update
 AFTER UPDATE OF position,claim_id,state,replacement_claim_id ON replica_records
 WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id
@@ -98,7 +96,6 @@ WHEN OLD.position IS NOT NEW.position OR OLD.claim_id IS NOT NEW.claim_id
         AND kind='person.directive-note-set'
         AND NOT EXISTS (SELECT 1 FROM local_directive_note_pending WHERE claim_id=claims.id);
 END;
-DROP TRIGGER IF EXISTS directive_note_record_delete;
 CREATE TRIGGER IF NOT EXISTS directive_note_record_delete AFTER DELETE ON replica_records
 WHEN OLD.claim_id IS NOT NULL BEGIN
     INSERT OR IGNORE INTO local_directive_note_dirty
@@ -123,6 +120,39 @@ END;
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     // Earlier builds cannot admit this kind. Install an empty projection before any new
     // admission, without scanning or rewriting the existing log during schema migration.
+    // Preserve the schema cookie on unchanged opens, while upgrading an older trigger
+    // definition exactly once. The fixed definitions contain no whitespace-bearing literals.
+    for suffix in ["insert", "update", "delete"] {
+        let name = format!("directive_note_record_{suffix}");
+        let marker = format!("CREATE TRIGGER IF NOT EXISTS {name}");
+        let start = SCHEMA
+            .find(&marker)
+            .context("missing directive-note trigger definition")?;
+        let end = SCHEMA[start..]
+            .find("\nEND;")
+            .context("unterminated directive-note trigger definition")?;
+        let expected = SCHEMA[start..start + end + 5].replace("IF NOT EXISTS ", "");
+        let installed: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [&name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let tokens = |sql: &str| {
+            sql.trim()
+                .trim_end_matches(';')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        if installed
+            .as_deref()
+            .is_some_and(|sql| tokens(sql) != tokens(&expected))
+        {
+            connection.execute_batch(&format!("DROP TRIGGER {name}"))?;
+        }
+    }
     connection.execute_batch(SCHEMA)?;
     Ok(())
 }
