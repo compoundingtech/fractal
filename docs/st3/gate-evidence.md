@@ -358,7 +358,7 @@ accepted base, never from the change under test. A signer's trust level is the p
 its principal before the first slash (`machine/ci1` is level `machine`); it is never
 read from the record. Removing a line revokes every note that key signed.
 
-`kind` is the record's `runner`, and only `nix` and `sekrets` are accepted. The latest
+`kind` is the record's `runner`, and only `nix`, `wrapper` (the existing CI job wrapped so it signs its result) and `sekrets` are accepted. The latest
 trusted record for the tree and check decides, so a newer failure supersedes an older
 pass. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
 `wrong_check`, `bad_signature` (forged or unsigned), `untrusted_signer` (a valid

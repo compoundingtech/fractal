@@ -30,7 +30,7 @@ NOTES = 'refs/notes/evidence/'
 STATEMENT_TYPE = 'https://in-toto.io/Statement/v1'
 PREDICATE_TYPE = 'https://smalltalk.dev/evidence/gate/v1'
 KEYS_PATH = '.st/evidence-keys'
-KINDS = ('nix', 'sekrets')
+KINDS = ('nix', 'wrapper', 'sekrets')
 
 
 class Failure(Exception):

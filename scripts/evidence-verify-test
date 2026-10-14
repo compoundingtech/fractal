@@ -114,10 +114,12 @@ class Verifier(unittest.TestCase):
                          (record, 'nix', 'machine/ci1', 'machine'))
         self.assertEqual(result['command'], ['make', 'test'])
 
-    def test_sekrets_is_the_other_accepted_kind_and_unknown_kinds_are_not(self):
+    def test_wrapper_and_sekrets_are_accepted_kinds_and_unknown_kinds_are_not(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='sekrets')
         self.assertEqual(self.f.verify(self.tree)[1]['kind'], 'sekrets')
-        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='hand-typed', seconds=1)
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='wrapper', seconds=1)
+        self.assertEqual(self.f.verify(self.tree)[1]['kind'], 'wrapper')
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='hand-typed', seconds=2)
         self.assertEqual(self.reason(self.tree), 'unsupported_kind')
 
     def test_a_forged_signature_is_rejected(self):
