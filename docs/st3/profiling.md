@@ -128,6 +128,14 @@ the part not yet used and a reset time. `st slo explain ID` says one row in plai
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
 
+`st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
+`7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
+remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
+day after seven. A chart column is the lowest reading in its slice of the period, so a brief spend
+shows; a column with no reading is a dot, which means the daemon was down or nothing was
+measured, not that a budget was spent. `GET /v1/slo/history?id=&since_ms=&until_ms=&steps=`
+serves the same columns. A node with a collector keeps the longer history there.
+
 `st doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
 over their target in the last five minutes. A p99 target is missed in a window when more than 1%
 of its samples are over. A max target is missed when any one sample is over. A miss is `info`,
@@ -210,6 +218,33 @@ Terminal sockets (`terminal_stream_socket`) follow the shared latest-screen sour
 recheck their live fence; the existing fence span is `terminal/live-fence`. These are source
 locations for investigating ongoing work, not an attribution of process CPU. Long-poll waits and
 socket lifetime must be distinguished from the cost of a completed read.
+
+On `/v1/client/collections/stream` (`st3.client.collections.v0`), a conversation
+subscription additionally owns `stream conversation/first-frame` from accepted receipt
+through its first successful data-frame send. Its `conversation/first-frame-total`
+includes admission/scheduler delay, owner resolution, initial retries, page work and
+outbox/send delay. `completion: finished` means the socket send succeeded, not that
+the client rendered it; cancellation or replacement records `dropped`, not success.
+The follower releases first-frame ownership before its intentional change long poll.
+Async admission, owner resolution/relay, first-page and send spans record wall time
+only. CPU and SQL are charged only during a future's poll or its physical blocking
+worker, never across an async suspension. Native preparation/fold, bounded header,
+stored-message overlay, page/frame preparation and serialization use thread-local
+CPU/SQL spans. These overlapping spans are not additive. Labels are static and carry
+no transcript, audio, text, session identifier or credential attributes. No public
+request-latency rows or diagnostic fields are added.
+
+Local opening captures the first page and replay boundary together, using the native
+keyset fold and reusing its bounded head for the header. Remote opening retains the
+two established owner reads (changes with no cursor and zero wait, then timeline);
+profile those reads separately before attributing repeated fold work to local opening.
+For representative receipts, pin the daemon build and capture five successful initial,
+tab-switch and reconnect frames on the used collections route, with client receipt/render
+time beside the internal profile. Record local versus relayed ownership and cold versus
+warm source state; exclude intentional reconnect-offline time from server-work comparisons.
+The isolated `conversation_first_frame_profile_lifecycle` test runs with
+`ST3_PROFILE_DIR` and `ST3_PROFILE_SLOW_MS=0`; it proves successful completion and
+wall-only async attribution before long-poll idle, not production performance.
 
 A slow record's `completion` is `finished` when the request or task explicitly finished its
 profile. If its owner exits without finishing, including a canceled HTTP request, the last
@@ -556,6 +591,25 @@ or unhealthy health, a frontier ahead of the log, a non-incremental kind, a work
 malformed operation metadata, an operation conflict, and `incremental-error:CODE`. Healthy
 incremental chunks produce no fallback log. The target is the admitted index observed at entry;
 a full replay can also include claims admitted since that observation.
+
+### Startup phase durations
+
+Every successful daemon start emits one structured stderr line when both listeners are ready:
+`st3: startup phases {"configuration_ms":...,"install_hooks_ms":...,"open_store_ms":...,...,"total_ms":...}`.
+The service journal captures this line without enabling profiling. Durations use a monotonic
+clock and milliseconds; `total_ms` starts at entry to daemon initialization, not process execution.
+Failed starts that never reach listener readiness do not emit this summary.
+
+The phase keys partition that interval: `configuration_ms`, `install_hooks_ms`,
+`open_store_ms`, `judge_claims_ms`, `validate_replication_backlog_ms`,
+`apply_replication_repairs_ms`, `settlement_projection_ms`, `runtime_prelude_ms`,
+`login_environment_ms`, `isolation_pty_ms`, `recorder_ms`, `app_state_ms`,
+`reconciler_ms`, `background_tasks_ms`, and `bind_ms`. Configuration includes identity and
+instance-lock setup; hooks include profiler initialization and the file-descriptor limit.
+Opening the store includes signing-key setup. Settlement and projection share one interval;
+the runtime prelude includes the startup claim, notification state, and PTY directory.
+Binding ends at the second listener's readiness callback. The summary adds no per-request
+instrumentation and is not repeated for projection chunks or readiness progress updates.
 
 ## Reproduce a mailbox-wake comparison
 

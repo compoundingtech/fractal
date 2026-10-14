@@ -15,6 +15,12 @@ back on the session it suspended on, holds hour-old mail, and consumes recent ne
 mail exactly once. The Rust wrapper
 `crates/st3/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
 
+The boot, no-st2 and subagent fixtures put their private bin directory first, followed by
+inherited `PATH` entries that neither contain an `st2` executable nor name an `st2` path.
+Provide Bash, Python, `env`, Git, curl and `pty` on the inherited path, plus Node for pi/omp.
+Login shells and stand-in interpreters use discovered absolute executables; conventional
+system bin directories are not required, so these fixtures also run in Nix sandboxes.
+
 The OMP `when-idle` regression uses a separate runner:
 
     ../st3-rollout-binding-canary/run BINARY EVIDENCE_DIR omp when-idle [--omp EXECUTABLE]
@@ -78,7 +84,12 @@ so races the real ones hide are hit every time.
 The evidence directory holds `result.json` (the verdict and the seat's last state), `daemon.log`,
 `terminal-*.txt` (the seat's screen), `trace-*.jsonl` (its claims), `receipts-*.jsonl` (what the
 stand-in saw and did), and `observation-outboxes.json` (pending event sequences and driver
-diagnostics). Predecessor adoption can also leave legacy harness records. Read the trace first: it shows which side
+diagnostics), and private `driver-*.log` files. Runtime roots are registered with the
+process guardian before startup. On interruption, the guardian reaps their writers, captures
+these files and records an interrupted verdict before removing the roots. A collection error
+is recorded in `capture-errors.json`; it cannot skip the other logs. Normal failure snapshots
+are captured before shutdown, with the final outbox state in `observation-outboxes-after-stop.json`.
+Predecessor adoption can also leave legacy harness records. Read the trace first: it shows which side
 wrote what, in what order. Fix the product on main; do not slow a stand-in to hide a race. The
 canaries found these when they were written: Codex ending its session before the daemon's first
 mailbox replay, Codex publishing its predecessor's `ended` record as the new incarnation's, and a

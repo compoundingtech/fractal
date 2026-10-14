@@ -105,6 +105,7 @@ pub fn words() -> Value {
         AgentState::Restarting,
         AgentState::Down,
         AgentState::Stopped,
+        AgentState::Retired,
         AgentState::Unknown,
     ]
     .iter()

@@ -658,6 +658,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
         .agents()
         .map(|agent| {
             let state = match (agent.state.as_str(), agent.harness_state.as_deref()) {
+                ("retired", _) => AgentState::Retired,
                 _ if agent.fault.is_some() => AgentState::Fault,
                 // A seat whose message path stopped polling or cannot hand off takes no
                 // messages, however ready its harness looks. An `outdated` path still delivers.
@@ -735,7 +736,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                 unmanaged: false,
                 // A running agent with a runtime is worth trying; opening it finds the terminal.
                 terminal: !agent.runtime_ids.is_empty()
-                    && !matches!(agent.state.as_str(), "stopped" | "failed"),
+                    && !matches!(agent.state.as_str(), "stopped" | "failed" | "retired"),
                 parent: agent
                     .under
                     .first()

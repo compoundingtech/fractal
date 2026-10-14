@@ -75,7 +75,7 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
         AgentState::Starting => ("◌", theme::WAITING),
         AgentState::Restarting => ("◌", theme::WAITING),
         AgentState::Down => ("⊘", theme::FAULT),
-        AgentState::Stopped => ("○", theme::QUIET),
+        AgentState::Stopped | AgentState::Retired => ("○", theme::QUIET),
         AgentState::Unknown => ("?", theme::QUIET),
     }
 }
@@ -92,6 +92,7 @@ pub fn agent_word(state: AgentState) -> &'static str {
         AgentState::Restarting => "restarting",
         AgentState::Down => "down",
         AgentState::Stopped => "stopped",
+        AgentState::Retired => "retired",
         AgentState::Unknown => "not managed",
     }
 }
@@ -442,7 +443,8 @@ fn structured_request(
         card.section("choose one", None, inner);
     }
     for (index, answer) in request.answers.iter().enumerate() {
-        let chosen = drafts.answering == Some(index);
+        let chosen = drafts.answering == Some(index)
+            || drafts.needs_words.as_deref() == Some(answer.label.as_str());
         // A radio row: the dot says it is a choice, the filled one is the choice, and the chosen
         // row is lifted off the card so it cannot be missed.
         let fill = |style: Style| {
@@ -526,8 +528,34 @@ fn structured_request(
             ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
         ]);
     } else if drafts.answering.is_some() {
+        // An option that needs the person's words opens a box for them instead of sending.
+        let needs_words = drafts
+            .answering
+            .and_then(|index| request.answers.get(index))
+            .is_some_and(|answer| answer.outcome.as_deref() == Some("request_changes"));
+        // The box for them is on the card from the moment the option is chosen: typing starts it.
+        if needs_words {
+            let label = drafts
+                .answering
+                .and_then(|index| request.answers.get(index))
+                .map(|answer| answer.label.clone())
+                .unwrap_or_default();
+            card.section("in your own words", None, inner);
+            text_box(
+                card,
+                &format!("answer {from}"),
+                drafts,
+                &format!("what should change? Start typing; Enter sends it with “{label}”"),
+                inner,
+            );
+        }
         card.buttons(&[
-            ("enter", "Send this answer", Hit::Enter, theme::ACCENT),
+            (
+                "enter",
+                if needs_words { "Write your words" } else { "Send this answer" },
+                Hit::Enter,
+                theme::ACCENT,
+            ),
             ("↑↓", "Another", Hit::Key('a'), theme::OVERLAY1),
             ("esc", "Not now", Hit::Escape, theme::OVERLAY1),
         ]);
@@ -1492,6 +1520,7 @@ fn agent_group(agent: &Agent) -> &'static str {
         AgentState::Working | AgentState::Compacting => "working",
         AgentState::Idle | AgentState::Starting | AgentState::Restarting => "idle",
         AgentState::Stopped | AgentState::Unknown => "stopped",
+        AgentState::Retired => "retired",
     }
 }
 
@@ -2712,15 +2741,16 @@ pub struct AgentAction {
 pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
     let row = |key, label, what| AgentAction { key, label, what };
     let mut rows = Vec::new();
-    let running = !matches!(agent.state, AgentState::Stopped | AgentState::Unknown);
+    let retired = agent.state == AgentState::Retired;
+    let running = !matches!(agent.state, AgentState::Stopped | AgentState::Retired | AgentState::Unknown);
     if agent.state == AgentState::Working {
         rows.push(row('i', "Interrupt", "stop its current turn, as Esc does in its own screen"));
     }
     if running {
         rows.push(row('r', "Restart", "a new process for the same seat, on its declaration"));
         rows.push(row('p', "Suspend", "stop at a quiet moment, keeping its session to resume"));
-        rows.push(row('x', "Retire", "stop it and take it off the lists; start brings it back"));
-    } else {
+        rows.push(row('x', "Stop", "stop its process; start brings it back"));
+    } else if !retired {
         rows.push(row('s', "Start", "start it again on its declaration"));
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }
