@@ -2,8 +2,11 @@
 
 Status: proposed design for [#832](https://github.com/compoundingtech/smalltalk/issues/832)
 and [#841](https://github.com/compoundingtech/smalltalk/issues/841). This note grants no
-authority and implements no command. Factory reviews the use case; Intake independently
-reviews the security boundary before an implementation mission is assigned.
+authority and implements no command. Nathan's 2026-10-14 disposition cancels Slice 0
+and the scratch-pair proof on our machines. Johannes's agent runs that replication proof
+on Johannes's machines; requests for needed st changes go to #832. No Docker or container
+backend is permitted on any of our machines. Approval in principle covers this design note
+only, not an interim mechanism, tool, root helper or implementation.
 
 An agent should be able to validate a generated graph against disposable daemons, invite a
 second disposable member and seed 50 invented documents without becoming a person. The
@@ -63,7 +66,7 @@ production Fabric or Tailscale installation provides this backend.
 
 The trusted launcher owns a registry outside the member's writable filesystem. Each entry
 binds a random scope ID, lifetime ID, creator agent, enrolled participant host identities,
-member public keys, policy digest, creation and expiry times, status and immutable image pin.
+member public keys, policy digest, creation and expiry times, status and immutable binary/source pin.
 A scope has at most two members in the first slice. Member names are labels, not identities.
 The registry is authoritative for admission and removal; an editable `scratch=true` file,
 environment flag, copied database or path prefix cannot recreate an entry.
@@ -117,7 +120,7 @@ The following names illustrate the contract. They are not available CLI instruct
 
 | Operation | Required evidence and result |
 | --- | --- |
-| `scratch create` | Bound enrolled agent; fixed backend/image; fresh empty state; exact limits and expiry. Returns public scope descriptor and private client access through a protected channel. |
+| `scratch create` | Bound enrolled agent; fixed reviewed backend/binary; fresh empty state; exact limits and expiry. Returns public scope descriptor and private client access through a protected channel. |
 | `scratch member add` | Second host attestation and exact member key within the same scope manifest; no user-supplied production root. |
 | `scratch invite` / `scratch join` | Current creator authority plus both member attestations; signed single-use domain-specific invitation and checked redemption. |
 | `scratch apply` / `scratch document put` | Actor remains the creator agent; target is the certified scope instance; bounded fixture input; current lifetime rechecked at commit. |
@@ -245,14 +248,13 @@ transport enrollment is reserved by this design note.
 
 ## Review and next assignment
 
-Factory first checks whether this limited two-member flow removes the specific manual invite
-and 50-document bottleneck. Intake then checks the threat matrix, bootstrap identity,
+Factory records needed st changes for Johannes's replication proof on his machines. Intake then checks the threat matrix, bootstrap identity,
 cross-host attestation, protocol/import coverage, deadline recovery and OS boundary. The
 remaining implementation decisions are the qualified first backend and caller verifier,
 trusted launcher enrollment, manifest encoding, transport provisioning and resource limits.
 Unavailable prerequisites must be stated in the implementation plan with a named owner.
 
-Only after those reviews should a finite implementation mission specify source owners,
+Only after those reviews and the applicable Nathan decision may a separate implementation mission specify source owners,
 native controls, exact-head CI, operator installation and the separate end-to-end replication
 proof. Landing this note does not close #832's implementation demand or establish the iOS
 replication proof.
@@ -315,83 +317,48 @@ reaches the agent or guest. ACL tests must deny all production tags. Fabric uses
 scope-only identities with exact peer grants and verified expiry, never a production home.
 These are reviewed future configurations, not currently installed grants.
 
-### Slice 0 and staged delivery
+### Withdrawn Slice 0 and implementation boundary
 
-Slice 0 is an interim operator-prepared disposable pair, built and torn down by one reviewed
-fixed script/image. The agent can trigger exactly one fixed fixture operation with no
-arguments choosing images, paths, commands, endpoints or credentials. Operations owns
-creation and teardown, including failure and caller exit. The pair inherits no production
-state, sockets, workspace, HOME, SSH agent or secrets store. Host-enforced egress permits
-only the two exact peers and the reviewed transport under test. Lifetime is at most one hour,
-enforced outside the guest; pausing or restoring a guest snapshot cannot extend it. Results
-are labelled `interim-scratch-proof`, never accepted as production landing evidence. A
-disconnected participant remains cleanup pending. Preparing guests is not permission to
-impersonate a person from an agent; the exact bootstrap/fixture actor path needs review.
+The interim Slice 0, its operator-prepared pair, image packaging, root trigger and hosted
+replacement fixture are withdrawn. The two-instance replacement was also canceled; no
+pair proof will run on our machines from this note. The earlier packaging estimates and
+first-run dates are void. Completed source and security reviews remain historical proposals,
+not execution authority or evidence of replication, isolation or cleanup.
 
-Operations' held-only assessment on 2026-10-14 says packaging is feasible this week:
-approximately two working days after receiving the fixed fixture command and st build pin
-to prepare a script/image for Intake, then a first run the day after script acceptance. This
-is conditional, not a scheduled or authorized run. The proposed backend is two non-root
-containers on one private internal Docker network, no published ports or host mounts,
-read-only rootfs, tmpfs state, capabilities dropped, no-new-privileges and explicit resource
-limits. Containers share the host kernel: this interim backend confines honest-agent mistakes
-and bounded-data fixtures, not hostile guest code. It is considered only for data fixtures
-running the fixed reviewed st build and check set; hostile-code tests require a stronger
-separately qualified backend. Proposed enforcement combines a 30-minute runner limit with an operator-owned
-one-hour external cleanup deadline. Docker group access is scheduled for removal by the
-separate #310 installation, so the narrow script invocation/installer authorization remains
-unresolved. Docker-group membership is root-equivalent and must not be the agent's trigger
-authorization. Require a narrow root-owned exact-script trigger with no caller arguments;
-no group retention or sudoers change is approved by this note.
+Johannes's agent performs the replication proof on Johannes's machines. Factory watches
+[#832](https://github.com/compoundingtech/smalltalk/issues/832) for requests for needed st
+changes. Our machines run our work; a machine request from Johannes's side stays on his
+machines unless Nathan explicitly directs otherwise.
 
-That local-container pair has no cross-host member or Tailscale, and currently specifies no
-qualified Fabric adapter. It can establish a bounded local replication fixture only; it
-does not yet unblock Johannes's Fabric/cross-host or iOS proof. Operations' feasibility
-answer is packaging feasibility, not proof that a runnable bootstrap/certified-cut fixture
-already exists. Smalltalk must supply that exact pinned fixture contract before the estimate
-starts. Any container backend and fixed trigger still require Intake's independent review.
+The unified Fabric-trust design describes the proposed agent path for creating an invite,
+joining a second member and writing test documents. It must distinguish those proposed
+capabilities from the current person guards. This note changes neither those guards nor
+actor authority. Any implementation, replicated vocabulary, storage/rules change or public
+contract requires its own reviewed assignment and applicable Nathan decision.
 
-| Slice | Deliverable and exit evidence | Owners | Rough sizing guess, not commitment |
-| --- | --- | --- | --- |
-| 0 | Reviewed operator pair/run/teardown; 50 documents, certified-cut field comparison, truthful cleanup | Operations backend/script; smalltalk fixed fixture; Intake security | About two working days after fixture/build inputs, per Operations; authorization unresolved |
-| 1 | Both members inside one VM; create/seed/inspect/remove and caller/expiry/cleanup controls | Smalltalk launcher/verifier; Operations backend/enrollment | 3–5 working days after prerequisite qualification |
-| 2 | Scratch protocol domain and complete ingress/import refusal controls | Smalltalk protocol/source owners; Intake | 3–5 working days after protocol design review |
-| 3 | Cross-host attested pair and disconnected cleanup | Smalltalk launcher/protocol; Operations host backends | 2–4 working days after both hosts are qualified |
-| 4 | Fabric and Tailscale comparison, ephemeral identities and tested ACLs | Operations transport provisioning; smalltalk fixture | 1–3 working days after disposable credentials exist |
+A future design may discuss two separate `st --instance NAME` instances, and existing
+tiles/namespaces where isolation is needed. Separate instance state, sockets and service
+names do not supply a security boundary against a same-UID process. No Docker/container
+backend, root-owned helper, launcher installation, disposable transport credential or
+machine allocation is promised or authorized here. Missing isolation and caller-verification
+primitives remain explicit prerequisites rather than an interim tool to build now.
 
-Slice 1 alone does not unblock the Fabric replication proof. Only a separately qualified
-transport extension of Slice 0 or Slices 3–4 can do that. Until Slice 2, Slice 0/1 images and
-routes are confined entirely by isolation and egress controls, never admitted to production.
-These guesses reserve no worker, host, storage version or implementation schedule.
+### Proposed receipt requirements, no assigned fixture
 
-| Prerequisite | Accountable owner | Still to qualify |
-| --- | --- | --- |
-| Backend and interim Slice 0 script | Operations | Image/script/trigger, credential/egress boundary and teardown |
-| Fixed fixture, caller proxy and launcher service | Smalltalk | Bootstrap actor, reviewed check set, authenticated channel and caller controls |
-| Root enrollment and registry retirement witness | Operations with smalltalk registry source owner | Writer/reader permissions, monotonic witness and rollback recovery |
-| Protocol and import-path audit | Smalltalk | Exact encoding/version and every ingress refusal |
-| Disposable transport credentials and ACLs | Operations | Single-use/expiry, production-tag refusal and no inherited issuing key |
+If a separately approved future operation is assigned, its reviewed check set and immutable
+binary/source pins must be fixed; input is bounded data, never an agent-supplied command.
+Its result must bind the actual participants, certified cuts, field-level comparison and each
+participant's cleanup status. Failed checks and incomplete cleanup stay explicit. Private
+keys, invitation tokens and access secrets never appear in receipts or logs.
 
-### One operation and one receipt
+A replication comparison must use the same certified cut, including source identity and
+projected state, rather than counts or transfer hashes alone. An unavailable certificate
+means incomplete evidence, not an invented accessor. These are proposed acceptance
+requirements, not an available command, fixture assignment or scheduled run.
 
-Prefer `scratch run FIXTURE`, where a reviewed fixture name selects immutable checks and
-image pins. It creates the permitted pair, seeds bounded data, runs that fixed check set,
-retires the lifetime and returns one machine-readable receipt. Input is bounded data, never
-an agent-supplied command or script; debugging operations have the same restriction. The
-receipt includes scope/lifetime, policy/check/image/member pins, certified cuts, field-level
-document comparison and each participant's cleanup status. Failed checks and incomplete
-cleanup remain explicit. Member private keys, invitation tokens and access secrets never
-appear in receipts/logs. Private client access uses the authenticated per-seat channel and
-expires with its exact scope/lifetime. Scratch claim references are launcher-issued typed
-IDs; production admission must reject them rather than replay them as production authority.
-
-The replication proof compares both members at the same certified cut field by field,
-including source identity and projected state, rather than comparing counts or transfer
-hashes alone. If the fixture cannot certify that cut, its result is incomplete and states the
-missing accessor. No legacy snapshot helper is assumed to supply a bounded certificate.
-
-When delegated grants are qualified, the exact creation request becomes a grant-authorized
-operation; fresh state, attestation, domain separation and cleanup remain required.
+Delegated-grant and authority migration remain future design questions. No implementation
+follows from landing this note; Nathan must see the reviewed design before any interim
+mechanism, tool or root helper is built from it.
 
 ### Additional acceptance controls
 
