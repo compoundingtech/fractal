@@ -21,6 +21,7 @@ fn agent(id: &str) -> Resource {
 }
 fn agents(app: &mut App, ids: &[&str]) -> Option<Command> {
     app.update(Update::Window {
+        received: std::time::Instant::now(),
         window: Window::Agents,
         snapshot: snapshot(),
         items: ids.iter().map(|id| agent(id)).collect(),

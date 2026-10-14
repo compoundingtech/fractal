@@ -2,16 +2,19 @@
 name = "stui"
 version = "0.1.0"
 edition = "2024"
-description = "Smalltalk terminal UI starter shell"
+description = "Smalltalk terminal UI library"
 license = "MIT"
 # The workspace's build identity stamp, shared with st2 and st-drivers (see src/version.rs).
-build = "../../build.rs"
+build = "../st-drivers/build.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 crossterm = "0.29"
 ratatui = { workspace = true }
+smallclaims = { path = "../smallclaims" }
 st3-client = { path = "../st3-client" }
+st3-terminal-direct = { path = "../st3-terminal-direct" }
 st3-feed = { path = "../st3-feed" }
 st3-conversation-ui = { path = "../st3-conversation-ui", features = ["ratatui"] }
 st3-ui-model = { path = "../st3-ui-model" }
@@ -37,17 +40,13 @@ pty-client = { git = "https://github.com/compoundingtech/pty", rev = "ad6cce5ab7
 pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "ad6cce5ab74d2594dbd0c86d46747b0e6c17b440" }
 pty-core = { git = "https://github.com/compoundingtech/pty", rev = "ad6cce5ab74d2594dbd0c86d46747b0e6c17b440" }
 
-[[bin]]
-name = "stui"
-path = "src/main.rs"
-
 # Its own tests run with the crate's, so the timing log it writes stays valid JSON.
 [[example]]
 name = "phone_client"
 test = true
 
 [dev-dependencies]
-smallclaims = { path = "../smallclaims" }
+st3-schema = { path = "../st3-schema" }
 st3 = { path = "../st3" }
 tempfile = "3"
 axum = { version = "0.8", features = ["ws"] }

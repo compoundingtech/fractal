@@ -27,6 +27,7 @@ use tower::ServiceExt as _;
 
 use crate::archive::hydrate_eval;
 use crate::graph::{parse_intent, resolve_document_references};
+use crate::message_body;
 #[cfg(test)]
 use crate::model::AttentionRequest;
 use crate::model::ClientReplicated;
@@ -42,9 +43,10 @@ use crate::model::{
     LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
     MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
     MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
-    MissionRunRequest, MissionRunView, OperationalRepairApplyRequest, OperationalRepairPlan,
-    OperationalRepairResult, PlannerSpec, PlanningApprovalRequest, PlanningCancelRequest,
-    PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningRevisionRequest,
+    MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView,
+    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec,
+    PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest,
+    PlanningProposalRequest, PlanningRevisionRequest,
     PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse,
     ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse, ReplicationHealAnswer,
     ReplicationHealAnswerRequest, ReplicationHealNextRequest, ReplicationHealStep,
@@ -59,19 +61,40 @@ use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
 mod client_blobs;
+#[cfg(test)]
+mod terminal_gate_evidence;
+mod message_bodies;
 mod client_adapters;
 mod client_presence;
 mod client_v0;
 mod custom;
 mod delivery_presence;
+pub(crate) mod agent_harness;
+#[cfg(test)]
+mod harness_health_controls;
+#[cfg(test)]
+mod harness_health_output_controls;
 mod delivery_probes;
 mod github_watch;
 mod harness_events;
 mod mailbox;
 mod mail_backlog;
+pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
+mod response_body;
 mod owned_sets;
+mod published_attention;
+pub use published_attention::start_attention_list;
+#[cfg(test)]
+pub(crate) use published_attention::{published_attention_rows, refresh_attention_list};
+mod directive_notes;
+mod request_latency;
+mod client_observations;
 mod terminal_view;
+mod work_response;
+mod published_lists;
+pub use published_lists::start_published_lists;
+mod changes;
 
 pub(crate) use client_v0::raw_terminal::splice as raw_terminal_splice;
 pub(crate) use client_v0::raw_terminal::{
@@ -147,6 +170,9 @@ struct ClientSnapshot {
     store_index: u64,
     projection_version: String,
     created_at: String,
+    /// For rows a background refresher folded: when it published them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    published_at: Option<String>,
 }
 
 /// A client page and the snapshot it was read in, which the envelope names.
@@ -168,6 +194,11 @@ struct ClientListQuery {
     state: Option<String>,
     #[serde(default)]
     native_only: bool,
+    /// Agents and current work: wait briefly for a roster, or a work list, at least as new as this
+    /// request, rather than answering at once from the newest published one. Agents skip the wait
+    /// when the latest roster refresh failed and none is in flight.
+    #[serde(default)]
+    fresh: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -196,7 +227,7 @@ struct ClientPageCursor {
 }
 
 fn signal_changed(state: &AppState) {
-    crate::performance::record_wake("api", None);
+    crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::Api, None);
     state.notify.notify_one();
     signal_visible_change(state);
 }
@@ -220,7 +251,7 @@ pub(crate) fn signal_message_changed(state: &AppState, kind: &str, work_wake: bo
 
 /// [`signal_changed`] for a claim, counting the wake under the claim's kind.
 fn signal_claim_changed(state: &AppState, kind: &str) {
-    crate::performance::record_wake("api", Some(kind));
+    crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::Api, Some(kind));
     state.notify.notify_one();
     signal_visible_change(state);
 }
@@ -440,8 +471,32 @@ impl IntoResponse for ApiError {
 }
 
 pub fn router(state: AppState) -> Router {
+    crate::relay_trace::init();
     delivery_presence::start();
     router_for_transport(state, ClientTransportBoundary::Unix)
+}
+
+/// Already-admitted snapshot/receipt transport fixtures only. There is no CLI/API switch
+/// into this router: real native custody controls and the daemon use `router`.
+#[cfg(feature = "test-support")]
+pub(crate) fn admitted_mailbox_protocol_router(state: AppState) -> Router {
+    Router::new()
+        .route("/v1/mailbox/bind", post(mailbox::bind_admitted_fixture))
+        .route("/v1/mailbox", get(mailbox::subscribe_admitted_fixture))
+        .fallback_service(router(state.clone()))
+        .with_state(state)
+}
+
+/// Synthetic private-store transport controls; never physical native admission.
+#[cfg(feature = "test-support")]
+pub(crate) fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Router {
+    assert!(subject.starts_with("agent/example/"));
+    admitted_mailbox_protocol_router(state).layer(Extension(NativeDeliveryPeer {
+        agent: subject.into(),
+        transport: "omp-channel",
+        pid: std::process::id(),
+        archives_inbox: false,
+    }))
 }
 
 /// Build the loopback-only client gateway. Unlike the local Unix boundary, every ordinary
@@ -451,9 +506,13 @@ pub fn fabric_router(state: AppState) -> Router {
 }
 
 fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> Router {
+    crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/harnesses", get(available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
+        .route("/v1/client/notes", get(directive_notes::read))
+        .route("/v1/notes", axum::routing::put(directive_notes::write))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/arrangements", get(client_v0::arrangements::list))
@@ -472,6 +531,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             "/v1/client/request-latency",
             get(client_v0::request_latency),
         )
+        .route("/v1/client/observations", post(client_observations::report)
+            .layer(DefaultBodyLimit::max(client_observations::MAX_BODY_BYTES)))
         .route("/v1/client/documents/content", get(client_v0::document_get))
         .route("/v1/client/usage", get(client_v0::usage_period))
         .route("/v1/client/mail-backlog", get(mail_backlog::get))
@@ -487,8 +548,12 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/devices", get(client_v0::devices))
         .route("/v1/client/attention", get(client_attention))
         .route("/v1/client/attention/{*id}", get(client_attention_detail))
+        // The same rows under the name a person reads.
+        .route("/v1/client/alerts", get(client_attention))
+        .route("/v1/client/alerts/{*id}", get(client_attention_detail))
         .route("/v1/client/messages", get(client_messages))
         .route("/v1/client/messages/{*id}", get(client_messages_detail))
+        .route("/v1/client/message-bodies/{*id}", get(message_bodies::client_body))
         .route("/v1/client/launches", get(client_launches))
         .route(
             "/v1/client/launches/{id}/variants",
@@ -516,6 +581,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         )
         .route("/v1/client/launches/{id}", get(client_launches_detail))
         .route("/v1/client/work", get(client_work))
+        .route("/v1/client/changes", get(changes::list))
+        .route("/v1/client/changes/sync", post(changes::sync))
+        .route("/v1/client/change", get(changes::show))
         .route("/v1/client/work/{*id}", get(client_work_detail))
         .route("/v1/client/agents", get(client_agents))
         .route("/v1/client/resources", get(client_v0::resources::list))
@@ -676,9 +744,15 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/rules/set", post(set_rule))
         .route("/v1/documents/content", get(get_document))
         .route("/v1/diagnostics/harness", post(post_harness_diagnostic))
-        .route("/v1/delivery/hold", get(get_delivery_hold).post(post_delivery_hold))
+        .route(
+            "/v1/delivery/hold",
+            get(get_delivery_hold).post(post_delivery_hold),
+        )
         .route("/v1/claims", get(list_claims).post(post_claim))
         .route("/v1/usage", get(get_usage))
+        .route("/v1/slo", get(get_slo))
+        .route("/v1/slo/history", get(get_slo_history))
+        .route("/v1/usage/messages", get(get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(get_claim))
         .route("/v1/reviews", get(list_reviews))
         .route("/v1/reviews/{*subject}", post(post_review))
@@ -699,11 +773,13 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/mailbox", get(mailbox::subscribe))
         .route("/v1/harness-events", post(harness_events::publish))
+        .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
         .route("/v1/mailbox/bind", post(mailbox::bind))
         .route("/v1/mailbox/attachment", get(mailbox::attachment))
         .route("/v1/mailbox/receipts", post(mailbox::receipt))
         .route("/v1/messages/{message_id}/claims", post(post_message_claim))
         .route("/v1/messages/read/{*subject}", get(read_message))
+        .route("/v1/messages/body/{*subject}", get(message_bodies::body))
         .route("/v1/messages/delivery/{*subject}", get(message_delivery))
         .route("/v1/messages/by-key", get(message_by_key))
         .route("/v1/status", get(status))
@@ -788,6 +864,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/evals", post(start_eval))
         .route("/v1/evals/{*run}", get(get_eval))
         .route("/v1/mission-runs", get(list_mission_runs))
+        .route("/v1/mission-runs/tree", get(list_mission_run_tree))
         .route("/v1/mission-overview", get(mission_overview))
         .route("/v1/outcome-history", get(outcome_history))
         .route("/v1/performance", get(performance_report))
@@ -803,6 +880,10 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route(
             "/v1/mission-runs/{run}/outcome",
             post(set_mission_run_outcome),
+        )
+        .route(
+            "/v1/mission-runs/{run}/report-to",
+            post(set_mission_run_report),
         )
         .route("/v1/mission-runs/{run}", get(get_mission_run))
         .route("/v1/run-generations/{generation}", get(get_run_generation))
@@ -906,7 +987,19 @@ async fn response_envelope_unbounded(
         .into_response();
     }
     let started = Instant::now();
+    let client_request = request.uri().path().starts_with("/v1/client/");
+    let request_id = if client_request {
+        crate::relay_trace::current().map_or_else(
+            || format!("request/{}", new_request_id()),
+            |trace| trace.id().to_owned(),
+        )
+    } else {
+        new_request_id()
+    };
     let request_path = request.uri().path().to_owned();
+    let request_query = request.uri().query().map(str::to_owned);
+    let long_poll = request_query.as_deref().is_some_and(asks_to_wait);
+    let served_remote = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let request_route = request
         .extensions()
         .get::<axum::extract::MatchedPath>()
@@ -917,11 +1010,46 @@ async fn response_envelope_unbounded(
         .get::<crate::profile::Caller>()
         .map(|caller| caller.0.clone())
         .unwrap_or_else(|| "(tcp)".into());
+    let request_method = request.method().clone();
+    let client_class = crate::otel_client_class::ClientClass::from_header(
+        request
+            .headers()
+            .get(client_presence::CLIENT_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    );
+    // The OTel server span exists only while trace export is on; the disabled path
+    // constructs nothing (st2's O11Y-R02 gate).
+    let otel = request_trace(
+        &request_method,
+        &request_route,
+        client_class,
+        request.headers(),
+        &request_id,
+    );
+    if let Some(server) = otel.as_ref()
+        && request.headers().contains_key(axum::http::header::UPGRADE)
+    {
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        request.extensions_mut().insert(crate::otel::UpgradeContext(
+            Some(server.context().span().span_context().clone()),
+        ));
+    }
     let profile = crate::profile::Op::start(
         format!("{} {request_route}", request.method()),
         Some(caller.clone()),
     );
-    let client_request = request.uri().path().starts_with("/v1/client/");
+    let origin = smallclaims::sqlite::telemetry::route_origin(request_method.as_str(), &request_route);
+    let observation_report = request_route == "/v1/client/observations";
+    // These point readers admit snapshot metadata inside their pinned read before
+    // formatting it. Authentication still runs here; their response extension
+    // supplies the envelope snapshot. All other routes keep admission snapshots.
+    let defer_detail_snapshot = (request_method == axum::http::Method::GET
+        || request_method == axum::http::Method::HEAD)
+        && matches!(
+            request_route.as_str(),
+            "/v1/client/observers/{*id}" | "/v1/client/subscriptions/{*id}"
+        );
     let fabric_boundary_error = (matches!(transport, ClientTransportBoundary::FabricLoopback)
         && !client_request
         && request.uri().path() != "/v1/health")
@@ -940,8 +1068,7 @@ async fn response_envelope_unbounded(
                     })
                 })
             })
-            .and_then(|cursor| decode_client_cursor(&cursor).ok())
-            .map(|cursor| cursor.snapshot)
+            .and_then(|cursor| decode_client_cursor_snapshot(&cursor).ok())
     });
     // Authentication can scan pairing claims, and creating a snapshot reads the store. Both
     // must leave the async acceptor free to admit independent requests when SQLite is busy.
@@ -955,21 +1082,50 @@ async fn response_envelope_unbounded(
         let auth_state = state.clone();
         let transport = transport.as_str();
         let auth_profile = profile.clone();
+        let auth_origin = origin.clone();
         let admission_queue = profile.as_ref().map(|op| op.wall_span("admission/queue"));
+        let mut diagnostic_queue =
+            crate::relay_trace::span(crate::relay_trace::Phase::AdmissionQueue);
+        let admission_enqueued = Instant::now();
+        let server_trace = otel.clone();
         let admitted = crate::api::read_deadline::spawn_blocking(move || {
+            diagnostic_queue.finish(crate::relay_trace::Outcome::Completed);
             drop(admission_queue);
+            let queue_ms = admission_enqueued.elapsed().as_millis() as i64;
+            let _server = server_trace.as_ref().map(|span| span.enter());
             let _entered = crate::profile::enter(auth_profile.as_ref());
+            let _origin = smallclaims::sqlite::telemetry::enter_origin(auth_origin);
             let authentication_span = crate::profile::span("admission/authenticate");
-            let authentication = client_v0::authenticate(&auth_state, &auth_request, transport);
+            let authenticate_started = Instant::now();
+            let authentication =
+                crate::relay_trace::result(crate::relay_trace::Phase::Authenticate, || {
+                    client_v0::authenticate(&auth_state, &auth_request, transport)
+                });
+            let authenticate_ms = authenticate_started.elapsed().as_millis() as i64;
             drop(authentication_span);
-            let snapshot_span = crate::profile::span("admission/snapshot");
-            let snapshot = client_request_snapshot(&auth_state, cursor_snapshot.flatten());
-            drop(snapshot_span);
+            let snapshot = (!defer_detail_snapshot && !observation_report).then(|| {
+                let snapshot_span = crate::profile::span("admission/snapshot");
+                let snapshot_started = Instant::now();
+                let snapshot = crate::relay_trace::work(crate::relay_trace::Phase::Snapshot, || {
+                    client_request_snapshot(&auth_state, cursor_snapshot.flatten())
+                });
+                let snapshot_ms = snapshot_started.elapsed().as_millis() as i64;
+                drop(snapshot_span);
+                (snapshot, snapshot_ms)
+            });
+            let (snapshot, snapshot_ms) = snapshot.unzip();
+            if let Some(server) = server_trace.as_ref() {
+                server.record("st.admission.queue_ms", queue_ms);
+                server.record("st.admission.authenticate_ms", authenticate_ms);
+                if let Some(snapshot_ms) = snapshot_ms {
+                    server.record("st.admission.snapshot_ms", snapshot_ms);
+                }
+            }
             (authentication, snapshot)
         })
         .await;
         match admitted {
-            Ok((authentication, snapshot)) => (authentication.map(Some), Some(snapshot)),
+            Ok((authentication, snapshot)) => (authentication.map(Some), snapshot),
             Err(error) => (Err(ApiError::internal(error)), None),
         }
     } else {
@@ -983,28 +1139,68 @@ async fn response_envelope_unbounded(
     if let Some(snapshot) = &client_snapshot {
         request.extensions_mut().insert(snapshot.clone());
     }
+    let envelope_context = response_body::Context {
+        state: state.clone(),
+        client_request,
+        observation_report,
+        request_id: request_id.clone(),
+        client_snapshot,
+        server: otel.clone(),
+        roster: request_route == "/v1/client/agents",
+    };
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
         // handler on a blocking thread so a busy projection or replication pass cannot
-        // occupy an async worker needed to accept another call. Each read on that
-        // thread takes its own read connection, so it never waits for another read.
-        (None, Ok(_)) if request_path == "/v1/health" => next.run(request).await,
+        // occupy an async worker needed to accept another call. Read workers are admitted
+        // before taking store locks; nested work reuses the handler's reader.
+        (None, Ok(_)) if request_path == "/v1/health" || observation_report => {
+            let handler_started = Instant::now();
+            let response = next.run(request).await;
+            if let Some(server) = otel.as_ref() {
+                server.record(
+                    "st.handler.duration_ms",
+                    handler_started.elapsed().as_millis() as i64,
+                );
+            }
+            response
+        }
         (None, Ok(_)) => {
             let runtime = tokio::runtime::Handle::current();
             let handler_profile = profile.clone();
             let cpu_kind = request_route.clone();
             let cpu_client = caller.clone();
             let handler_queue = profile.as_ref().map(|op| op.wall_span("handler/queue"));
+            let mut diagnostic_queue =
+                crate::relay_trace::span(crate::relay_trace::Phase::HandlerQueue);
+            let handler_enqueued = Instant::now();
+            let server_trace = otel.clone();
             let forwarded_handler = request_path == crate::peer::CLIENT_READ_FORWARD_PATH;
-            match crate::api::read_deadline::spawn_handler(move || {
+            let handler_envelope = envelope_context.clone();
+            // The awaiting request owns body collection. Dropping it closes this
+            // channel even when its already-started handler worker is detached.
+            let (_body_owner, body_cancelled) = tokio::sync::oneshot::channel::<()>();
+            let remote = served_remote.clone();
+            let roster_trace = (request_route == "/v1/client/agents").then(|| server_trace.clone()).flatten();
+            match crate::api::read_deadline::spawn_handler(roster_trace, move || {
+                diagnostic_queue.finish(crate::relay_trace::Outcome::Completed);
                 drop(handler_queue);
+                let queue_ms = handler_enqueued.elapsed().as_millis() as i64;
+                let _server = server_trace.as_ref().map(|span| span.enter());
+                let writer_wait = server_trace.as_ref().map(|_| {
+                    Arc::new(smallclaims::sqlite::telemetry::WriterWait::with_origin(origin))
+                });
+                let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait.clone());
                 if let Some(profile) = &handler_profile {
                     profile.queued();
                 }
                 let _entered = crate::profile::enter(handler_profile.as_ref());
-                crate::performance::with_cpu(Some(&cpu_kind), Some(&cpu_client), || {
-                    runtime.block_on(async move {
+                let handler_started = Instant::now();
+                let (response, handler_elapsed) =
+                    crate::performance::with_cpu(Some(&cpu_kind), Some(&cpu_client), || {
+                    let mut diagnostic_handler =
+                        crate::relay_trace::span(crate::relay_trace::Phase::Handler);
+                    let response = runtime.block_on(track_remote_reads(remote, crate::api::read_deadline::handler(async move {
                         // Cancel the actual forwarded relay, not only its outer waiter.
                         // Other routes retain their existing cooperative cancellation;
                         // this transport's mutation variants carry no read budget.
@@ -1021,8 +1217,31 @@ async fn response_envelope_unbounded(
                         } else {
                             next.run(request).await
                         }
-                    })
-                })
+                    })));
+                    diagnostic_handler.finish(if response.status().is_success() {
+                        crate::relay_trace::Outcome::Completed
+                    } else {
+                        crate::relay_trace::Outcome::Failed
+                    });
+                    // The handler has returned its poll-scoped reader. Collect and frame
+                    // JSON on this same blocking worker, under its existing read budget;
+                    // a large response never runs a JSON codec on the async acceptor.
+                    let handler_elapsed = handler_started.elapsed();
+                    let response = runtime.block_on(handler_envelope.wrap_owned(response, body_cancelled))
+                        .unwrap_or_else(IntoResponse::into_response);
+                    (response, handler_elapsed)
+                });
+                if let Some(server) = server_trace.as_ref() {
+                    server.record("st.handler.queue_ms", queue_ms);
+                    server.record(
+                        "st.handler.duration_ms",
+                        handler_elapsed.as_millis() as i64,
+                    );
+                    if let Some(writer_wait) = writer_wait.as_ref() {
+                        crate::otel::record_writer_wait(server, writer_wait.totals());
+                    }
+                }
+                response
             })
             .await
             {
@@ -1031,146 +1250,234 @@ async fn response_envelope_unbounded(
             }
         }
     };
-    if response.status() == StatusCode::SWITCHING_PROTOCOLS
-        || !response
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("application/json"))
+    // Authentication errors and the small health/observation bypasses have no handler
+    // worker. Ordinary handlers already framed their response on that worker.
+    let mut response = if response.extensions().get::<response_body::Metrics>().is_some()
+        || !response_body::is_json(&response)
     {
-        record_request_latency(&request_route, &request_path, &caller, started);
-        if let Some(profile) = profile {
-            profile.finish();
-        }
-        return response;
-    }
-    let enveloping = Instant::now();
+        response
+    } else {
+        envelope_context.wrap(response).await.unwrap_or_else(IntoResponse::into_response)
+    };
+    let metrics = response.extensions_mut().remove::<response_body::Metrics>();
     let status = response.status();
-    let (mut parts, body) = response.into_parts();
-    // A page read inside one SQLite snapshot names that snapshot, which can be newer than the
-    // one this request was admitted at.
-    let client_snapshot = parts
-        .extensions
-        .remove::<ClientSnapshot>()
-        .or(client_snapshot);
-    let raw = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|error| {
-            json!({
-                "code": "invalid-server-json",
-                "message": error.to_string(),
-            })
-        }),
-        Err(error) => json!({
-            "code": "response-read-failed",
-            "message": error.to_string(),
-        }),
-    };
-    let store_index = if client_request {
-        client_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.store_index)
-            .unwrap_or_default()
-    } else {
-        // index() is an atomic load. Health must not queue behind blocking
-        // handlers just to decorate its response.
-        state.store.index().unwrap_or_default()
-    };
-    let request_id = if client_request {
-        format!("request/{}", new_request_id())
-    } else {
-        new_request_id()
-    };
-    let envelope = if client_request && status.is_success() {
-        json!({
-            "api_version": CLIENT_API_VERSION,
-            "request_id": request_id,
-            "snapshot": client_snapshot.expect("a successful client request has a snapshot"),
-            "value": raw,
-        })
-    } else if client_request {
-        client_error_envelope(status, &raw, &request_id)
-    } else if status.is_success() {
-        json!({
-            "api_version": "st3.v1",
-            "request_id": request_id,
-            "snapshot_host": state.node,
-            "store_index": store_index,
-            "value": raw,
-        })
-    } else {
-        json!({
-            "api_version": "st3.v1",
-            "request_id": request_id,
-            "snapshot_host": state.node,
-            "store_index": store_index,
-            "code": raw.get("code").and_then(Value::as_str).unwrap_or("request-failed"),
-            "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
-            "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
-        })
-    };
-    let body = serde_json::to_vec(&envelope).unwrap_or_else(|_| b"{}".to_vec());
-    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
-    record_request_latency(&request_route, &request_path, &caller, started);
+    record_request_latency(
+        &request_method,
+        &request_route,
+        &request_path,
+        request_query.as_deref(),
+        &caller,
+        started,
+        Served {
+            long_poll,
+            remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
+        },
+    );
+    crate::otel::record_http_request_duration(
+        request_method.as_str(),
+        &request_route,
+        client_class,
+        status,
+        started.elapsed(),
+    );
+    finish_request_trace(otel, status);
     if let Some(profile) = profile {
-        profile.enveloped(enveloping.elapsed(), body.len());
+        if let Some(metrics) = metrics {
+            profile.enveloped(metrics.elapsed, metrics.bytes);
+        }
         profile.finish();
     }
-    Response::from_parts(parts, Body::from(body))
+    response
 }
 
-#[derive(Default)]
-struct RouteLatency {
-    count: u64,
-    recent_ms: VecDeque<u64>,
+static REQUEST_LATENCY: OnceLock<Mutex<request_latency::Meter>> = OnceLock::new();
+/// The request's OTel server span: named `METHOD {route}`, a local root unless the caller
+/// sent a valid W3C `traceparent`/`tracestate`, which HTTP requests and WebSocket
+/// upgrades carry alike. `None` whenever trace export is off, so that path allocates
+/// nothing. Phase durations land on this one span as numeric attributes
+/// (`st.admission.queue_ms`, `st.admission.authenticate_ms`, `st.admission.snapshot_ms`,
+/// `st.handler.queue_ms`, `st.handler.duration_ms`) instead of child spans: at
+/// saturation five children per request priced in well above the O11Y-R18 CPU budget,
+/// and a single span keeps the same phase visibility.
+fn request_trace(
+    method: &axum::http::Method,
+    route: &str,
+    client_class: crate::otel_client_class::ClientClass,
+    headers: &axum::http::HeaderMap,
+    request_id: &str,
+) -> Option<tracing::Span> {
+    if !crate::otel::export_enabled() {
+        return None;
+    }
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let span_name = format!("{} {route}", method.as_str());
+    let span = tracing::info_span!(
+        target: "st3::http",
+        "http server request",
+        "otel.name" = span_name.as_str(),
+        "otel.kind" = "server",
+        "span.label" = route,
+        "http.request.method" = method.as_str(),
+        "http.route" = route,
+        "st3.client.class" = client_class.as_str(),
+        "st.request.id" = request_id,
+        "http.response.status_code" = tracing::field::Empty,
+        "st.parent.sampled" = tracing::field::Empty,
+        "st.admission.queue_ms" = tracing::field::Empty,
+        "st.admission.authenticate_ms" = tracing::field::Empty,
+        "st.admission.snapshot_ms" = tracing::field::Empty,
+        "st.handler.queue_ms" = tracing::field::Empty,
+        "st.handler.duration_ms" = tracing::field::Empty,
+        "st.roster.mode" = tracing::field::Empty,
+        "st.roster.cards" = tracing::field::Empty,
+        "st.page.rows" = tracing::field::Empty,
+        "st.page.bytes" = tracing::field::Empty,
+        "st.writer.wait_ms" = tracing::field::Empty,
+        "st.writer.ops" = tracing::field::Empty,
+    );
+    let remote = crate::otel::extract_remote_context(headers);
+    let parent = remote.span();
+    let context = parent.span_context();
+    if context.is_valid() {
+        span.record(
+            "st.parent.sampled",
+            context.is_sampled() && context.trace_state().get("st").is_none(),
+        );
+    }
+    span.set_parent(remote);
+    Some(span)
 }
 
-static REQUEST_LATENCY: OnceLock<Mutex<BTreeMap<String, RouteLatency>>> = OnceLock::new();
+/// Record the response status, mark server faults (5xx, or a handler panic surfaced as a
+/// 500) as span errors — a 4xx is the caller's, not the server's — and end the server
+/// span by dropping its last handle.
+fn finish_request_trace(server: Option<tracing::Span>, status: axum::http::StatusCode) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let Some(server) = server else {
+        return;
+    };
+    server.record("http.response.status_code", i64::from(status.as_u16()));
+    if status.is_server_error() {
+        server.set_status(opentelemetry::trace::Status::error(format!(
+            "HTTP {status}"
+        )));
+    }
+}
 
-fn request_latency() -> &'static Mutex<BTreeMap<String, RouteLatency>> {
-    REQUEST_LATENCY.get_or_init(|| Mutex::new(BTreeMap::new()))
+
+fn request_latency() -> &'static Mutex<request_latency::Meter> {
+    REQUEST_LATENCY.get_or_init(|| Mutex::new(request_latency::Meter::default()))
+}
+
+/// Count one published current-work stage's duration beside the request rows.
+fn record_work_stage(stage: request_latency::WorkStage, elapsed: Duration) {
+    request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_work_stage(stage, elapsed);
+}
+
+/// Count one agents roster stage's duration beside the request rows.
+fn record_roster_stage(stage: request_latency::RosterStage, elapsed: Duration) {
+    // A poisoned diagnostic lock must not stop the refresher that records into it.
+    request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_roster_stage(stage, elapsed);
+    #[cfg(test)]
+    roster_stage_recorded().send_modify(|_| {});
+}
+
+/// Publication precedes the completed refresh timing; tests asserting timings wait here.
+#[cfg(test)]
+fn roster_stage_recorded() -> &'static tokio::sync::watch::Sender<()> {
+    static RECORDED: OnceLock<tokio::sync::watch::Sender<()>> = OnceLock::new();
+    RECORDED.get_or_init(|| tokio::sync::watch::channel(()).0)
 }
 
 fn request_latency_snapshot() -> Vec<Value> {
-    let routes = request_latency().lock().unwrap();
-    routes
-        .iter()
-        .map(|(route, latency)| {
-            let mut sorted = latency.recent_ms.iter().copied().collect::<Vec<_>>();
-            sorted.sort_unstable();
-            let percentile = |percent: usize| {
-                sorted
-                    .get(
-                        ((sorted.len().saturating_mul(percent).saturating_add(99)) / 100)
-                            .saturating_sub(1),
-                    )
-                    .copied()
-                    .unwrap_or_default()
-            };
-            json!({
-                "route": route,
-                "count": latency.count,
-                "recent_count": sorted.len(),
-                "p50_ms": percentile(50),
-                "p99_ms": percentile(99),
-                "max_ms": sorted.last().copied().unwrap_or_default(),
-            })
-        })
-        .collect()
+    request_latency().lock().unwrap().snapshot()
 }
 
-fn record_request_latency(route: &str, path: &str, caller: &str, started: Instant) {
+/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+pub(crate) fn request_latency_target_windows() -> Value {
+    request_latency().lock().unwrap().targets_only(Instant::now())
+}
+
+/// Every target's live windows, and every path's: see `slo/targets.toml`.
+pub(crate) fn request_latency_windows() -> Value {
+    request_latency().lock().unwrap().windows(Instant::now())
+}
+
+tokio::task_local! {
+    /// Set while a request is handled; a read relayed from another machine's owner marks it.
+    static SERVED_REMOTE: Arc<std::sync::atomic::AtomicBool>;
+}
+
+/// Run a request's handler with its remote-read flag in scope. The flag follows the handler's
+/// own task. A relay awaited inside a `tokio::spawn` would lose it, so such a spawn must pass
+/// its own flag, as the collections socket does for the conversation follower.
+pub(crate) async fn track_remote_reads<F: Future>(
+    flag: Arc<std::sync::atomic::AtomicBool>,
+    handler: F,
+) -> F::Output {
+    SERVED_REMOTE.scope(flag, handler).await
+}
+
+/// The request being handled read from another machine, so its target is the remote one.
+pub(crate) fn note_remote_read() {
+    let _ = SERVED_REMOTE.try_with(|remote| remote.store(true, std::sync::atomic::Ordering::Relaxed));
+}
+
+/// A query that asks the daemon to wait for a change makes the request a long poll.
+fn asks_to_wait(query: &str) -> bool {
+    query.split('&').any(|pair| match pair.split_once('=') {
+        Some(("wait_ms", value)) => value.parse::<u64>().is_ok_and(|ms| ms > 0),
+        Some(("wait", value)) => value == "true",
+        _ => false,
+    })
+}
+
+/// How a completed request was served, for its target.
+#[derive(Clone, Copy, Default)]
+struct Served {
+    long_poll: bool,
+    remote: bool,
+}
+
+/// A client collections socket's subscription sent its first snapshot or screen.
+pub(crate) fn record_stream_latency(collection: &str, elapsed: Duration, remote: bool) {
+    let timed = request_latency::Timed::resolve(
+        &format!("stream {collection}"),
+        remote,
+        request_latency::Wait::No,
+    );
+    request_latency()
+        .lock()
+        .unwrap()
+        .time(Instant::now(), timed, elapsed);
+}
+
+fn record_request_latency(
+    method: &axum::http::Method,
+    route: &str,
+    path: &str,
+    query: Option<&str>,
+    caller: &str,
+    started: Instant,
+    served: Served,
+) {
     let elapsed = started.elapsed();
     crate::performance::record_request(route, Some(caller), elapsed);
+    // The key and the target lookup allocate and scan; do them before taking the lock. A long
+    // poll counts toward no target; a fresh agents list toward its own.
+    let wait = if served.long_poll {
+        request_latency::Wait::LongPoll
+    } else if request_latency::is_fresh_agents_read(method, route, query) {
+        request_latency::Wait::Fresh
+    } else {
+        request_latency::Wait::No
+    };
+    let timed = request_latency::Timed::resolve(&format!("{method} {route}"), served.remote, wait);
     {
-        let mut routes = request_latency().lock().unwrap();
-        if routes.len() < 256 || routes.contains_key(route) {
-            let sample = routes.entry(route.to_owned()).or_default();
-            sample.count = sample.count.saturating_add(1);
-            if sample.recent_ms.len() == 512 {
-                sample.recent_ms.pop_front();
-            }
-            sample.recent_ms.push_back(elapsed.as_millis() as u64);
-        }
+        let mut meter = request_latency().lock().unwrap();
+        meter.record(method, route, path, query, elapsed);
+        meter.time(Instant::now(), timed, elapsed);
     }
     if elapsed < Duration::from_secs(1) {
         return;
@@ -1181,7 +1488,7 @@ fn record_request_latency(route: &str, path: &str, caller: &str, started: Instan
     eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
 }
 
-fn new_request_id() -> String {
+pub(crate) fn new_request_id() -> String {
     let mut bytes = [0_u8; 16];
     if getrandom::fill(&mut bytes).is_err() {
         let fallback = format!(
@@ -1244,12 +1551,21 @@ fn client_request_snapshot(
 }
 
 fn client_snapshot_at(state: &AppState, store_index: u64) -> ClientSnapshot {
-    let created_at = client_timestamp(
+    #[cfg(test)]
+    client_v0::observer_subscription_detail_tests::note_snapshot_construction(state);
+    client_snapshot_with_time(
+        state,
+        store_index,
         state
             .store
             .projection_time_at(store_index)
             .unwrap_or_default(),
-    );
+    )
+}
+
+/// The snapshot at `store_index` when its acceptance time (`projection_time_at`) is already known.
+fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
+    let created_at = client_timestamp(unix_ms);
     let fingerprint = hex::encode(Sha256::digest(
         format!(
             "{CLIENT_PROJECTION_VERSION}:{}:{store_index}:{created_at}",
@@ -1267,6 +1583,7 @@ fn client_snapshot_at(state: &AppState, store_index: u64) -> ClientSnapshot {
         store_index,
         projection_version: CLIENT_PROJECTION_VERSION.into(),
         created_at,
+        published_at: None,
     }
 }
 
@@ -1287,6 +1604,15 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
+    // The work list's refresher ended: nothing publishes it until the daemon restarts.
+    if code == Some(published_lists::WORK_LIST_ENDED) {
+        return false;
+    }
+    // An unconfirmed mutation needs the exact original request, not a generic
+    // transient retry that might replace its identity or its signed bytes.
+    if code == Some("message-send-unconfirmed") {
+        return false;
+    }
     if matches!(code, Some(
         "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired"
         | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle"
@@ -1343,6 +1669,8 @@ fn client_error_code(code: Option<&str>) -> String {
         | "invalid-subject-reference"
         | "stale-fence"
         | "timeline-history-incomplete"
+        | "projection-detail-too-large"
+        | "projection-detail-invalid-source"
         | "cursor-gap"
         | "page-cursor-expired"
         | "rate-limited"
@@ -1354,6 +1682,9 @@ fn client_error_code(code: Option<&str>) -> String {
         | "transcript-unavailable"
         | "terminal-ended"
         | "blob-too-large"
+        | "message-too-large"
+        | "message-store-full"
+        | "long-message-signature-unsupported"
         | "unsupported-media-type"
         | "blob-content-mismatch"
         | "blob-quota-exceeded"
@@ -1361,6 +1692,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "blob-expired"
         | "database-busy"
         | "database-locked"
+        | "message-send-unconfirmed"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" => "validation-failed".into(),
         "launch-review-not-authorized"
@@ -1446,6 +1778,14 @@ fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> {
         message: "the page cursor is malformed".into(),
         details: Box::default(),
     })
+}
+
+fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
+    if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
+        client_v0::native_page_cursor_snapshot(cursor)
+    } else {
+        decode_client_cursor(cursor).map(|cursor| cursor.snapshot)
+    }
 }
 
 fn client_page_expired(message: impl Into<String>) -> ApiError {
@@ -1770,6 +2110,8 @@ async fn client_capabilities(
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
     let capabilities = client_v0::capabilities(&session);
+    // The longest message body this daemon takes, so a composer shows a limit only when told.
+    let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
         "kind": "capabilities",
         "machine_version": st_drivers::version::machine_version(),
@@ -1781,6 +2123,7 @@ async fn client_capabilities(
             "max_event_items": 500,
             "max_response_bytes": CLIENT_MAX_RESPONSE_BYTES,
             "max_wait_ms": 30_000,
+            "max_message_bytes": max_message_bytes,
             "max_glass_body_bytes": st3_schema::glasses::MAX_BODY_BYTES,
             "max_glasses": st3_schema::glasses::MAX_GLASSES,
             "max_glass_depth": st3_schema::glasses::MAX_DEPTH,
@@ -1810,6 +2153,9 @@ fn client_work_resources(
     snapshot_unix_ms: u128,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
+    if !history {
+        store.count_direct_work_read();
+    }
     let mut work = if history {
         store.client_work_history_at_snapshot(actor, snapshot_unix_ms)?
     } else {
@@ -1941,7 +2287,7 @@ fn client_work_item(
 }
 
 /// Translate internal step states once for every client projection.
-fn client_work_state(status: &str) -> &str {
+pub(crate) fn client_work_state(status: &str) -> &str {
     match status {
         "pending" => "waiting",
         "working" => "claimed",
@@ -2071,6 +2417,7 @@ fn client_work_values(
                 "title": work.title,
                 "assigned_to": work.assigned_to,
                 "last_progress": work.progress_summary,
+                "progress_at": work.progress_at_unix_ms.map(client_timestamp),
                 "state": state,
                 "agentless": work.agentless,
                 "gate_kind": gate_kind,
@@ -2078,8 +2425,10 @@ fn client_work_values(
                 "readiness_epoch": work.readiness_epoch,
                 "claimant": work.claimant,
                 "claim_incarnation": work.claim_incarnation,
+                "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
+                "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "execution_elapsed_ms": work.execution_elapsed_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
@@ -2203,65 +2552,74 @@ fn client_agent_page_refs(store: &Store, history: bool, index: u64) -> anyhow::R
 
 fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> anyhow::Result<Vec<Value>> {
     let connection = store.readers.get();
-    let mut subjects = connection
-        .prepare_cached(crate::store::RANGE_SUBJECTS)?
-        .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if !history {
-        subjects = store.current_view_candidates(&connection, subjects, index, true)?;
-    }
-    let names = subjects.iter().cloned().collect::<Vec<_>>();
-    let desired = store
-        .desired_subjects_named(&names)?
-        .into_iter()
-        .map(|desired| (desired.subject.clone(), desired))
-        .collect::<BTreeMap<_, _>>();
-    let queues = store.agent_work_queues()?;
-    let steps = queues
-        .values()
-        .flat_map(|queue| {
-            queue
-                .current_work_ids
-                .iter()
-                .chain(queue.next_work_id.iter())
-                .chain(queue.upcoming_work_ids.iter())
-                .cloned()
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let labels = store.step_labels(&steps)?;
-    let label = |id: &String| {
-        labels.get(id).map(|step| json!({
-        "id":id, "mission_id":step.mission, "mission_run_id":step.run,
-        "path":step.path, "title":step.title, "goal":step.goal,
-        "state":client_work_state(&step.status), "since":client_timestamp(step.updated_at_unix_ms),
-    }))
-    };
-    let mut refs = subjects.into_iter().map(|id| {
-        let declaration = desired.get(&id);
-        let name = crate::model::effective_agent_name(&id, declaration.map(|d| &d.desired));
-        let queue = queues.get(&id).cloned().unwrap_or_default();
-        json!({
-            "id":id, "name":name,
-            "host_id":declaration.and_then(|d| d.member.as_ref()).map(|m| client_host_id(&m.host)),
-            "current_work_ids":queue.current_work_ids, "active_work_count":queue.active_work_count,
-            "next_work_id":queue.next_work_id, "upcoming_work_ids":queue.upcoming_work_ids,
-            "queued_work_count":queue.queued_work_count,
-            "current_work":queue.current_work_ids.iter().filter_map(label).collect::<Vec<_>>(),
-            "next_work":queue.next_work_id.as_ref().and_then(label),
-            "upcoming_work":queue.upcoming_work_ids.iter().filter_map(label).collect::<Vec<_>>(),
-        })
-    }).collect::<Vec<_>>();
-    refs.sort_by(|a, b| {
-        a["name"]
-            .as_str()
-            .cmp(&b["name"].as_str())
-            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
-    });
-    Ok(refs)
+    let (subjects, desired) = crate::otel::roster_phase("membership", || -> anyhow::Result<_> {
+        let mut subjects = connection
+            .prepare_cached(crate::store::RANGE_SUBJECTS)?
+            .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if !history {
+            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
+        }
+        let names = subjects.iter().cloned().collect::<Vec<_>>();
+        let desired = store
+            .desired_subjects_named(&names)?
+            .into_iter()
+            .map(|desired| (desired.subject.clone(), desired))
+            .collect::<BTreeMap<_, _>>();
+        Ok((subjects, desired))
+    })?;
+    crate::otel::roster_phase("queue_selection", || -> anyhow::Result<Vec<Value>> {
+        let queues = store.agent_work_queues()?;
+        let steps = queues
+            .values()
+            .flat_map(|queue| {
+                queue
+                    .current_work_ids
+                    .iter()
+                    .chain(queue.next_work_id.iter())
+                    .chain(queue.upcoming_work_ids.iter())
+                    .cloned()
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let labels = store.step_labels(&steps)?;
+        let label = |id: &String| {
+            labels.get(id).map(|step| json!({
+            "id":id, "mission_id":step.mission, "mission_run_id":step.run,
+            "path":step.path, "title":step.title, "goal":step.goal,
+            "state":client_work_state(&step.status), "since":client_timestamp(step.updated_at_unix_ms),
+        }))
+        };
+        let mut refs = subjects.into_iter().map(|id| {
+            let declaration = desired.get(&id);
+            let name = crate::model::effective_agent_name(&id, declaration.map(|d| &d.desired));
+            let queue = queues.get(&id).cloned().unwrap_or_default();
+            let mut reference = json!({
+                "id":id, "name":name,
+                "host_id":declaration.and_then(|d| d.member.as_ref()).map(|m| client_host_id(&m.host)),
+                "current_work_ids":queue.current_work_ids, "active_work_count":queue.active_work_count,
+                "next_work_id":queue.next_work_id, "upcoming_work_ids":queue.upcoming_work_ids,
+                "queued_work_count":queue.queued_work_count,
+                "current_work":queue.current_work_ids.iter().filter_map(label).collect::<Vec<_>>(),
+                "next_work":queue.next_work_id.as_ref().and_then(label),
+                "upcoming_work":queue.upcoming_work_ids.iter().filter_map(label).collect::<Vec<_>>(),
+            });
+            if let Some(lifecycle) = crate::model::declared_agent_lifecycle(declaration.map(|d| &d.desired)) {
+                reference["lifecycle"] = json!(lifecycle);
+            }
+            reference
+        }).collect::<Vec<_>>();
+        refs.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .cmp(&b["name"].as_str())
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        Ok(refs)
+    })
 }
 
 fn client_agent_cards_for_page(
@@ -2275,7 +2633,21 @@ fn client_agent_cards_for_page(
         .iter()
         .filter_map(|r| r["id"].as_str().map(str::to_owned))
         .collect::<BTreeSet<_>>();
-    let cards = store.cached_agent_resources_for(index, history, Some(&selected), |changed| {
+    let cards = client_agent_cards_selected(store, history, index, &selected, false)
+        .map_err(ApiError::internal)?;
+    client_agent_cards_from_cached(store, cards, refs, at)
+}
+
+/// The cards of `selected` agents at `index`, folding only those not already cached there.
+/// A `chunk` of a roster assembled in short folds refolds no card outside `selected`.
+fn client_agent_cards_selected(
+    store: &Store,
+    history: bool,
+    index: u64,
+    selected: &BTreeSet<String>,
+    chunk: bool,
+) -> anyhow::Result<Vec<Value>> {
+    let build = |changed: Option<(&BTreeSet<String>, &[Value])>| {
         let (subjects, previous) = changed.expect("a selected page always names its missing cards");
         // Delta metadata is current and already diffed; only cold pages need shallow refs.
         // Frozen continuation refs remain response metadata, never shared cache inputs.
@@ -2291,8 +2663,12 @@ fn client_agent_cards_for_page(
         )?;
         add_agent_todos(store, &mut cards, index)?;
         Ok(cards)
-    }).map_err(ApiError::internal)?;
-    client_agent_cards_from_cached(store, cards, refs, at)
+    };
+    if chunk {
+        store.cached_agent_resources_chunk(index, history, selected, build)
+    } else {
+        store.cached_agent_resources_for(index, history, Some(selected), build)
+    }
 }
 
 fn client_agent_cards_from_cached(
@@ -2333,56 +2709,125 @@ fn client_agent_cards_from_cached(
 }
 
 fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Result<()> {
-    let subjects = items
-        .iter()
-        .filter_map(|item| item["id"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    let observations = store.agent_todo_observations_for(&subjects, index)?;
-    for item in items {
-        let claims = observations.get(item["id"].as_str().unwrap_or_default());
-        item["todo"] = client_v0::agent_todo_value(
-            claims.and_then(|claims| claims.get("harness.todo.observed")),
-            claims.and_then(|claims| claims.get("harness.session-file")),
-            item["incarnation_id"].as_str(),
-        );
-    }
-    Ok(())
+    crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
+        let subjects = items
+            .iter()
+            .filter_map(|item| item["id"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let observations = store.agent_todo_observations_for(&subjects, index)?;
+        for item in items {
+            let claims = observations.get(item["id"].as_str().unwrap_or_default());
+            item["todo"] = client_v0::agent_todo_value(
+                claims.and_then(|claims| claims.get("harness.todo.observed")),
+                claims.and_then(|claims| claims.get("harness.session-file")),
+                item["incarnation_id"].as_str(),
+            );
+        }
+        Ok(())
+    })
 }
 
+/// Live presentation of already folded cards: freshness, delivery presence and subagents.
 fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
-    let local_host = client_host_id(store.origin());
-    for item in items.iter_mut() {
-        if item.get("updated_at").and_then(Value::as_str) == Some("") {
-            item["updated_at"] = Value::String(at.to_owned());
-        }
-        let source = item
-            .as_object_mut()
-            .unwrap()
-            .remove("_status_source")
-            .unwrap_or(Value::Null);
-        let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
-        // Freshness is approximate presentation. Use the card's already reduced observation;
-        // querying diagnostic and local-observation history here made every read grow with it.
-        let observation = match harness {
-            None => "missing",
-            Some(harness)
-                if client_now_ms().saturating_sub(harness.observed_at_unix_ms) > 90_000 =>
-            {
-                "stale"
+    crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
+        let local_host = client_host_id(store.origin());
+        for item in items.iter_mut() {
+            if item.get("updated_at").and_then(Value::as_str) == Some("") {
+                item["updated_at"] = Value::String(at.to_owned());
             }
-            Some(_) => "current",
-        };
-        item["observation"] = json!(observation);
-        if observation == "stale" && item["harness_state"] == "idle" {
-            item["harness_state"] = json!("indeterminate");
-            if item["state"] == "running" {
-                item["state"] = json!("waiting");
+            let source = item
+                .as_object_mut()
+                .unwrap()
+                .remove("_status_source")
+                .unwrap_or(Value::Null);
+            let launch_since = item.as_object_mut().unwrap().remove("_launch_since_ms").and_then(|ms| ms.as_u64());
+            let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
+            // Freshness is approximate presentation. Use the card's already reduced observation;
+            // querying diagnostic and local-observation history here made every read grow with it.
+            let report_age_ms = harness
+                .as_ref()
+                .map(|harness| {
+                    u64::try_from(client_now_ms().saturating_sub(harness.observed_at_unix_ms))
+                        .unwrap_or(u64::MAX)
+                });
+            let observation = match report_age_ms {
+                None => "missing",
+                Some(age) if age > 90_000 => "stale",
+                Some(_) => "current",
+            };
+            let reported = item["harness_state"].as_str().map(str::to_owned);
+            item["observation"] = json!(observation);
+            // A turn can run for hours without a new harness claim, so only a claim that says the
+            // seat is waiting for input lapses; a `working` one stays until the harness says otherwise.
+            if observation == "stale" && matches!(item["harness_state"].as_str(), Some("ready" | "idle")) {
+                item["harness_state"] = json!("indeterminate");
+                if item["state"] == "running" {
+                    item["state"] = json!("waiting");
+                }
             }
+            overlay_down(item, launch_since, report_age_ms, reported.as_deref(), client_now_ms() as u64);
+            overlay_delivery_presence(item, &local_host);
         }
-        overlay_delivery_presence(item, &local_host);
+        overlay_subagents(store, items)?;
+        Ok(())
+    })
+}
+
+/// How long a declared seat may take to show a running session before it is called down.
+const LAUNCH_WINDOW_MS: u64 = 120_000;
+
+/// How old a harness report may be and still show that the seat's driver is alive. A driver at an
+/// empty prompt reports every five minutes, so its report is older than the 90 s freshness window
+/// for most of every interval; two intervals and a minute of slack never call such a seat down.
+const HEARTBEAT_MS: u64 = 661_000;
+
+/// Settles a seat whose runtime row says it is not running yet. Every app shows the result and
+/// none re-derives it.
+///
+/// A harness that reported within a heartbeat is alive, whatever a runtime row stuck at `pending`
+/// says: a seat can outlive its row. It reads as any other live seat (running, or waiting when its
+/// idle report has lapsed). With no such report, a seat with a declaration and no session after its
+/// launch window is `down`, since the moment it began waiting, and the steps it holds say so
+/// (their progress was written by a holder that is not running).
+fn overlay_down(
+    item: &mut Value,
+    launch_since: Option<u64>,
+    report_age_ms: Option<u64>,
+    reported: Option<&str>,
+    now_ms: u64,
+) {
+    if !matches!(item["state"].as_str(), Some("desired" | "starting")) {
+        return;
     }
-    overlay_subagents(store, items)?;
-    Ok(())
+    // A `starting` report is written at launch and proves nothing about a session; `ended` and
+    // `failed` say the harness is gone. Any other report comes from a driver that is up.
+    if report_age_ms.is_some_and(|age| age <= HEARTBEAT_MS)
+        && !matches!(reported, None | Some("starting" | "ended" | "failed"))
+    {
+        let lapsed = report_age_ms.is_some_and(|age| age > 90_000);
+        item["state"] = json!(match reported {
+            Some("working") => "running",
+            Some("ready" | "idle") if !lapsed => "running",
+            _ => "waiting",
+        });
+        return;
+    }
+    let Some(since) = launch_since.filter(|since| now_ms.saturating_sub(*since) > LAUNCH_WINDOW_MS) else {
+        return;
+    };
+    let since = client_timestamp(u128::from(since));
+    item["state"] = json!("down");
+    item["down_since"] = json!(since);
+    // A harness report that predates the loss of the session says nothing about now; leaving
+    // `working` beside `down` would make the two fields disagree.
+    item["harness_state"] = json!("indeterminate");
+    // The activity of an earlier incarnation is not activity of a seat that has no session.
+    item["silent_since"] = Value::Null;
+    if let Some(work) = item["current_work"].as_array_mut() {
+        for label in work {
+            label["holder_down_since"] = json!(since);
+        }
+    }
 }
 
 /// A seat's latest suspend or resume as client-v0 shows it.
@@ -2456,7 +2901,7 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     let Some(recipient) = item.get("id").and_then(Value::as_str) else {
         return;
     };
-    let assessment = delivery_presence::assess(recipient, &driver);
+    let assessment = delivery_presence::assess_current(recipient, &driver, item["incarnation_id"].as_str());
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
@@ -2495,18 +2940,20 @@ pub(crate) fn agent_queue_metadata(
     store: &Store,
     subjects: &BTreeSet<String>,
 ) -> anyhow::Result<Vec<Value>> {
-    let queues = store.agent_work_queues()?;
-    let steps = queues.values().flat_map(|queue| {
-        queue.current_work_ids.iter().chain(queue.next_work_id.iter())
-            .chain(queue.upcoming_work_ids.iter()).cloned()
-    }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-    let labels = store.step_labels(&steps)?;
-    let empty = crate::store::AgentWorkQueue::default();
-    Ok(subjects.iter().map(|subject| {
-        let mut fields = agent_queue_fields(queues.get(subject).unwrap_or(&empty), &labels);
-        fields["id"] = json!(subject);
-        fields
-    }).collect())
+    crate::otel::roster_phase("queue_selection", || -> anyhow::Result<Vec<Value>> {
+        let queues = store.agent_work_queues()?;
+        let steps = queues.values().flat_map(|queue| {
+            queue.current_work_ids.iter().chain(queue.next_work_id.iter())
+                .chain(queue.upcoming_work_ids.iter()).cloned()
+        }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+        let labels = store.step_labels(&steps)?;
+        let empty = crate::store::AgentWorkQueue::default();
+        Ok(subjects.iter().map(|subject| {
+            let mut fields = agent_queue_fields(queues.get(subject).unwrap_or(&empty), &labels);
+            fields["id"] = json!(subject);
+            fields
+        }).collect())
+    })
 }
 
 #[cfg(test)]
@@ -2525,10 +2972,20 @@ fn client_agent_resources_selected(
     snapshot_index: u64,
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = store.agent_card_status_at(
+    let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
         changed.map(|(subjects, _)| subjects), snapshot_index, history,
-    )?;
+    ))?;
     client_agent_resources_from_status(store, history, snapshot_index, changed, status)
+}
+
+/// Every agent card at `snapshot_index` of a quiet store, folded as the roster folds them but
+/// outside a read snapshot: on a store just opened, nothing is kept yet, as at a daemon start.
+/// For load measurements; it returns how many cards it folded.
+#[doc(hidden)]
+pub fn cold_agent_roster_rebuild(store: &Store, snapshot_index: u64) -> anyhow::Result<usize> {
+    let mut cards = client_agent_resources_selected(store, false, snapshot_index, None)?;
+    add_agent_todos(store, &mut cards, snapshot_index)?;
+    Ok(cards.len())
 }
 
 fn client_agent_resources_from_status(
@@ -2547,11 +3004,52 @@ fn client_agent_resources_from_status(
                 .any(|item| item["id"].as_str() == Some(subject.as_str()))
         })
     });
-    let work_queues = if retain_queues {
-        BTreeMap::new()
-    } else {
-        store.agent_work_queues()?
-    };
+    let queues = crate::otel::roster_phase("queue_selection", || -> anyhow::Result<_> {
+        let queues = if retain_queues {
+            BTreeMap::new()
+        } else {
+            store.agent_work_queues()?
+        };
+        let queued_steps = queues
+            .values()
+            .flat_map(|queue| {
+                queue
+                    .current_work_ids
+                    .iter()
+                    .chain(queue.next_work_id.iter())
+                    .chain(queue.upcoming_work_ids.iter())
+                    .cloned()
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let labels = store.step_labels(&queued_steps)?;
+        Ok(CardQueues {
+            retained: changed.filter(|_| retain_queues).map(|(_, previous)| previous),
+            queues,
+            labels,
+        })
+    })?;
+    crate::otel::roster_phase("card_presentation", || {
+        client_agent_cards_presented(store, history, snapshot_index, status, &queues, changed.map(|(names, _)| names))
+    })
+}
+
+/// Queue fields for folded cards: retained from unchanged previous cards, or freshly selected.
+struct CardQueues<'a> {
+    retained: Option<&'a [Value]>,
+    queues: BTreeMap<String, crate::store::AgentWorkQueue>,
+    labels: BTreeMap<String, crate::store::StepLabel>,
+}
+
+fn client_agent_cards_presented(
+    store: &Store,
+    history: bool,
+    snapshot_index: u64,
+    status: StatusResponse,
+    queues: &CardQueues<'_>,
+    selected: Option<&BTreeSet<String>>,
+) -> anyhow::Result<Vec<Value>> {
     let agent_subjects = status
         .subjects
         .iter()
@@ -2575,29 +3073,41 @@ fn client_agent_resources_from_status(
         .collect::<BTreeMap<_, _>>();
     let usage_summaries = store.usage_summaries_at(&agent_subjects, Some(snapshot_index))?;
     let member_faults = store.member_reconcile_faults_for(&agent_subjects, snapshot_index)?;
+    let mailbox_faults = match store.mailbox_faults_for(&agent_subjects, snapshot_index) {
+        Ok(faults) => Some(faults),
+        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
+        Err(error) => return Err(error),
+    };
+    store.record_agent_roster_fault_read(history, &agent_subjects, mailbox_faults.is_none(), selected);
+    // An optional fault read cannot discard current status, usage, queues or other card fields.
+    // Retain even a known null fault; a card never published before states that it is unknown.
+    let previous_faults = if mailbox_faults.is_none() {
+        store.previous_agent_faults(snapshot_index, history, &agent_subjects)
+    } else {
+        BTreeMap::new()
+    };
+    let stop_deferral_faults = store.stop_deferral_faults_for(&agent_subjects, snapshot_index)?;
+    // Harnesses, activity, and who can have a suspension or rollout, for many agents at once.
+    // Each status names the actual-state claim it selected, the newest runtime observation
+    // whenever the agent has one.
+    let actual_claims = status
+        .subjects
+        .iter()
+        .map(|subject| (subject.subject.clone(), subject.actual_claim.clone()))
+        .collect();
+    let mut card_reads = store.agent_card_reads(&agent_subjects, snapshot_index, &actual_claims)?;
     // Cards without a harness need only their actual claim's acceptance time, not its body.
     // Keep the existing per-claim fallback if the bulk metadata read cannot be completed.
     let actual_claim_times = store.claim_acceptance_times(
         &status
             .subjects
             .iter()
-            .filter_map(|subject| subject.actual_claim.as_deref())
+            .flat_map(|subject| {
+                // A seat that never reported has only its declaration to say how long it has waited.
+                subject.actual_claim.as_deref().into_iter().chain(subject.desired_token.as_deref())
+            })
             .collect::<Vec<_>>(),
     );
-    let queued_steps = work_queues
-        .values()
-        .flat_map(|queue| {
-            queue
-                .current_work_ids
-                .iter()
-                .chain(queue.next_work_id.iter())
-                .chain(queue.upcoming_work_ids.iter())
-                .cloned()
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let step_labels = store.step_labels(&queued_steps)?;
     let mut agents = status
         .subjects
         .into_iter()
@@ -2606,8 +3116,11 @@ fn client_agent_resources_from_status(
         })
         .filter(|subject| history || subject.projection.layer == "current")
         .map(|mut subject| -> anyhow::Result<(String, Value)> {
-            subject.harness = store.observed_harness_at(&subject.subject, snapshot_index)?;
-            let fault = member_faults.get(&subject.subject);
+            subject.harness = card_reads.take_harness(store, &subject.subject)?;
+            let member_fault = member_faults.get(&subject.subject);
+            let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
+            let fault = member_fault.or(mailbox_fault)
+                .or_else(|| stop_deferral_faults.get(&subject.subject));
             let fields = subject
                 .actual
                 .as_ref()
@@ -2615,19 +3128,22 @@ fn client_agent_resources_from_status(
             let observed = fields
                 .and_then(|fields| fields.get("status"))
                 .and_then(Value::as_str);
-            let driver = subject
-                .harness
-                .as_ref()
-                .and_then(|harness| harness.driver.clone())
-                .or_else(|| subject.desired.as_ref().and_then(desired_harness_driver));
+            let declared_provider = subject.desired.as_ref().and_then(desired_harness_driver);
+            subject.harness = agent_harness::eligible(
+                declared_provider.as_deref(),
+                fields.and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str),
+                subject.harness.take(),
+            );
+            subject.harness = agent_harness::availability(subject.harness.take(), mailbox_fault.map(String::as_str));
+            let driver = declared_provider.or_else(|| subject.harness.as_ref().and_then(|harness| harness.driver.clone()));
             let harness_state = subject.harness.as_ref().map(|harness| harness.state.clone());
-            let last_activity_at = store.agent_last_activity_at(
+            let last_activity_at = card_reads.last_activity_at(
+                store,
                 &subject.subject,
                 subject
                     .harness
                     .as_ref()
                     .map(|harness| harness.incarnation_id.as_str()),
-                snapshot_index,
             )?;
             let silent_since = if harness_state.as_deref() == Some("working") {
                 let working_since = match subject.harness.as_ref() {
@@ -2699,12 +3215,31 @@ fn client_agent_resources_from_status(
                 _ if subject.desired.is_some() => "desired",
                 _ => "stopped",
             };
+            // When a seat that has no running session began waiting for one.
+            let launch_since_ms = (matches!(state, "desired" | "starting")
+                && !matches!(observed, Some("running" | "ready" | "working" | "idle")))
+            .then(|| {
+                let claim_time = |claim: &str| match &actual_claim_times {
+                    Ok(times) => times.get(claim).copied(),
+                    Err(_) => store.claim_by_id(claim).ok().flatten().map(|claim| claim.accepted_at_unix_ms),
+                };
+                subject
+                    .actual_claim
+                    .as_deref()
+                    .and_then(claim_time)
+                    .or_else(|| subject.desired_token.as_deref().and_then(claim_time))
+            })
+            .flatten();
             let handoff = subject.desired_token.as_deref()
                 .map(|token| crate::placement::handoff(store, &subject.subject, token, snapshot_index))
                 .transpose()?.flatten();
             let moving = handoff.as_ref().is_some_and(|h| h.phase != "running");
-            let state = if fault.is_some() { "failed" } else if moving { "waiting" } else { state };
-            let suspension = crate::suspension::current(store, &subject.subject)?;
+            let state = if member_fault.is_some() { "failed" } else if mailbox_fault.is_some() || moving { "waiting" } else { state };
+            let suspension = if card_reads.may_have_suspension(&subject.subject) {
+                crate::suspension::current(store, &subject.subject)?
+            } else {
+                None
+            };
             // A suspended seat has no process by design: it is neither stopped nor failed.
             let state = match suspension.as_ref().map(|item| item.phase.as_str()) {
                 Some("suspended") if fault.is_none() => "suspended",
@@ -2752,7 +3287,7 @@ fn client_agent_resources_from_status(
                 .clone()
                 .or_else(|| subject.claims.last().cloned())
                 .unwrap_or_else(|| format!("agent/{}", subject.subject));
-            let queue = work_queues
+            let queue = queues.queues
                 .get(&subject.subject)
                 .cloned()
                 .unwrap_or_default();
@@ -2772,9 +3307,17 @@ fn client_agent_resources_from_status(
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
                 "_status_source": subject.harness,
+                "_launch_since_ms": launch_since_ms.map(|ms| ms as u64),
                 "blocked_on": subject.harness.as_ref().and_then(|harness| harness.blocked_on.as_deref()),
                 "ask": subject.harness.as_ref().and_then(|harness| harness.ask.as_deref()),
                 "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref()),
+                // What the seat is doing that is neither work nor a wait on anyone: a status,
+                // never an alert.
+                "activity": subject
+                    .harness
+                    .as_ref()
+                    .filter(|harness| harness.reason.as_deref() == Some("compaction"))
+                    .map(|_| "compacting"),
                 "host_id": desired_agents.get(&subject.subject).map(|(host, _, _)| host),
                 "workspace": desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace),
                 "checkout": desired_agents.get(&subject.subject).and_then(|(_, _, checkout)| checkout.as_ref()),
@@ -2791,14 +3334,25 @@ fn client_agent_resources_from_status(
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
-                "rollout": crate::rollout::status(store, &subject.subject)?,
+                "rollout": if card_reads.may_have_rollout(&subject.subject) {
+                    crate::rollout::status(store, &subject.subject)?
+                } else {
+                    None
+                },
             });
-            if let Some((_, previous)) = changed.filter(|_| retain_queues)
+            if mailbox_faults.is_none() && fault.is_none() {
+                value["fault"] = previous_faults.get(&subject.subject).cloned()
+                    .unwrap_or_else(|| json!("fault status unknown"));
+            }
+            if let Some(lifecycle) = crate::model::declared_agent_lifecycle(subject.desired.as_ref()) {
+                value["lifecycle"] = json!(lifecycle);
+            }
+            if let Some(previous) = queues.retained
                 && let Some(old) = previous.iter().find(|item| item["id"] == value["id"]) {
                 for field in AGENT_QUEUE_FIELDS {
                     value[field] = old[field].clone();
                 }
-            } else if let Value::Object(fields) = agent_queue_fields(&queue, &step_labels) {
+            } else if let Value::Object(fields) = agent_queue_fields(&queue, &queues.labels) {
                 value.as_object_mut().unwrap().extend(fields);
             }
             Ok((name, value))
@@ -2830,11 +3384,13 @@ fn managed_session_id(owner: &str, identity: &str) -> String {
     format!("session/{}", &digest[..24])
 }
 
+type ManagedSessionOwner = (String, Option<String>, Option<String>);
+
 fn managed_session_owner_at(
     store: &Store,
     snapshot_index: u64,
     session_id: &str,
-) -> anyhow::Result<Option<(String, Option<String>, Option<String>)>> {
+) -> anyhow::Result<Option<ManagedSessionOwner>> {
     crate::performance::task("conversation/owner", || {
         let owners = store.conversation_owners_at(snapshot_index)?;
         for owner in owners.values() {
@@ -2849,7 +3405,28 @@ fn managed_session_owner_at(
     })
 }
 
-/// How many of a subject's claims, oldest first, date its session in the session list.
+fn managed_session_owner_for_subject_at(
+    store: &Store,
+    snapshot_index: u64,
+    session_id: &str,
+    owner: &str,
+) -> anyhow::Result<Option<ManagedSessionOwner>> {
+    crate::performance::task("conversation/owner", || {
+        let owners = store.conversation_owners_at(snapshot_index)?;
+        let Some(owner) = owners.get(owner) else {
+            return Ok(None);
+        };
+        let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
+            return Ok(None);
+        };
+        if managed_session_id(&owner.subject, identity) != session_id {
+            return Ok(None);
+        }
+        Ok(Some((owner.subject.clone(), owner.incarnation.clone(), owner.origin.clone())))
+    })
+}
+
+/// Bound the legacy runtime-only scan; incarnation dating uses two index seeks instead.
 const SESSION_CLAIMS: usize = 10_000;
 
 fn client_session_resources(
@@ -2894,35 +3471,7 @@ fn client_session_resources(
         .sessions
         .retain(|session| !managed_native_sessions.contains(&session.native_id));
     for session in external.sessions {
-        let running = session.process.is_some();
-        let process = session.process.as_ref().map(|process| {
-            json!({
-                "pid": process.pid,
-                "started_at": crate::external_sessions::timestamp(process.started_at_unix_ms),
-                "fingerprint": process.fingerprint,
-                "exact_session": process.exact_session
-            })
-        });
-        sessions.push(json!({
-            "id": session.id,
-            "kind": "session",
-            "revision": session.revision,
-            "updated_at": crate::external_sessions::timestamp(session.updated_at_unix_ms),
-            "owner_id": format!("external-session/{}/{}", session.driver.as_str(), session.native_id),
-            "state": if running { "running" } else { "completed" },
-            "started_at": crate::external_sessions::timestamp(session.started_at_unix_ms),
-            "ended_at": if running { None } else { Some(crate::external_sessions::timestamp(session.updated_at_unix_ms)) },
-            "timeline_cursor": format!("timeline-cursor/{}/latest", session.id.trim_start_matches("session/")),
-            "usage": null,
-            "managed": false,
-            "driver": session.driver.as_str(),
-            "native_session_id": session.native_id,
-            "workspace": session.cwd.map(|path| path.display().to_string()),
-            "title": session.title,
-            "importable": true,
-            "import_reason": null,
-            "process": process
-        }));
+        sessions.push(external_session_resource(session));
     }
     for unresolved in external.unresolved_processes {
         sessions.push(unresolved_session_resource(unresolved, at));
@@ -2934,6 +3483,38 @@ fn client_session_resources(
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(sessions)
+}
+
+fn external_session_resource(session: crate::external_sessions::ExternalSession) -> Value {
+    let running = session.process.is_some();
+    let process = session.process.as_ref().map(|process| {
+        json!({
+            "pid": process.pid,
+            "started_at": crate::external_sessions::timestamp(process.started_at_unix_ms),
+            "fingerprint": process.fingerprint,
+            "exact_session": process.exact_session
+        })
+    });
+    json!({
+        "id": session.id,
+        "kind": "session",
+        "revision": session.revision,
+        "updated_at": crate::external_sessions::timestamp(session.updated_at_unix_ms),
+        "owner_id": format!("external-session/{}/{}", session.driver.as_str(), session.native_id),
+        "state": if running { "running" } else { "completed" },
+        "started_at": crate::external_sessions::timestamp(session.started_at_unix_ms),
+        "ended_at": if running { None } else { Some(crate::external_sessions::timestamp(session.updated_at_unix_ms)) },
+        "timeline_cursor": format!("timeline-cursor/{}/latest", session.id.trim_start_matches("session/")),
+        "usage": null,
+        "managed": false,
+        "driver": session.driver.as_str(),
+        "native_session_id": session.native_id,
+        "workspace": session.cwd.map(|path| path.display().to_string()),
+        "title": session.title,
+        "importable": true,
+        "import_reason": null,
+        "process": process
+    })
 }
 
 fn unresolved_session_resource(
@@ -3014,12 +3595,12 @@ fn managed_session_resources(
             "stopped" | "exited" | "absent" => "completed",
             _ => "waiting",
         };
-        // A session is dated by the subject's first SESSION_CLAIMS claims, the page this list
-        // once read whole and filtered, so a subject with more keeps the dates it had.
+        // Keep the old page bound only for runtime-only identities, which scan subject history.
+        // Incarnation spans are index-bounded and must include incarnations after that page.
         let through_claim = subject
             .claims
             .get(SESSION_CLAIMS - 1)
-            .filter(|_| subject.claims.len() > SESSION_CLAIMS);
+            .filter(|_| incarnation.is_none() && subject.claims.len() > SESSION_CLAIMS);
         let mut accepted_times = store
             .runtime_claim_span_at(
                 &subject.subject,
@@ -3039,9 +3620,23 @@ fn managed_session_resources(
         let started = fields
             .and_then(|fields| fields.get("started_at_unix_ms"))
             .and_then(|value| value.as_u64().map(u128::from))
-            .map(client_timestamp)
-            .or_else(|| accepted_times.iter().min().copied().map(client_timestamp))
-            .unwrap_or_else(|| at.to_owned());
+            .or_else(|| accepted_times.iter().min().copied());
+        // Client v0 requires a timestamp. Without session evidence, the actual observation's
+        // acceptance time is the closest durable date, not the time someone reads the session.
+        let started = match started {
+            Some(started) => client_timestamp(started),
+            None => subject
+                .actual_claim
+                .as_deref()
+                .or_else(|| subject.claims.first().map(String::as_str))
+                .map(|id| store.claim_by_id(id))
+                .transpose()?
+                .flatten()
+                .map_or_else(
+                    || client_timestamp(0),
+                    |claim| client_timestamp(claim.accepted_at_unix_ms),
+                ),
+        };
         let updated = accepted_times
             .iter()
             .max()
@@ -3178,6 +3773,8 @@ pub(crate) fn client_attention_resources_at(
     let mut resources = Vec::new();
     for item in current {
         let id = client_attention_id(&item.subject, &item.person, &item.episode)?;
+        let alert = item.is_alert();
+        let conversations = item.conversations();
         let mut resource = json!({
             "id": id, "kind": "attention", "attention_kind": item.kind,
             "source_id": item.subject, "source_kind": item.kind, "episode": item.episode,
@@ -3186,9 +3783,14 @@ pub(crate) fn client_attention_resources_at(
             "title": item.title, "detail": item.detail, "priority": item.priority,
             "state": "open", "requested_at": client_timestamp(item.requested_at_unix_ms),
             "targets": item.targets, "actions": client_attention_actions(&item.kind, item.review_mode.as_deref()),
-            "operational": {"layer": "current", "actionable": true, "reasons": []}
+            "operational": {"layer": "current", "actionable": true, "reasons": []},
+            "alert": alert,
         });
+        if !conversations.is_empty() {
+            resource["conversation_ids"] = json!(conversations);
+        }
         for (name, value) in [
+            ("conversation_id", item.conversation),
             ("requester_id", item.requester_id),
             ("launch_id", item.launch_id),
             ("variant_id", item.variant_id),
@@ -3203,6 +3805,12 @@ pub(crate) fn client_attention_resources_at(
         }
         if let Some(mode) = item.review_mode {
             resource["review_mode"] = json!(mode);
+        }
+        // A prompt st can answer offers its answers as one typed action.
+        if !item.answers.is_empty() {
+            resource["actions"] = json!(["prompt.respond"]);
+            resource["action_parameters"] = json!({"prompt.respond": {
+                "target_id": item.subject, "episode": item.episode, "answers": item.answers}});
         }
         if item.kind.starts_with("custom.")
             && let Some(source) = store.custom_subject(&item.subject)?
@@ -3362,7 +3970,7 @@ fn client_message_resources(
             reasons.push("superseded");
         }
         let current = reasons.is_empty();
-        resources.push(json!({
+        let mut resource = json!({
             "id": message.subject,
             "kind": "message",
             "revision": last.map(|claim| claim.id.as_str()).unwrap_or("message/unknown"),
@@ -3372,14 +3980,20 @@ fn client_message_resources(
             "title": message.title,
             "content": message.content,
             "state": message.status,
-            "delivery": message_delivery_value(&message.to, &message.status, sent_at, client_now_ms()),
+            "delivery": message_delivery_value(store, &message.to, &message.status, sent_at, client_now_ms())?,
             "sent_at": client_timestamp(sent_at),
             "session_id": session_id,
             "in_reply_to": message.in_reply_to,
             "tags": message.tags,
             "attachments": message.attachments.iter().map(client_attachment).collect::<Vec<_>>(),
             "operational": { "layer": if current { "current" } else { "history" }, "actionable": current, "reasons": reasons }
-        }));
+        });
+        // Only a long message names its body, so every other resource reads as it always has.
+        if let (Some(reference), Some(bytes)) = (&message.body_ref, message.body_bytes) {
+            resource["body_ref"] = json!(reference);
+            resource["body_bytes"] = json!(bytes);
+        }
+        resources.push(resource);
     }
     resources.sort_by(|left, right| {
         right["sent_at"]
@@ -3392,13 +4006,25 @@ fn client_message_resources(
 
 /// Native acceptance and recipient read are separate evidence. A pending read never expires,
 /// and its age remains visible even on the sender's node, which cannot inspect a remote process.
-fn message_delivery_value(to: &str, status: &str, sent_at: u128, now: u128) -> Value {
+fn message_delivery_value(store: &Store, to: &str, status: &str, sent_at: u128, now: u128) -> anyhow::Result<Value> {
     let read = matches!(status, "read" | "closed");
     let age_ms = now.saturating_sub(sent_at);
     let path = delivery_presence::known(to);
     let blocked = !read && path.as_ref().is_some_and(|path| path.stale());
+    // Only mail still outside the native transport can be held. Use observed evidence,
+    // not work-derived readiness; the store fold fences it to the running incarnation.
+    let held = if matches!(status, "sent" | "staged") {
+        let index = store.index()?;
+        let harness = store.observed_harness_at(to, index)?;
+        harness.as_ref().is_some_and(|harness| harness.blocked_on.as_deref() == Some("human"))
+            && store.seat_observation_at(to, harness.as_ref(), index, now)? == "current"
+    } else {
+        false
+    };
     let reason = if read {
         "the recipient has read the message"
+    } else if held {
+        "held outside the native harness while the recipient waits for a human answer or approval"
     } else if blocked {
         path.as_ref()
             .and_then(|path| path.reason.as_deref())
@@ -3411,11 +4037,11 @@ fn message_delivery_value(to: &str, status: &str, sent_at: u128, now: u128) -> V
             _ => "waiting for recipient read",
         }
     };
-    json!({
-        "state": if read { "read" } else if blocked || age_ms > 10_000 { "waiting" } else { "pending" },
+    Ok(json!({
+        "state": if read { "read" } else if held || blocked || age_ms > 10_000 { "waiting" } else { "pending" },
         "phase": status, "reason": reason, "age_ms": age_ms,
         "recipient_delivery": path.map(|path| path.to_value()),
-    })
+    }))
 }
 
 async fn message_delivery(
@@ -3433,7 +4059,7 @@ async fn message_delivery(
         let claims = state.store.claims_for(&subject, Some("message.sent")).map_err(ApiError::internal)?;
         let sent_at = claims.first().map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
         Ok(Json(json!({ "id": subject, "from": message.from, "to": message.to,
-            "delivery": message_delivery_value(&message.to, &message.status, sent_at, client_now_ms()) })))
+            "delivery": message_delivery_value(&state.store, &message.to, &message.status, sent_at, client_now_ms()).map_err(ApiError::internal)? })))
     }).await
 }
 
@@ -3468,6 +4094,14 @@ async fn message_by_key(
             .map_err(ApiError::internal)?
             .ok_or_else(not_sent)?;
         Ok(Json(MessageSendReceipt {
+            kind: Some(
+                if crate::silent::is_held(&message) {
+                    "silent"
+                } else {
+                    "wake"
+                }
+                .into(),
+            ),
             message,
             idempotency_key: query.key.clone(),
             already_sent: true,
@@ -3784,7 +4418,7 @@ fn launch_compact_preview(
         .collect::<BTreeSet<_>>();
     let mut agents_by_id = state
         .store
-        .desired_subjects()?
+        .desired_subjects_named(&assigned_agents.iter().cloned().collect::<Vec<_>>())?
         .into_iter()
         .filter(|subject| subject.kind == "agent" && assigned_agents.contains(&subject.subject))
         .map(|subject| (subject.subject.clone(), subject))
@@ -3970,54 +4604,80 @@ fn client_launch_approval_resources(
     Ok(approvals)
 }
 
-fn client_launch_resources(state: &AppState, history: bool) -> anyhow::Result<Vec<Value>> {
+fn client_launch_resource(
+    state: &AppState,
+    session: &PlanningSessionView,
+) -> anyhow::Result<Value> {
     let store = &state.store;
-    let sessions = store.planning_sessions(history)?;
-    let mut resources = sessions
+    let phase = match session.status.as_str() {
+        "planning" | "revision-requested" => "authoring",
+        "review" => "review",
+        "approved" => "approved",
+        "cancelled" => "cancelled",
+        _ => "failed",
+    };
+    let historical = matches!(phase, "approved" | "cancelled" | "failed");
+    let target = match (&session.target_mission_run, &session.source_generation) {
+        (Some(run), Some(generation)) => json!({
+            "type": "mission-run",
+            "mission_run_id": run,
+            "generation_id": generation
+        }),
+        _ => json!({ "type": "new-mission" }),
+    };
+    let decisions = client_launch_decision_resources(store, session)?;
+    let latest_variant = client_launch_variant_resources(state, session)?
         .into_iter()
-        .map(|session| {
-            let phase = match session.status.as_str() {
-                "planning" | "revision-requested" => "authoring",
-                "review" => "review",
-                "approved" => "approved",
-                "cancelled" => "cancelled",
-                _ => "failed",
-            };
-            let historical = matches!(phase, "approved" | "cancelled" | "failed");
-            let target = match (&session.target_mission_run, &session.source_generation) {
-                (Some(run), Some(generation)) => json!({
-                    "type": "mission-run",
-                    "mission_run_id": run,
-                    "generation_id": generation
-                }),
-                _ => json!({ "type": "new-mission" }),
-            };
-            let decisions = client_launch_decision_resources(store, &session)?;
-            let latest_variant = client_launch_variant_resources(state, &session)?.into_iter().rev().next();
-            let visualization = latest_variant.as_ref().and_then(|variant| variant.get("visualization").cloned());
-            let preview = latest_variant.as_ref().and_then(|variant| variant.get("preview").cloned());
-            let preview_token = latest_variant.as_ref().and_then(|variant| variant.get("preview_token").cloned());
-            let approval_ids = store.claims_for(&session.subject, None)?.into_iter().filter(|claim| claim.kind == "planning-session.approved").filter_map(|claim| claim.body.pointer("/fields/candidate_revision").and_then(Value::as_u64).map(|revision| format!("launch-approval/{}/{revision}", session.id))).collect::<Vec<_>>();
-            Ok(json!({
-                "id": format!("launch/{}", session.id),
-                "kind": "launch",
-                "revision": format!("launch/{}", session.updated_at_unix_ms),
-                "updated_at": client_timestamp(session.updated_at_unix_ms),
-                "title": session.mission,
-                "phase": phase,
-                "request": session.request,
-                "planner": session.planner,
-                "planner_config": session.planner_config,
-                "target": target,
-                "variants": session.variants.iter().map(|variant| format!("launch-variant/{}/{}", session.id, variant.name)).collect::<Vec<_>>(),
-                "decisions": decisions.iter().filter_map(|decision| decision["id"].as_str()).collect::<Vec<_>>(),
-                "approvals": approval_ids,
-                "visualization": visualization,
-                "preview": preview,
-                "preview_token": preview_token,
-                "operational": { "layer": if historical { "history" } else { "current" }, "actionable": !historical, "reasons": if historical { vec![phase] } else { Vec::<&str>::new() } }
-            }))
+        .rev()
+        .next();
+    let visualization = latest_variant
+        .as_ref()
+        .and_then(|variant| variant.get("visualization").cloned());
+    let preview = latest_variant
+        .as_ref()
+        .and_then(|variant| variant.get("preview").cloned());
+    let preview_token = latest_variant
+        .as_ref()
+        .and_then(|variant| variant.get("preview_token").cloned());
+    let approval_ids = store
+        .claims_for(&session.subject, None)?
+        .into_iter()
+        .filter(|claim| claim.kind == "planning-session.approved")
+        .filter_map(|claim| {
+            claim
+                .body
+                .pointer("/fields/candidate_revision")
+                .and_then(Value::as_u64)
+                .map(|revision| format!("launch-approval/{}/{revision}", session.id))
         })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "id": format!("launch/{}", session.id),
+        "kind": "launch",
+        "revision": format!("launch/{}", session.updated_at_unix_ms),
+        "updated_at": client_timestamp(session.updated_at_unix_ms),
+        "title": session.mission,
+        "phase": phase,
+        "request": session.request,
+        "planner": session.planner,
+        "planner_config": session.planner_config,
+        "target": target,
+        "variants": session.variants.iter().map(|variant| format!("launch-variant/{}/{}", session.id, variant.name)).collect::<Vec<_>>(),
+        "decisions": decisions.iter().filter_map(|decision| decision["id"].as_str()).collect::<Vec<_>>(),
+        "approvals": approval_ids,
+        "visualization": visualization,
+        "preview": preview,
+        "preview_token": preview_token,
+        "operational": { "layer": if historical { "history" } else { "current" }, "actionable": !historical, "reasons": if historical { vec![phase] } else { Vec::<&str>::new() } }
+    }))
+}
+
+fn client_launch_resources(state: &AppState, history: bool) -> anyhow::Result<Vec<Value>> {
+    let mut resources = state
+        .store
+        .planning_sessions(history)?
+        .iter()
+        .map(|session| client_launch_resource(state, session))
         .collect::<anyhow::Result<Vec<_>>>()?;
     resources.sort_by(|left, right| {
         right["updated_at"]
@@ -4026,6 +4686,30 @@ fn client_launch_resources(state: &AppState, history: bool) -> anyhow::Result<Ve
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(resources)
+}
+
+/// Select a visible native session before rendering. A native ID may itself start with
+/// `launch/`; only if it is absent from this listing does the public-ID fallback apply.
+fn client_launch_detail_at(
+    state: &AppState,
+    id: &str,
+    history: bool,
+) -> anyhow::Result<Option<Value>> {
+    for native_id in std::iter::once(id).chain(id.strip_prefix("launch/")) {
+        // Strip exactly this synthetic prefix in Store::planning_session, preserving a
+        // native ID that itself begins with `planning-session/`.
+        let Some(session) = state
+            .store
+            .planning_session(&format!("planning-session/{native_id}"))?
+        else {
+            continue;
+        };
+        if !history && matches!(session.status.as_str(), "approved" | "cancelled" | "failed") {
+            continue;
+        }
+        return client_launch_resource(state, &session).map(Some);
+    }
+    Ok(None)
 }
 
 fn client_history_resource(claim: ClaimRecord) -> Value {
@@ -4058,6 +4742,16 @@ async fn client_work(
     if query.history {
         return client_work_history(&state, snapshot, &query).await;
     }
+    // While a refresher governs the work list (from when it holds the list's view, before it
+    // starts), pages come from its publications and never fold the list on read. With none,
+    // as with ST3_PUBLISHED_LISTS=off, they read directly, as before.
+    if !matches!(
+        state.store.published_work_list().current(),
+        crate::store::published_list::ListRead::NeverStarted
+    ) || state.store.collection_view_published("work")
+    {
+        return client_work_published(state, snapshot, query).await;
+    }
     let actor = query.actor.clone();
     client_snapshot_page(&state, snapshot, "work", &query, move |state, snapshot| {
         client_work_resources(
@@ -4069,6 +4763,377 @@ async fn client_work(
         )
     })
     .await
+}
+
+/// How long a fresh current-work read waits for a publication at least as new as itself.
+const WORK_LIST_FRESH_WAIT: Duration = Duration::from_secs(2);
+
+/// Where a published current-work page's cursor continues: the publication its first page
+/// served and the actor's rows in it, kept as the page cache keeps a first page's items.
+struct PublishedWorkPage {
+    digest: String,
+    /// The publication's identity: its list, generation and number. A continuation is served
+    /// only while that list is still the store's and in that generation.
+    id: crate::store::published_list::PublicationId,
+    /// What the first page issued, which a cursor, being the client's to edit, must repeat.
+    contract: PublishedWorkContract,
+    /// Only the rows the page lists, in order: the actor's, or every row for a fleet page,
+    /// sharing the publication's rendered values. Not the publication, its memo or its seats.
+    rows: Arc<Vec<Arc<Value>>>,
+    expires_at_unix_ms: u128,
+}
+
+/// Drop the entries that expired, and this list's entries of a generation a forget replaced.
+/// Another store's entries are left to their own list. Lazy: run at each cache access.
+fn purge_published_work_pages(
+    pages: &mut VecDeque<PublishedWorkPage>,
+    list: &crate::store::published_list::PublishedList<crate::store::work_list::WorkRows>,
+) {
+    let now = client_now_ms();
+    let (instance, generation) = (list.instance(), list.generation());
+    pages.retain(|page| {
+        page.expires_at_unix_ms > now && (page.id.list != instance || page.id.generation == generation)
+    });
+}
+
+/// A published work page's issued limit, snapshot and filters.
+#[derive(PartialEq, Eq)]
+struct PublishedWorkContract {
+    limit: usize,
+    /// The whole issued snapshot, each field of it, as the cursor carries it.
+    snapshot: String,
+    person: Option<String>,
+    actor: Option<String>,
+    owner_run: Option<String>,
+    status: Option<String>,
+    native_only: bool,
+}
+
+impl PublishedWorkContract {
+    fn of(cursor: &ClientPageCursor) -> Self {
+        Self {
+            limit: cursor.limit,
+            snapshot: serde_json::to_string(&cursor.snapshot).expect("a client snapshot serializes"),
+            person: cursor.person.clone(),
+            actor: cursor.actor.clone(),
+            owner_run: cursor.owner_run.clone(),
+            status: cursor.status.clone(),
+            native_only: cursor.native_only,
+        }
+    }
+}
+
+static PUBLISHED_WORK_PAGES: OnceLock<Mutex<VecDeque<PublishedWorkPage>>> = OnceLock::new();
+
+fn published_work_pages() -> &'static Mutex<VecDeque<PublishedWorkPage>> {
+    PUBLISHED_WORK_PAGES.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// How many published work page entries a list's publications hold, for tests: the cache is
+/// shared by every store in the process.
+#[cfg(test)]
+fn published_work_pages_of(list: u64) -> usize {
+    published_work_pages()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|page| page.id.list == list)
+        .count()
+}
+
+/// The first `items_digest` segment of a cursor that continues a published work page.
+const PUBLISHED_WORK_DIGEST: &str = "published-work:";
+
+/// A published work page's identity: the host, the publication (its list, generation and
+/// number, unique within the process) and the actor, hex-encoded so no actor can spell
+/// another's.
+fn published_work_digest(
+    state: &AppState,
+    id: crate::store::published_list::PublicationId,
+    actor: Option<&str>,
+) -> String {
+    let actor = actor.map_or_else(|| "-".to_owned(), |actor| hex::encode(actor.as_bytes()));
+    format!(
+        "{PUBLISHED_WORK_DIGEST}{}:{}:{}:{}:{actor}",
+        hex::encode(state.node.as_bytes()),
+        id.list,
+        id.generation,
+        id.sequence
+    )
+}
+
+/// A current work page from the work list's publications. A first page serves the newest
+/// current publication, or with `fresh=true` one at least as new as the request; a continuation
+/// serves the publication its first page did. Neither folds the list: with nothing current to
+/// serve it is not ready, and once the refresher has ended, unavailable.
+async fn client_work_published(
+    state: AppState,
+    snapshot: ClientSnapshot,
+    query: ClientListQuery,
+) -> Result<ClientPageResponse, ApiError> {
+    use crate::store::published_list::ListRead;
+    if let Some(encoded) = &query.cursor {
+        let cursor = decode_client_cursor(encoded)?;
+        // A first page read before the refresher started continues from the page cache.
+        if !cursor.items_digest.starts_with(PUBLISHED_WORK_DIGEST) {
+            let page = client_page(&state, &snapshot, "work", Vec::new(), &query)?;
+            return Ok((Extension(snapshot), Json(page)));
+        }
+        let page = client_work_published_continuation(&state, &snapshot, &query, cursor)?;
+        return Ok((Extension(snapshot), Json(page)));
+    }
+    let list = state.store.published_work_list();
+    let (publication, id) = if query.fresh {
+        let waited = Instant::now();
+        let fresh = wait_for_work_list(&state.store).await;
+        record_work_stage(request_latency::WorkStage::FreshWait, waited.elapsed());
+        fresh?
+    } else {
+        match list.current() {
+            ListRead::Served(publication, id) => (publication, id),
+            ListRead::NotReady | ListRead::NeverStarted => {
+                list.request_refresh();
+                return Err(published_lists::work_list_not_ready());
+            }
+            ListRead::Ended => return Err(published_lists::work_list_ended()),
+        }
+    };
+    let reader = state.clone();
+    blocking_store(move || Ok(client_work_published_page(&reader, &publication, id, &query))).await?
+}
+
+/// Wait up to [`WORK_LIST_FRESH_WAIT`] for a current publication at or after the store's index
+/// when the request arrived. Each way it can end answers differently: such a publication; not
+/// fresh, once the wait is over; not ready, if the list is withdrawn or forgotten meanwhile or
+/// its change channel closes; unavailable, if the refresher ends. Never stale rows as fresh.
+async fn wait_for_work_list(
+    store: &Arc<Store>,
+) -> Result<
+    (
+        Arc<crate::store::published_list::Publication<crate::store::work_list::WorkRows>>,
+        crate::store::published_list::PublicationId,
+    ),
+    ApiError,
+> {
+    use crate::store::published_list::ListRead;
+    let list = store.published_work_list();
+    let wanted = store.index().map_err(ApiError::internal)?;
+    let mut changes = list.subscribe();
+    let deadline = tokio::time::Instant::now() + WORK_LIST_FRESH_WAIT;
+    let mut asked = false;
+    loop {
+        drop(changes.borrow_and_update());
+        let newest = match list.current() {
+            ListRead::Served(publication, id) if publication.cut >= wanted => return Ok((publication, id)),
+            // Behind the request: ask once for a fold now, without the rest of the pause.
+            ListRead::Served(publication, _) => {
+                if !asked {
+                    list.request_fresh();
+                    asked = true;
+                }
+                publication.cut
+            }
+            ListRead::Ended => return Err(published_lists::work_list_ended()),
+            ListRead::NotReady | ListRead::NeverStarted => return Err(published_lists::work_list_not_ready()),
+        };
+        match tokio::time::timeout_at(deadline, changes.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(published_lists::work_list_not_ready()),
+            Err(_) => return Err(published_lists::work_list_not_fresh(wanted, Some(newest))),
+        }
+    }
+}
+
+/// A first page of `publication`, under the snapshot of its own cut. An actor's rows come from
+/// its order in the publication, built on its first read. The page is emitted only if no
+/// forget replaced the projections since `id` was acquired.
+fn client_work_published_page(
+    state: &AppState,
+    publication: &Arc<crate::store::published_list::Publication<crate::store::work_list::WorkRows>>,
+    id: crate::store::published_list::PublicationId,
+    query: &ClientListQuery,
+) -> Result<ClientPageResponse, ApiError> {
+    let started = Instant::now();
+    let limit = query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS).clamp(1, CLIENT_MAX_PAGE_ITEMS);
+    let mut built = false;
+    let indexes = query.actor.as_deref().map(|actor| {
+        let (indexes, fresh) = publication.rows.actor_rows(actor);
+        built = fresh;
+        indexes
+    });
+    let (items, has_more) = publication.rows.page_of(indexes.as_deref().map(Vec::as_slice), 0, limit);
+    // The final fence: emit nothing a forget replaced since `id` was acquired.
+    let list = state.store.published_work_list();
+    if list.instance() != id.list || list.generation() != id.generation {
+        return Err(published_lists::work_list_not_ready());
+    }
+    let snapshot = roster_snapshot(state, publication.cut, publication.published_at_unix_ms);
+    let digest = published_work_digest(state, id, query.actor.as_deref());
+    let mut expires_at_unix_ms = 0;
+    let next_cursor = if has_more {
+        let mut cursor = published_work_cursor(&snapshot, query, items.len(), limit, digest, 0);
+        let contract = PublishedWorkContract::of(&cursor);
+        let mut pages = published_work_pages().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        purge_published_work_pages(&mut pages, list);
+        // The same page asked again reuses its entry and its original expiry: polling the same
+        // first page neither adds an entry nor evicts another's.
+        expires_at_unix_ms = match pages
+            .iter()
+            .find(|page| page.digest == cursor.items_digest && page.contract == contract)
+        {
+            Some(page) => page.expires_at_unix_ms,
+            None => {
+                while pages.len() >= CLIENT_PAGE_CACHE_CAPACITY {
+                    pages.pop_front();
+                }
+                let expires_at_unix_ms = client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS);
+                pages.push_back(PublishedWorkPage {
+                    digest: cursor.items_digest.clone(),
+                    id,
+                    contract,
+                    rows: Arc::new(publication.rows.selected_rows(indexes.as_deref().map(Vec::as_slice))),
+                    expires_at_unix_ms,
+                });
+                expires_at_unix_ms
+            }
+        };
+        cursor.expires_at_unix_ms = expires_at_unix_ms;
+        Some(encode_client_cursor(&cursor)?)
+    } else {
+        None
+    };
+    let page = ClientResourcePage {
+        kind: "page".into(),
+        collection: "work".into(),
+        filters: client_page_filters("work", query),
+        items,
+        page: ClientPageInfo {
+            limit,
+            has_more,
+            next_cursor,
+            cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+        },
+        sync: client_sync_notice(state),
+        replicated: None,
+    };
+    let stage = if built { request_latency::WorkStage::ActorBuild } else { request_latency::WorkStage::Page };
+    record_work_stage(stage, started.elapsed());
+    Ok((Extension(snapshot), Json(page)))
+}
+
+fn published_work_cursor(
+    snapshot: &ClientSnapshot,
+    query: &ClientListQuery,
+    offset: usize,
+    limit: usize,
+    items_digest: String,
+    expires_at_unix_ms: u128,
+) -> ClientPageCursor {
+    ClientPageCursor {
+        snapshot: snapshot.clone(),
+        collection: "work".into(),
+        offset,
+        limit,
+        history: false,
+        person: query.person.clone(),
+        actor: query.actor.clone(),
+        owner_run: query.owner_run.clone(),
+        status: query.status.clone(),
+        owner: None,
+        state: None,
+        native_only: query.native_only,
+        items_digest,
+        before_index: None,
+        after_key: None,
+        expires_at_unix_ms,
+    }
+}
+
+/// The next page of a published work page: the same publication and actor rows, sliced at the
+/// cursor. It expires as a cached page does, and also once a forget replaced the projections
+/// its rows were folded from. A later publication of the same generation leaves it valid.
+fn client_work_published_continuation(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    query: &ClientListQuery,
+    cursor: ClientPageCursor,
+) -> Result<ClientResourcePage, ApiError> {
+    if cursor.collection != "work"
+        || cursor.history != query.history
+        || cursor.person != query.person
+        || cursor.actor != query.actor
+        || cursor.owner_run != query.owner_run
+        || cursor.owner.is_some()
+        || cursor.state.is_some()
+        || cursor.status != query.status
+        || cursor.native_only != query.native_only
+        || query.limit.is_some_and(|limit| limit.clamp(1, CLIENT_MAX_PAGE_ITEMS) != cursor.limit)
+        || cursor.snapshot.id != snapshot.id
+        || cursor.snapshot.store_index != snapshot.store_index
+    {
+        return Err(client_page_expired(
+            "the page cursor does not match this collection, snapshot, or filter",
+        ));
+    }
+    if client_now_ms() > cursor.expires_at_unix_ms {
+        return Err(client_page_expired("the page cursor expired"));
+    }
+    // Served only from the store's own list, in the generation its rows were folded in.
+    let list = state.store.published_work_list();
+    let (rows, id) = {
+        let mut pages = published_work_pages().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        purge_published_work_pages(&mut pages, list);
+        // The cursor is the client's to edit: it must repeat the limit, snapshot and filters
+        // its first page issued, so it can never ask for more than one bounded page, and two
+        // pages with one digest and expiry but different contracts never answer for each other.
+        let contract = PublishedWorkContract::of(&cursor);
+        if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&cursor.limit) {
+            return Err(client_page_expired("the page cursor does not match the page it continues"));
+        }
+        let page = pages
+            .iter()
+            .find(|page| {
+                page.digest == cursor.items_digest
+                    && page.expires_at_unix_ms == cursor.expires_at_unix_ms
+                    && page.contract == contract
+            })
+            .ok_or_else(|| client_page_expired("the page snapshot is no longer available; restart pagination"))?;
+        (Arc::clone(&page.rows), page.id)
+    };
+    let current = |list: &crate::store::published_list::PublishedList<crate::store::work_list::WorkRows>| {
+        list.instance() == id.list && list.generation() == id.generation
+    };
+    if !current(list) {
+        return Err(client_page_expired("the work list was refolded since this page was read; restart pagination"));
+    }
+    let end = cursor.offset.saturating_add(cursor.limit).min(rows.len());
+    let items = rows[cursor.offset.min(end)..end].iter().map(|row| (**row).clone()).collect::<Vec<_>>();
+    let has_more = end < rows.len();
+    // The final fence: a forget while the page was sliced replaced the rows it holds.
+    if !current(list) {
+        return Err(client_page_expired("the work list was refolded since this page was read; restart pagination"));
+    }
+    let next_cursor = if has_more {
+        let mut next = cursor.clone();
+        next.offset = cursor.offset.saturating_add(items.len());
+        Some(encode_client_cursor(&next)?)
+    } else {
+        None
+    };
+    Ok(ClientResourcePage {
+        kind: "page".into(),
+        collection: "work".into(),
+        filters: client_page_filters("work", query),
+        items,
+        page: ClientPageInfo {
+            limit: cursor.limit,
+            has_more,
+            next_cursor,
+            cursor_expires_at: has_more.then(|| client_timestamp(cursor.expires_at_unix_ms)),
+        },
+        sync: client_sync_notice(state),
+        replicated: None,
+    })
 }
 
 /// The work history, read a page at a time in the order it shows, each page inside one SQLite
@@ -4218,19 +5283,29 @@ async fn client_agents(
     Extension(snapshot): Extension<ClientSnapshot>,
     Query(query): Query<ClientListQuery>,
 ) -> Result<ClientPageResponse, ApiError> {
+    // A daemon's readers never fold the roster: they answer from its refresher's publications.
+    if state.store.agent_roster_refresher_running() {
+        return client_agents_published(state, snapshot, query).await;
+    }
     // A warm request never queues behind a cold projection. Drop the probe's SQLite
     // snapshot before waiting, then recheck all cache fences in the admitted snapshot.
+    let requested = snapshot.store_index;
+    let fresh = query.fresh;
     for admitted in [false, true] {
         let admission = if admitted {
-            Some(state.store.admit_agent_resources().await)
+            Some(state.store.admit_agent_resources("http").await)
         } else {
             None
         };
         let reader = state.clone();
         let snapshot = snapshot.clone();
         let query = query.clone();
-        let result = blocking_store(move || {
+        let filtered = query.status.is_some();
+        let result = blocking_roster(move || {
             let _admission = admission;
+            if let Some(admission) = &_admission {
+                admission.enter_worker();
+            }
             reader.store.clone().read_snapshot(|index| {
                 let snapshot = if query.cursor.is_some() {
                     snapshot
@@ -4243,10 +5318,300 @@ async fn client_agents(
             })
         }).await??;
         if let Some(page) = result {
+            let path = match (filtered, admitted) {
+                (true, _) => "filtered_full",
+                (false, true) => "exact_cold",
+                (false, false) => "exact_warm",
+            };
+            crate::otel::record_roster_read(path, requested, Some(page.0.0.store_index), fresh);
             return Ok(page);
         }
     }
     unreachable!("an admitted roster read always builds missing cards")
+}
+
+/// An agents page from the refresher's publications. A first page answers at once from the
+/// newest one, or says not ready; one that asks for a fresh roster first waits briefly for a
+/// roster at or after its own cut. A
+/// continuation answers from the roster published at exactly its first page's cut, or says the
+/// page expired. Neither folds a card.
+async fn client_agents_published(
+    state: AppState,
+    snapshot: ClientSnapshot,
+    query: ClientListQuery,
+) -> Result<ClientPageResponse, ApiError> {
+    state.store.note_agent_roster_read();
+    let requested = snapshot.store_index;
+    if query.cursor.is_some() {
+        let reader = state.clone();
+        return blocking_roster(move || {
+            Ok(client_agents_published_continuation(&reader, snapshot, &query))
+        })
+        .await?;
+    }
+    let fresh = query.fresh;
+    if fresh {
+        let waited = Instant::now();
+        wait_for_agent_roster(&state.store, query.history).await;
+        record_roster_stage(request_latency::RosterStage::FreshWait, waited.elapsed());
+    }
+    let reader = state.clone();
+    let history = query.history;
+    let built = Instant::now();
+    let page = blocking_roster(move || Ok(client_agents_published_page(&reader, &query, requested))).await;
+    if fresh {
+        record_roster_stage(request_latency::RosterStage::FreshPage, built.elapsed());
+    }
+    match page?? {
+        Some(page) => Ok(page),
+        None => {
+            crate::otel::record_roster_read("not_ready", requested, None, fresh);
+            if history {
+                state.store.request_agent_roster_history();
+            } else {
+                state.store.request_agent_roster_refresh();
+            }
+            Err(agent_roster_not_ready())
+        }
+    }
+}
+
+fn agent_roster_not_ready() -> ApiError {
+    ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "agent-roster-not-ready".into(),
+        message: "the agents roster is still being prepared; retry shortly".into(),
+        details: Box::default(),
+    }
+}
+
+/// How many agents one short snapshot reduces while the refresher warms the roster.
+const AGENT_ROSTER_WARM_CHUNK: usize = 250;
+
+/// Reduce every agent's current-view and card status in short snapshots of at most
+/// [`AGENT_ROSTER_WARM_CHUNK`] agents. These per-agent reductions stay cached until a claim
+/// they depend on arrives, so the folds that follow at one cut read them instead of the log.
+fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
+    let subjects = store.read_snapshot(|index| {
+        let connection = store.readers.get();
+        crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
+            Ok(connection
+                .prepare_cached(crate::store::RANGE_SUBJECTS)?
+                .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+    })?;
+    for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
+        let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
+        store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
+            store.agent_card_status_at(Some(&names), index, false).map(drop)
+        }))?;
+    }
+    Ok(())
+}
+
+/// How many times a refresh folds the roster in chunks before it gives up on a roster that
+/// keeps changing in ways it cannot follow card by card.
+const AGENT_ROSTER_ASSEMBLY_ROUNDS: usize = 3;
+
+/// Publish the complete roster at a new cut, never folding more than
+/// [`AGENT_ROSTER_WARM_CHUNK`] cards in one snapshot. A snapshot completes the roster only once
+/// the newest rows say which cards changed and at most that many are changed or missing.
+/// Otherwise the cards fold in chunks, each at its own cut, refolding the already folded cards
+/// whose claims changed, and completion is tried again. Readers keep the previous complete
+/// roster meanwhile, with its own cut and publication time; if it cannot be assembled, the
+/// refresh fails and is tried again on the next request.
+fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
+    store.begin_agent_roster_fault_retries(history);
+    if store.read_snapshot(|index| store.agent_roster_current(index, history))? {
+        return Ok(());
+    }
+    let complete = |store: &Store| store.read_snapshot(|index| {
+        if let Some(reason) =
+            store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)?
+        {
+            return Ok(Some(reason));
+        }
+        client_agent_resources_cached(store, history, index).map(|_| None)
+    });
+    for _ in 0..AGENT_ROSTER_ASSEMBLY_ROUNDS {
+        let Some(reason) = complete(store)? else {
+            return Ok(());
+        };
+        store.note_agent_roster_chunked(&reason);
+        let order = store.read_snapshot(|index| {
+            Ok(client_agent_page_refs(store, history, index)?.iter()
+                .filter_map(|reference| reference["id"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>())
+        })?;
+        for chunk in order.chunks(AGENT_ROSTER_WARM_CHUNK) {
+            let chunk = chunk.iter().cloned().collect::<BTreeSet<_>>();
+            store.read_snapshot(|index| {
+                client_agent_cards_selected(store, history, index, &chunk, true).map(drop)
+            })?;
+        }
+    }
+    if complete(store)?.is_none() {
+        return Ok(());
+    }
+    anyhow::bail!("the agents roster kept changing in ways no short fold can follow; keeping the previous one")
+}
+
+/// Every current agent's refs, and the cards of as many as the largest window or page shows.
+fn client_agent_roster_head(store: &Store, index: u64) -> anyhow::Result<()> {
+    let refs = client_agent_page_refs(store, false, index)?;
+    let head = refs.iter().take(CLIENT_MAX_PAGE_ITEMS + 1)
+        .filter_map(|reference| reference["id"].as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    client_agent_cards_selected(store, false, index, &head, false).map(drop)
+}
+
+/// For a read that asked to see what was written before it: wait, briefly, for the refresher
+/// to publish a roster at or after the current cut, unless no claim since the newest
+/// publication changes a card, so that a refresh would fold nothing. The read itself folds
+/// nothing.
+async fn wait_for_agent_roster(store: &Arc<Store>, history: bool) {
+    let Ok(wanted) = store.index() else { return };
+    let published = |store: &Store| {
+        let index = store.index().ok()?;
+        store.published_agent_roster(index, history).map(|(cut, _, _)| cut).or_else(|| {
+            (!history).then(|| store.published_agent_roster_head(index, 1)).flatten()
+                .map(|(cut, _, _, _)| cut)
+        })
+    };
+    let mut publications = store.subscribe_agent_roster();
+    let _ = tokio::time::timeout(AGENT_ROSTER_READ_WAIT, async {
+        while published(store).is_none_or(|cut| cut < wanted) {
+            store.request_fresh_agent_roster(history);
+            if published(store).is_some() && store.agent_roster_refresh_failed() {
+                return;
+            }
+            // Claims on unrelated subjects move the cut all the time; the paced refresher
+            // would publish the same cards. One bounded range read tells.
+            let reader = Arc::clone(store);
+            if let Ok(true) = blocking_store(move || {
+                reader.published_agent_roster_unchanged_through(wanted, history)
+            }).await {
+                return;
+            }
+            if publications.changed().await.is_err() {
+                return;
+            }
+        }
+    }).await;
+}
+
+/// The snapshot of a roster published at `cut`: that cut, its time, and when it was folded.
+fn roster_snapshot(state: &AppState, cut: u64, published_at_unix_ms: u128) -> ClientSnapshot {
+    ClientSnapshot {
+        published_at: Some(client_timestamp(published_at_unix_ms)),
+        ..client_snapshot_at(state, cut)
+    }
+}
+
+/// A first page of the newest published roster, under the snapshot it was folded at.
+/// `requested` is the request's own cut, recorded beside the publication cut it was served.
+fn client_agents_published_page(
+    state: &AppState,
+    query: &ClientListQuery,
+    requested: u64,
+) -> Result<Option<ClientPageResponse>, ApiError> {
+    let store = &state.store;
+    let current = store.index().map_err(ApiError::internal)?;
+    let index = current;
+    let Some((index, cards, published_at)) = store.published_agent_roster(index, query.history) else {
+        // Before the first complete roster, an unfiltered first page can come from its head.
+        if query.status.is_some() || query.history {
+            return Ok(None);
+        }
+        let Some((index, refs, head, published_at)) =
+            store.published_agent_roster_head(index, CLIENT_MAX_PAGE_ITEMS + 1)
+        else {
+            return Ok(None);
+        };
+        store.request_agent_roster_refresh();
+        crate::otel::record_roster_read("published_head", requested, Some(index), query.fresh);
+        let snapshot = roster_snapshot(state, index, published_at);
+        let mut page = client_page_read(state, &snapshot, "agents", (*refs).clone(), query, true)?;
+        page.items = client_agent_cards_from_cached(
+            store, page_cards(&head, &page.items), &page.items, &snapshot.created_at,
+        )?;
+        return Ok(Some((Extension(snapshot), Json(page))));
+    };
+    // A roster older than the current cut, its local activity or its queue deadline needs a
+    // refresh; the newest one needs none.
+    if index < current || !store.agent_roster_current(current, query.history).map_err(ApiError::internal)? {
+        if query.history {
+            store.request_agent_roster_history();
+        } else {
+            store.request_agent_roster_refresh();
+        }
+    }
+    let snapshot = roster_snapshot(state, index, published_at);
+    let path = if query.status.is_some() { "filtered_full" } else { "published_complete" };
+    crate::otel::record_roster_read(path, requested, Some(index), query.fresh);
+    if let Some(status) = query.status.as_deref() {
+        let mut cards = (*cards).clone();
+        overlay_agent_resources(store, &mut cards, &snapshot.created_at)
+            .map_err(ApiError::internal)?;
+        cards.retain(|card| card["state"].as_str() == Some(status));
+        let page = client_page_read(state, &snapshot, "agents", cards, query, true)?;
+        return Ok(Some((Extension(snapshot), Json(page))));
+    }
+    // Continuations keep the same membership, order and queue metadata as the exact path's
+    // refs, and read their cards from this same publication.
+    let refs = crate::otel::roster_phase("membership", || cards.iter().map(|card| {
+        let mut reference = serde_json::Map::new();
+        for field in ["id", "name", "host_id"].into_iter().chain(AGENT_QUEUE_FIELDS) {
+            reference.insert(field.to_owned(), card[field].clone());
+        }
+        Value::Object(reference)
+    }).collect::<Vec<_>>());
+    let mut page = client_page_read(state, &snapshot, "agents", refs, query, true)?;
+    page.items = client_agent_cards_from_cached(
+        store, page_cards(&cards, &page.items), &page.items, &snapshot.created_at,
+    )?;
+    Ok(Some((Extension(snapshot), Json(page))))
+}
+
+/// A page continuing a first page served from a publication: its cards come from the roster
+/// published at exactly that page's cut. Once that roster is gone, pagination restarts.
+fn client_agents_published_continuation(
+    state: &AppState,
+    snapshot: ClientSnapshot,
+    query: &ClientListQuery,
+) -> Result<ClientPageResponse, ApiError> {
+    let store = &state.store;
+    let mut page = client_page_read(state, &snapshot, "agents", Vec::new(), query, true)?;
+    let published = store.published_agent_roster_at(snapshot.store_index, query.history);
+    let path = if query.status.is_some() { "filtered_full" } else { "published_complete" };
+    let served = published.as_ref().map(|_| snapshot.store_index);
+    crate::otel::record_roster_read(path, snapshot.store_index, served, query.fresh);
+    let snapshot = match &published {
+        Some((_, published_at)) => roster_snapshot(state, snapshot.store_index, *published_at),
+        None => snapshot,
+    };
+    // A status-filtered first page kept its whole overlaid cards for its continuations.
+    if query.status.is_some() {
+        return Ok((Extension(snapshot), Json(page)));
+    }
+    let Some((cards, _)) = published else {
+        return Err(client_page_expired(
+            "the roster this page was read from is no longer published; restart pagination",
+        ));
+    };
+    page.items = client_agent_cards_from_cached(
+        store, page_cards(&cards, &page.items), &page.items, &snapshot.created_at,
+    )?;
+    Ok((Extension(snapshot), Json(page)))
+}
+
+/// The cards a page's refs name, from published cards.
+fn page_cards(cards: &[Value], refs: &[Value]) -> Vec<Value> {
+    let selected = refs.iter().filter_map(|item| item["id"].as_str()).collect::<BTreeSet<_>>();
+    cards.iter()
+        .filter(|card| card["id"].as_str().is_some_and(|id| selected.contains(id)))
+        .cloned().collect()
 }
 
 fn client_agents_page_at(
@@ -4330,6 +5695,27 @@ async fn client_agents_detail(
         )?;
         add_agent_todos(&store, &mut items, snapshot_index)?;
         overlay_agent_resources(&store, &mut items, &created_at)?;
+        for item in &mut items {
+            if let Some(subject) = item["id"].as_str()
+                && let Some(operation) = store.runtime_start_for(subject)?
+            {
+                let phase = if operation.revoked_by.is_some() { "revoked" }
+                    else if operation.result.as_ref().is_some_and(|result| result["phase"] == "unknown") { "unknown" }
+                    else if operation.finished { "completed" }
+                    else if operation.dispatched { "running" } else { "queued" };
+                let (running_jobs, revoked_running_jobs) = store.runtime_start_counts()?;
+                let (unresolved_jobs, revoked_unresolved_jobs) = store.unresolved_runtime_start_counts()?;
+                item["runtime_start"] = json!({
+                    "operation_id": operation.id, "phase": phase,
+                    "worker_running": operation.dispatched && !operation.finished,
+                    "cleanup_verified": operation.cleanup_verified,
+                    "running_jobs": running_jobs,
+                    "revoked_running_jobs": revoked_running_jobs,
+                    "unresolved_jobs": unresolved_jobs,
+                    "revoked_unresolved_jobs": revoked_unresolved_jobs,
+                });
+            }
+        }
         Ok(items)
     })
     .await?;
@@ -4375,10 +5761,14 @@ async fn client_sessions_detail(
 ) -> Result<Json<Value>, ApiError> {
     if let Some(id) = id.strip_suffix("/timeline") {
         // An agent's timeline is its current session's: st resolves it, not the client.
-        let session_id = client_v0::conversation_session_id(&state, id)?;
+        let session_id = crate::relay_trace::result(crate::relay_trace::Phase::Session, || {
+            client_v0::conversation_session_id(&state, id)
+        })?;
         let id = session_id.as_str();
-        let managed = managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-            .map_err(ApiError::internal)?;
+        let managed = crate::relay_trace::result(crate::relay_trace::Phase::Owner, || {
+            managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+        })
+        .map_err(ApiError::internal)?;
         if let Some((_, _, origin)) = managed {
             let remote_host = origin
                 .as_deref()
@@ -4420,6 +5810,17 @@ async fn client_sessions_detail(
             }
         }
         return client_v0::timeline_value(&state, &snapshot, &session, id, &query);
+    }
+    // Child transcripts are deliberately absent from the top-level session inventory.
+    // Resolve their resource by the same parent/task identity used by timeline reads.
+    let session_id = client_detail_id("session", &id);
+    if let Some(child) = crate::subagent_sessions::resolve_child(
+        state.native_session_home.as_deref(),
+        &session_id,
+    )
+    .map_err(ApiError::internal)?
+    {
+        return Ok(Json(external_session_resource(child)));
     }
     client_detail(
         client_session_resources(
@@ -4759,18 +6160,27 @@ async fn client_launches(
 
 async fn client_launches_detail(
     State(state): State<AppState>,
+    Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ClientListQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let items = client_launch_resources(&state, query.history).map_err(ApiError::internal)?;
-    // The route carries a session ID. A native ID may itself start with `launch/`.
-    let resource_id = format!("launch/{id}");
-    let id = if items.iter().any(|item| item["id"] == resource_id) {
-        resource_id
-    } else {
-        id
-    };
-    client_detail(items, "launch", &id)
+) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
+    client_v0::require_scope(&session, "read.projections")?;
+    let (snapshot, value) = blocking_store(move || {
+        state.store.read_snapshot(|index| {
+            let value = client_launch_detail_at(&state, &id, query.history)?.ok_or_else(|| {
+                anyhow::anyhow!(St3Error::new(
+                    "not-found",
+                    format!(
+                        "launch `{}` does not exist",
+                        client_detail_id("launch", &id)
+                    ),
+                ))
+            })?;
+            Ok((client_snapshot_at(&state, index), value))
+        })
+    })
+    .await?;
+    Ok((Extension(snapshot), Json(value)))
 }
 
 fn client_launch_session(state: &AppState, id: &str) -> Result<PlanningSessionView, ApiError> {
@@ -5015,6 +6425,29 @@ async fn client_history_detail(
         .ok_or_else(|| ApiError::not_found(format!("history `{id}` does not exist")))
 }
 
+/// A roster operation on a blocking worker. Its submission-to-start wait is recorded apart
+/// from its execution, and its reader timing is attributed, only when `traced`.
+fn roster_worker<T>(traced: bool, submitted: Option<Instant>, seed: Option<crate::otel::RosterAttributes>, work: impl FnOnce() -> T) -> T {
+    if !traced {
+        return work();
+    }
+    crate::otel::roster_scope(|| {
+        crate::otel::seed_roster_attributes(seed);
+        crate::otel::roster_worker_started(submitted);
+        work()
+    })
+}
+
+/// [`blocking_store`] for an HTTP roster read: worker queue wait, then the attributed read.
+async fn blocking_roster<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let submitted = crate::otel::export_enabled().then(Instant::now);
+    blocking_store(move || roster_worker(true, submitted, None, operation)).await
+}
+
 async fn blocking_store<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
@@ -5022,7 +6455,11 @@ where
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
     crate::api::read_deadline::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
         crate::performance::with_charged(cpu_kind, operation)
     })
@@ -5038,7 +6475,11 @@ where
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
     crate::api::read_deadline::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
         crate::performance::with_charged(cpu_kind, operation)
     })
@@ -5056,7 +6497,11 @@ where
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
     crate::api::read_deadline::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
         crate::performance::with_charged(cpu_kind, operation)
     })
@@ -5113,10 +6558,13 @@ pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
 }
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
-/// request path. Some of its checks read the whole claim log, seconds of work on a busy host's
-/// store; until it is made, the collection says so instead of making a read wait for it.
-pub fn start_operation_report(state: &AppState) {
-    client_v0::start_operation_report(state);
+/// request path. Until it is made, the collection says so instead of making a read wait for it.
+/// A newly started report returns its operation audit for the delayed startup repair to consume;
+/// later doctor calls and diagnostic refreshes always audit the current store themselves.
+pub fn start_operation_report(
+    state: &AppState,
+) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+    client_v0::start_operation_report(state)
 }
 
 /// Read the headers of this host's native session transcripts off the request path as the
@@ -5124,6 +6572,115 @@ pub fn start_operation_report(state: &AppState) {
 /// instead of walking the transcript trees, so a cold tree cannot hold those requests.
 pub fn start_native_session_discovery(state: &AppState) {
     crate::external_sessions::start_history_inventory(state.native_session_home.as_deref());
+}
+
+/// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
+/// so refreshing never takes more than about half a core however often readers ask. Reads
+/// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
+/// A read waiting for a fresh roster cuts it short to the refresh's own length.
+const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
+
+/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so
+/// that a very cheap fold cannot turn fresh reads into many refreshes a second.
+const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
+
+/// How long a read asking for a fresh roster waits for one at or after its own cut: long enough
+/// for the refresher to finish a fold, pause as long, and fold again.
+const AGENT_ROSTER_READ_WAIT: Duration = Duration::from_secs(2);
+
+/// Keep the complete agents roster published off the request path. As the daemon starts it
+/// folds every agent's refs and the cards the largest window shows, then the rest of the cards.
+/// A roster read that misses its exact cut serves the newest publication under
+/// that publication's own snapshot and wakes this one task, so readers neither fold the fleet's
+/// cards nor wait behind a fold once the first has published. Each refresh reuses the previous
+/// publication and refolds only the cards whose claims changed, when it can tell which.
+pub fn start_agent_roster(state: &AppState) {
+    let Some(wake) = state.store.start_agent_roster_refresher() else {
+        return;
+    };
+    let store = state.store.clone();
+    tokio::spawn(async move {
+        let mut head = true;
+        loop {
+            let started = tokio::time::Instant::now();
+            let mut admission = store.admit_agent_resources("refresher").await;
+            let first = std::mem::take(&mut head);
+            if !first {
+                record_roster_stage(request_latency::RosterStage::RefreshAdmission, admission.waited());
+            }
+            let reader = store.clone();
+            let mut warm_attributes = None;
+            if first {
+                // Warm without admission: nothing is published, and no reader folds.
+                drop(admission);
+                let reader = store.clone();
+                let submitted = crate::otel::export_enabled().then(Instant::now);
+                match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
+                    roster_worker(true, submitted, None, || {
+                        let result = crate::performance::task("roster/warm", || warm_agent_roster(&reader));
+                        (result, crate::otel::take_roster_attributes())
+                    })
+                })).await {
+                    Ok((result, attributes)) => {
+                        warm_attributes = attributes;
+                        if let Err(error) = result {
+                            eprintln!("st3: agents roster warm-up failed: {error:#}");
+                        }
+                    }
+                    Err(error) => eprintln!("st3: agents roster warm-up stopped: {error}"),
+                }
+                admission = store.admit_agent_resources("refresher").await;
+            }
+            let submitted = crate::otel::export_enabled().then(Instant::now);
+            let refreshed = tokio::task::spawn_blocking(move || roster_worker(true, submitted, warm_attributes, || {
+                let _admission = admission;
+                _admission.enter_worker();
+                // The first fold publishes only what windows and first pages show; the rest
+                // follows at once.
+                crate::performance::task("roster/refresh", || if first {
+                    reader.answer_agent_roster_requests(|| {
+                        reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
+                    })
+                } else {
+                    // Nothing published to start from: every card folds again from the log.
+                    let cold = reader.published_agent_roster(u64::MAX, false).is_none();
+                    let folded = Instant::now();
+                    let refreshed = reader.answer_agent_roster_requests(|| {
+                        refresh_agent_roster(&reader, false)?;
+                        if reader.take_agent_roster_history_request() {
+                            refresh_agent_roster(&reader, true)?;
+                        }
+                        Ok(())
+                    });
+                    record_roster_stage(if cold {
+                        request_latency::RosterStage::RefreshCold
+                    } else {
+                        request_latency::RosterStage::Refresh
+                    }, folded.elapsed());
+                    refreshed
+                })
+            }))
+            .await;
+            match refreshed {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("st3: agents roster refresh failed: {error:#}"),
+                Err(error) => eprintln!("st3: agents roster refresh stopped: {error}"),
+            }
+            if first {
+                continue;
+            }
+            // Pause as long as the refresh took, so refreshing stays under about half a core
+            // however often readers ask, and at least the minimum pause unless a reader waits
+            // for a fresh roster: that read then waits for one fold, not the rest of the pause.
+            let pause = started.elapsed().max(AGENT_ROSTER_FRESH_PAUSE);
+            tokio::time::sleep(pause).await;
+            tokio::select! {
+                () = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause)) => {}
+                () = store.fresh_agent_roster_wanted() => {}
+            }
+            wake.notified().await;
+        }
+    });
 }
 
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
@@ -5227,24 +6784,37 @@ async fn serve_unix_with_ancestor_ready(
             }
         };
         // Every local connection names its caller, so request counts by client are always on.
+        let mut diagnostic_connection = crate::relay_trace::Connection::capture();
         let peer_pid = local_peer_pid(&stream);
         let app = app.clone();
         tokio::spawn(async move {
+            if let Some(connection) = &mut diagnostic_connection {
+                connection.dispatched();
+            }
             // /proc ancestry may fault in pages on a loaded host. Keep that work
             // out of the accept loop so a slow lookup delays only this peer.
-            let (bound_agent, caller, delivery_peer) = match peer_pid {
+            if let Some(connection) = &mut diagnostic_connection {
+                connection.queued();
+            }
+            let (bound_agent, caller, delivery_peer, diagnostic_connection) = match peer_pid {
                 Some(pid) => crate::api::read_deadline::spawn_blocking(move || {
+                    if let Some(connection) = &mut diagnostic_connection {
+                        connection.started();
+                    }
                     let bound_agent = bind_ancestry.then(|| ancestor(pid)).flatten();
                     let caller = Some(crate::profile::Caller::of_command(
                         local_process_arguments(pid).map(|(arguments, _)| arguments),
                         bound_agent.as_deref(),
                     ));
                     let delivery_peer = bind_harness.then(|| native_delivery_peer(pid)).flatten();
-                    (bound_agent, caller, delivery_peer)
+                    if let Some(connection) = &mut diagnostic_connection {
+                        connection.finished();
+                    }
+                    (bound_agent, caller, delivery_peer, diagnostic_connection)
                 })
                 .await
                 .unwrap_or_default(),
-                None => (None, None, None),
+                None => (None, None, None, diagnostic_connection),
             };
             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 let app = app.clone();
@@ -5253,6 +6823,9 @@ async fn serve_unix_with_ancestor_ready(
                 let delivery_peer = delivery_peer.clone();
                 async move {
                     let mut request = request.map(Body::new);
+                    if let Some(connection) = diagnostic_connection {
+                        request.extensions_mut().insert(connection);
+                    }
                     if let Some(pid) = peer_pid {
                         request.extensions_mut().insert(LocalPeer {
                             pid,
@@ -5680,15 +7253,25 @@ pub async fn serve_tcp(address: &str, app: Router) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
+    let harnesses = read_deadline::spawn_blocking(crate::environment::available_harnesses)
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(harnesses))
+}
+
+
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({
         "status": "ready",
         "node": state.node,
         "version": env!("CARGO_PKG_VERSION"),
+        "build": {"commit": st_drivers::version::build_commit()},
         "isolation": isolation_name(st_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
     })))
 }
 
@@ -5717,7 +7300,11 @@ async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, Api
         st_runtime::priority_report(&observations)
     });
     let token = crate::resource::github_auth().await;
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
     let mut report = crate::api::read_deadline::spawn_blocking(move || {
+        // Sealing this node's batches writes through the store's writer, so the request's
+        // writer accounting must follow the job off the runtime thread.
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         // This node's claims are signed as their batches are sealed; seal and judge them so
         // the signature counts cover everything written so far.
         state.store.replication_snapshot().map_err(ApiError::internal)?;
@@ -5777,6 +7364,13 @@ async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, Api
             ),
         });
     }
+    for (name, status, message) in crate::slo::doctor_lines(&request_latency_windows()) {
+        report.checks.push(DoctorCheck {
+            name,
+            status: status.into(),
+            message,
+        });
+    }
     report.checks.extend(github_usage_checks(
         &crate::resource::github_usage_report(),
         client_now_ms(),
@@ -5787,6 +7381,7 @@ async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, Api
         reader_store.readers.usage(),
         smallclaims::sqlite::read_cache_kib(),
         smallclaims::sqlite::max_idle_read_connections(),
+        smallclaims::sqlite::max_read_workers(),
         crate::memory::service_memory(),
     ));
     report.status = if report.checks.iter().any(|check| check.status == "fail") {
@@ -5834,6 +7429,7 @@ fn reader_memory_check(
     readers: smallclaims::sqlite::ReaderUsage,
     cache_kib: usize,
     retained: usize,
+    read_workers: usize,
     groups: anyhow::Result<Option<Vec<crate::memory::GroupMemory>>>,
 ) -> DoctorCheck {
     let targets = readers.open as u128 * cache_kib as u128;
@@ -5841,7 +7437,7 @@ fn reader_memory_check(
         + smallclaims::sqlite::WRITE_CACHE_KIB as u128
         + DAEMON_MEMORY_HEADROOM_KIB;
     let mut message = format!(
-        "{} open readers ({} idle, {} active), peak {}, {} opened since startup; per-reader cache target {} KiB; current reader targets {} MiB; idle retention {}; planning envelope {} MiB (reader targets + 32 MiB writer + 512 MiB reserve). Warning: concurrent reader bursts are unbounded; cache targets exclude schema, prepared statements and query results, and this envelope is not a process memory limit",
+        "{} open readers ({} idle, {} active), peak {}, {} opened since startup; per-reader cache target {} KiB; current reader targets {} MiB; idle retention {}; API read-worker admission {}; planning envelope {} MiB (reader targets + 32 MiB writer + 512 MiB reserve). Raw/background reader checkout is uncapped; cache targets exclude schema, prepared statements and query results, and this envelope is not a process memory limit",
         readers.open,
         readers.idle,
         readers.open.saturating_sub(readers.idle),
@@ -5850,6 +7446,7 @@ fn reader_memory_check(
         cache_kib,
         targets / 1024,
         retained,
+        read_workers,
         envelope_kib / 1024,
     );
     let mut warned = false;
@@ -6042,7 +7639,7 @@ fn stale_attention_check(items: &[crate::model::AttentionItemView], now: u128) -
         return DoctorCheck {
             name: "attention-age".into(),
             status: "pass".into(),
-            message: "no attention item has been open for more than a day".into(),
+            message: "no alert or fault has been open for more than a day".into(),
         };
     }
     stale.sort_by(|left, right| {
@@ -6071,7 +7668,7 @@ fn stale_attention_check(items: &[crate::model::AttentionItemView], now: u128) -
         name: "attention-age".into(),
         status: "warn".into(),
         message: format!(
-            "{} attention items have been open for more than a day; `st attention ls --as PERSON` shows how to close a person's item, and a fault closes at its source: {}",
+            "{} alerts and faults have been open for more than a day; `st alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source: {}",
             stale.len(),
             listed.join("; ")
         ),
@@ -6257,6 +7854,75 @@ fn graph_references_check(unresolved: &[String]) -> DoctorCheck {
     }
 }
 
+fn publication_evidence_check(store: &Store) -> DoctorCheck {
+    match store.publication_evidence_ready() {
+        Ok(true) => DoctorCheck { name:"publication-evidence".into(), status:"pass".into(),
+            message:"retained runtime and incarnation launch evidence is complete".into() },
+        Ok(false) => DoctorCheck { name:"publication-evidence-incomplete".into(), status:"warn".into(),
+            message:"publication evidence bootstrap or pending canonical deltas are incomplete; guarded publications refuse until complete; inspect daemon bootstrap errors if progress stops".into() },
+        Err(error) => DoctorCheck { name:"publication-evidence-unavailable".into(), status:"warn".into(), message:error.to_string() },
+    }
+}
+
+/// Held silent mail is never lost: unread past a day, it is listed for its seat.
+fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
+    match store.coordination_backfill_status() {
+        Ok((cursor, ceiling, false, progress))
+            if now.saturating_sub(u128::from(progress)) > 15 * 60 * 1000 =>
+        {
+            return DoctorCheck {
+                name: "held-mail".into(),
+                status: "warn".into(),
+                message: format!(
+                    "held-mail metadata bootstrap stalled for over 15 minutes at {cursor}/{ceiling}; inspect daemon bootstrap errors and repair the source before publishing counts"
+                ),
+            };
+        }
+        Err(error) => {
+            return DoctorCheck {
+                name: "held-mail".into(),
+                status: "warn".into(),
+                message: error.to_string(),
+            };
+        }
+        _ => {}
+    }
+    match store.held_mail_before(now.saturating_sub(crate::silent::HELD_TOO_LONG_MS)) {
+        Ok(seats) if seats.is_empty() => DoctorCheck {
+            name: "held-mail".into(),
+            status: "pass".into(),
+            message: if store
+                .coordination_backfill_status()
+                .is_ok_and(|state| !state.2)
+            {
+                "held-mail metadata bootstrap is progressing; this diagnostic is partial until complete".into()
+            } else {
+                "no seat holds silent mail unread for over a day".into()
+            },
+        },
+        Ok(seats) => DoctorCheck {
+            name: "held-mail".into(),
+            status: "warn".into(),
+            message: format!(
+                "silent mail unread for over a day (at most 128 oldest subjects per check): {}; read it with `st conversations ls --as SEAT`",
+                seats
+                    .iter()
+                    .map(|(seat, count, oldest)| format!(
+                        "{seat}: {count}, oldest {}h",
+                        now.saturating_sub(*oldest) / 3_600_000
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        },
+        Err(error) => DoctorCheck {
+            name: "held-mail".into(),
+            status: "warn".into(),
+            message: error.to_string(),
+        },
+    }
+}
+
 fn unread_current_seat_counts(
     store: &Store,
     recipients: &BTreeSet<&str>,
@@ -6268,6 +7934,8 @@ fn unread_current_seat_counts(
     for message in messages.iter().filter(|message| {
         recipients.contains(message.to.as_str())
             && !matches!(message.status.as_str(), "read" | "closed")
+            // Held mail is not late: it waits for the seat's next turn.
+            && !crate::silent::waits_for_turn(message)
     }) {
         let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
         if let Some(host) = owners
@@ -6343,7 +8011,24 @@ fn terminal_exec_gates_check(store: &Store) -> anyhow::Result<DoctorCheck> {
 }
 
 fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
+    let drift = state.store.operation_projection_drift();
+    doctor_report_with_operation_drift(state, &drift)
+}
+
+fn doctor_report_with_operation_drift(
+    state: &AppState,
+    drift: &anyhow::Result<Vec<String>>,
+) -> Result<Json<DoctorReport>, ApiError> {
     let mut checks = Vec::new();
+    let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
+        .map_err(ApiError::internal)?
+        .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
+    let access_mode = if auto { "auto" } else { "bypass" };
+    checks.push(DoctorCheck {
+        name: "harness-access-mode".into(), status: "pass".into(),
+        message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
+    });
+
     match state.store.index() {
         Ok(index) => checks.push(DoctorCheck {
             name: "claim-store".into(),
@@ -6364,7 +8049,7 @@ fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
             message: error.to_string(),
         }),
     }
-    match state.store.operation_projection_drift() {
+    match drift {
         Ok(drift) if drift.is_empty() => checks.push(DoctorCheck {
             name: "operation-projection".into(),
             status: "pass".into(),
@@ -7042,6 +8727,8 @@ fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
         }),
         Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
     }
+    checks.push(publication_evidence_check(&state.store));
+    checks.push(held_mail_check(&state.store, client_now_ms()));
     match delivery_probes::check(
         &state.store,
         client_now_ms(),
@@ -7101,10 +8788,13 @@ fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
             message: error.to_string(),
         }),
     }
-    checks.push(stale_attention_check(
-        &doctor_attention_items(&state.store, client_now_ms()).map_err(ApiError::internal)?,
-        client_now_ms(),
-    ));
+    let attention_now = client_now_ms();
+    let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
+    checks.push(
+        mission_eligibility_doctor::check(&state.store, &attention, attention_now)
+            .map_err(ApiError::internal)?,
+    );
+    checks.push(stale_attention_check(&attention, attention_now));
     let report_status = if checks.iter().any(|check| check.status == "fail") {
         "fail"
     } else if checks.iter().any(|check| check.status == "warn") {
@@ -7267,9 +8957,10 @@ async fn repair_replication_record(
 /// Spool one snapshot on a read worker; a slow downloader never holds the SQLite snapshot.
 async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
     let store = state.store.clone();
+    let bodies = message_body::bodies(&state.state_dir);
     let file = blocking_store(move || {
         let mut file = tempfile::tempfile()?;
-        store.write_backup(&mut file)?;
+        store.write_backup_with_bodies(&mut file, Some(&bodies))?;
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
@@ -7293,6 +8984,25 @@ async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiErr
         .into_response())
 }
 
+/// Count completed summary store calls, including errors, without charging nested CPU.
+/// These wall times overlap the export route. JSON serialization, worker decode and CPU
+/// are outside this measurement; do not add these durations to the enclosing route.
+fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T) -> T {
+    let label = if authority_guard {
+        "replication/authority-guard"
+    } else {
+        "replication/summary"
+    };
+    let started = Instant::now();
+    let result = work();
+    crate::performance::record_request(label, None, started.elapsed());
+    result
+}
+
+#[cfg(test)]
+#[path = "api/replication_guard_tests.rs"]
+mod replication_guard_tests;
+
 async fn replication_export(
     State(state): State<AppState>,
     Json(request): Json<ReplicationExportRequest>,
@@ -7307,7 +9017,9 @@ async fn replication_export(
     let store = state.store.clone();
     blocking_store(move || {
         let exchange = if request.summary_only {
-            store.export_replication_summary(&request.fleet_id)?
+            record_replication_summary(request.authority_guard, || {
+                store.export_replication_summary(&request.fleet_id)
+            })?
         } else {
             store.export_replication_exchange_answering(
                 &request.fleet_id,
@@ -7413,7 +9125,39 @@ async fn replication_receive(
         // with or without new data, projects what it admitted meanwhile.
         let was_deferred = store.replication_projection_deferred();
         let projection = if new_data || was_deferred {
-            admitted_projection_result(store.project_replication_backlog_unless_catching_up())?
+            use opentelemetry::trace::{Span as _, TraceContextExt as _};
+            use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+            let receive = crate::otel::export_enabled().then(|| {
+                tracing::Span::current().context().span().span_context().clone()
+            });
+            let mut span = crate::otel::stage_root(
+                "st.replication.projection", "receive", receive,
+            );
+            let result = admitted_projection_result(
+                store.project_replication_backlog_unless_catching_up(),
+            );
+            if let Some(span) = span.as_mut() {
+                span.set_attribute(opentelemetry::KeyValue::new(
+                    "st.replication.peer", request.peer.clone(),
+                ));
+                span.set_attribute(opentelemetry::KeyValue::new(
+                    "st.replication.moved_envelopes", receipt.received as i64,
+                ));
+                span.set_attribute(opentelemetry::KeyValue::new(
+                    "st.replication.outcome",
+                    match &result {
+                        Ok(Some(true)) => "projected",
+                        Ok(Some(false)) => "unchanged",
+                        Ok(None) => "deferred",
+                        Err(_) => "error",
+                    },
+                ));
+                if result.is_err() {
+                    span.set_status(opentelemetry::trace::Status::error("projection failed"));
+                }
+                span.end();
+            }
+            result?
         } else {
             Some(true)
         };
@@ -7444,7 +9188,7 @@ async fn replication_receive(
     .await?;
     if response.changed {
         if reconcile_changed {
-            crate::performance::record_wake("replication receive", None);
+            crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::ReplicationReceive, None);
             state.notify.notify_one();
         }
         state
@@ -7467,9 +9211,9 @@ async fn replication_heal_answer(
     }
     let store = state.store.clone();
     let (answer, changed) = blocking_store(move || {
-        let before = store.replication_status(false, None, &[])?.graph_digest;
+        let before = store.replication_change_point()?;
         let answer = store.heal_answer(&request.peer, &request.query)?;
-        let changed = store.replication_status(false, None, &[])?.graph_digest != before;
+        let changed = store.replication_change_point()? != before;
         Ok((answer, changed))
     })
     .await?;
@@ -7486,9 +9230,9 @@ async fn replication_heal_next(
 ) -> Result<Json<ReplicationHealStep>, ApiError> {
     let store = state.store.clone();
     let (step, changed) = blocking_store(move || {
-        let before = store.replication_status(false, None, &[])?.graph_digest;
+        let before = store.replication_change_point()?;
         let step = store.heal_next(&request.peer, request.answer)?;
-        let changed = store.replication_status(false, None, &[])?.graph_digest != before;
+        let changed = store.replication_change_point()? != before;
         Ok((step, changed))
     })
     .await?;
@@ -7626,6 +9370,11 @@ pub struct FleetStatus {
     pub node: String,
     pub fleet_id: Option<String>,
     pub member_key: Option<String>,
+    /// Configured local transports, including when no endpoint is currently up.
+    #[serde(default)]
+    pub transports: Vec<String>,
+    #[serde(default)]
+    pub fabric_protocol: Option<String>,
     pub view: crate::fleet::FleetView,
     pub peers: Vec<crate::model::ReplicationPeerStatus>,
     pub invites: Vec<crate::store::FleetInviteView>,
@@ -7652,12 +9401,25 @@ async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetStatus>
     let fleet_id = state.fleet_id.clone();
     let state_dir = state.state_dir.clone();
     blocking_store(move || {
+        let file = crate::config::FleetFile::load(&state_dir)?;
         let replication =
             store.replication_status_sealed(fleet_id.is_some(), fleet_id.as_deref(), &peers)?;
         Ok(FleetStatus {
             node,
             fleet_id,
             member_key: store.member_public_key(),
+            transports: file
+                .as_ref()
+                .map(|file| file.transports.clone())
+                .unwrap_or_default(),
+            fabric_protocol: file
+                .as_ref()
+                .filter(|file| file.transports.iter().any(|name| name == "fabric"))
+                .map(|file| {
+                    file.fabric_protocol.clone().unwrap_or_else(|| {
+                        crate::fleet::transport::default_fabric_protocol(&file.fleet_id)
+                    })
+                }),
             view: store.fleet_view_sealed()?,
             peers: replication.peers,
             invites: store.fleet_invites(false)?,
@@ -8066,14 +9828,6 @@ async fn start_planning_session(
         "You are the durable {} planner for launch {id}. Use `st documents get` for each immutable document reference below. Write one Markdown mission and one complete version 2 KDL mission. The KDL mission ID must be `{mission_id}` and its state must be ready. You can submit named variants with `st launch submit {id} --variant NAME --markdown FILE --kdl KDL_FILE`. Use temporary files outside the workspace, and remove them after submission. Do not change the workspace. Do not publish or run the mission. Stay available for revision messages until approval or cancellation.\n\n{references}",
         planner_config.provider
     );
-    let arguments = match planner_config.provider.as_str() {
-        "codex" => vec![
-            "--dangerously-bypass-approvals-and-sandbox".into(),
-            "--dangerously-bypass-hook-trust".into(),
-        ],
-        "claude" => vec!["--permission-mode".into(), "bypassPermissions".into()],
-        _ => Vec::new(),
-    };
     let planner = quick_agent(
         &state,
         QuickAgentRequest {
@@ -8081,7 +9835,7 @@ async fn start_planning_session(
             worktree: request.workspace.clone(),
             model: planner_config.model.clone(),
             effort: planner_config.effort.clone(),
-            arguments,
+            arguments: Vec::new(),
             expected_subject,
             idempotency_key: format!("{}:planner", request.idempotency_key),
         },
@@ -9860,9 +11614,6 @@ fn suspension_target(
         .rollout(subject)
         .map_err(ApiError::bad)?
         .is_some_and(|o| o.holds_seat())
-        || crate::rollout::status(&state.store, subject)
-            .map_err(ApiError::internal)?
-            .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
     {
         return Err(ApiError::bad(St3Error::new(
             "rollout-in-progress",
@@ -9889,7 +11640,7 @@ fn suspension_target(
             "resolve the seat's conflicting declarations first",
         )));
     }
-    let member = state
+    let mut member = state
         .store
         .desired_subject_with_writer(subject)
         .map_err(ApiError::internal)?
@@ -9903,6 +11654,11 @@ fn suspension_target(
                 "only a declared, started seat can be suspended or resumed",
             ))
         })?;
+    if let Some((_, incumbent)) =
+        crate::rollout::pending_manual_launch(&state.store, subject).map_err(ApiError::internal)?
+    {
+        member = incumbent;
+    }
     let token = current.desired_token.clone().ok_or_else(|| {
         ApiError::bad(St3Error::new(
             "suspend-not-declared",
@@ -9975,6 +11731,15 @@ pub(crate) fn request_suspend(
         .map_err(ApiError::internal)?
     {
         return Ok(prior);
+    }
+    if crate::rollout::status(&state.store, &subject)
+        .map_err(ApiError::internal)?
+        .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "rollout-in-progress",
+            "the seat has a rollout; inspect it or retry with st agents rollout",
+        )));
     }
     let (current, member, token) = suspension_target(state, &subject)?;
     if let Some(suspension) =
@@ -10140,6 +11905,19 @@ pub(crate) fn request_resume(
             "resume needs a host name",
         )));
     }
+    let launch_token = if let Some((incumbent, old)) =
+        crate::rollout::pending_manual_launch(&state.store, &subject).map_err(ApiError::internal)?
+    {
+        if host != old.host {
+            return Err(ApiError::bad(St3Error::new(
+                "rollout-in-progress",
+                "resume on the current host before applying the pending manual rollout",
+            )));
+        }
+        incumbent
+    } else {
+        token.clone()
+    };
     let mut fields = BTreeMap::from([
         ("action".into(), Value::String("resume".into())),
         (
@@ -10177,7 +11955,7 @@ pub(crate) fn request_resume(
             kind: "runtime.action.requested".into(),
             actor: Some(actor),
             fields,
-            evidence: vec![token, suspend],
+            evidence: vec![launch_token, suspend],
             expected_subject: None,
             idempotency_key: Some(key),
         })
@@ -10386,6 +12164,17 @@ async fn put_document(
     bound: Option<axum::Extension<BoundAgent>>,
     Json(request): Json<DocumentPutRequest>,
 ) -> Result<Json<DocumentVersion>, ApiError> {
+    if let Some(bound) = bound.as_ref()
+        && !crate::handoff::may_write(&bound.0.0, &request.name)
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "document-not-yours",
+            format!(
+                "`{}` belongs to another seat; a seat writes only doc/agents/… for itself",
+                request.name
+            ),
+        )));
+    }
     let response = state
         .store
         .put_document_as(
@@ -10692,16 +12481,18 @@ async fn finish_claim_publication(
     harness_transition: Option<bool>,
 ) -> Result<Json<ClaimRecord>, ApiError> {
     // Publish only the cumulative buckets. The response detail and turn ID remain local.
-    let store = state.store.clone();
-    let rollup_response = response.clone();
-    if let Some(rollup) =
-        blocking_store(move || store.usage_rollup_for_timeline(&rollup_response)).await?
-    {
+    if response.kind == "harness.timeline" {
         let store = state.store.clone();
-        let (_, updated) =
-            blocking_action(move || store.append_client_claim_outcome(&rollup)).await?;
-        if updated {
-            signal_visible_change(state);
+        let rollup_response = response.clone();
+        if let Some(rollup) =
+            blocking_store(move || store.usage_rollup_for_timeline(&rollup_response)).await?
+        {
+            let store = state.store.clone();
+            let (_, updated) =
+                blocking_action(move || store.append_client_claim_outcome(&rollup)).await?;
+            if updated {
+                signal_visible_change(state);
+            }
         }
     }
     if appended {
@@ -10744,6 +12535,23 @@ struct UsageQuery {
     until_ms: Option<u64>,
 }
 
+async fn get_coordination_counts(
+    State(state): State<AppState>,
+    Query(query): Query<UsageQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let until = query.until_ms.unwrap_or(client_now_ms() as u64);
+    let since = query.since_ms.unwrap_or(until.saturating_sub(86_400_000));
+    if since > until {
+        return Err(ApiError::bad(St3Error::new(
+            "invalid-usage-period",
+            "usage start must be before its end",
+        )));
+    }
+    Ok(Json(
+        blocking_store(move || state.store.coordination_counts(since, until)).await?,
+    ))
+}
+
 async fn get_usage(
     State(state): State<AppState>,
     Query(query): Query<UsageQuery>,
@@ -10768,9 +12576,103 @@ async fn get_usage(
         ))
     })
     .await?;
-    Ok(Json(
-        json!({"since_ms": since_ms, "until_ms": until_ms, "rows": rows, "limits": limits, "agent_messages": agent_messages}),
+    let mut report = json!({"since_ms": since_ms, "until_ms": until_ms, "rows": rows, "limits": limits, "agent_messages": agent_messages});
+    // The policy as the config file says now, so `st usage` shows which accounts it never stops.
+    let reloaded = tokio::task::spawn_blocking(crate::config::reload_daemon_limits)
+        .await
+        .ok()
+        .flatten();
+    let policy = reloaded
+        .as_ref()
+        .and_then(|reloaded| reloaded.as_ref().ok())
+        .and_then(|config| crate::store::LimitsPolicy::from_config(config).map(|policy| (config, policy)));
+    // A reading older than the limits cadence is the last known one, not the current one.
+    let fresh_ms = policy
+        .as_ref()
+        .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |(_, policy)| policy.fresh_ms);
+    let now = client_now_ms() as u64;
+    for (row, limit) in report["limits"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .zip(&limits)
+    {
+        row["stale"] = json!(now.saturating_sub(limit.measured_at_unix_ms) > fresh_ms);
+    }
+    if let Some((config, policy)) = policy {
+        for (row, limit) in report["limits"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .zip(&limits)
+        {
+            row["exempt"] = json!(policy.exempts(limit));
+        }
+        report["limits_policy"] = json!({
+            "stop_at_weekly_percent": config.stop_at_weekly_percent,
+            "exempt_accounts": config.exempt_accounts,
+            "exempt_harnesses": config.exempt_harnesses,
+        });
+    }
+    Ok(Json(report))
+}
+
+/// Every objective and budget as one list: see `objectives`.
+pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
+    let limits = store.account_limits()?;
+    let fresh_ms = crate::config::reload_daemon_limits()
+        .and_then(|reloaded| reloaded.ok())
+        .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
+        .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
+    Ok(crate::objectives::rows(
+        &request_latency_target_windows(),
+        &limits,
+        client_now_ms() as u64,
+        fresh_ms,
     ))
+}
+
+async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let rows = blocking_store(move || slo_rows(&store)).await?;
+    Ok(Json(json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows})))
+}
+
+#[derive(Deserialize)]
+struct SloHistoryQuery {
+    id: String,
+    since_ms: Option<u64>,
+    until_ms: Option<u64>,
+    /// How many equal steps to answer in; each holds its lowest reading.
+    steps: Option<usize>,
+}
+
+/// What was left of one objective or budget across a period, from the local history log.
+async fn get_slo_history(
+    State(state): State<AppState>,
+    Query(query): Query<SloHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let until_ms = query.until_ms.unwrap_or(client_now_ms() as u64);
+    let since_ms = query
+        .since_ms
+        .unwrap_or(until_ms.saturating_sub(crate::slo_history::RETENTION_MS / 7));
+    let steps = query.steps.unwrap_or(120);
+    if since_ms >= until_ms || until_ms - since_ms > crate::slo_history::RETENTION_MS || !(1..=1_000).contains(&steps) {
+        return Err(ApiError::bad(St3Error::new(
+            "invalid-slo-period",
+            "the period must end after it starts, span at most 7 days, and use 1 to 1000 steps",
+        )));
+    }
+    let dir = crate::slo_history::dir(&state.state_dir);
+    let id = query.id.clone();
+    let points = tokio::task::spawn_blocking(move || crate::slo_history::read(&dir, &id, since_ms, until_ms))
+        .await
+        .map_err(|error| ApiError::bad(St3Error::new("slo-history-unavailable", error.to_string())))?
+        .map_err(|error| ApiError::bad(St3Error::new("slo-history-unavailable", error.to_string())))?;
+    Ok(Json(json!({
+        "id": query.id, "since_ms": since_ms, "until_ms": until_ms, "samples": points.len(),
+        "steps": crate::slo_history::buckets(&points, since_ms, until_ms, steps),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -11241,7 +13143,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
     }
     Err(unknown(format!(
         "`{target}` names no step run, mission run, loop or attention card; \
-         `st attention ls --as PERSON` lists the reviews waiting"
+         `st alerts ls --as PERSON` lists the reviews waiting"
     )))
 }
 
@@ -11463,6 +13365,22 @@ pub const SIGNED_MESSAGE_FIELDS: &[&str] = &[
     "to",
 ];
 
+/// The fields a device signs on a message past 8 KiB. The claim holds a preview, so it signs
+/// that: `content` is the preview, cut as [`message_body::preview`] cuts it, and `body_sha256`
+/// and `body_bytes` are the hash and length of the whole text, which every member reads from the
+/// claim's `text/plain` `attachments` entry. Sorted, as the check compares them.
+pub const SIGNED_LONG_MESSAGE_FIELDS: &[&str] = &[
+    "body_bytes",
+    "body_sha256",
+    "content",
+    "from",
+    "in_reply_to",
+    "session_id",
+    "tags",
+    "title",
+    "to",
+];
+
 /// How far a device's signing time may be from this daemon's clock when it first accepts the
 /// message. Members that receive it later check the signature, never the time.
 pub const DEVICE_SIGNATURE_WINDOW_MS: u128 = 15 * 60 * 1_000;
@@ -11479,16 +13397,17 @@ fn check_device_signature(
     subject: &str,
     from: &str,
     fields: &BTreeMap<String, Value>,
+    expected: &[&str],
 ) -> Result<(), ApiError> {
     use smallclaims::principal::{FIELDS_FORMAT, Judged, KeyGrant};
     let mut signed = signature.signed_fields.clone();
     signed.sort();
-    if signature.format.as_deref() != Some(FIELDS_FORMAT) || signed != SIGNED_MESSAGE_FIELDS {
+    if signature.format.as_deref() != Some(FIELDS_FORMAT) || signed != expected {
         return Err(device_signature_error(
             "device-signature-format",
             format!(
                 "a device signs a message in {FIELDS_FORMAT} over {}",
-                SIGNED_MESSAGE_FIELDS.join(", ")
+                expected.join(", ")
             ),
         ));
     }
@@ -11598,16 +13517,24 @@ fn accept_message_receipt_with_upload_owner(
             "external sender imports require the enrolled adapter endpoint",
         )));
     }
+    crate::model::refuse_person_recipient(&normalize_message_party(&request.to))
+        .map_err(ApiError::bad)?;
     if request.content.trim().is_empty() && request.attachments.is_empty() {
         return Err(ApiError::bad(St3Error::new(
             "empty-message",
             "a message needs nonempty content",
         )));
     }
-    if request.content.len() > 4096 && !request.content.starts_with("doc/") {
+    let long_body = request.content.len() > message_body::INLINE_MAX_BYTES
+        && !request.content.starts_with("doc/");
+    if long_body && request.content.len() > message_body::MAX_BYTES {
         return Err(ApiError::bad(St3Error::new(
             "message-too-large",
-            "an inline message cannot exceed 4 KiB; post a document first",
+            format!(
+                "a message cannot be longer than {} KiB; this one is {} KiB. Shorten it or send it as several messages.",
+                message_body::MAX_BYTES / 1024,
+                request.content.len().div_ceil(1024)
+            ),
         )));
     }
     if request.content.starts_with("doc/") {
@@ -11637,13 +13564,89 @@ fn accept_message_receipt_with_upload_owner(
     }
     let from = normalize_message_party(&request.from);
     let to = normalize_message_party(&request.to);
-    let attachments = client_blobs::resolve_attachments(state, upload_owner.unwrap_or(&from), &request.attachments)?;
+    if !from.starts_with("daemon/")
+        && request
+            .tags
+            .iter()
+            .any(|tag| crate::silent::reserved_event_tag(tag))
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "reserved-message-tag",
+            "daemon event tags cannot be asserted by conversation senders",
+        )));
+    }
+    if device_signature.is_some()
+        && request
+            .tags
+            .iter()
+            .any(|tag| crate::silent::is_remaining_tag(tag))
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "reserved-message-tag",
+            "remaining-count tags are delivery metadata",
+        )));
+    }
+    let attachments = client_blobs::resolve_attachments(
+        state,
+        upload_owner.unwrap_or(&from),
+        &request.attachments,
+    )?;
     let id = hex::encode(Sha256::digest(request.idempotency_key.as_bytes()))[..16].to_owned();
     let subject = format!("message/{id}");
+    let previous = state
+        .store
+        .operation_claim(&request.idempotency_key)
+        .map_err(ApiError::internal)?;
+    let parent = request
+        .in_reply_to
+        .as_deref()
+        .map(|parent| state.store.message(&message_subject(parent)))
+        .transpose()
+        .map_err(ApiError::internal)?
+        .flatten();
+    // A signed message stores exactly the tags its device signed; only a person signs, and a
+    // person's message always wakes.
+    let tags = if let Some(previous) = previous
+        .as_ref()
+        .filter(|claim| claim.kind == "message.sent" && claim.subject == subject)
+    {
+        let stored: Vec<String> = serde_json::from_value(
+            previous.body["fields"]
+                .get("tags")
+                .cloned()
+                .unwrap_or_else(|| json!([])),
+        )
+        .map_err(ApiError::internal)?;
+        // Reuse acceptance metadata while still checking the sender's tag input.
+        let same_tags = if device_signature.is_some() {
+            request.tags == stored
+        } else {
+            crate::silent::stored_tags(&from, &request.tags)
+                == crate::silent::stored_tags(&from, &stored)
+        };
+        if !same_tags {
+            return Err(ApiError::bad(St3Error::new(
+                "idempotency-mismatch",
+                "the idempotency key already identifies different message tags",
+            )));
+        }
+        stored
+    } else if device_signature.is_some() {
+        request.tags.clone()
+    } else {
+        crate::silent::stored_tags(&from, &request.tags)
+    };
     let mut fields = BTreeMap::from([
         ("from".into(), Value::String(from.clone())),
         ("to".into(), Value::String(to.clone())),
-        ("content".into(), Value::String(request.content.clone())),
+        (
+            "content".into(),
+            Value::String(if long_body {
+                message_body::preview(&request.content)
+            } else {
+                request.content.clone()
+            }),
+        ),
         ("status".into(), Value::String("sent".into())),
         (
             "title".into(),
@@ -11663,21 +13666,71 @@ fn accept_message_receipt_with_upload_owner(
         ),
         (
             "tags".into(),
-            Value::Array(request.tags.iter().cloned().map(Value::String).collect()),
+            Value::Array(tags.iter().cloned().map(Value::String).collect()),
         ),
     ]);
     if let Some(session_id) = session_id {
         fields.insert("session_id".into(), Value::String(session_id));
     }
-    if !attachments.is_empty() {
+    // A long body is a file on this member, named in the claim like an image: nothing of it but
+    // the preview and this reference enters the database or replication. The file is staged
+    // under a temporary name before the claim, so a failed write never leaves a claim without
+    // its text, and renamed into place once the claim has landed, so a refusal or a failed
+    // append leaves no stray file. A repeat of the same send finishes a rename that did not
+    // happen, which heals a crash between the two.
+    let mut body = None;
+    let mut claim_attachments = attachments.clone();
+    if long_body {
+        message_body::bodies(&state.state_dir)
+            .ensure_room(&from, &subject, request.content.len())
+            .map_err(ApiError::bad)?;
+        let entry = crate::model::MessageAttachment {
+            sha256: hex::encode(Sha256::digest(request.content.as_bytes())),
+            media_type: message_body::MEDIA_TYPE.into(),
+            name: None,
+            size: request.content.len() as u64,
+            origin: client_host_id(&state.node),
+        };
+        claim_attachments.push(entry.clone());
+        body = Some(entry);
+    }
+    if !claim_attachments.is_empty() {
         fields.insert(
             "attachments".into(),
-            serde_json::to_value(&attachments).map_err(ApiError::internal)?,
+            serde_json::to_value(&claim_attachments).map_err(ApiError::internal)?,
         );
     }
     if let Some(signature) = &device_signature {
-        check_device_signature(state, signature, &request, &subject, &from, &fields)?;
+        let mut signed = fields.clone();
+        let mut expected = SIGNED_MESSAGE_FIELDS;
+        if let Some(body) = &body {
+            // The claim holds a preview, so the signature must cover the preview, the hash and
+            // the length, which every member can read from the claim. A device that signs the
+            // whole text, as it does under 8 KiB, signs something no other member can check.
+            let mut names = signature.signed_fields.clone();
+            names.sort();
+            if names == SIGNED_MESSAGE_FIELDS {
+                return Err(ApiError::bad(St3Error::new(
+                    "long-message-signature-unsupported",
+                    format!(
+                        "this device signs messages in a form that cannot cover one over {} KiB; update it, or send a shorter message",
+                        message_body::INLINE_MAX_BYTES / 1024
+                    ),
+                )));
+            }
+            signed.insert("body_sha256".into(), Value::String(body.sha256.clone()));
+            signed.insert("body_bytes".into(), json!(body.size));
+            expected = SIGNED_LONG_MESSAGE_FIELDS;
+        }
+        check_device_signature(state, signature, &request, &subject, &from, &signed, expected)?;
     }
+    let staged = if body.is_some() {
+        message_body::bodies(&state.state_dir)
+            .stage(&from, &subject, request.content.as_bytes())
+            .map_err(ApiError::internal)?
+    } else {
+        None
+    };
     let input = ClaimInput {
         subject: subject.clone(),
         kind: "message.sent".into(),
@@ -11689,33 +13742,70 @@ fn accept_message_receipt_with_upload_owner(
     };
     // A repeated key returns the first claim and says it appended nothing.
     let (record, appended) = match &device_signature {
-        Some(signature) => state.store.append_signed_claim(&input, signature),
+        Some(signature) => state.store.append_signed_message(&input, signature),
         None => state.store.append_claim_outcome(&input),
     }
-    .map_err(ApiError::bad)?;
-    let mut work_wake = is_work_wake(&request.tags);
-    if let Some(parent) = request.in_reply_to.as_deref() {
+    .map_err(|error| {
+        if let Some(staged) = staged.as_ref() {
+            staged.discard();
+        }
+        ApiError::bad(error)
+    })?;
+    if let Some(staged) = staged {
+        // The claim is in. If the text cannot be put in place, the message exists with its
+        // preview: say so as an unconfirmed send, which a repeat of the same send finishes.
+        staged.commit().map_err(|error| {
+            ApiError::internal(anyhow::anyhow!(
+                "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
+            ))
+        })?;
+    }
+    // A concurrent sender may have accepted this key first with the same canonical input.
+    // Return its accepted classification, rather than this attempt's speculative tags.
+    let tags = record.body["fields"]["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|tag| !crate::silent::is_remaining_tag(tag))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut work_wake = is_work_wake(&tags);
+    if let Some(reference) = request.in_reply_to.as_deref() {
         // Settling the parent writes its lifecycle claims too.
-        work_wake |= state
-            .store
-            .message(&message_subject(parent))
-            .map_err(ApiError::internal)?
+        work_wake |= parent
+            .as_ref()
             .is_none_or(|message| is_work_wake(&message.tags));
-        settle_answered_message(&state.store, parent, &from, &to, &subject, &record.id)?;
+        settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
     }
     signal_message_changed(state, "message.sent", work_wake);
+    let kind = if tags.iter().any(|tag| crate::silent::is_silent_tag(tag))
+        && !crate::silent::always_wakes(&from, &tags)
+    {
+        "silent"
+    } else {
+        "wake"
+    };
     Ok(MessageSendReceipt {
+        kind: Some(kind.into()),
         message: MessageView {
             subject,
             from,
             to,
-            content: request.content,
+            content: if long_body {
+                message_body::preview(&request.content)
+            } else {
+                request.content
+            },
             status: "sent".into(),
             title: request.title,
             in_reply_to: request.in_reply_to,
-            tags: request.tags,
+            tags,
             created_index: record.store_index,
             attachments,
+            body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
+            body_bytes: body.as_ref().map(|body| body.size),
+            body_origin: body.map(|body| body.origin),
         },
         idempotency_key: request.idempotency_key,
         already_sent: !appended,
@@ -11845,8 +13935,15 @@ async fn list_messages_page(
     let after = cursor.as_ref().map(|cursor| cursor.after);
     let store = state.store.clone();
     let (items, next_after) = blocking_store(move || {
-        let (mut items, next_after) =
-            store.messages_page(to.as_deref(), query.include_closed, after, through, limit)?;
+        let native = !query.include_closed
+            && peer
+                .as_ref()
+                .is_some_and(|peer| to.as_deref() == Some(peer.0.agent.as_str()));
+        let (mut items, next_after) = if native {
+            store.messages_page_for_delivery(to.as_deref().unwrap(), after, through, limit)?
+        } else {
+            store.messages_page(to.as_deref(), query.include_closed, after, through, limit)?
+        };
         mailbox::hold_pre_boot_mail(
             &store, peer.as_ref().map(|peer| &peer.0), to.as_deref(), &mut items,
         )?;
@@ -11892,7 +13989,15 @@ async fn list_messages(
     );
     let store = state.store.clone();
     blocking_store(move || {
-        let mut messages = store.messages(recipient.as_deref(), query.include_closed)?;
+        let native = !query.include_closed
+            && peer
+                .as_ref()
+                .is_some_and(|peer| recipient.as_deref() == Some(peer.0.agent.as_str()));
+        let mut messages = if native {
+            store.messages_for_delivery_through(recipient.as_deref().unwrap(), store.index()?)?
+        } else {
+            store.messages(recipient.as_deref(), query.include_closed)?
+        };
         mailbox::hold_pre_boot_mail(
             &store, peer.as_ref().map(|peer| &peer.0), recipient.as_deref(), &mut messages,
         )?;
@@ -12612,6 +14717,13 @@ struct MissionRunQuery {
 }
 
 #[derive(Deserialize)]
+struct MissionRunTreeQuery {
+    root: String,
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct MissionOverviewQuery {
     mission: String,
 }
@@ -12701,6 +14813,43 @@ async fn list_mission_runs(
             "select exactly one mission or root mission run",
         ))),
     }
+}
+
+async fn list_mission_run_tree(
+    State(state): State<AppState>,
+    Query(query): Query<MissionRunTreeQuery>,
+) -> Result<Json<crate::model::MissionRunTreePage>, ApiError> {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=50).contains(&limit) {
+        return Err(ApiError::bad(St3Error::new(
+            "invalid-mission-run-limit",
+            "mission run tree page limit must be 1 through 50",
+        )));
+    }
+    let store = state.store.clone();
+    let page = blocking_store(move || {
+        store.read_snapshot(|frontier| {
+            let Some((mut runs, next_cursor)) =
+                store.mission_runs_for_root_page(&query.root, query.after.as_deref(), limit)?
+            else {
+                return Ok(None);
+            };
+            annotate_stuck_gates(&store, &mut runs)?;
+            Ok(Some(crate::model::MissionRunTreePage {
+                runs,
+                has_more: next_cursor.is_some(),
+                next_cursor,
+                frontier,
+            }))
+        })
+    })
+    .await?;
+    page.map(Json).ok_or_else(|| {
+        ApiError::bad(St3Error::new(
+            "invalid-mission-run-cursor",
+            "the mission run cursor is absent from this root; start again without a cursor",
+        ))
+    })
 }
 
 fn annotate_stuck_gates(store: &Store, runs: &mut [MissionRunView]) -> anyhow::Result<()> {
@@ -12807,6 +14956,10 @@ async fn revise_mission_run(
     let (_, reviewers) =
         crate::store::analyze_mission_revision(&old, replacement, &current.requester)
             .map_err(ApiError::bad)?;
+    state
+        .store
+        .validate_revision_seat_carry(&current, replacement)
+        .map_err(ApiError::bad)?;
     let mut publication = intent.clone();
     publication.subjects.clear();
     let mut planned = state
@@ -13267,6 +15420,30 @@ async fn set_mission_run_outcome(
     Ok(Json(outcome))
 }
 
+/// A person or the run's requester changes who a running run reports to.
+async fn set_mission_run_report(
+    State(state): State<AppState>,
+    AxumPath(run): AxumPath<String>,
+    Json(request): Json<MissionRunReportRequest>,
+) -> Result<Json<MissionRunReportView>, ApiError> {
+    let actor = person_or_agent_actor(&request.actor, "run-report-authority-denied")?;
+    let store = state.store.clone();
+    let report = blocking_action(move || {
+        store.set_mission_run_report(
+            &run,
+            &actor,
+            request.report_to.as_deref(),
+            request.stalled_after_ms,
+            request.report_stalls,
+            request.report_completed,
+            &request.idempotency_key,
+        )
+    })
+    .await?;
+    signal_changed(&state);
+    Ok(Json(report))
+}
+
 /// A person or an agent retires a mission.
 async fn retire_mission(
     State(state): State<AppState>,
@@ -13612,6 +15789,7 @@ async fn handoff_work(
         &mut input.incarnation,
     )?;
     let request = WorkRequest {
+        wait_ms: None,
         actor: Some(input.actor.clone()),
         incarnation: input.incarnation.clone(),
         summary: Some(input.note.clone()),
@@ -13663,6 +15841,7 @@ async fn extend_work(
     )?;
     let extend_ms = request.by_ms;
     let request = WorkRequest {
+        wait_ms: None,
         actor: request.actor,
         incarnation: request.incarnation,
         summary: None,
@@ -13700,13 +15879,24 @@ async fn work_action_response(
     // An exact retry returns the transaction's durable response even if the provider exited after
     // committing it. The store repeats this lookup under its mutation boundary; this early read
     // only prevents the live-incarnation precondition from breaking idempotent recovery.
-    if let Some(response) = state
+    if let Some(mut response) = state
         .store
         .cached_idempotency_response::<StepRunView>(&request.idempotency_key)
         .map_err(ApiError::internal)?
     {
         if let Some(input) = handoff.as_ref() {
             state.store.handoff_retry(&subject, input).map_err(ApiError::bad)?;
+        }
+        if action == "renew" {
+            // A renewal caches its view without the fields the writer no longer folds.
+            let store = state.store.clone();
+            response = blocking_action(move || {
+                store
+                    .enrich_work_response(&mut response)
+                    .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
+                Ok(response)
+            })
+            .await?;
         }
         return Ok(Json(response));
     }
@@ -13728,34 +15918,17 @@ async fn work_action_response(
     }
     let quiet_renewal = action == "renew";
     let store = state.store.clone();
-    let (mut response, desired) = blocking_action(move || {
-        let response = if let Some(input) = handoff {
+    let response = blocking_action(move || {
+        let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
             store.work_action_extending(&subject, &action, &request, extend_ms)?
         };
 
-        let desired = store.desired_subjects().map_err(|error| {
-            St3Error::new("store-read-failed", format!("read desired agents: {error}"))
-        })?;
-        Ok((response, desired))
+        work_response::enrich_under(&store, &mut response)?;
+        Ok(response)
     })
     .await?;
-    if let Some(assignee) = response
-        .claimant
-        .as_ref()
-        .or(response.assigned_to.as_ref())
-        .or_else(|| (response.available_to.len() == 1).then(|| &response.available_to[0]))
-    {
-        response.under = desired
-            .into_iter()
-            .filter(|subject| subject.kind == "agent")
-            .map(|subject| (subject.subject, crate::graph::agent_under(&subject.desired)))
-            .collect::<BTreeMap<_, _>>()
-            .get(assignee)
-            .cloned()
-            .unwrap_or_default();
-    }
     if quiet_renewal {
         signal_visible_change(&state);
     } else {
@@ -13939,7 +16112,9 @@ async fn logs_session(
             "a log chunk limit must be between 1 and 65536 bytes",
         )));
     }
-    let session = live_session(&state, &subject, None)?;
+    let session = read_deadline::query(&state.store, "/v1/sessions/logs/{*subject}", || {
+        live_session(&state, &subject, None)
+    })?;
     if session.terminal {
         return Err(ApiError::bad(St3Error::new(
             "unsupported-capability",
@@ -14785,6 +16960,69 @@ mod tests {
     use std::path::PathBuf;
 
     #[tokio::test]
+    async fn child_session_detail_resolves_readable_transcript_outside_session_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("native");
+        let transcript = home.join(".omp/agent/sessions/example/native-test.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"session\",\"id\":\"native-test\",\"cwd\":\"/work/example\",\"timestamp\":\"2026-10-06T12:00:00Z\"}\n",
+                "{\"type\":\"message\",\"id\":\"parent-message\",\"timestamp\":\"2026-10-06T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"parent only\"}]}}\n",
+            ),
+        )
+        .unwrap();
+        let child_transcript = transcript.with_extension("").join("task-1.jsonl");
+        std::fs::create_dir_all(child_transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &child_transcript,
+            concat!(
+                "{\"type\":\"session\",\"id\":\"child\",\"cwd\":\"/work/example\",\"timestamp\":\"2026-10-06T12:01:00Z\"}\n",
+                "{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-10-06T12:01:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"child only\"}]}}\n",
+            ),
+        )
+        .unwrap();
+        let parent = crate::external_sessions::discover(Some(&home), true)
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.native_id == "native-test")
+            .unwrap();
+        let child_id = crate::subagent_sessions::child_session_id(&parent, "task-1");
+        let mut state = state(root.path());
+        state.native_session_home = Some(home);
+        let app = router(state);
+        let path = format!("/v1/client/sessions/{child_id}");
+        let (status, detail) = get_request(app.clone(), &path).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["id"], child_id);
+        assert_eq!(detail["kind"], "session");
+        assert_eq!(detail["managed"], false);
+        assert_eq!(detail["driver"], "omp");
+        assert_eq!(detail["native_session_id"], "native-test/task-1");
+        assert_eq!(detail["workspace"], "/work/example");
+        assert_eq!(detail["title"], "native-test · task-1");
+        assert_eq!(detail["owner_id"], "external-session/omp/native-test/task-1");
+        assert_eq!(detail["state"], "completed");
+        assert_eq!(detail["updated_at"], detail["ended_at"]);
+        assert!(detail["started_at"].as_str().is_some());
+        assert!(detail["updated_at"].as_str().is_some());
+        let (status, timeline) = get_request(app.clone(), &format!("{path}/timeline")).await;
+        assert_eq!(status, StatusCode::OK, "{timeline}");
+        assert_eq!(timeline["session_id"], child_id);
+        assert!(
+            timeline["items"].as_array().unwrap().iter().any(|item| {
+                item["body"]["text"] == "child only"
+            }),
+            "{timeline}"
+        );
+        std::fs::remove_file(child_transcript).unwrap();
+        let (status, missing) = get_request(app, &path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
+    }
+
+    #[tokio::test]
     async fn resources_page_keeps_rows_when_sync_forecast_is_unrepresentable() {
         use smallclaims::replication::MAX_SAFE_DURATION_SECONDS;
         use smallclaims::store::PeerSyncProgress;
@@ -15314,7 +17552,7 @@ agent "eval/channel" { workspace "/tmp"; harness "claude" {} }
                 max_events,
             }]))
         };
-        let normal = reader_memory_check(usage, 2048, 128, groups(Some(1 << 30), 0));
+        let normal = reader_memory_check(usage, 2048, 128, 32, groups(Some(1 << 30), 0));
         assert_eq!(normal.status, "pass");
         assert!(
             normal
@@ -15323,20 +17561,21 @@ agent "eval/channel" { workspace "/tmp"; harness "claude" {} }
         );
         assert!(normal.message.contains("current reader targets 194 MiB"));
         assert!(normal.message.contains("planning envelope 800 MiB"));
-        assert!(normal.message.contains("bursts are unbounded"));
+        assert!(normal.message.contains("API read-worker admission 32"));
+        assert!(normal.message.contains("Raw/background reader checkout is uncapped"));
         assert_eq!(
-            reader_memory_check(usage, 8192, 128, groups(Some(1 << 30), 0)).status,
+            reader_memory_check(usage, 8192, 128, 32, groups(Some(1 << 30), 0)).status,
             "warn"
         );
-        let pressure = reader_memory_check(usage, 2048, 128, groups(Some(1 << 30), 1225));
+        let pressure = reader_memory_check(usage, 2048, 128, 32, groups(Some(1 << 30), 1225));
         assert_eq!(pressure.status, "warn");
         assert!(pressure.message.contains("memory.events:max 1225"));
         assert_eq!(
-            reader_memory_check(usage, 2048, 128, groups(None, 0)).status,
+            reader_memory_check(usage, 2048, 128, 32, groups(None, 0)).status,
             "pass"
         );
         assert_eq!(
-            reader_memory_check(usage, 2048, 128, Err(anyhow::anyhow!("unavailable"))).status,
+            reader_memory_check(usage, 2048, 128, 32, Err(anyhow::anyhow!("unavailable"))).status,
             "warn"
         );
         let burst = smallclaims::sqlite::ReaderUsage {
@@ -15346,7 +17585,7 @@ agent "eval/channel" { workspace "/tmp"; harness "claude" {} }
             opened: 300,
         };
         assert_eq!(
-            reader_memory_check(burst, 2048, 128, groups(Some(1 << 30), 0)).status,
+            reader_memory_check(burst, 2048, 128, 32, groups(Some(1 << 30), 0)).status,
             "warn"
         );
     }
@@ -15527,10 +17766,13 @@ agent "eval/channel" { workspace "/tmp"; harness "claude" {} }
         let state = state(root.path());
         let before = state.store.index().unwrap();
         record_request_latency(
+            &axum::http::Method::GET,
             "/v1/client/agents",
             "/v1/client/agents",
+            None,
             "stui",
             Instant::now() - Duration::from_secs(2),
+            Served::default(),
         );
         // The old implementation spawned a blocking write, so give that write
         // time to finish before proving the request caused no graph change.
@@ -15818,6 +18060,33 @@ agent "eval/channel" { workspace "/tmp"; harness "claude" {} }
     }
 
     #[test]
+    fn agent_lifecycle_roster_tracks_current_declaration_without_defaults() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = &state.store;
+        for (version, lifecycle) in [None, Some("standing"), Some("owner"), Some("bounded"), None]
+            .into_iter().enumerate()
+        {
+            let field = lifecycle.map(|value| format!("lifecycle \"{value}\";")).unwrap_or_default();
+            let source = format!("version 2\nagent \"example/purpose\" {{ {field} command \"true\" }}");
+            let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+            let plan = store.mission(&intent, crate::model::IntentInput {
+                kdl: source, source_name: None,
+            }).unwrap();
+            store.apply(&intent, &plan.subject_tokens, &format!("lifecycle-{version}")).unwrap();
+            let index = store.index().unwrap();
+            for history in [false, true] {
+                let refs = client_agent_page_refs(store, history, index).unwrap();
+                let rows = checked_agent_cache(store, history, index);
+                let cards = client_agent_cards_for_page(store, history, index, &refs, "0").unwrap();
+                for row in refs.iter().chain(rows.iter()).chain(cards.iter()) {
+                    assert_eq!(row.get("lifecycle"), lifecycle.map(|value| json!(value)).as_ref());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn agent_page_refs_rebuild_for_work_desired_membership_and_order_changes() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
@@ -15883,6 +18152,7 @@ mission "refs-work" state="ready" {{
         let refs = read(true);
         assert_eq!(refs[0]["next_work_id"], second.steps[0].subject);
         let action = |name: &str| store.work_action(&second.steps[0].subject, name, &WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.amber".into()), incarnation: Some("refs-runtime".into()),
             summary: Some("Complete fixture work.".into()), reason: None, evidence: Vec::new(),
             idempotency_key: format!("refs-{name}"),
@@ -15930,6 +18200,7 @@ mission "expiring-work" state="ready" {
         let step = &run.steps[0].subject;
         store.set_step_state(step, "ready", None).unwrap();
         store.work_action(step, "claim", &WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.zeta".into()), incarnation: Some("fixture-runtime".into()),
             summary: None, reason: None, evidence: Vec::new(), idempotency_key: "lease-fence-claim".into(),
         }).unwrap();
@@ -15973,16 +18244,17 @@ mission "expiring-work" state="ready" {
 
     #[test]
     fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
+        let store = Store::open_memory("message-delivery-test").unwrap();
         let to = "agent/remote/message-delivery-test";
         assert_eq!(
-            message_delivery_value(to, "sent", 1_000, 2_000)["state"],
+            message_delivery_value(&store, to, "sent", 1_000, 2_000).unwrap()["state"],
             "pending"
         );
-        let late = message_delivery_value(to, "staged", 1_000, 12_000);
+        let late = message_delivery_value(&store, to, "staged", 1_000, 12_000).unwrap();
         assert_eq!(late["state"], "waiting");
         assert_eq!(late["phase"], "staged");
         assert_eq!(late["recipient_delivery"], Value::Null);
-        let accepted = message_delivery_value(to, "delivered", 1_000, 12_000);
+        let accepted = message_delivery_value(&store, to, "delivered", 1_000, 12_000).unwrap();
         assert_eq!(accepted["state"], "waiting");
         assert!(
             accepted["reason"]
@@ -15991,9 +18263,119 @@ mission "expiring-work" state="ready" {
                 .contains("waiting for recipient read")
         );
         assert_eq!(
-            message_delivery_value(to, "read", 1_000, 12_000)["state"],
+            message_delivery_value(&store, to, "read", 1_000, 12_000).unwrap()["state"],
             "read"
         );
+    }
+
+    #[test]
+    fn message_delivery_holds_native_decisions_until_the_current_observation_clears() {
+        for driver in ["omp", "pi", "claude", "codex", "opencode"] {
+            for ask in ["question", "permission", "approval"] {
+                for release in ["answer", "cancel", "timeout"] {
+                    let store = Store::open_memory("message-decision-hold").unwrap();
+                    let to = "agent/remote/message-decision-hold";
+                    let append = |kind: &str, fields: Value| {
+                        store.append_claim(&ClaimInput {
+                            subject: to.into(),
+                            kind: kind.into(),
+                            actor: Some(to.into()),
+                            fields: serde_json::from_value(fields).unwrap(),
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: None,
+                        }).unwrap()
+                    };
+                    append("runtime.observed", json!({
+                        "status": "running", "runtime_id": "hold-runtime", "incarnation_id": "first"
+                    }));
+                    let observed = append("harness.observed", json!({
+                        "state": "working", "driver": driver, "incarnation_id": "first",
+                        "blocked_on": "human", "ask": ask
+                    }));
+                    let now = observed.accepted_at_unix_ms;
+                    for phase in ["sent", "staged"] {
+                        let delivery = message_delivery_value(&store, to, phase, now, now).unwrap();
+                        assert_eq!(delivery["state"], "waiting", "{driver}/{ask}/{release}: {delivery}");
+                        assert_eq!(delivery["phase"], phase);
+                        assert_eq!(delivery["age_ms"], 0);
+                        assert!(delivery["reason"].as_str().unwrap().contains("held outside the native harness"));
+                        assert_eq!(delivery["recipient_delivery"], Value::Null);
+                    }
+                    for phase in ["delivered", "read", "closed"] {
+                        let delivery = message_delivery_value(&store, to, phase, now, now).unwrap();
+                        assert!(!delivery["reason"].as_str().unwrap().contains("held"));
+                        assert_eq!(delivery["phase"], phase);
+                        assert_eq!(delivery["state"], if phase == "delivered" { "pending" } else { "read" });
+                    }
+                    let resumed = append("harness.observed", json!({
+                        "state": "working", "driver": driver, "incarnation_id": "first",
+                        "blocked_on": null, "ask": null, "reason": release
+                    }));
+                    for phase in ["sent", "staged"] {
+                        let delivery = message_delivery_value(
+                            &store, to, phase, now, resumed.accepted_at_unix_ms
+                        ).unwrap();
+                        assert!(!delivery["reason"].as_str().unwrap().contains("held"),
+                            "{driver}/{ask}/{release}: {delivery}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn message_delivery_does_not_hold_stale_or_restarted_native_decisions() {
+        let store = Store::open_memory("message-decision-restart").unwrap();
+        let to = "agent/remote/message-decision-restart";
+        let append = |kind: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: to.into(),
+                kind: kind.into(),
+                actor: Some(to.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({
+            "status": "running", "runtime_id": "hold-runtime", "incarnation_id": "first"
+        }));
+        let observed = append("harness.observed", json!({
+            "state": "blocked", "driver": "omp", "incarnation_id": "first",
+            "blocked_on": "human", "ask": "question"
+        }));
+        let now = observed.accepted_at_unix_ms;
+        assert!(message_delivery_value(&store, to, "staged", now, now).unwrap()["reason"]
+            .as_str().unwrap().contains("held"));
+        let stale = message_delivery_value(&store, to, "staged", now, now + 90_001).unwrap();
+        assert_eq!(stale["state"], "waiting");
+        assert!(!stale["reason"].as_str().unwrap().contains("held"));
+
+        let restarted = append("runtime.observed", json!({
+            "status": "running", "runtime_id": "hold-runtime", "incarnation_id": "second"
+        }));
+        // Even a subsequently received old-incarnation block cannot restore the hold.
+        let late = append("harness.observed", json!({
+            "state": "blocked", "driver": "omp", "incarnation_id": "first",
+            "blocked_on": "human", "ask": "permission", "reason": "late old prompt"
+        }));
+        for phase in ["sent", "staged"] {
+            for at in [restarted.accepted_at_unix_ms, late.accepted_at_unix_ms] {
+                assert!(!message_delivery_value(&store, to, phase, now, at).unwrap()["reason"]
+                    .as_str().unwrap().contains("held"));
+            }
+        }
+        append("harness.observed", json!({
+            "state": "working", "driver": "omp", "incarnation_id": "second",
+            "blocked_on": "human", "ask": "question"
+        }));
+        let ended = append("harness.observed", json!({
+            "state": "ended", "driver": "omp", "incarnation_id": "second"
+        }));
+        assert!(!message_delivery_value(&store, to, "staged", now, ended.accepted_at_unix_ms)
+            .unwrap()["reason"].as_str().unwrap().contains("held"));
     }
 
     #[test]
@@ -16363,6 +18745,88 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    }
+
+    #[tokio::test]
+    async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let now = client_now_ms() as u64;
+        let (status, body) = json_request(
+            app.clone(),
+            "/v1/claims",
+            json!({"subject": "agent/example.live", "kind": "harness.limits", "actor": "agent/example.live",
+                "fields": {"driver": "claude", "account_ref": "ada/claude-1", "weekly_percent": 30.0,
+                    "five_hour_percent": 10.0, "measured_at_unix_ms": now - 10_000},
+                "evidence": [], "idempotency_key": "slo-limits"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, list) = get_request(app.clone(), "/v1/slo").await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        let rows = list["rows"].as_array().unwrap();
+        let find = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap_or_else(|| panic!("no {id}"));
+        assert_eq!(find("person-read")["kind"], "objective");
+        assert_eq!(find("ada/claude-1/weekly")["kind"], "budget");
+        assert_eq!(find("ada/claude-1/weekly")["remaining_percent"], 70.0);
+        assert_eq!(find("ada/claude-1/5h")["remaining_percent"], 90.0);
+
+        // The history is read from the log the daemon appends; a bad period is refused.
+        let dir = crate::slo_history::dir(&state.state_dir);
+        crate::slo_history::append(&dir, now - 180_000, &[json!({"id": "cpu", "remaining_percent": 80.0})]).unwrap();
+        crate::slo_history::append(&dir, now - 60_000, &[json!({"id": "cpu", "remaining_percent": 60.0})]).unwrap();
+        let (status, history) = get_request(
+            app.clone(),
+            &format!("/v1/slo/history?id=cpu&since_ms={}&until_ms={now}&steps=2", now - 240_000),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{history}");
+        assert_eq!(history["samples"], 2);
+        assert_eq!(history["steps"], json!([80.0, 60.0]));
+        for query in [
+            format!("id=cpu&since_ms={now}&until_ms={now}"),
+            format!("id=cpu&since_ms=0&until_ms={now}"),
+            format!("id=cpu&since_ms={}&until_ms={now}&steps=0", now - 1000),
+        ] {
+            let (status, _) = get_request(app.clone(), &format!("/v1/slo/history?{query}")).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_usage_report_marks_only_old_limits_readings_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let now = client_now_ms() as u64;
+        for (seat, account, measured) in [
+            ("agent/example.old", "ada/claude-1", now - 60 * 3_600_000),
+            ("agent/example.live", "ada/claude-2", now - 10_000),
+        ] {
+            let (status, body) = json_request(
+                app.clone(),
+                "/v1/claims",
+                json!({"subject": seat, "kind": "harness.limits", "actor": seat,
+                    "fields": {"driver": "claude", "account_ref": account, "weekly_percent": 84.0,
+                        "measured_at_unix_ms": measured},
+                    "evidence": [], "idempotency_key": format!("limits-{seat}")}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (_, report) = get_request(app, "/v1/usage").await;
+        let stale = |name: &str| {
+            report["limits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|limit| limit["account_ref"] == name)
+                .unwrap_or_else(|| panic!("{name} missing in {report}"))["stale"]
+                .clone()
+        };
+        assert_eq!(stale("ada/claude-1"), true);
+        assert_eq!(stale("ada/claude-2"), false);
     }
 
     #[tokio::test]
@@ -16869,7 +19333,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         }
 
         // As the daemon does when it starts, so no read makes the first diagnostic report.
-        start_operation_report(&state);
+        let _ = start_operation_report(&state);
         let app = router(state);
         for path in [
             "/v1/messages/page?include_closed=false&limit=100&to=agent%2Fprobe",
@@ -16926,6 +19390,112 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             );
             assert_eq!(response.unwrap().0, StatusCode::OK);
         });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_seed_first_launch_contract_survives_concurrency_and_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        let database = root.path().join("seed.sqlite3");
+        state.store = Arc::new(Store::open(&database, "node").unwrap());
+        let socket = root.path().join("seed.sock");
+        let server_socket = socket.clone();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move { serve_unix(&server_socket, router(server_state)).await });
+        while !socket.exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        let client = crate::client::Client::new(crate::client::Endpoint::Unix(socket));
+        let id = uuid::Uuid::now_v7().to_string();
+        let seed = root.path().join(format!("time_{id}.jsonl"));
+        let invalid = root.path().join("missing.jsonl");
+        std::fs::write(&seed, format!("{{\"type\":\"session\",\"id\":\"{id}\"}}\n")).unwrap();
+        let launch = |seat: &'static str, incarnation: &'static str, driver: &'static str, seed: Option<PathBuf>, strict: bool| {
+            let client = client.clone();
+            let inventory = root.path().join(seat.replace('/', "-"));
+            async move { crate::native_seed::first_launch(&client, seat, incarnation, driver, seed.as_deref(), &inventory, strict).await }
+        };
+        assert!(launch("agent/invalid", "one", "omp", Some(invalid.clone()), false).await.is_err());
+        let corrupt = root.path().join(format!("corrupt_{id}.jsonl"));
+        std::fs::write(&corrupt, format!("{{\"type\":\"session\",\"id\":\"{id}\"}}\nbroken\n")).unwrap();
+        assert!(launch("agent/invalid", "corrupt", "omp", Some(corrupt), false).await.is_err());
+        assert_eq!(launch("agent/invalid", "two", "omp", Some(seed.clone()), false).await.unwrap(), Some(id.clone()), "invalid input must not consume the opportunity");
+        assert_eq!(launch("agent/invalid", "three", "omp", Some(seed.clone()), false).await.unwrap(), None, "an unbound seeded receipt starts fresh even while seed remains declared");
+
+        let (one, two) = tokio::join!(
+            launch("agent/concurrent", "one", "omp", Some(seed.clone()), false),
+            launch("agent/concurrent", "two", "omp", Some(seed.clone()), false)
+        );
+        let outcomes = [one.unwrap(), two.unwrap()];
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_some()).count(), 1, "only the receipt winner launches seeded; the other launch proceeds fresh");
+        let append = |seat: &str, kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput { subject: seat.into(), kind: kind.into(), actor: Some(seat.into()), fields: serde_json::from_value(fields).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None }).unwrap();
+        };
+        append("agent/legacy-binding", "harness.session-file", json!({"harness":"omp","session_id":"legacy"}));
+        assert_eq!(launch("agent/legacy-binding", "adopt", "omp", Some(invalid.clone()), false).await.unwrap(), None, "an existing binding wins even without a first-launch receipt");
+        append("agent/concurrent", "harness.session-file", json!({"harness":"omp","session_id":id}));
+        assert_eq!(launch("agent/concurrent", "restart", "omp", Some(invalid.clone()), false).await.unwrap(), None, "bound history beats edits and invalid seeds");
+        assert_eq!(launch("agent/concurrent", "other-account", "claude", None, false).await.unwrap(), None, "history fence is not harness or account scoped");
+        let reopened = Store::open(&database, "node").unwrap();
+        assert_eq!(crate::suspension::continue_session(&reopened, "agent/concurrent", "omp", None, None).unwrap().unwrap().0, id, "a restarted daemon continues the bound session");
+        assert_eq!(reopened.claims_for("agent/concurrent", Some("harness.session-file")).unwrap().len(), 1);
+        append("agent/concurrent", "runtime.action.requested", json!({"action":"fresh-context"}));
+        append("agent/concurrent", "harness.diagnostic", json!({"code":crate::suspension::CONTINUE_UNAVAILABLE_CODE,"status":"transcript-missing"}));
+        assert_eq!(launch("agent/concurrent", "fresh", "omp", Some(seed.clone()), false).await.unwrap(), None);
+
+        assert_eq!(launch("agent/fresh", "one", "claude", None, false).await.unwrap(), None);
+        assert_eq!(launch("agent/fresh", "two", "omp", Some(seed.clone()), false).await.unwrap(), None, "a fresh receipt never blocks or re-arms, even if seed is later added");
+        for driver in crate::skill::HARNESSES {
+            assert_eq!(launch("agent/fresh", "seedless-second-launch", driver, None, false).await.unwrap(), None, "seedless restarts must work for every harness");
+        }
+        assert_eq!(launch("agent/invalid", "seedless-incomplete", "omp", None, false).await.unwrap(), None, "an incomplete seeded launch proceeds fresh when seed is removed");
+        let notice = state.store.latest_claim("agent/invalid", Some("harness.diagnostic")).unwrap().unwrap();
+        assert_eq!(notice.body["fields"]["code"], "first-native-launch-incomplete");
+        assert_eq!(notice.body["fields"]["severity"], "warning");
+        assert_eq!(launch("agent/invalid", "still-declared", "omp", Some(invalid.clone()), false).await.unwrap(), None, "even a missing still-declared seed is not validated or staged again");
+        let declared_notice = state.store.latest_claim("agent/invalid", Some("harness.diagnostic")).unwrap().unwrap();
+        assert_eq!(declared_notice.body["fields"]["code"], "first-native-launch-incomplete");
+        assert_eq!(declared_notice.body["fields"]["incarnation_id"], "still-declared");
+        assert!(declared_notice.body["fields"]["reason"].as_str().unwrap().contains("starting fresh"));
+        assert!(!declared_notice.body["fields"]["reason"].as_str().unwrap().contains("acknowledge-seed"), "launch notices do not prescribe recovery before starting");
+        assert!(crate::native_seed::acknowledge(&client, "agent/fresh", "person/operator", "fresh needs no recovery").await.is_err());
+        assert!(crate::native_seed::acknowledge(&client, "agent/invalid", "person/operator", " ").await.is_err());
+        let acknowledgement = crate::native_seed::acknowledge(&client, "agent/invalid", "person/operator", "accept fresh after interrupted import").await.unwrap();
+        assert_eq!(acknowledgement.kind, "custom.agent.first-native-launch-acknowledged");
+        assert_eq!(acknowledgement.actor.as_deref(), Some("person/operator"));
+        assert_eq!(acknowledgement.body["fields"]["reason"], "accept fresh after interrupted import");
+        assert_eq!(acknowledgement.body["evidence"][0], acknowledgement.body["fields"]["receipt"]);
+        assert_eq!(launch("agent/invalid", "recovered", "omp", Some(invalid.clone()), false).await.unwrap(), None, "acknowledgement records acceptance without reseeding or changing fresh launch behavior");
+        assert_eq!(state.store.latest_claim("agent/invalid", Some("harness.diagnostic")).unwrap().unwrap().id, declared_notice.id, "acknowledgement suppresses later incomplete notices, not launches");
+        append("agent/deliberately-fresh", "runtime.action.requested", json!({"action":"fresh-context"}));
+        assert_eq!(launch("agent/deliberately-fresh", "one", "omp", Some(invalid.clone()), false).await.unwrap(), None);
+        assert!(launch("agent/strict", "conflicting", "omp", Some(invalid), true).await.unwrap_err().to_string().contains("native seed cannot accompany resume environment"));
+        assert_eq!(launch("agent/strict", "one", "omp", None, true).await.unwrap(), None, "a rejected seed conflict must not consume the opportunity; strict resume proceeds without a seed");
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_seed_restart_before_first_message_never_wedges_fresh_seat() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("restart.sqlite3");
+        let inventory = root.path().join("inventory");
+        for attempt in 0..2 {
+            let mut state = state(root.path());
+            state.store = Arc::new(Store::open(&database, "node").unwrap());
+            let socket = root.path().join(format!("restart-{attempt}.sock"));
+            let client = crate::client::Client::new(crate::client::Endpoint::Unix(socket.clone()));
+            let server_socket = socket.clone();
+            let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await });
+            while !socket.exists() { tokio::time::sleep(Duration::from_millis(10)).await; }
+            assert_eq!(crate::native_seed::first_launch(
+                &client, "agent/before-message", &format!("incarnation-{attempt}"), "omp",
+                None, &inventory, false,
+            ).await.unwrap(), None);
+            server.abort();
+            let _ = server.await;
+        }
+        let reopened = Store::open(&database, "node").unwrap();
+        assert!(reopened.claims_for("agent/before-message", Some("harness.session-file")).unwrap().is_empty());
+        assert!(reopened.claims_for("agent/before-message", Some("custom.agent.initial-message")).unwrap().is_empty());
+        assert!(!inventory.exists(), "unseeded restarts require no seed inventory");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17161,6 +19731,91 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             .unwrap();
             assert_eq!(sessions.len(), 1);
             assert_eq!(sessions[0]["revision"], incarnation);
+        }
+    }
+
+    #[test]
+    fn managed_session_dates_incarnation_after_claim_cap_without_local_timeline() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let subject = "agent/ada";
+        // Build both subjects' old history in one transaction, without projection rebuilds.
+        {
+            let mut connection = state.store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            for _ in 0..=SESSION_CLAIMS {
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    subject,
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle", "incarnation_id": "first"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    "agent/reviewer",
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        let first = state.store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("runtime-ada")),
+                ("incarnation_id".into(), json!("second")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(
+            state.store.latest_local_timeline_at(subject, "second", first.store_index).unwrap(),
+            None
+        );
+        for at in ["2026-10-11T10:00:00.000Z", "2026-10-11T10:01:00.000Z"] {
+            let sessions = managed_session_resources(
+                &state.store, false, at, first.store_index,
+            ).unwrap().0;
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0]["started_at"], client_timestamp(first.accepted_at_unix_ms));
+            assert_eq!(sessions[0]["updated_at"], client_timestamp(first.accepted_at_unix_ms));
+        }
+        // The unindexed legacy path stays capped, but its required start date is durable too.
+        let legacy = state.store.append_claim(&ClaimInput {
+            subject: "agent/reviewer".into(),
+            kind: "runtime.observed".into(),
+            actor: Some("agent/reviewer".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("runtime-reviewer")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        for at in ["2026-10-11T10:02:00.000Z", "2026-10-11T10:03:00.000Z"] {
+            let sessions = managed_session_resources(
+                &state.store, false, at, legacy.store_index,
+            ).unwrap().0;
+            let legacy_session = sessions.iter().find(|session| {
+                session["owner_id"] == "agent/reviewer"
+            }).unwrap();
+            assert!(legacy_session["runtime_incarnation"].is_null());
+            assert_eq!(legacy_session["started_at"], client_timestamp(legacy.accepted_at_unix_ms));
         }
     }
 
@@ -17445,6 +20100,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             router(state),
             "/v1/work/complete/step-run/run/work",
             serde_json::to_value(WorkRequest {
+                wait_ms: None,
                 actor: Some("agent/node.worker".into()),
                 incarnation: Some("ended-incarnation".into()),
                 summary: Some("complete".into()),
@@ -17476,9 +20132,14 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         let envelope: Value = serde_json::from_slice(&bytes).unwrap();
         if path.starts_with("/v1/client/") {
             assert_eq!(envelope["api_version"], "st3.client.v0");
-            assert_eq!(envelope["snapshot"]["host_id"], "host/node");
             assert!(envelope["request_id"].as_str().unwrap().contains('-'));
-            assert!(envelope["snapshot"]["store_index"].is_u64());
+            if status.is_success() {
+                assert_eq!(envelope["snapshot"]["host_id"], "host/node");
+                assert!(envelope["snapshot"]["store_index"].is_u64());
+            } else {
+                assert_eq!(envelope["error_version"], "st3.client.error.v0");
+                assert!(envelope["code"].as_str().is_some());
+            }
         } else {
             assert_eq!(envelope["api_version"], "st3.v1");
             assert_eq!(envelope["snapshot_host"], "node");
@@ -17594,11 +20255,13 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
                 "a no-op {lifecycle} woke readers"
             );
         }
-        // A work wake does.
+        // A daemon's work wake does; ordinary senders cannot assert reserved event tags.
+        let mut work_wake = send("wake", &["st3-work:step-run/example/work"]);
+        work_wake["from"] = json!("daemon/node");
         let (status, sent) = json_request(
             app.clone(),
             "/v1/messages",
-            send("wake", &["st3-work:step-run/example/work"]),
+            work_wake,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{sent}");
@@ -17702,6 +20365,59 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         let error: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(error["code"], "foreign-agent-actor");
         assert!(!state.store.desired_subjects().unwrap().iter().any(|item| item.kind == "subscription"));
+    }
+
+    #[tokio::test]
+    async fn a_seat_writes_only_its_own_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let write = |writer: Option<&'static str>, name: &str, key: &str| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/documents")
+                .header("content-type", "application/json");
+            if let Some(writer) = writer {
+                request = request.extension(BoundAgent(writer.into()));
+            }
+            let body = serde_json::json!({
+                "name": name,
+                "bytes": b"Waiting on PR 12.".to_vec(),
+                "expected_document": null,
+                "idempotency_key": key,
+            });
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(request.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                (status, serde_json::from_slice::<Value>(&body).unwrap())
+            }
+        };
+        let (status, written) =
+            write(Some("agent/garden/ash"), "doc/agents/garden/ash/handoff", "own").await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+
+        // Not even its own other names are open to it under doc/agents/.
+        let (status, refused) =
+            write(Some("agent/garden/ash"), "doc/agents/garden/ash/other", "own-other").await;
+        assert_ne!(status, StatusCode::OK, "{refused}");
+        assert_eq!(refused["code"], "document-not-yours");
+
+        let (status, refused) =
+            write(Some("agent/garden/birch"), "doc/agents/garden/ash/handoff", "other").await;
+        assert_ne!(status, StatusCode::OK, "{refused}");
+        assert_eq!(refused["code"], "document-not-yours");
+
+        // A seat's other documents and a person's writes are unaffected.
+        let (status, ordinary) = write(Some("agent/garden/birch"), "doc/garden/notes", "notes").await;
+        assert_eq!(status, StatusCode::OK, "{ordinary}");
+        let (status, person) =
+            write(None, "doc/agents/garden/ash/handoff", "person").await;
+        assert_eq!(status, StatusCode::OK, "{person}");
     }
 
     #[tokio::test]
@@ -17873,6 +20589,148 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             timeout_ms: None,
             limit: Some(limit),
         }
+    }
+
+    #[tokio::test]
+    async fn event_page_owner_filter_preserves_populated_membership_and_scanned_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let subject_a = "agent/node.event-page-a";
+        let subject_b = "agent/node.event-page-b";
+        let mut intent = crate::graph::parse_test_intent(
+            &format!(
+                "version 2\n\
+                 agent \"event-page-a\" {{ command \"true\" }}\n\
+                 agent \"event-page-b\" {{ command \"true\" }}\n\
+                 mission \"event-page-owner-a\" state=\"ready\" {{\n\
+                   goal \"Own the first invented agent.\"\n\
+                   step \"work\" {{ assigned-to \"{subject_a}\" }}\n\
+                 }}\n\
+                 mission \"event-page-owner-b\" state=\"ready\" {{\n\
+                   goal \"Own the second invented agent.\"\n\
+                   step \"work\" {{ assigned-to \"{subject_b}\" }}\n\
+                 }}\n"
+            ),
+            "node",
+        )
+        .unwrap();
+        roster_fixture_apply(&state.store, &intent, "event-page-owners-initial");
+        let runs = ["event-page-owner-a", "event-page-owner-b"]
+            .into_iter()
+            .map(|mission| {
+                state
+                    .store
+                    .create_mission_run(&MissionRunRequest {
+                        mission: mission.into(),
+                        revision: None,
+                        workspace: root.path().display().to_string(),
+                        requester: Some("person/test".into()),
+                        mode: Some("run".into()),
+                        inputs: BTreeMap::new(),
+                        idempotency_key: format!("event-page-run-{mission}"),
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for (subject, run) in [(subject_a, &runs[0]), (subject_b, &runs[1])] {
+            let desired = intent.subjects.get_mut(subject).unwrap();
+            desired.owner_run = Some(run.subject.clone());
+            desired.owner_generation = Some(run.generation.clone());
+            desired.owner_step = Some(run.steps[0].subject.clone());
+        }
+        roster_fixture_apply(&state.store, &intent, "event-page-owners-set");
+        let owned_a = state
+            .store
+            .desired_subjects_for_owner_run(&runs[0].subject)
+            .unwrap();
+        let owned_b = state
+            .store
+            .desired_subjects_for_owner_run(&runs[1].subject)
+            .unwrap();
+        assert!(owned_a.iter().any(|desired| desired.subject == subject_a));
+        assert!(!owned_a.iter().any(|desired| desired.subject == subject_b));
+        assert!(owned_b.iter().any(|desired| desired.subject == subject_b));
+        assert!(!owned_b.iter().any(|desired| desired.subject == subject_a));
+        let (_, setup_cursor) = state.store.event_bounds().unwrap();
+
+        let accepted = [subject_b, subject_b, subject_a, subject_a, subject_b]
+            .into_iter()
+            .enumerate()
+            .map(|(number, subject)| {
+                state
+                    .store
+                    .append_claim(&ClaimInput {
+                        subject: subject.into(),
+                        kind: "agent.presence".into(),
+                        actor: Some(subject.into()),
+                        fields: serde_json::from_value(json!({
+                            "presence": "available",
+                            "reason": format!("invented event {number}"),
+                        }))
+                        .unwrap(),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: Some(format!("event-page-presence-{number}")),
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for subject in [subject_a, subject_b] {
+            let admitted = state.store.claims_for(subject, Some("agent.presence")).unwrap();
+            let expected_ids = accepted
+                .iter()
+                .filter(|claim| claim.subject == subject)
+                .map(|claim| &claim.id)
+                .collect::<Vec<_>>();
+            assert_eq!(admitted.iter().map(|claim| &claim.id).collect::<Vec<_>>(), expected_ids);
+        }
+
+        let app = router(state);
+        let path = |after| {
+            format!(
+                "/v1/events/page?after={after}&owner_run={}&limit=2&wait=false",
+                runs[0].subject.replace('/', "%2F")
+            )
+        };
+        let (status, first) = get_request(app.clone(), &path(setup_cursor)).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let first = first.get("value").unwrap_or(&first);
+        assert_eq!(first["items"], json!([]));
+        assert_eq!(first["next_after"], json!(accepted[1].store_index));
+        assert_eq!(first["has_more"], json!(true));
+
+        let (status, second) = get_request(app.clone(), &path(accepted[1].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        let second = second.get("value").unwrap_or(&second);
+        let expected_a = accepted[2..4]
+            .iter()
+            .map(|claim| {
+                json!({
+                    "store_index": claim.store_index,
+                    "kind": &claim.kind,
+                    "subject": &claim.subject,
+                    "body": &claim.body,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(second["items"], json!(expected_a));
+        assert_eq!(second["next_after"], json!(accepted[3].store_index));
+        assert_eq!(second["has_more"], json!(true));
+
+        let (status, third) = get_request(app.clone(), &path(accepted[3].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{third}");
+        let third = third.get("value").unwrap_or(&third);
+        assert_eq!(third["items"], json!([]));
+        assert_eq!(third["next_after"], json!(accepted[4].store_index));
+        assert_eq!(third["has_more"], json!(false));
+        assert!(third["frontier"].as_u64().unwrap() >= accepted[4].store_index);
+
+        let (status, done) = get_request(app, &path(accepted[4].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{done}");
+        let done = done.get("value").unwrap_or(&done);
+        assert_eq!(done["items"], json!([]));
+        assert_eq!(done["next_after"], Value::Null);
+        assert_eq!(done["has_more"], json!(false));
     }
 
     #[tokio::test]
@@ -18544,6 +21402,27 @@ agent "good" {{ workspace {:?}; command "true" }}
     }
 
     #[tokio::test]
+    async fn health_build_commit_matches_version_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let app = router(state(root.path()));
+        let (status, health) = get_request(app, "/v1/health").await;
+        assert_eq!(status, StatusCode::OK, "{health}");
+        assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+        let commit = health["build"]["commit"].as_str().unwrap();
+        assert_eq!(commit, st_drivers::version::build_commit());
+        let version = st_drivers::version::machine_version();
+        let revision = version.split_once('+').unwrap().1;
+        let revision = revision.strip_prefix("local.").unwrap_or(revision);
+        let revision = revision.strip_suffix(".dirty").unwrap_or(revision);
+        let revision = revision.strip_suffix("-dirty").unwrap_or(revision);
+        if revision == "dev" {
+            assert_eq!(commit, "unknown");
+        } else {
+            assert!(commit.starts_with(revision), "{version}: {commit}");
+        }
+    }
+
+    #[tokio::test]
     async fn health_and_doctor_report_runtime_metadata() {
         let root = tempfile::tempdir().unwrap();
         let app = router(state(root.path()));
@@ -18892,7 +21771,7 @@ mission "orchid" state="ready" { goal "Expose a scheduler wait."; step "work" { 
         assert!(
             stale
                 .message
-                .starts_with("2 attention items have been open for more than a day"),
+                .starts_with("2 alerts and faults have been open for more than a day"),
             "{}",
             stale.message
         );
@@ -19674,8 +22553,8 @@ mission "unrequested/work" state="ready" { goal "Do unrelated work." }
         assert!(matches!(
             &planner_launch,
             crate::model::LaunchSpec::Argv(arguments)
-                if arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
-                    && arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
+                if !arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
+                    && !arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
         ));
         assert!(store.mission_spec("planned/work", None).unwrap().is_none());
         assert!(store.active_mission_runs().unwrap().is_empty());
@@ -20377,6 +23256,7 @@ mission "visible-agentless" state="ready" {
         assert_eq!(step["title"], "Keep watch");
         assert_eq!(step["assigned_to"], Value::Null);
         assert_eq!(step["last_progress"], Value::Null);
+        assert_eq!(step["progress_at"], Value::Null);
         assert_eq!(step["agentless"], true);
         assert!(
             client_work_resources(
@@ -20628,6 +23508,7 @@ mission "paged" state="ready" {
                 &builds[0],
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(builder.clone()),
                     incarnation: Some("builder-1".into()),
                     summary: None,
@@ -21204,6 +24085,83 @@ version 2
     }
 
     #[tokio::test]
+    async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let message = |key: &str, from: &str, to: &str, in_reply_to: Option<&str>| {
+            serde_json::to_value(MessageSendRequest {
+                idempotency_key: key.into(),
+                from: from.into(),
+                to: to.into(),
+                content: "Hello".into(),
+                title: None,
+                in_reply_to: in_reply_to.map(str::to_owned),
+                tags: Vec::new(),
+                attachments: Vec::new(),
+            })
+            .unwrap()
+        };
+        // An agent, and a person writing to an agent, are unchanged.
+        let (status, asked) =
+            json_request(app.clone(), "/v1/messages", message("ask", "person/ada", "agent/worker", None)).await;
+        assert_eq!(status, StatusCode::OK, "{asked}");
+        let asked = asked["subject"].as_str().unwrap().to_owned();
+        let (status, relayed) =
+            json_request(app.clone(), "/v1/messages", message("relay", "agent/worker", "agent/helper", None)).await;
+        assert_eq!(status, StatusCode::OK, "{relayed}");
+        // A send to a person, a reply to a person, a bare name that means the requester, and a
+        // person writing to a person all fail with the one error, and write nothing.
+        let before = state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len();
+        for (key, from, to, parent) in [
+            ("send", "agent/worker", "person/ada", None),
+            ("reply", "agent/worker", "person/ada", Some(asked.as_str())),
+            ("requester", "agent/worker", "requester", None),
+            ("people", "person/ada", "person/robin", None),
+        ] {
+            let (status, body) =
+                json_request(app.clone(), "/v1/messages", message(key, from, to, parent)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{key}: {body}");
+            assert_eq!(body["code"], "person-has-no-inbox", "{key}");
+            let text = body["message"].as_str().unwrap();
+            assert!(text.starts_with("people do not have inboxes: print your answer in the chat"), "{text}");
+            let chat = text.find("print in the chat").unwrap();
+            assert!(chat < text.find("work ask").unwrap() && chat < text.find("work update").unwrap());
+            assert!(text.contains("only if the person asked for it"), "{text}");
+        }
+        assert_eq!(
+            state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
+            before,
+            "a refused message is not written"
+        );
+        // What an older client already holds stays readable: a message to a person that is in the
+        // graph still lists, reads and settles.
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: "message/earlier".into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/worker".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!("agent/worker")),
+                    ("to".into(), json!("person/ada")),
+                    ("content".into(), json!("Sent before people lost their inbox.")),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("earlier".into()),
+            })
+            .unwrap();
+        let (status, listed) = get_request(app.clone(), "/v1/messages?to=person/ada&include_closed=true").await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert!(listed.as_array().unwrap().iter().any(|row| row["subject"] == "message/earlier"), "{listed}");
+        let (status, read) = get_request(app, "/v1/messages/read/earlier").await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["content"], "Sent before people lost their inbox.");
+    }
+
+    #[tokio::test]
     async fn message_lifecycle_requires_the_exact_recipient_actor() {
         let root = tempfile::tempdir().unwrap();
         let app = router(state(root.path()));
@@ -21213,7 +24171,7 @@ version 2
             serde_json::to_value(MessageSendRequest {
                 idempotency_key: "recipient-authority-message".into(),
                 from: "agent/sender".into(),
-                to: "person/receiver".into(),
+                to: "agent/receiver".into(),
                 content: "Please review this.".into(),
                 title: None,
                 in_reply_to: None,
@@ -21274,7 +24232,7 @@ version 2
             serde_json::to_value(MessageLifecycleRequest {
                 delegation: None,
                 lifecycle: "staged".into(),
-                actor: Some("person/receiver".into()),
+                actor: Some("agent/receiver".into()),
                 transport: Some("codex-app-server".into()),
                 runtime_id: Some("runtime/receiver".into()),
                 evidence: Vec::new(),
@@ -21286,7 +24244,7 @@ version 2
         .await;
         assert_eq!(status, StatusCode::OK, "{staged}");
         assert_eq!(staged["body"]["fields"]["status"], "staged");
-        assert_eq!(staged["body"]["fields"]["recipient"], "person/receiver");
+        assert_eq!(staged["body"]["fields"]["recipient"], "agent/receiver");
         assert_eq!(staged["body"]["fields"]["transport"], "codex-app-server");
         assert_eq!(staged["body"]["fields"]["runtime_id"], "runtime/receiver");
 
@@ -21296,7 +24254,7 @@ version 2
             serde_json::to_value(MessageLifecycleRequest {
                 delegation: None,
                 lifecycle: "delivered".into(),
-                actor: Some("person/receiver".into()),
+                actor: Some("agent/receiver".into()),
                 transport: None,
                 runtime_id: None,
                 evidence: Vec::new(),
@@ -21307,7 +24265,7 @@ version 2
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{read}");
-        assert_eq!(read["actor"], "person/receiver");
+        assert_eq!(read["actor"], "agent/receiver");
 
         let legacy = app
             .oneshot(
@@ -21923,6 +24881,7 @@ mission "wake" state="ready" {
     fn roster_fixture_work(fixture: &RosterClaimsFixture, agent: usize, action: &str, key: &str) {
         fixture.store.work_action(&fixture.runs[agent / 10].steps[agent % 10].subject,
             action, &WorkRequest {
+                wait_ms: None,
                 actor: Some(fixture.subjects[agent].clone()),
                 incarnation: Some(format!("roster-session-{agent}")),
                 summary: Some(format!("Fixture {action}.")), reason: None,
@@ -22273,6 +25232,55 @@ mission "wake" state="ready" {
         assert_eq!(breakdown["harness.todo.observed"], (12, 0));
         assert_eq!(local_breakdown["harness.usage"], 12);
         assert_eq!(old_cold, 12);
+    }
+
+    #[test]
+    fn faults_and_nudges_on_runs_and_steps_refold_only_the_cards_they_reach() {
+        let fixture = roster_claims_fixture();
+        let store = &fixture.store;
+        for history in [false, true] {
+            checked_agent_cache(store, history, store.index().unwrap());
+        }
+        let (run, step) = (&fixture.runs[1], &fixture.runs[2].steps[3]);
+        roster_fixture_work(&fixture, 23, "claim", "fault-fixture-claim");
+        for history in [false, true] {
+            checked_agent_cache(store, history, store.index().unwrap());
+        }
+        let append = |subject: &str, kind: &str, actor: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        let failure = |subject: &str, episode: &str| json!({
+            "condition": "observed", "episode": episode, "incarnation": null,
+            "reason": "Fixture fault.", "reviewer": "person/test", "severity": "warning",
+            "source_revision": null, "targets": [subject], "title": "A fixture fault",
+        });
+        for (label, subject, kind, actor, fields) in [
+            ("run fault", run.subject.as_str(), "operational.failure", "agent/st3/reconciler",
+                failure(&run.subject, "fixture-run-fault")),
+            ("step fault", step.subject.as_str(), "operational.failure", "agent/st3/reconciler",
+                failure(&step.subject, "fixture-step-fault")),
+            ("nudge", step.subject.as_str(), "work.nudged", "daemon/runtime", json!({
+                "agent": fixture.subjects[23], "attempt": 1, "idle_since_unix_ms": "1",
+                "message": "message/fixture", "reason": "quiet", "waits": [],
+            })),
+            ("report-to", run.subject.as_str(), "mission-run.report-to", "person/test",
+                json!({"report_to": "agent/node.roster-00"})),
+            ("eval verdict", run.subject.as_str(), "eval.verdict", "agent/st3/reconciler",
+                json!({"verdict": "pass", "reason": "Fixture verdict."})),
+        ] {
+            append(subject, kind, actor, fields);
+            let refolded = store.agent_resources_refolded_cards_for_test();
+            for history in [false, true] {
+                checked_agent_cache(store, history, store.index().unwrap());
+            }
+            let refolded = store.agent_resources_refolded_cards_for_test() - refolded;
+            // Run 1 owns ten agents; step 2/3's holder is one. Never all sixty, in either view.
+            assert!(refolded <= 2 * 11, "{label} refolded {refolded} cards");
+        }
     }
 
     fn roster_fixture_person_claim(store: &Store, subject: &str, kind: &str, fields: Value) {
@@ -22664,7 +25672,7 @@ mission "wake" state="ready" {
             Query(ClientListQuery::default()),
         ).await.unwrap();
         assert_eq!(cold.items.len(), 1);
-        let admission = state.store.admit_agent_resources().await;
+        let admission = state.store.admit_agent_resources("other").await;
         let started = Instant::now();
         let (_, Json(warm)) = tokio::time::timeout(
             Duration::from_secs(2),
@@ -22773,6 +25781,588 @@ mission "wake" state="ready" {
             } else {
                 assert!(cached.is_none(), "timeline publication must invalidate the roster");
                 checked_agent_cache(&state.store, false, index);
+            }
+        }
+    }
+
+    #[test]
+    fn agent_roster_refresh_publishes_an_empty_or_small_roster_at_once() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        for history in [false, true] {
+            refresh_agent_roster(store, history).unwrap();
+            let (cut, cards, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+            assert_eq!((cut, cards.len()), (store.index().unwrap(), 0), "history {history}");
+        }
+        store.append_claim(&ClaimInput {
+            subject: "agent/small-roster".into(), kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"small",
+                "incarnation_id":"one"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        for history in [false, true] {
+            refresh_agent_roster(store, history).unwrap();
+            let (_, cards, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+            assert_eq!(cards.len(), 1, "history {history}");
+        }
+    }
+    fn roster_resilience_runtime(store: &Store, subject: &str, runtime: &str) {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":runtime,
+                "incarnation_id":"one"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    fn roster_resilience_ended(store: &Store) {
+        store.append_claim(&ClaimInput {
+            subject: "agent/ended".into(), kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"status":"stopped", "terminal":true,
+                "runtime_id":"ended", "incarnation_id":"ended"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+
+    #[tokio::test]
+    async fn roster_resilience_fault_deadline_publishes_current_fields_and_retries() {
+        for history in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let store = &state.store;
+            let _wake = store.start_agent_roster_refresher().unwrap();
+            roster_resilience_runtime(store, "agent/retained-fault", "old");
+            roster_resilience_runtime(store, "agent/known-clear", "old");
+            let failure = store.append_claim(&ClaimInput {
+                subject: "agent/retained-fault".into(), kind: "operational.failure".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
+                    "incarnation":"one", "reason":"previous failure", "reviewer":"agent/retained-fault",
+                    "title":"Mailbox lost", "severity":"error", "targets":["agent/retained-fault"]})).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            refresh_agent_roster(store, history).unwrap();
+            let (_, before, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+            let card = |cards: &[Value], id: &str| cards.iter().find(|card| card["id"] == id).unwrap().clone();
+            assert_eq!(card(&before, "agent/retained-fault")["fault"], "previous failure");
+            assert!(card(&before, "agent/known-clear")["fault"].is_null());
+            store.append_claim(&ClaimInput {
+                subject: "agent/retained-fault".into(), kind: "operational.recovered".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: serde_json::from_value(json!({"failure":failure.id, "reason":"recovered"})).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            for subject in ["agent/retained-fault", "agent/known-clear", "agent/new-unknown"] {
+                roster_resilience_runtime(store, subject, "new");
+            }
+            Store::expire_next_card_fault_read_for_test();
+            refresh_agent_roster(store, history).expect("an optional deadline must still publish");
+            let cut = store.index().unwrap();
+            let (published, after, _) = store.published_agent_roster(cut, history).unwrap();
+            assert_eq!(published, cut);
+            for subject in ["agent/retained-fault", "agent/known-clear", "agent/new-unknown"] {
+                assert_eq!(card(&after, subject)["runtime_ids"], json!(["runtime/new"]));
+            }
+            assert_eq!(card(&after, "agent/retained-fault")["fault"], "previous failure");
+            assert!(card(&after, "agent/known-clear")["fault"].is_null());
+            assert_eq!(card(&after, "agent/new-unknown")["fault"], "fault status unknown");
+            let (Extension(snapshot), Json(page)) = client_agents(State(state.clone()),
+                Extension(new_client_snapshot(&state)), Query(ClientListQuery { history, fresh: true, ..ClientListQuery::default() }))
+                .await.expect("a deadline-degraded publication must answer, not return 503");
+            assert_eq!(snapshot.store_index, cut);
+            assert_eq!(card(&page.items, "agent/retained-fault")["fault"], "previous failure");
+            // No new claim is needed: the next refresh retries exactly the degraded subjects.
+            refresh_agent_roster(store, history).unwrap();
+            let (_, retried, _) = store.published_agent_roster(cut, history).unwrap();
+            for subject in ["agent/retained-fault", "agent/known-clear", "agent/new-unknown"] {
+                assert!(card(&retried, subject)["fault"].is_null());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn roster_resilience_always_expired_fault_reads_publish_from_the_first_attempt_per_mode() {
+        for history in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let store = &state.store;
+            let _wake = store.start_agent_roster_refresher().unwrap();
+            assert!(store.published_agent_roster(store.index().unwrap(), history).is_none());
+            Store::expire_card_fault_reads_for_test(usize::MAX);
+            for round in 0..3 {
+                if round == 1 {
+                    store.forget_current_views();
+                    assert!(store.published_agent_roster(store.index().unwrap(), history).is_none(),
+                        "a full reset must keep its existing invalidation policy");
+                }
+                let runtime = format!("round-{round}");
+                roster_resilience_runtime(store, "agent/first-publication", &runtime);
+                refresh_agent_roster(store, history)
+                    .expect("a fault deadline from the first attempt must not prevent publication");
+                let cut = store.index().unwrap();
+                let (published, _, _) = store.published_agent_roster(cut, history).unwrap();
+                assert_eq!(published, cut);
+                let (status, page) = get_request(router(state.clone()),
+                    &format!("/v1/client/agents?history={history}&fresh=true")).await;
+                assert_eq!(status, StatusCode::OK, "never-published fault degradation must answer 200");
+                assert_eq!(page["items"][0]["runtime_ids"], json!([format!("runtime/{runtime}")]));
+                assert_eq!(page["items"][0]["fault"], "fault status unknown");
+            }
+            Store::expire_card_fault_reads_for_test(0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn roster_resilience_unpublished_mode_keeps_the_bounded_wait_and_503() {
+        for history in [false, true] {
+            for forget in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let state = state(root.path());
+                let store = &state.store;
+                let _wake = store.start_agent_roster_refresher().unwrap();
+                roster_resilience_runtime(store, "agent/current-only", "current");
+                if history || forget {
+                    refresh_agent_roster(store, false).unwrap();
+                }
+                if forget {
+                    store.forget_current_views();
+                }
+                assert!(store.published_agent_roster(store.index().unwrap(), history).is_none());
+                assert!(store.answer_agent_roster_requests::<()>(||
+                    anyhow::bail!("injected refresh failure")).is_err());
+                let started = tokio::time::Instant::now();
+                let request = client_agents(
+                    State(state.clone()), Extension(new_client_snapshot(&state)), Query(ClientListQuery {
+                        history, fresh: true, ..ClientListQuery::default()
+                    }));
+                tokio::pin!(request);
+                tokio::select! {
+                    _ = &mut request => panic!("an unpublished mode answered before its bounded wait"),
+                    _ = tokio::time::sleep(AGENT_ROSTER_READ_WAIT - Duration::from_millis(1)) => {}
+                }
+                let error = match request.await {
+                    Ok(_) => panic!("an unpublished mode must return 503"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(error.code, "agent-roster-not-ready");
+                assert_eq!(started.elapsed(), AGENT_ROSTER_READ_WAIT);
+            }
+        }
+    }
+
+    #[test]
+    fn roster_resilience_chunk_deadlines_publish_without_retrying_in_the_same_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        let count = AGENT_ROSTER_WARM_CHUNK * 2 + 1;
+        for n in 0..count {
+            roster_resilience_runtime(store, &format!("agent/chunk-{n:04}"), "old");
+        }
+        refresh_agent_roster(store, false).unwrap();
+        for n in 0..count {
+            roster_resilience_runtime(store, &format!("agent/chunk-{n:04}"), "new");
+        }
+        let last = format!("agent/chunk-{:04}", count - 1);
+        store.append_claim(&ClaimInput {
+            subject: last.clone(), kind: "operational.failure".into(), actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
+                "incarnation":"one", "reason":"new failure", "reviewer":last,
+                "title":"Mailbox lost", "severity":"error", "targets":[last]})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let before = store.agent_resources_refolded_cards_for_test();
+        Store::expire_card_fault_reads_for_test(3);
+        refresh_agent_roster(store, false).expect("degrading every chunk must still complete this attempt");
+        let cut = store.index().unwrap();
+        let (published, cards, _) = store.published_agent_roster(cut, false).unwrap();
+        assert_eq!(published, cut);
+        assert_eq!(cards.len(), count);
+        assert!(cards.iter().all(|card| card["runtime_ids"] == json!(["runtime/new"]) && card["fault"].is_null()));
+        assert_eq!(store.agent_resources_refolded_cards_for_test() - before, count,
+            "a deadline must not trigger another fold inside this refresh attempt");
+        let before = store.agent_resources_refolded_cards_for_test();
+        refresh_agent_roster(store, false).unwrap();
+        assert_eq!(store.agent_resources_refolded_cards_for_test() - before, count,
+            "the next attempt must retry the faults even at the same graph cut");
+        let (_, cards, _) = store.published_agent_roster(cut, false).unwrap();
+        assert_eq!(cards.iter().find(|card| card["id"] == last).unwrap()["fault"], "new failure",
+            "a same-cut complete publication must replace the old degraded fault values");
+    }
+
+    async fn assert_roster_resilience_failed_attempt(history: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        roster_resilience_runtime(store, "agent/retained", "old");
+        roster_resilience_ended(store);
+        refresh_agent_roster(store, history).unwrap();
+        let (cut, cards, published_at) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        assert_eq!(cards.iter().any(|card| card["id"] == "agent/ended"), history);
+        let (_, Json(before)) = client_agents(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Query(ClientListQuery { history, ..ClientListQuery::default() })).await.unwrap();
+        roster_resilience_runtime(store, "agent/retained", "new");
+        assert!(store.answer_agent_roster_requests::<()>(|| anyhow::bail!("injected refresh failure")).is_err());
+        for status in [None, Some("running".to_owned()), Some("stopped".to_owned())] {
+            let expected = before.items.iter().filter(|card| status.as_deref().is_none_or(|status| card["state"] == status))
+                .cloned().collect::<Vec<_>>();
+            let read = client_agents(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Query(ClientListQuery { history, status, fresh: true, ..ClientListQuery::default() }));
+            let (Extension(snapshot), Json(page)) = tokio::time::timeout(Duration::from_millis(200), read).await
+                .expect("a failed refresher must not impose the two-second wait").unwrap();
+            assert_eq!(snapshot.store_index, cut);
+            assert_eq!(snapshot.published_at, Some(client_timestamp(published_at)));
+            assert_eq!(page.items, expected);
+        }
+        store.answer_agent_roster_requests(|| Ok(())).unwrap();
+        let reader = Arc::clone(store);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || reader.answer_agent_roster_requests::<()>(|| {
+            started.send(()).unwrap();
+            proceed.recv().unwrap();
+            anyhow::bail!("injected in-flight failure")
+        }));
+        ready.await.unwrap();
+        let read = client_agents(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Query(ClientListQuery { history, fresh: true, ..ClientListQuery::default() }));
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err());
+        release.send(()).unwrap();
+        let (Extension(snapshot), Json(page)) = tokio::time::timeout(Duration::from_millis(200), read)
+            .await.expect("a failed attempt must wake its waiting readers").unwrap();
+        assert!(worker.await.unwrap().is_err());
+        assert_eq!(snapshot.store_index, cut);
+        assert_eq!(page.items, before.items);
+    }
+
+    #[tokio::test]
+    async fn roster_resilience_fresh_failed_attempt_returns_last_publication_promptly() {
+        assert_roster_resilience_failed_attempt(false).await;
+    }
+
+    #[tokio::test]
+    async fn roster_resilience_fresh_failed_history_attempt_returns_last_publication_promptly() {
+        assert_roster_resilience_failed_attempt(true).await;
+    }
+
+    #[tokio::test]
+    async fn roster_resilience_fresh_idle_and_new_attempt_after_failure_wait_for_written_cards() {
+        for history in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let store = &state.store;
+            let _wake = store.start_agent_roster_refresher().unwrap();
+            roster_resilience_runtime(store, "agent/retained", "old");
+            refresh_agent_roster(store, history).unwrap();
+            for failed in [false, true] {
+                let old_cut = store.index().unwrap();
+                let runtime = if failed { "after-failure" } else { "after-idle" };
+                roster_resilience_runtime(store, "agent/retained", runtime);
+                if failed {
+                    assert!(store.answer_agent_roster_requests::<()>(||
+                        anyhow::bail!("injected previous refresh failure")).is_err());
+                }
+                let read = client_agents(State(state.clone()), Extension(new_client_snapshot(&state)),
+                    Query(ClientListQuery { history, fresh: true, ..ClientListQuery::default() }));
+                tokio::pin!(read);
+                if !failed {
+                    assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+                        "an idle refresher must not answer a post-write fresh read with old cards");
+                }
+                let reader = Arc::clone(store);
+                let (started, ready) = tokio::sync::oneshot::channel();
+                let (release, proceed) = std::sync::mpsc::channel();
+                let worker = tokio::task::spawn_blocking(move || reader.answer_agent_roster_requests(|| {
+                    started.send(()).unwrap();
+                    proceed.recv().unwrap();
+                    refresh_agent_roster(&reader, history)
+                }));
+                ready.await.unwrap();
+                assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+                    "a newer in-flight attempt must be awaited even after a previous failure");
+                release.send(()).unwrap();
+                let (Extension(snapshot), Json(page)) = tokio::time::timeout(Duration::from_millis(200), read)
+                    .await.expect("successful publication must wake the fresh reader").unwrap();
+                worker.await.unwrap().unwrap();
+                assert_eq!(snapshot.store_index, store.index().unwrap());
+                assert!(snapshot.store_index > old_cut);
+                assert_eq!(page.items[0]["runtime_ids"], json!([format!("runtime/{runtime}")]));
+            }
+        }
+    }
+
+
+    async fn assert_agent_roster_survives_other_mode_publications(history: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.store = Arc::new(roster_followup_store());
+        let store = &state.store;
+        let wake = store.start_agent_roster_refresher().unwrap();
+        let advance = |marker| {
+            store.append_claim(&ClaimInput {
+                subject: format!("custom/test/roster-retention-{marker}"),
+                kind: "custom.test.marker".into(), actor: None, fields: BTreeMap::new(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        refresh_agent_roster(store, history).unwrap();
+        advance(0);
+        refresh_agent_roster(store, history).unwrap();
+        let (cut, _, published_at) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        let (_, Json(before)) = client_agents(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Query(ClientListQuery { history, ..ClientListQuery::default() }),
+        ).await.unwrap();
+        let mut first_other_cut = None;
+        for marker in 1..=12 {
+            advance(marker);
+            refresh_agent_roster(store, !history).unwrap();
+            let other_cut = store.published_agent_roster(store.index().unwrap(), !history).unwrap().0;
+            assert_eq!(other_cut, store.index().unwrap(), "each refresh must publish a distinct cut");
+            first_other_cut.get_or_insert(other_cut);
+        }
+        assert!(store.index().unwrap() > cut);
+        assert!(store.published_agent_roster_at(first_other_cut.unwrap(), !history).is_none(),
+            "old publications of the busy mode must still be evicted");
+        assert!(!store.take_agent_roster_history_request());
+        let (Extension(snapshot), Json(after)) = client_agents(
+            State(state.clone()), Extension(new_client_snapshot(&state)),
+            Query(ClientListQuery { history, fresh: true, ..ClientListQuery::default() }),
+        ).await.expect("the retained publication must answer, not return agent-roster-not-ready");
+        assert_eq!(snapshot.store_index, cut, "serve the newest retained publication's own cut");
+        assert_eq!(snapshot.published_at, Some(client_timestamp(published_at)));
+        assert_eq!(after.items, before.items);
+        assert_eq!(store.take_agent_roster_history_request(), history);
+        tokio::time::timeout(Duration::from_secs(1), wake.notified()).await
+            .expect("the stale first page must request a refresh");
+    }
+
+    #[tokio::test]
+    async fn client_agents_agent_roster_retains_history_during_current_publications() {
+        assert_agent_roster_survives_other_mode_publications(true).await;
+    }
+
+    #[tokio::test]
+    async fn client_agents_agent_roster_retains_current_during_history_publications() {
+        assert_agent_roster_survives_other_mode_publications(false).await;
+    }
+
+    #[test]
+    fn agent_roster_refresh_never_folds_more_than_a_chunk_in_one_call() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = &state.store;
+        let add = |agents: std::ops::Range<usize>| for n in agents {
+            store.append_claim(&ClaimInput {
+                subject: format!("agent/bound-{n:04}"), kind: "runtime.observed".into(),
+                actor: None, fields: serde_json::from_value(json!({"status":"running",
+                    "runtime_id":format!("bound-{n}"), "incarnation_id":"one"})).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        // Cold: nothing to start from.
+        add(0..600);
+        refresh_agent_roster(store, false).unwrap();
+        let (_, cards, _) = store.published_agent_roster(store.index().unwrap(), false).unwrap();
+        assert_eq!(cards.len(), 600);
+        // More changed and missing cards than one fold may take.
+        add(600..900);
+        refresh_agent_roster(store, false).unwrap();
+        let (cut, cards, _) = store.published_agent_roster(store.index().unwrap(), false).unwrap();
+        assert_eq!((cut, cards.len()), (store.index().unwrap(), 900));
+        assert!(store.agent_resources_largest_fold_for_test() <= AGENT_ROSTER_WARM_CHUNK,
+            "one call folded {} cards", store.agent_resources_largest_fold_for_test());
+        // A few changes complete in one short fold.
+        add(900..910);
+        refresh_agent_roster(store, false).unwrap();
+        assert_eq!(store.published_agent_roster(store.index().unwrap(), false).unwrap().1.len(), 910);
+        assert!(store.agent_resources_largest_fold_for_test() <= AGENT_ROSTER_WARM_CHUNK);
+    }
+
+    /// What one roster refresh costs on a copy of a real or generated store: the first full
+    /// fold, a fold after a claim that changes one card, and one after a claim no card reads.
+    /// `ST_ROSTER_FOLD_STORE` names the store; the copy stays in `TMPDIR` and only timings print.
+    #[test]
+    #[ignore = "roster fold timing on a store copy; set ST_ROSTER_FOLD_STORE and run with --ignored --nocapture"]
+    fn agent_roster_fold_timing_on_a_store_copy() {
+        let Some(source) = std::env::var_os("ST_ROSTER_FOLD_STORE").map(PathBuf::from) else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("claims.sqlite3");
+        for suffix in ["", "-wal"] {
+            let from = PathBuf::from(format!("{}{suffix}", source.display()));
+            if from.exists() {
+                fs::copy(&from, format!("{}{suffix}", database.display())).unwrap();
+            }
+        }
+        // With ST3_PROFILE_DIR set, each fold's statements land in its slow.jsonl.
+        smallclaims::profile::init_from_env();
+        let store = Store::open(&database, "bench-host").unwrap();
+        let timed = |label: &str, samples: &mut Vec<f64>, work: &dyn Fn()| {
+            let before = smallclaims::sqlite::work::total();
+            let started = Instant::now();
+            smallclaims::profile::task("roster-fold-timing", work);
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            samples.push(ms);
+            println!("roster fold {label}: {ms:.1} ms; sqlite_work={:?}",
+                smallclaims::sqlite::work::total() - before);
+        };
+        let mut cold = Vec::new();
+        timed("cold", &mut cold, &|| refresh_agent_roster(&store, false).unwrap());
+        let agents = store.read_snapshot(|index| Ok(client_agent_page_refs(&store, false, index)?
+            .iter().filter_map(|card| card["id"].as_str().map(str::to_owned)).collect::<Vec<_>>()))
+            .unwrap();
+        println!("roster fold agents={}", agents.len());
+        assert!(!agents.is_empty());
+        let append = |subject: &str, kind: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: None,
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        let mut changed = Vec::new();
+        let mut unrelated = Vec::new();
+        for turn in 0..30 {
+            let agent = &agents[turn % agents.len()];
+            append(agent, "harness.observed", json!({"state": if turn % 2 == 0 { "working" } else { "idle" },
+                "driver":"codex", "incarnation_id": format!("fold-timing-{turn}")}));
+            timed(&format!("one card changed (agent #{})", turn % agents.len()), &mut changed,
+                &|| refresh_agent_roster(&store, false).unwrap());
+            append(&format!("custom/fold-timing/{turn}"), "custom.test.marker", json!({}));
+            timed("no card changed", &mut unrelated, &|| refresh_agent_roster(&store, false).unwrap());
+        }
+        let summary = |label: &str, samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            let at = |q: f64| samples[((samples.len() as f64 * q).ceil() as usize).saturating_sub(1)];
+            println!("roster fold summary {label}: n={} p50={:.1} p90={:.1} max={:.1} ms",
+                samples.len(), at(0.5), at(0.9), samples[samples.len() - 1]);
+        };
+        summary("cold", &mut cold);
+        summary("one card changed", &mut changed);
+        summary("no card changed", &mut unrelated);
+        let performance = smallclaims::performance::snapshot();
+        for row in performance["requests"].as_array().into_iter().flatten()
+            .filter(|row| row["kind"].as_str().is_some_and(|kind| kind.starts_with("roster/")))
+        {
+            println!("roster fold task {}: n={} total_ms={} max_ms={}",
+                row["kind"], row["count"], row["total_ms"], row["max_ms"]);
+        }
+    }
+
+    /// What a refresh costs after a backlog of real claims: the roster folded at a cut that many
+    /// claims back, then refreshed at the newest, as after an idle refresher or a slow one.
+    /// `ST_ROSTER_BACKLOG_STORE` names a disposable store copy, opened in place; and
+    /// `ST_ROSTER_BACKLOGS` the backlogs in claims, comma separated.
+    #[test]
+    #[ignore = "roster refresh timing after a backlog; set ST_ROSTER_BACKLOG_STORE and run with --ignored --nocapture"]
+    fn agent_roster_backlog_refresh_timing_on_a_store_copy() {
+        let Some(database) = std::env::var_os("ST_ROSTER_BACKLOG_STORE").map(PathBuf::from) else {
+            return;
+        };
+        let backlogs = std::env::var("ST_ROSTER_BACKLOGS").unwrap_or_else(|_| "20,200,2000".into());
+        smallclaims::profile::init_from_env();
+        for backlog in backlogs.split(',').map(|n| n.trim().parse::<u64>().unwrap()) {
+            // A fresh store each time: no fold kept from the previous backlog.
+            let store = Store::open(&database, "bench-host").unwrap();
+            let newest = store.index().unwrap();
+            let timed = |label: &str, work: &dyn Fn()| {
+                let before = smallclaims::sqlite::work::total();
+                let started = Instant::now();
+                smallclaims::profile::task("roster-backlog-timing", work);
+                println!("roster backlog {backlog}: {label} {:.1} ms; sqlite_work={:?}",
+                    started.elapsed().as_secs_f64() * 1000.0,
+                    smallclaims::sqlite::work::total() - before);
+            };
+            timed("cold", &|| { client_agent_resources_cached(&store, false, newest - backlog).unwrap(); });
+            let reason = store.agent_roster_unbounded_because(newest, false, AGENT_ROSTER_WARM_CHUNK)
+                .unwrap();
+            let refolded = store.agent_resources_refolded_cards_for_test();
+            timed("refresh", &|| refresh_agent_roster(&store, false).unwrap());
+            println!("roster backlog {backlog}: chunked because {reason:?}; cards refolded {}",
+                store.agent_resources_refolded_cards_for_test() - refolded);
+        }
+    }
+
+    /// What one refresh costs after one claim of each kind that moves cards, on a disposable
+    /// store copy opened in place: claims copied from `ST_ROSTER_KIND_CLAIMS` (a JSON array of
+    /// `{label, subject, kind, actor, fields}`), and bursts of `harness.observed` on that many
+    /// agents at once. Each prints the fold time, cards refolded and where the time went.
+    #[test]
+    #[ignore = "roster refresh timing by claim kind; set ST_ROSTER_BACKLOG_STORE and ST_ROSTER_KIND_CLAIMS"]
+    fn agent_roster_refresh_by_claim_kind_timing_on_a_store_copy() {
+        let (Some(database), Some(claims)) = (
+            std::env::var_os("ST_ROSTER_BACKLOG_STORE").map(PathBuf::from),
+            std::env::var_os("ST_ROSTER_KIND_CLAIMS").map(PathBuf::from),
+        ) else {
+            return;
+        };
+        let claims: Vec<Value> = serde_json::from_slice(&fs::read(claims).unwrap()).unwrap();
+        let rounds = std::env::var("ST_ROSTER_KIND_ROUNDS").map_or(5, |n| n.parse().unwrap());
+        smallclaims::profile::init_from_env();
+        let store = Store::open(&database, "bench-host").unwrap();
+        refresh_agent_roster(&store, false).unwrap();
+        let agents = store.read_snapshot(|index| Ok(client_agent_page_refs(&store, false, index)?
+            .iter().filter_map(|card| card["id"].as_str().map(str::to_owned)).collect::<Vec<_>>()))
+            .unwrap();
+        println!("roster kinds agents={}", agents.len());
+        let task_ms = || {
+            let performance = smallclaims::performance::snapshot();
+            performance["requests"].as_array().into_iter().flatten()
+                .filter_map(|row| Some((row["kind"].as_str()?.to_owned(), row["total_ms"].as_f64()?)))
+                .filter(|(kind, _)| kind.starts_with("roster/"))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let append = |subject: &str, kind: &str, actor: Option<&str>, fields: &Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: actor.map(str::to_owned),
+                fields: serde_json::from_value(fields.clone()).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).map(drop)
+        };
+        let timed = |label: &str| {
+            let before = (smallclaims::sqlite::work::total(), task_ms(),
+                store.agent_resources_refolded_cards_for_test());
+            let started = Instant::now();
+            smallclaims::profile::task("roster-kind-timing", || refresh_agent_roster(&store, false).unwrap());
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            let after = task_ms();
+            let tasks = after.iter().filter_map(|(kind, total)| {
+                let spent = total - before.1.get(kind).copied().unwrap_or(0.0);
+                (spent >= 1.0).then(|| format!("{}={spent:.0}", kind.trim_start_matches("roster/")))
+            }).collect::<Vec<_>>().join(" ");
+            println!("roster kind {label}: {ms:.1} ms; cards refolded {}; {tasks}; vm_steps={}",
+                store.agent_resources_refolded_cards_for_test() - before.2,
+                (smallclaims::sqlite::work::total() - before.0).vm_steps);
+        };
+        for round in 0..rounds {
+            append(&format!("custom/kind-timing/{round}"), "custom.test.marker", None, &json!({})).unwrap();
+            timed("no card");
+            for burst in [1, 10, 25] {
+                for (n, agent) in agents.iter().cycle().skip(round * 7).take(burst.min(agents.len())).enumerate() {
+                    append(agent, "harness.observed", None, &json!({
+                        "state": if (round + n) % 2 == 0 { "working" } else { "idle" },
+                        "driver": "codex", "incarnation_id": format!("kind-timing-{round}-{n}"),
+                    })).unwrap();
+                }
+                timed(&format!("harness.observed x{burst}"));
+            }
+            for claim in &claims {
+                let label = claim["label"].as_str().unwrap();
+                match append(claim["subject"].as_str().unwrap(), claim["kind"].as_str().unwrap(),
+                    claim["actor"].as_str(), &claim["fields"])
+                {
+                    Ok(()) => timed(label),
+                    Err(error) => println!("roster kind {label}: append refused: {error:#}"),
+                }
             }
         }
     }
@@ -23277,6 +26867,46 @@ mission "agent-health" state="ready" {
             client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
         assert_eq!(resources[0]["state"], "running");
 
+        let healthy_cut = store.index().unwrap();
+        let harness = |driver: &str, incarnation: &str, key: &str| {
+            store.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: "harness.observed".into(), actor: Some(subject.clone()),
+                fields: serde_json::from_value(json!({"state":"ready","driver":driver,"incarnation_id":incarnation})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: Some(key.into()),
+            }).unwrap();
+        };
+        harness("claude", "incarnation-1", "agent-health-foreign-provider");
+        let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+        assert_eq!(resources[0]["driver"], "codex");
+        assert_eq!(resources[0]["state"], "starting");
+        assert!(resources[0]["harness_state"].is_null(), "wrong-provider readiness must not survive the cached card");
+        assert_eq!(resources[0]["queued_work_count"], 1);
+        harness("codex", "incarnation-1", "agent-health-native-provider-restored");
+        let fault = crate::model::AttentionRequest {
+            reviewer: "person/test".into(), title: "Mailbox unavailable".into(), reason: "The current mailbox lost delivery custody.".into(),
+            severity: "error".into(), targets: vec![subject.clone()], actor: "daemon/runtime".into(), idempotency_key: "agent-health-mailbox-loss".into(),
+        };
+        let episode = "attention/agent-health-mailbox";
+        let recorded = store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
+        let repeated = store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
+        assert_eq!(recorded.request, repeated.request);
+        let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+        assert_eq!(resources[0]["state"], "waiting");
+        assert_eq!(resources[0]["harness_state"], "indeterminate");
+        assert_eq!(resources[0]["blocked_on"], "channel");
+        assert_eq!(resources[0]["fault"], fault.reason);
+        harness("codex", "incarnation-1", "agent-health-superficial-ready");
+        let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+        assert_eq!(resources[0]["state"], "waiting", "ready alone cannot clear a mailbox fault");
+        let historic = client_agent_resources(&store, false, "snapshot", healthy_cut).unwrap();
+        assert_eq!(historic[0]["state"], "running");
+        assert!(historic[0]["fault"].is_null(), "the historical cut must not observe a later fault");
+        store.recover_operational_failure(episode, "authenticated replay control", "agent-health-repaired").unwrap();
+        let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+        assert_eq!(resources[0]["state"], "running");
+        assert!(resources[0]["fault"].is_null());
+        assert_eq!(resources[0]["next_work_id"], queued);
+
         store
             .append_claim(&ClaimInput {
                 subject: subject.clone(),
@@ -23420,6 +27050,15 @@ mission "agent-human" state="ready" {
         assert!(answered.blocked_on.is_none());
         assert!(answered.ask.is_none());
         assert!(answered.reason.is_none());
+        assert!(answered.activity.is_none());
+        // Compacting is the seat's status: it runs, it waits on nobody.
+        append("harness.observed", json!({
+            "state": "working", "driver": "omp", "incarnation_id": "human-1",
+            "blocked_on": null, "ask": null, "reason": "compaction", "input_buffer": null, "exit": null,
+        }));
+        let compacting: st3_client::Agent = serde_json::from_value(agent()).unwrap();
+        assert_eq!(compacting.state, "running");
+        assert_eq!(compacting.activity.as_deref(), Some("compacting"));
         // The harness schema's terminal activity keeps precedence over a stale ask.
         observe_harness("ended");
         assert_eq!(agent()["state"], "failed");
@@ -24225,6 +27864,7 @@ version 2
                 &step.subject,
                 "claim",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(actor.clone()),
                     incarnation: Some("test".into()),
                     summary: None,
@@ -24290,6 +27930,84 @@ version 2
             .expect("attempt-bound mission output");
         assert_eq!(bound.revision, revision);
         assert_eq!(bound.claim_id, output["claim_id"]);
+    }
+
+    #[test]
+    fn silent_send_retry_keeps_original_kind_and_rejects_changed_input() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let kdl = "version 2\nagent \"example/reader\" { command \"true\"; }\n";
+        let intent = crate::graph::parse_test_intent(kdl, "node").unwrap();
+        let planned = state
+            .store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: kdl.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply(&intent, &planned.subject_tokens, "seat-retry")
+            .unwrap();
+        let request = || MessageSendRequest {
+            idempotency_key: "silent-retry".into(),
+            from: "agent/example/writer".into(),
+            to: "agent/example/reader".into(),
+            content: "An update".into(),
+            title: None,
+            in_reply_to: None,
+            tags: vec![crate::silent::SILENT_TAG.into()],
+            attachments: vec![],
+        };
+        let first = accept_message(&state, request(), None, None).unwrap().0;
+        assert!(crate::silent::is_held(&first));
+        let retry = accept_message(&state, request(), None, None).unwrap().0;
+        assert_eq!(first.tags, retry.tags);
+        assert_eq!(first.subject, retry.subject);
+        for tags in [vec!["different".into()], vec![], vec!["launch".into()]] {
+            let mut changed = request();
+            changed.tags = tags;
+            assert!(accept_message(&state, changed, None, None).is_err());
+        }
+        let mut changed = request();
+        changed.content = "A different update".into();
+        assert!(accept_message(&state, changed, None, None).is_err());
+        assert_eq!(
+            state
+                .store
+                .claims_for(&first.subject, Some("message.sent"))
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut forged = request();
+        forged.idempotency_key = "forged-tag".into();
+        forged.tags = vec!["st3-fault:fake".into()];
+        assert!(accept_message(&state, forged, None, None).is_err());
+        let mut launch = request();
+        launch.idempotency_key = "ordinary-launch-tag".into();
+        launch.tags = vec!["launch".into(), crate::silent::SILENT_TAG.into()];
+        assert!(crate::silent::is_held(
+            &accept_message(&state, launch, None, None).unwrap().0
+        ));
+        let mut marker = request();
+        marker.from = "person/example".into();
+        marker.idempotency_key = "signed-marker".into();
+        marker.tags = vec![format!("{}{}", crate::silent::REMAINING_PREFIX, usize::MAX)];
+        let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+        let signature = smallclaims::principal::ClaimSignature::sign(
+            &key,
+            "",
+            "person/example",
+            None,
+            vec![],
+            client_now_ms() as u64,
+        );
+        let rejected = accept_message(&state, marker, None, Some(signature)).unwrap_err();
+        assert_eq!(rejected.code, "reserved-message-tag");
     }
 
     #[tokio::test]
@@ -24541,6 +28259,7 @@ version 2
                 &step.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(claimant.clone()),
                     incarnation: Some("test-incarnation".into()),
                     summary: None,
@@ -24556,6 +28275,7 @@ version 2
                 &step.subject,
                 "complete",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(claimant.clone()),
                     incarnation: Some("test-incarnation".into()),
                     summary: Some("Candidate submitted for review".into()),
@@ -24662,7 +28382,7 @@ version 2
                     .as_array()
                     .unwrap()
                     .iter()
-                    .all(|action| action["argv"][1] == "attention" && action["argv"][4] == "--as")
+                    .all(|action| action["argv"][1] == "alerts" && action["argv"][4] == "--as")
             }),
             "{attention}"
         );
@@ -24825,6 +28545,7 @@ version 2
                     &feedback_step.subject,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(feedback_claimant.clone()),
                         incarnation: Some("test-incarnation".into()),
                         summary: Some("Candidate submitted".into()),
@@ -25412,3 +29133,5 @@ agent "seat" { workspace "/tmp"; command "true" }
 
 #[cfg(test)]
 mod work_incarnation_tests;
+#[cfg(test)]
+mod message_bodies_tests;
