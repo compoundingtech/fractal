@@ -48,7 +48,7 @@ mission "dotfiles/ui-design/recovery" state="ready" {{
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
     );
     for _ in 0..12 {
-        reconciler.reconcile_once().unwrap();
+        reconciler.evaluate_mission_runs().unwrap();
         if let Some(gate) = store.desired_subjects_for_owner_run(&round).unwrap().into_iter()
             .find(|subject| subject.kind == "agent" && subject.subject.ends_with("/gate"))
         {
