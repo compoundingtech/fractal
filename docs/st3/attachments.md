@@ -19,27 +19,6 @@ image adds a few hundred bytes to sync, not megabytes. The reference field is `s
 `blob_hash`: the graph replicates and requires every blob a claim's `blob_hash`, `hash` or
 `bundle_hash` field names, which is the opposite of what an attachment wants.
 
-## Native OMP image availability
-
-Native `blob:sha256:<64 lowercase hex>` references belong to OMP's blob store, not automatically
-to st's authorized message attachment service. Replay preserves their exact safe identity,
-supported MIME type and supplied integer dimensions up to 65,535, but does not manufacture an st
-`attachment_id`, origin, upload authority or successful fetch.
-
-Standalone image blocks become typed `native_image_unavailable` timeline diagnostics.
-Their details use `{ "_tag": "OmpImage", "version": 1, "availability": "unavailable",
-"reason": "native_blob_not_fetchable", "native_ref": "blob:sha256:…", "mime_type": "image/webp" }`.
-Images inside message-level or nested tool results use the same descriptor in result content;
-other result content and call correlation remain unchanged.
-
-Inline pixels, remote URLs and malformed references are never copied into these descriptors.
-They report `availability: withheld` and `reason: image_payload_not_authorized`. Unsupported
-MIME values report `mime_availability: unknown` rather than leaking free text.
-Unrecognized image-bearing blocks, including `input_image`, `image_url` and single-object message
-content, also produce typed placeholders instead of JSON excerpts. Tool-result blocks containing
-data URIs are replaced with the same withheld descriptor, regardless of their block type.
-No image is fetched or uploaded by native normalization, and no image bytes enter timeline claims.
-
 ## Limits
 
 | Limit | Value |
@@ -59,6 +38,16 @@ a fetched copy. After that a read answers `blob-expired` (HTTP 410) and the mess
 needs the `control.messages` scope. The answer is `{blob, sha256, size, media_type}`, where `blob`
 is `blob/<sha256>`. The same bytes answer the same reference. `st blobs put FILE` does it from the
 CLI, and `st conversations send --attach FILE` does it as part of a send.
+
+Before it uploads, the CLI prepares the file (`crates/st3/src/attach_image.rs`): an SVG is
+rendered to a PNG on white at twice its size (at most 4096 pixels on a side), and an `<image href>`
+such as a screenshot it marks up is drawn only from a `data:` URL or a file inside the SVG's own
+folder (after `..` and symbolic links), so an SVG from elsewhere cannot pull another local image
+into what the recipient sees; any other path refuses the attachment and names it; a BMP becomes a PNG; and a still image
+over 10 MiB (up to 256 MiB) is scaled down until it fits, as a PNG for a PNG and as a JPEG
+otherwise. It prints what it changed. A GIF over the limit, HEIC, AVIF, TIFF and PDF are refused
+with a way to convert them. `st blobs put --media-type TYPE` uploads the bytes exactly. The daemon
+takes only the four types in [Limits](#limits) either way.
 
 Errors: `blob-too-large` (413), `unsupported-media-type` (415), `blob-content-mismatch` (422),
 `blob-quota-exceeded` (429).

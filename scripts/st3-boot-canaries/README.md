@@ -6,9 +6,11 @@ message.
 
     run BINARY EVIDENCE_DIR HARNESS SCENARIO [--bound SECONDS] [--scratch DIR] [--replacement-binary BINARY]
 
-`HARNESS` is `claude`, `codex`, `pi`, `omp` or `opencode`. `SCENARIO` is `fresh`, `restart`,
-`daemon-restart`, `reexec`, `concurrent`, `suspend` or (Codex only) `import`; `run --help` says
-what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
+`HARNESS` is `claude`, `codex`, `pi`, `omp` or `opencode`. `SCENARIO` is one of `fresh`,
+`restart`, `daemon-restart`, `reexec`, `concurrent`, `suspend`, `claim-socket-denied`,
+`access-auto`, `access-bypass`, `idle-hold` (Codex/OpenCode), `utf8` and `import` (Codex),
+or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
+`run --help` says what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
 back on the session it suspended on, holds hour-old mail, and consumes recent never-offered
 mail exactly once. The Rust wrapper
 `crates/st3/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.

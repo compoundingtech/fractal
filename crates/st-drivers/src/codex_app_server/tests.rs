@@ -3338,6 +3338,109 @@ fn declared_resume_policy_preloads_before_the_tui_can_load_read_only() {
 }
 
 #[test]
+fn a_failed_preload_names_the_missing_rollout_not_the_closed_channel() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _stop_exclusive = stop_flag_tests();
+    let socket = tmp.path().join("server.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialize"
+        );
+        write_json_message(
+            &mut websocket,
+            &json!({ "id": 0, "result": { "userAgent": "fake" } }),
+        )
+        .unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialized"
+        );
+        let request = read_json_message(&mut websocket).unwrap().unwrap();
+        assert_eq!(request["method"], "thread/resume");
+        write_json_message(
+            &mut websocket,
+            &json!({
+                "id": CONTROL_SUBSCRIBE_REQUEST_ID,
+                "error": {
+                    "code": -32600,
+                    "message": "no rollout found for thread id thread-prior"
+                }
+            }),
+        )
+        .unwrap();
+    });
+
+    let stream = UnixStream::connect(&socket).unwrap();
+    let shutdown = stream.try_clone().unwrap();
+    let websocket = initialize_control(stream)
+        .unwrap()
+        .expect("no stop raised in tests");
+    let binding_path = tmp.path().join("state/binding.json");
+    let control_state_path = tmp.path().join("state/control-state.json");
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let (events_tx, events_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (preloaded_tx, preloaded_rx) = mpsc::channel();
+    let pump = thread::spawn(move || {
+        pump_control(
+            websocket,
+            &binding_path,
+            &control_state_path,
+            &runtime,
+            Some(ControlResume {
+                thread_id: "thread-prior",
+                ready: ready_rx,
+                tui_loaded_timeout: TUI_LOADED_TIMEOUT,
+                permission_overrides: Some(ResumePermissionOverrides {
+                    approval_policy: Some("never".into()),
+                    approvals_reviewer: None,
+                    sandbox: Some("danger-full-access".into()),
+                    model: None,
+                    effort: None,
+                    permissions: None,
+                }),
+                preload: true,
+                preloaded: Some(preloaded_tx),
+            }),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            events_tx,
+        )
+    });
+    ready_tx.send(()).unwrap();
+    let closed = preloaded_rx
+        .recv_timeout(TEST_EVENT_TIMEOUT)
+        .map_err(anyhow::Error::from)
+        .unwrap_err();
+    server.join().unwrap();
+    let _ = shutdown.shutdown(Shutdown::Both);
+    pump.join().unwrap();
+
+    let reported = format!("{:#}", preload_failure(&events_rx, closed));
+    assert!(
+        reported.contains(
+            "saved Codex resume binding has no persisted rollout for thread thread-prior"
+        ),
+        "{reported}"
+    );
+    assert!(!reported.contains("sending half is closed"), "{reported}");
+    // With nothing recorded by the control thread the closed-channel error is all there is.
+    let (_, empty) = mpsc::channel::<ControlEvent>();
+    let fallback = format!(
+        "{:#}",
+        preload_failure(&empty, anyhow::anyhow!("closed channel"))
+    );
+    assert_eq!(fallback, "closed channel");
+}
+
+#[test]
 fn rejected_declared_resume_settings_fail_without_downgrading_the_policy() {
     let tmp = tempfile::tempdir().unwrap();
     let _stop_exclusive = stop_flag_tests();
@@ -5677,13 +5780,13 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
             "params": {"threadId": "thread-main", "requestId": 9}}),
         "thread-main",
     );
-    assert!(approval.pending.is_some());
+    assert!(!approval.pending.is_empty());
     approval.observe(
         &json!({"method": "serverRequest/resolved",
             "params": {"threadId": "thread-main", "requestId": 10}}),
         "thread-main",
     );
-    assert!(approval.pending.is_none());
+    assert!(approval.pending.is_empty());
 
     // A request whose wait is a new transition binds to it; st reporting it gone forgets it.
     write(active());
@@ -5699,7 +5802,7 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
     );
     assert_ne!(asked, vec![prompt]);
     assert_eq!(asked, vec![sequences()]);
-    assert!(approval.pending.is_none());
+    assert!(approval.pending.is_empty());
 
     // The thread moving on forgets a request too: a status without the flag, a completed turn.
     approval.observe(&request(12, "thread-main"), "thread-main");
@@ -5708,20 +5811,20 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
             "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}}}),
         "thread-main",
     );
-    assert!(approval.pending.is_some());
+    assert!(!approval.pending.is_empty());
     approval.observe(
         &json!({"method": "thread/status/changed", "params": {"threadId": "thread-main",
             "status": {"type": "active", "activeFlags": []}}}),
         "thread-main",
     );
-    assert!(approval.pending.is_none());
+    assert!(approval.pending.is_empty());
     approval.observe(&request(13, "thread-main"), "thread-main");
     approval.observe(
         &json!({"method": "turn/completed", "params": {"threadId": "thread-main",
             "turn": {"id": "turn-1", "status": "completed"}}}),
         "thread-main",
     );
-    assert!(approval.pending.is_none());
+    assert!(approval.pending.is_empty());
 
     // A legacy request names its thread as a conversation and takes its own words.
     write(active());
@@ -5734,6 +5837,111 @@ fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
     assert_eq!(
         approval.answer_if_due(tick(), record, answered("allow")),
         Some(json!({"id": "legacy-1", "result": {"decision": "approved"}}))
+    );
+}
+
+/// Codex can ask twice before either is answered. Each request is its own prompt: the oldest
+/// waits first, the next becomes the prompt once the first is resolved, and its wait is a new
+/// transition, so st's answer to one is never sent to the other.
+#[test]
+fn two_approvals_wait_in_turn_and_each_binds_to_its_own_transition() {
+    use crate::session_control::PromptAnswer;
+    let root = tempfile::tempdir().unwrap();
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let mut state = CodexControlState::new(&runtime, "thread-main".into());
+    let mut writer =
+        harness_state::Writer::new(root.path(), "h.worker", "codex", Some("h.worker".into()));
+    let path = harness_state::harness_state_path(root.path());
+    let record = || harness_state::read(&path, None);
+    let sequences = || {
+        let observed = harness_state::read(&path, None).unwrap();
+        (
+            observed.ownership_sequence.unwrap(),
+            observed.transition_sequence.unwrap(),
+        )
+    };
+    // What `CodexInboxDelivery::observe_control` does: a new request starts a transition.
+    let mut last_request = None;
+    let mut publish = |state: &CodexControlState, writer: &mut harness_state::Writer| {
+        let request = state.approval_request().cloned();
+        if request.is_some() && request != last_request {
+            writer.interrupt();
+        }
+        last_request = request;
+        writer.observe(state.harness_observation().unwrap()).unwrap();
+    };
+    let request = |id: u64, method: &str| {
+        json!({"id": id, "method": method,
+            "params": {"threadId": "thread-main", "turnId": "turn-1"}})
+    };
+    let mut approval = CodexApprovalAnswer::default();
+    let mut at = Instant::now();
+    let mut tick = || {
+        at += APPROVAL_ANSWER_POLL;
+        at
+    };
+    state
+        .observe(&json!({"method": "turn/started",
+            "params": {"threadId": "thread-main", "turn": {"id": "turn-1"}}}))
+        .unwrap();
+    publish(&state, &mut writer);
+
+    for message in [
+        request(1, "item/commandExecution/requestApproval"),
+        request(2, "item/fileChange/requestApproval"),
+    ] {
+        state.observe(&message).unwrap();
+        approval.observe(&message, "thread-main");
+        publish(&state, &mut writer);
+    }
+    // The oldest request is the prompt, and the record names what it asks.
+    assert_eq!(record().unwrap().reason.as_deref(), Some("commandExecution"));
+    let first = sequences();
+    let mut asked = Vec::new();
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Answered {
+                answer: "allow".into(),
+            })
+        }),
+        Some(json!({"id": 1, "result": {"decision": "accept"}}))
+    );
+    assert_eq!(asked, vec![first]);
+
+    // Codex resolves the first; the second is the prompt now, and its own transition.
+    let resolved = json!({"method": "serverRequest/resolved",
+        "params": {"threadId": "thread-main", "requestId": 1}});
+    state.observe(&resolved).unwrap();
+    approval.observe(&resolved, "thread-main");
+    // Before its wait is written, the second request finds only the first's observation: no bind.
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |_, _| unreachable!()),
+        None
+    );
+    publish(&state, &mut writer);
+    assert_eq!(record().unwrap().reason.as_deref(), Some("fileChange"));
+    let second = sequences();
+    assert_ne!(second, first);
+    let mut asked = Vec::new();
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Answered {
+                answer: "deny".into(),
+            })
+        }),
+        Some(json!({"id": 2, "result": {"decision": "decline"}}))
+    );
+    assert_eq!(asked, vec![second]);
+
+    // Once nothing waits, the thread's flag alone is answered in the terminal.
+    let resolved = json!({"method": "serverRequest/resolved",
+        "params": {"threadId": "thread-main", "requestId": 2}});
+    state.observe(&resolved).unwrap();
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("waitingOnApproval")
     );
 }
 
@@ -5783,8 +5991,32 @@ fn approval_request_blocks_until_matching_thread_reports_resolution() {
         crate::harness_state::BlockedOn::Human
     );
     assert_eq!(observation.ask, crate::harness_state::Ask::Permission);
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("commandExecution"),
+        "the wait names the request it saw"
+    );
+    // A reloaded state (an adopted connection) still waits, but never saw the request: only the
+    // terminal can answer it, until the request is seen again.
     state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
     assert!(state.approval_request_pending);
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("waitingOnApproval")
+    );
+    assert!(
+        state
+            .observe(&json!({
+                "id": 1,
+                "method": "item/commandExecution/requestApproval",
+                "params": {"threadId": "thread-main", "turnId": "turn-1"}
+            }))
+            .unwrap()
+    );
+    assert_eq!(
+        state.harness_observation().unwrap().reason.as_deref(),
+        Some("commandExecution")
+    );
     assert!(
         !state
             .observe(&json!({
@@ -5792,7 +6024,8 @@ fn approval_request_blocks_until_matching_thread_reports_resolution() {
                 "method": "item/commandExecution/requestApproval",
                 "params": {"threadId": "thread-main", "turnId": "turn-1"}
             }))
-            .unwrap()
+            .unwrap(),
+        "the same request again changes nothing"
     );
 
     assert!(
@@ -8350,6 +8583,24 @@ fn native_codex_login_recovery_requires_a_successful_current_thread_turn() {
 }
 
 #[test]
+fn an_unticked_setup_box_leaves_codex_its_own_approval_defaults_in_both_modes() {
+    use crate::access::AccessMode;
+    let socket = Some("/run/example/st.sock");
+    let workspace = Path::new("/work/example");
+    let plain: Vec<String> = vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()];
+    for mode in [AccessMode::Auto, AccessMode::Bypass] {
+        let ticked = managed_codex_argv_asking(mode, false, socket, workspace, plain.clone()).unwrap();
+        let asking = managed_codex_argv_asking(mode, true, socket, workspace, plain.clone()).unwrap();
+        assert!(ticked.len() > asking.len(), "{mode:?}: the install default adds permission arguments");
+        assert_eq!(
+            asking,
+            ["codex", "--dangerously-bypass-hook-trust", "--model", "gpt-example", "boot"],
+            "{mode:?}: only hook trust is added; no sandbox bypass, profile or reviewer"
+        );
+    }
+}
+
+#[test]
 fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resume() {
     use crate::access::AccessMode;
     let socket = Some("/run/example/st.sock");
@@ -8372,6 +8623,21 @@ fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resu
     assert_eq!(parsed["permissions"]["st-managed"]["workspace_roots"]["/work/example"].as_bool(), Some(true));
     assert_eq!(parsed["permissions"]["st-managed"]["network"]["unix_sockets"]["/run/example/st.sock"].as_str(), Some("allow"));
     let resumed = prepare_controlled_launch_args("unix:///control.sock", &auto[1..], Some("prior")).unwrap();
+    // Codex 0.160.1 refuses a remote resume whose argv carries any permission config, so the
+    // resumed TUI keeps the non-permission options only; the app server holds the permission ones.
+    let tui_config: Vec<&str> = resumed
+        .tui_args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert!(tui_config.iter().all(|value| !is_permission_config(value)), "{tui_config:?}");
+    assert!(tui_config.contains(&"web_search=\"live\""), "{tui_config:?}");
+    assert_eq!(&resumed.tui_args[..3], ["--remote", "unix:///control.sock", "resume"].map(String::from));
+    assert!(resumed.tui_args.contains(&"prior".to_string()));
+    for key in ["permissions.st-managed=", "default_permissions=", "approvals_reviewer=", "sandbox_workspace_write.network_access="] {
+        assert!(resumed.server_args.iter().any(|arg| arg.starts_with(key)), "the app server keeps {key}");
+    }
     let overrides = resumed.resume_permissions.unwrap();
     assert_eq!(overrides.permissions.as_deref(), Some("st-managed"));
     assert_eq!(overrides.approval_policy.as_deref(), Some("on-request"));
@@ -8399,6 +8665,32 @@ fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resu
     let prompt = vec!["codex".into(), "--".into(), "--dangerously-bypass-approvals-and-sandbox".into()];
     let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, prompt).unwrap();
     assert!(merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+}
+
+#[test]
+fn an_authored_permission_config_leaves_the_resume_argv_and_is_projected_through_thread_resume() {
+    // The remote TUI refuses permission config on a resume, with or without a managed profile, so
+    // an authored `-c` permission entry used to fail a resume too. It now leaves the TUI argv, and
+    // the typed thread/resume carries what it can express; `sandbox_workspace_write.*` and
+    // permission profile tables stay on the app server only.
+    let authored: Vec<String> = [
+        "--model", "gpt-example", "-c", "sandbox_mode=\"read-only\"", "--config=approval_policy=never",
+        "-c", "sandbox_workspace_write.network_access=true", "-c", "web_search=\"live\"", "boot",
+    ]
+    .map(String::from)
+    .to_vec();
+    let resumed = prepare_controlled_launch_args("unix:///control.sock", &authored, Some("prior")).unwrap();
+    let joined = resumed.tui_args.join(" ");
+    for gone in ["sandbox_mode", "approval_policy", "sandbox_workspace_write"] {
+        assert!(!joined.contains(gone), "{gone} must leave the resume argv: {joined}");
+    }
+    assert!(joined.contains("web_search=\"live\"") && joined.contains("--model gpt-example"), "{joined}");
+    let overrides = resumed.resume_permissions.unwrap();
+    assert_eq!(overrides.sandbox.as_deref(), Some("read-only"));
+    assert_eq!(overrides.approval_policy.as_deref(), Some("never"));
+    for kept in ["sandbox_mode=", "approval_policy=never", "sandbox_workspace_write.network_access=true"] {
+        assert!(resumed.server_args.iter().any(|arg| arg.contains(kept)), "the app server keeps {kept}");
+    }
 }
 
 #[test]

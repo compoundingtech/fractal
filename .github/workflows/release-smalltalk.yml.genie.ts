@@ -1,8 +1,11 @@
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig } from './workspace-ci.ts'
+import { linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
-import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
+import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
+import { readFileSync } from 'node:fs'
+
+const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-version', import.meta.url), 'utf8').trim()
 
 // Preserve release triggers, source verification and publishing permissions. Every commit on main
 // also builds and verifies both archives and keeps them as short-lived artifacts, so release
@@ -26,8 +29,15 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "build.rs",
+        "crates/st-drivers/build.rs",
         "crates/st-drivers/src/version.rs",
+        "install.sh",
+        "scripts/download-install-test",
+        "scripts/linux-release-cc",
+        "scripts/check-linux-release.py",
+        "scripts/release-build-stamp.py",
+        "scripts/release-rust-version",
+        "scripts/fixtures/install-release-v0.3.17",
         "scripts/release-smalltalk*",
         "scripts/release_notes*",
         "scripts/ci-build-snapshot*",
@@ -37,6 +47,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         "scripts/install-release*",
         "scripts/install-macos*",
         "docs/st3/binary-releases.md",
+        ".github/workflows/workspace-ci.ts",
+        "scripts/ci-pick-runner",
         "flake.lock"
       ]
     }
@@ -50,6 +62,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
+    "pick-runner": priorityRunnerJob,
     "installer": {
       "name": "installer (${{ matrix.runner }})",
       "strategy": {
@@ -77,7 +90,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ]
     },
     "build": {
-      "if": "${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request' }}",
+      "needs": ["pick-runner"],
+      "if": "${{ !cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request') }}",
       "name": "release-build (${{ matrix.target }})",
       "strategy": {
         "fail-fast": false,
@@ -94,7 +108,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
           ]
         }
       },
-      "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && 'ci1-priority' || matrix.runner }}",
+      "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1 && fromJSON(needs['pick-runner'].outputs.ci1)[0] || 'ci1-priority') || matrix.runner }}",
       "timeout-minutes": 90,
       "env": {
         "MACOSX_DEPLOYMENT_TARGET": "15.0",
@@ -109,7 +123,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
           }
         },
         {
-          "uses": "dtolnay/rust-toolchain@stable"
+          "uses": "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067",
+          "with": { "toolchain": releaseRustVersion }
         },
         { name: 'Name the pinned compiler cache', run: `printf 'CI_ZIG_CACHE_DIR=%s/zig/0.15.2\\n' \"$RUNNER_TOOL_CACHE\" >> \"$GITHUB_ENV\"` },
         buildSnapshotRestore,
@@ -138,6 +153,15 @@ export default githubWorkflow(readyPRJobs(auditCaches({
           }
         },
         buildSnapshotPrepare,
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }).map(step => ({ ...step, if: "runner.os == 'Linux'" })),
+        {
+          name: 'Provide the pinned Linux host C compiler',
+          if: "runner.os == 'Linux'",
+          run: `set -euo pipefail
+compiler=$(nix build .#release-cc^out --no-link --print-out-paths)
+"$compiler/bin/cc" --version
+printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
+        },
         {
           "name": "Test installer",
           "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-smalltalk-test\npython3 scripts/release_notes_test.py\n"
@@ -233,4 +257,4 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ]
     }
   }
-}, {"installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))
+}, {"pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))

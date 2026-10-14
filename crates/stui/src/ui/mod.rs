@@ -17,6 +17,7 @@ pub mod conversation;
 pub mod demo;
 mod direct;
 pub mod doc;
+pub mod checklist;
 mod edit;
 mod glass;
 mod hover;
@@ -1123,6 +1124,14 @@ impl Ui {
             None => self.tab == 4,
         };
         shown.then_some(self.usage_hours)
+    }
+
+    pub(crate) fn inventories_wanted(&self) -> crate::feed::Inventories {
+        self.glasses.as_ref().map_or_else(|| crate::feed::Inventories {
+            clients: self.clients_wanted(), usage_hours: self.usage_wanted(),
+            machines: self.tab == 3, devices: self.tab == 3,
+            sessions: self.tab == 1 || self.tab == 3, terminals: false,
+        }, |glasses| glasses.inventories_wanted(self.tab, self.usage_hours))
     }
 
     /// Details beside the conversation, or in its place when the pane is too narrow for both;

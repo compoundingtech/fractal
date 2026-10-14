@@ -1,5 +1,16 @@
 # Checkpoints and trimming
 
+`st replication checkpoint status` shows each participant's `machine_version` advertised at
+its last daemon start, including its source revision and dirty marker. This is startup metadata,
+which may differ from the build that produced a checkpoint seal. A daemon republishes its version
+on every start; status selects its latest own-origin `daemon.started` claim in canonical order.
+Older or unstamped members advertise only the package version and show `not advertised` for the
+revision. JSON status includes a `machine_version` map of participants with advertised revisions,
+omitted when none are available. Pending checkpoint `builds` still names each member's seal build.
+Agreement inputs and proof identities are unchanged. Startup revisions replicate to every fleet
+member and contain no secret. Native Cargo, archive release and Nix stamp generators reject identities longer than
+128 bytes before producing a release binary. Startup also checks that bound as a defensive guard.
+
 A fleet's replicated claim log only grows, because every node holds every claim. Most of what it
 holds is old observation: a seat's state a minute ago, a diagnostic that has since repeated, a usage
 reading that a later reading includes. A checkpoint is how every node of a fleet agrees to delete
@@ -59,6 +70,14 @@ nothing, writes a `checkpoint-proof-failed` diagnostic and the checkpoint waits,
 reaches a live store. If they match, the node publishes one `checkpoint.verified` claim with the
 digests of the drops, the kept claims, the graph and the readers' answers. A node verifies a
 checkpoint once.
+
+The sealed set, the plan and the proof's answers live on disk, not in memory. The node captures the
+sealed set a page at a time into a staging file in its checkpoint scratch directory, committing its
+cursor with each page, and plans from that file one slot or seat at a time. The file is named for
+the cut and seal row and carries the capture epoch, the rules digest and the executable's identity,
+so the pass after a restart resumes it and anything else captures again. One pass holds the
+directory under a lock. The trim reads its tombstones from the same file in pages, then deletes it.
+A pass holds a fixed working set plus the claims of one slot, whatever the size of the history.
 
 Failed proof identities are recorded in the checkpoint's local detail. An identical input is
 not copied or replayed again, including after a restart or after switching away from and back
@@ -425,18 +444,36 @@ commit took a median of 28 ms and a 99th percentile of 311 ms. The test
 `a_trim_that_stops_anywhere_finishes_the_same_after_a_restart` now also stops part way through
 recording.
 
+## The 2026-10-13 lesson: the sealed set in memory
+
+The capture read the whole sealed set into memory: every envelope, claim body and earlier
+tombstone, and then the plan's tombstone lists beside it. Three members reached 6 to 7 GB after a
+daily cut, and since the scheduler deleted its scratch directory on start, a restart captured
+everything again and the memory came back. Measured with a counting allocator, that capture raised
+live heap by about 2.7 KB a claim. The capture is now staged on disk as **Verify** describes, and
+the scheduler deletes only stale proof copies on start. The test `checkpoint_memory` runs a full
+pass (capture, plan, proof and trim) at two sizes of history four times apart and requires each
+stage to stay within 8 MiB and to grow by less than half when the history quadruples. The old
+capture held 14 MiB and 54 MiB there; the staged pass holds under 1 MiB at both.
+
 ## Where the proof lives
 
 | What | Where |
 |---|---|
 | Due time, names, the dry-run plan | `crates/smallclaims/src/store/checkpoint.rs` |
+| The staging file: capture, cursor, plan marks, tombstone pages | `crates/smallclaims/src/store/checkpoint_staging.rs` |
 | Participants, seals, verifications, stability, excusal, attention timing | `crates/smallclaims/src/store/checkpoint_agreement.rs` |
 | Tombstones, trim, manifest adoption | `crates/smallclaims/src/store/checkpoint_trim.rs` |
 | The rules, each kind's class and window | `crates/st3-schema/retention.toml` |
 | The guards, the planner, the reader digest | `crates/st3/src/store/checkpoint_rules.rs` |
+| The planner over a staging file | `crates/st3/src/store/checkpoint_rules/staged.rs` |
+| A pass's memory budget | `crates/st3/tests/checkpoint_memory.rs` |
 | Rule examples as tests | `crates/st3/src/store/checkpoint_tests.rs` |
 | Trim, tombstone and replication tests | `crates/st3/src/store/tombstones_tests.rs` |
 | Agreement and convergence tests | `crates/st3/src/store/checkpoint_agreement_tests.rs` |
+
+What a checkpoint pass may hold in memory, and how the capture resumes after a restart, is in
+[Checkpoint capture in bounded memory](checkpoint-capture.md).
 
 A new rule changes the rules digest, so it takes effect only once every participant runs it. Before
 adding one, list every reader of the kind, give each kept claim a reason in terms of a reader's
