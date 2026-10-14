@@ -112,15 +112,15 @@ fn short(id: &str) -> String {
         .to_owned()
 }
 
-fn missions(model: &Model) -> Vec<Mission> {
+fn missions(model: &Model, person: &str) -> Vec<Mission> {
     st3_ui_model::missions::adapt(
         model.missions(),
         model.agents(),
         model.attention(),
+        person,
         &now(),
         &st3_ui_model::missions::Display {
             mission_label: &crate::mission_display_label,
-            agent_label: &crate::agent_label,
             age_label: &crate::age_label,
             clean_text: &clean_message_text,
         },
@@ -142,7 +142,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         .map(|host| host.trim_start_matches("host/").to_owned())
         .unwrap_or_else(|| "this machine".into());
     let attention = attention(model, extras);
-    let missions = missions(model);
+    let missions = missions(model, person);
     let quiet = missions
         .iter()
         .filter(|mission| {

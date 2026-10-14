@@ -129,6 +129,12 @@
       "glyph": "○",
       "id": "not_started",
       "name": "not started"
+    },
+    {
+      "explain": "this st does not say; an older st",
+      "glyph": "?",
+      "id": "unknown",
+      "name": "unknown"
     }
   ],
   "tabs": [
