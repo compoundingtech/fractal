@@ -260,6 +260,7 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
   const wheel = React.useRef(0)
   // Focus handoff guards: a pointer press keeps drag-selection on the grid; Ctrl-\ parks focus there.
   const pointerDown = React.useRef(false)
+  const pointerRelease = React.useRef<AbortController | undefined>(undefined)
   const leaving = React.useRef(false)
   const [composing, setComposing] = React.useState(false)
   const [notice, setNotice] = React.useState<string | undefined>(undefined)
@@ -345,6 +346,7 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
       return () => {
         observer.disconnect()
         debouncer.dispose()
+        pointerRelease.current?.abort()
         surface.current = null
       }
     },
@@ -359,22 +361,31 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
       onFocus={(event) => {
         // Keyboard-first typing: a grid focused while live hands focus to the cursor field at once,
         // so an IME's first keydown already composes in an editable element.
-        if (leaving.current) {
-          leaving.current = false
-          return
-        }
+        if (leaving.current) return
         if (!live || pointerDown.current) return
         if (event.target.getAttribute('aria-roledescription') === 'terminal') field.current?.focus({ preventScroll: true })
       }}
       onMouseDown={() => {
+        // A press may end anywhere, so the release is watched on the window, not on the surface.
+        pointerRelease.current?.abort()
+        const release = new AbortController()
+        pointerRelease.current = release
         pointerDown.current = true
+        const clear = () => {
+          pointerDown.current = false
+          release.abort()
+        }
+        window.addEventListener('mouseup', clear, { capture: true, signal: release.signal })
+        window.addEventListener('pointercancel', clear, { capture: true, signal: release.signal })
       }}
       onKeyDown={(event) => {
         const route = keyRoute(event)
         if (route === 'leave') {
           event.preventDefault()
+          // Focus events fire synchronously inside focus(), so the guard covers exactly this handoff.
           leaving.current = true
           surface.current?.querySelector<HTMLElement>('[aria-roledescription="terminal"]')?.focus()
+          leaving.current = false
           return
         }
         if (route !== 'encode') return
@@ -393,7 +404,7 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
         admit(admitPaste({ encoder, text: event.clipboardData.getData('text/plain'), modes: terminal.modes() }))
       }}
       onMouseUp={() => {
-        pointerDown.current = false
+        // The window listener has already cleared the press.
         // A drag leaves a selection to copy; a plain click starts typing at the cursor.
         if (!selectionInside(surface.current)) field.current?.focus({ preventScroll: true })
       }}

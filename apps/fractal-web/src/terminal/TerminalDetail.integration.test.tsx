@@ -252,6 +252,46 @@ describe('raw terminal', () => {
     expect(chip()?.textContent).toBe('Click to type')
   })
 
+  it.each([
+    [
+      'a repeated Ctrl-\\ while already parked on the grid',
+      async (grid: HTMLElement) => {
+        grid.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: '\\', code: 'Backslash', ctrlKey: true }))
+        grid.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: '\\', code: 'Backslash', ctrlKey: true }))
+      },
+    ],
+    [
+      'a press on the grid released outside the terminal',
+      async (grid: HTMLElement) => {
+        grid.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+        document.body.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+      },
+    ],
+  ] as const)('still hands keyboard re-entry to the cursor field after %s', async (_case, disturb) => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    const session = opened[0]!
+    await live(session, 'raw prompt$ ')
+    const grid = host.querySelector<HTMLElement>('[aria-roledescription="terminal"]')!
+    await act(async () => grid.focus())
+    await act(async () => {
+      field()!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: '\\', code: 'Backslash', ctrlKey: true }))
+    })
+    expect(document.activeElement).toBe(grid)
+    await act(async () => disturb(grid))
+    const outside = document.body.appendChild(document.createElement('button'))
+    await act(async () => outside.focus())
+    await act(async () => grid.focus())
+    outside.remove()
+    expect(document.activeElement).toBe(field())
+    await act(async () => {
+      field()!.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '' }))
+      field()!.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '日本' }))
+    })
+    expect(session.sent).toEqual(['日本'])
+  })
+
   it('drops keys while reconnecting instead of queueing them, and says so', async () => {
     const { opened, port } = rawSessions()
     await mount({ terminal: observed({ value: screen }), terminalRaw: port })
