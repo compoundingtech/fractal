@@ -182,8 +182,8 @@ F3 results gate implementation landing, not the Nathan proposal question.
 ## Disposable table-name swap spike
 
 F1 remains unproved. The exact separable source and recipe are retained in
-`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/table-name-swap-v2-source-recipe@bc510726210d0ae650d7bc76581478256e05ccbe5ea1187b9a5c1fd2fbe7acb6`.
-Source SHA256: `894cca00a96b848e9c0a1b69b33a45f1163bfba73d829c38c587acb60b64678e`.
+`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/table-name-swap-v2-growth-source-recipe@4b848ba40d2250083558114bf3694533e4b8274e29d58bd59d168ff24d21fb9e`.
+Source SHA256: `9c6536f94a56aee34444cc3344a382ea1adc013950ad13bc4917dae30e107574`.
 Only Python `ast.parse` was used; the module was not imported or invoked.
 
 The proposed future unit runs serially on a newly created disposable directory and accepts no
@@ -206,7 +206,10 @@ Global-index-name collision, `INDEXED BY`, view/FK/trigger rewrites, populated i
 populated retirement remain separate observations. Index repair is timed while the old reader
 is open, including its lock/error and commit behavior. No aggregate swap number hides it.
 WAL/FULL durability is retained; SQLite version, PRAGMAs (including legacy ALTER behavior),
-schema text, estimated VM progress and file sizes accompany each phase. Completed cases emit
+schema text and estimated VM progress accompany each phase. Main DB, WAL and SHM logical/
+allocated sizes are sampled before and after setup, swap, index repair and retirement, with
+separate deltas. Cleanup samples before close, after physical close and after owned removal
+and records its own duration; these observations remain unrun and are not hard quota proof. Completed cases emit
 raw records incrementally; a genuine error emits its failing phase and stops without retry.
 
 The source's 256 MiB phase-boundary file-size check is **sampled**, not a hard aggregate disk
@@ -218,7 +221,7 @@ unadmitted ceilings. Queue/setup/child/rollback/physical close and delegated cle
 no extra grace, higher cap or automatic retry follows a failure.
 
 The concrete ordinary hosted runner recipe is retained at
-`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/hosted-f1-v2-runner-recipe@05ce0b06cb3cd7e25f2736ce74c0280531ff2c58b80b57f4f1bff71ba99568bb`.
+`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/hosted-f1-v2-growth-runner-recipe@2fcef748dfb68a30046337182694ac07a1b39541d3b056e2c3d6eef58f78cceb`.
 It proposes one serial supporting Linux job under the existing ordinary PR queue policy, with
 this seat as caller and the exact script hash above. Actual execution owner, slot/unit/lease,
 Python/SQLite binary pins, hard quota provider and absolute deadline are unset review inputs
