@@ -273,12 +273,13 @@ UI
     ui=(tmux -L "audit-$name" -f /dev/null new-session -x 120 -y 40 "$audit/tools/ui")
   fi
   # SCENE picks what to open: the Claude transcript (default), the gardener's mail, or Now with
-  # the asks' cards. Ctrl+K finds it (worded so the agent ranks above the spaces earlier looks
-  # saved) and Enter opens it; a terminal that draws loads the first image by itself; Ctrl+Up
-  # focuses the image row above and Ctrl+U loads it by hand.
+  # the asks' cards. Ctrl+K finds it and Enter opens it; a terminal that draws loads the first
+  # image by itself; Ctrl+Up focuses the image row above and Ctrl+U loads it by hand. Spaces an
+  # earlier look saved would rank above the agent, so each look starts without them.
+  rm -f "$home/.st-instance/$instance/state/st3/stui/"glasses-*.json
   local open
   case "${SCENE:-claude}" in
-    claude) open=(--key '4:^K' --key '5:workspace claude' --key '7:\r') ;;
+    claude) open=(--key '4:^K' --key '5:claude' --key '7:\r') ;;
     gardener) open=(--key '4:^K' --key '5:gardener' --key '7:\r') ;;
     now) open=(--key '4:^H') ;;
     *) echo "SCENE is claude, gardener or now"; exit 2 ;;

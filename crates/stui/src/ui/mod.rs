@@ -3161,14 +3161,18 @@ impl Ui {
             {
                 let start = target.line.max(top);
                 let end = (target.line + content::IMAGE_ROWS).min(top + height);
+                // Two columns in from the line's own start: a card's frame stays visible.
+                let width = target
+                    .width
+                    .min(area.width.saturating_sub(3 + target.column));
                 self.content.draw_image(
                     key,
-                    area.width.saturating_sub(3),
+                    width,
                     (start - target.line) as u16,
                     Rect {
-                        x: area.x + 2,
+                        x: area.x + 2 + target.column,
                         y: area.y + (start - top) as u16,
-                        width: area.width.saturating_sub(3),
+                        width,
                         height: (end - start) as u16,
                     },
                     buf,

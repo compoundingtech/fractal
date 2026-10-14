@@ -625,20 +625,54 @@ impl Content {
     /// A card's image lines (`Hit::Pane(PaneIntent::Image)` for an ask's image) say what st
     /// knows of the image and how to show it, and reserve rows for it once it is shown.
     pub fn expand_requests(&self, doc: &mut Doc, width: usize) {
-        let mut lines: Vec<(usize, Key)> = doc
+        let mut lines: Vec<(usize, u16, Key)> = doc
             .targets
             .iter()
             .filter_map(|target| match &target.hit {
                 Hit::Pane(st3_conversation_ui::PaneIntent::Image(image)) => {
                     let key = image_key(image);
-                    self.requests.contains_key(&key).then_some((target.line, key))
+                    self.requests
+                        .contains_key(&key)
+                        .then_some((target.line, target.column, key))
                 }
                 _ => None,
             })
             .collect();
         lines.sort();
-        lines.dedup();
-        for (line, key) in lines.into_iter().rev() {
+        lines.dedup_by(|a, b| a.0 == b.0);
+        for (line, inset, key) in lines.into_iter().rev() {
+            // A card frames its lines: keep the frame on both sides of the line and its rows.
+            let frame = (inset > 0)
+                .then(|| doc.lines.get(line))
+                .flatten()
+                .filter(|row| row.spans.len() >= 2)
+                .map(|row| {
+                    let first = row.spans[0].clone();
+                    let last = row.spans[row.spans.len() - 1].clone();
+                    let inner = row.width().saturating_sub(first.width() + last.width());
+                    (first, last, inner)
+                });
+            let inner = frame.as_ref().map_or(width, |(_, _, inner)| *inner);
+            let framed = |mut spans: Vec<Span<'static>>| match &frame {
+                Some((first, last, inner)) => {
+                    // What does not fit ends in an ellipsis inside the frame.
+                    let mut used: usize = spans.iter().map(Span::width).sum();
+                    if used > *inner
+                        && let Some(tail) = spans.last_mut()
+                    {
+                        let keep = tail.width().saturating_sub(used - inner);
+                        tail.content = text::truncate(&tail.content, keep).into();
+                        used = spans.iter().map(Span::width).sum();
+                    }
+                    let mut all = vec![first.clone()];
+                    all.extend(spans);
+                    all.push(Span::raw(" ".repeat(inner.saturating_sub(used))));
+                    all.push(last.clone());
+                    Line::from(all)
+                }
+                None => Line::from(spans),
+            };
+            let inset = if frame.is_some() { inset } else { 0 };
             let image = &self.requests[&key];
             let (media, size, pixels) = match self.facts.get(&key) {
                 Some(facts) => (
@@ -656,7 +690,7 @@ impl Content {
             );
             let open = unicode_width::UnicodeWidthStr::width(head.as_str()) as u16;
             if let Some(row) = doc.lines.get_mut(line) {
-                *row = Line::from(vec![
+                *row = framed(vec![
                     Span::styled(head, theme::fg(theme::TEXT)),
                     Span::styled("open", theme::fg(theme::LAVENDER)),
                     Span::styled(format!(" · {action}"), theme::dim()),
@@ -665,20 +699,20 @@ impl Content {
             doc.targets.retain(|target| target.line != line);
             doc.targets.push(Target {
                 line,
-                column: 0,
+                column: inset,
                 width: open,
                 hit: Hit::ContentImage(key.clone()),
             });
             doc.targets.push(Target {
                 line,
-                column: open,
+                column: inset + open,
                 width: 4,
                 hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(image.clone())),
             });
             doc.targets.push(Target {
                 line,
-                column: open + 4,
-                width: (width as u16).saturating_sub(open + 4),
+                column: inset + open + 4,
+                width: (inner as u16).saturating_sub(open + 4),
                 hit: Hit::ContentImage(key.clone()),
             });
             if self.shown.contains(&key) && matches!(self.loaded.get(&key), Some(Loaded::Image { .. })) {
@@ -694,11 +728,12 @@ impl Content {
                     }
                 }
                 doc.lines
-                    .splice(at..at, std::iter::repeat_n(Line::default(), IMAGE_ROWS));
+                    .splice(at..at, std::iter::repeat_n(framed(Vec::new()), IMAGE_ROWS));
+                // The image sits inside the frame, two columns in like any other.
                 doc.targets.push(Target {
                     line: at,
-                    column: 0,
-                    width: width as u16,
+                    column: inset,
+                    width: if frame.is_some() { (inner as u16).saturating_sub(2) } else { width as u16 },
                     hit: Hit::InlineImage(key.clone()),
                 });
             }
@@ -2344,5 +2379,38 @@ mod tests {
         // An image no open ask carries leaves memory.
         content.index_requests(Vec::new());
         assert!(content.loaded.is_empty());
+    }
+
+    #[test]
+    fn an_asks_image_on_a_card_keeps_the_cards_frame() {
+        use super::super::doc::DocExt as _;
+        let image = st3_conversation_ui::MailImage {
+            sha256: "ef".repeat(32),
+            message: "step-run/ask-2/ask".into(),
+            media_type: "image/png".into(),
+            name: Some("pond.png".into()),
+            size: 2048,
+        };
+        let mut content = Content::default();
+        content.index_requests(vec![image.clone()]);
+        let key = image_key(&image);
+        assert!(content.toggle_image(&key));
+        content.complete(key.clone(), Ok((String::new(), drawn_png(64, 40))));
+        let mut inner = Doc::new();
+        inner.line(Line::from("Dig the pond here?"));
+        inner.targets.push(Target { line: 1, column: 0, width: 40, hit: Hit::Pane(st3_conversation_ui::PaneIntent::Image(image.clone())) });
+        inner.line(Line::from("   ▣ pond.png  open"));
+        let mut doc = Doc::new();
+        doc.card("request", theme::MAUVE, true, inner, 60);
+        content.expand_requests(&mut doc, 60);
+        let text = whole(&doc);
+        assert!(doc.lines.iter().all(|line| line.width() == 60), "{text}");
+        let row = text.lines().find(|line| line.contains("pond.png")).unwrap();
+        assert!(row.starts_with("┃    ▣ pond.png · image/png · 1 KB, 64×40  open · hide") && row.ends_with("… ┃"), "{row}");
+        let open = doc.targets.iter().find(|target| matches!(target.hit, Hit::Pane(_))).unwrap();
+        assert_eq!(&row.chars().skip(open.column as usize).take(4).collect::<String>(), "open");
+        let rows = doc.targets.iter().find(|target| matches!(target.hit, Hit::InlineImage(_))).unwrap();
+        assert_eq!((rows.line, rows.column, rows.width), (3, 2, 54), "the image sits inside the frame");
+        assert!(text.lines().skip(3).take(IMAGE_ROWS).all(|line| line.starts_with("┃ ") && line.ends_with(" ┃")), "{text}");
     }
 }
