@@ -256,3 +256,141 @@ Only after those reviews should a finite implementation mission specify source o
 native controls, exact-head CI, operator installation and the separate end-to-end replication
 proof. Landing this note does not close #832's implementation demand or establish the iOS
 replication proof.
+
+## Design and security review amendments
+
+Factory reviewed `d4d37c2b` and accepted the direction with six changes. Intake independently
+accepted docs-only landing with seven security requirements before implementation. The
+following requirements refine the proposal above; they grant no implementation or execution.
+
+### Adversary, caller and registry
+
+The first slice protects against an honest agent making a wrong request, including requests
+induced by untrusted fixture content, and against code inside the disposable guest. It does
+not claim to confine a hostile host process sharing the production user's UID. That process
+already has the user's filesystem authority; protecting against it requires a separately
+enforced host security identity. Environment ancestry and application actor checks are
+cooperative host attribution, not that security boundary.
+
+The proposed Linux caller verifier is a root-installed per-seat request proxy. The launcher
+checks `SO_PEERCRED` against its exact enrolled UID, PID, process birth, root-controlled
+systemd unit/cgroup and pinned executable on every mutation. The registry maps that proxy to
+one agent; a request cannot select another agent's identity. Direct CLI processes, proxy
+children and reparented descendants have different PIDs/births and refuse, even when their
+environment is cleared or their cgroup is unchanged. A proxy restart needs trusted
+re-enrollment; PID reuse must refuse.
+
+The proxy itself needs a protected, authenticated per-seat channel from the enrolled harness
+driver. This channel is a new reviewed prerequisite, not a public same-UID socket, ancestry
+walk or caller-supplied session name. An unqualified driver or missing enrollment returns
+unavailable. Mac hosts need an independently reviewed authenticated adapter. The driver,
+proxy and registry source must be qualified together; this note does not assert their APIs
+already exist.
+
+Proposed Linux registry storage is `/var/lib/st-scratch-controller/registry`, mode 0700,
+owned by the separate launcher service account. Only the narrow launcher writer may mutate
+it. Operators and the launcher can read full creator bindings; each agent sees only its own
+public descriptor. Retirement uses a separately protected monotonic witness outside guest
+snapshots and registry backups. Registry opening compares its retirement sequence/hash with
+that witness. Restoring an older registry, losing the witness or uncertain controller rollback
+refuses creation/reopen until operator recovery reconciles retirement. An append-only file
+restored with the same backup would not suffice; Operations must qualify the witness backend.
+Cross-host launcher trust roots are operator-installed out of band, never supplied in an
+invitation. If one launcher is unavailable, new cross-host admission is unavailable.
+
+### Isolation is the primary production boundary
+
+Today's production binaries do not implement a scratch-domain check. Protocol separation
+is future defence in depth and cannot be assumed on old or mixed-build peers. Enforced OS
+isolation, no production state/credentials/transport homes, and deny-by-default egress are
+the primary controls. The first acceptance tests must prove the allowlisted scratch peer is
+reachable while every production address is unreachable, and inspect the guest image,
+mounts and environment for inherited production credentials before any protocol test.
+
+Tailscale provisioning requires ephemeral, tag-scoped, pre-authorized single-use keys issued
+by an operator, preferably in a separate test tailnet. The issuing/admin credential never
+reaches the agent or guest. ACL tests must deny all production tags. Fabric uses disposable
+scope-only identities with exact peer grants and verified expiry, never a production home.
+These are reviewed future configurations, not currently installed grants.
+
+### Slice 0 and staged delivery
+
+Slice 0 is an interim operator-prepared disposable pair, built and torn down by one reviewed
+fixed script/image. The agent can trigger exactly one fixed fixture operation with no
+arguments choosing images, paths, commands, endpoints or credentials. Operations owns
+creation and teardown, including failure and caller exit. The pair inherits no production
+state, sockets, workspace, HOME, SSH agent or secrets store. Host-enforced egress permits
+only the two exact peers and the reviewed transport under test. Lifetime is at most one hour,
+enforced outside the guest; pausing or restoring a guest snapshot cannot extend it. Results
+are labelled `interim-scratch-proof`, never accepted as production landing evidence. A
+disconnected participant remains cleanup pending. Preparing guests is not permission to
+impersonate a person from an agent; the exact bootstrap/fixture actor path needs review.
+
+Operations' held-only assessment on 2026-10-14 says packaging is feasible this week:
+approximately two working days after receiving the fixed fixture command and st build pin
+to prepare a script/image for Intake, then a first run the day after script acceptance. This
+is conditional, not a scheduled or authorized run. The proposed backend is two non-root
+containers on one private internal Docker network, no published ports or host mounts,
+read-only rootfs, tmpfs state, capabilities dropped, no-new-privileges and explicit resource
+limits. Proposed enforcement combines a 30-minute runner limit with an operator-owned
+one-hour external cleanup deadline. Docker group access is scheduled for removal by the
+separate #310 installation, so the narrow script invocation/installer authorization remains
+unresolved. No group retention or sudoers change is approved by this note.
+
+That local-container pair has no cross-host member or Tailscale, and currently specifies no
+qualified Fabric adapter. It can establish a bounded local replication fixture only; it
+does not yet unblock Johannes's Fabric/cross-host or iOS proof. Operations' feasibility
+answer is packaging feasibility, not proof that a runnable bootstrap/certified-cut fixture
+already exists. Smalltalk must supply that exact pinned fixture contract before the estimate
+starts. Any container backend and fixed trigger still require Intake's independent review.
+
+| Slice | Deliverable and exit evidence | Owners | Rough sizing guess, not commitment |
+| --- | --- | --- | --- |
+| 0 | Reviewed operator pair/run/teardown; 50 documents, certified-cut field comparison, truthful cleanup | Operations backend/script; smalltalk fixed fixture; Intake security | About two working days after fixture/build inputs, per Operations; authorization unresolved |
+| 1 | Both members inside one VM; create/seed/inspect/remove and caller/expiry/cleanup controls | Smalltalk launcher/verifier; Operations backend/enrollment | 3–5 working days after prerequisite qualification |
+| 2 | Scratch protocol domain and complete ingress/import refusal controls | Smalltalk protocol/source owners; Intake | 3–5 working days after protocol design review |
+| 3 | Cross-host attested pair and disconnected cleanup | Smalltalk launcher/protocol; Operations host backends | 2–4 working days after both hosts are qualified |
+| 4 | Fabric and Tailscale comparison, ephemeral identities and tested ACLs | Operations transport provisioning; smalltalk fixture | 1–3 working days after disposable credentials exist |
+
+Slice 1 alone does not unblock the Fabric replication proof. Only a separately qualified
+transport extension of Slice 0 or Slices 3–4 can do that. Until Slice 2, Slice 0/1 images and
+routes are confined entirely by isolation and egress controls, never admitted to production.
+These guesses reserve no worker, host, storage version or implementation schedule.
+
+| Prerequisite | Accountable owner | Still to qualify |
+| --- | --- | --- |
+| Backend and interim Slice 0 script | Operations | Image/script/trigger, credential/egress boundary and teardown |
+| Fixed fixture, caller proxy and launcher service | Smalltalk | Bootstrap actor, reviewed check set, authenticated channel and caller controls |
+| Root enrollment and registry retirement witness | Operations with smalltalk registry source owner | Writer/reader permissions, monotonic witness and rollback recovery |
+| Protocol and import-path audit | Smalltalk | Exact encoding/version and every ingress refusal |
+| Disposable transport credentials and ACLs | Operations | Single-use/expiry, production-tag refusal and no inherited issuing key |
+
+### One operation and one receipt
+
+Prefer `scratch run FIXTURE`, where a reviewed fixture name selects immutable checks and
+image pins. It creates the permitted pair, seeds bounded data, runs that fixed check set,
+retires the lifetime and returns one machine-readable receipt. Input is bounded data, never
+an agent-supplied command or script; debugging operations have the same restriction. The
+receipt includes scope/lifetime, policy/check/image/member pins, certified cuts, field-level
+document comparison and each participant's cleanup status. Failed checks and incomplete
+cleanup remain explicit. Member private keys, invitation tokens and access secrets never
+appear in receipts/logs. Private client access uses the authenticated per-seat channel and
+expires with its exact scope/lifetime. Scratch claim references are launcher-issued typed
+IDs; production admission must reject them rather than replay them as production authority.
+
+The replication proof compares both members at the same certified cut field by field,
+including source identity and projected state, rather than comparing counts or transfer
+hashes alone. If the fixture cannot certify that cut, its result is incomplete and states the
+missing accessor. No legacy snapshot helper is assumed to supply a bounded certificate.
+
+When delegated grants are qualified, the exact creation request becomes a grant-authorized
+operation; fresh state, attestation, domain separation and cleanup remain required.
+
+### Additional acceptance controls
+
+Before implementation acceptance, prove caller refusal for cleared-environment/reparented
+descendants, unenrolled callers and another enrolled agent's identity; restored older registry
+cannot revive a retired lifetime; guest pause/snapshot cannot extend expiry; one-shot/debug
+commands reject caller-supplied scripts; and transport keys are single-use and expire while
+ACLs refuse production tags. These supplement the existing actor, path, import and cleanup
+controls. None has run for this docs-only note.
