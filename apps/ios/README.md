@@ -14,7 +14,7 @@ Observation reporting holds one send slot during both batch preparation and tran
 
 ## Layout
 
-The chrome is native and keeps the system look and fonts. The content is React and is drawn like stui: IBM Plex Mono, stui's Catppuccin Mocha palette (`theme.ts`, from `crates/stui/src/ui/theme.rs`), dense rows, dim section rules with counts, and state glyphs.
+The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Other tabs retain the stui-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
 
 | Piece | Native component | Package |
 | --- | --- | --- |
