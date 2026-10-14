@@ -260,3 +260,9 @@ The previously accepted metadata diagnostic remains separately proposed: output 
 and key interval on both nodes and refuses a differing/unprepared cut or interval. It reports
 whether the first differing field is a timestamp. No live capture or diagnostic implementation
 is introduced by this audit.
+
+## Hosted binding source candidate
+
+See [the unrun controller/job binding](receive-replay-hosted-binding.md). It pins the
+reviewed growth successor and keeps the queue-terminal/provider cleanup boundary
+explicitly unqualified. Ready and invocation require Root exact-source review.
