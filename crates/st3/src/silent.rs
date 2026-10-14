@@ -79,6 +79,38 @@ pub fn stored_tags(from: &str, requested: &[String]) -> Vec<String> {
     tags
 }
 
+/// Notes are a live view, not a snapshot of the notes present when mail was queued.
+/// Keep one digest per recipient so multiple revisions cannot repeat the same live block.
+pub fn refresh_notes(store: &crate::store::Store, messages: &mut Vec<MessageView>) -> anyhow::Result<()> {
+    let mut newest = std::collections::BTreeMap::<String, (u64, String)>::new();
+    for message in messages.iter().filter(|message| is_notes_digest(message)) {
+        let candidate = (message.created_index, message.subject.clone());
+        newest.entry(message.to.clone()).and_modify(|current| {
+            if candidate > *current { *current = candidate.clone(); }
+        }).or_insert(candidate);
+    }
+    let mut rendered = std::collections::BTreeMap::new();
+    for recipient in newest.keys() {
+        rendered.insert(recipient.clone(), crate::notes_digest::render(
+            &crate::notes_digest::current_notes(store, recipient)?)?);
+    }
+    messages.retain_mut(|message| {
+        if !is_notes_digest(message) { return true; }
+        let Some(Some(content)) = rendered.get(&message.to) else { return false; };
+        if newest.get(&message.to).is_none_or(|(_, subject)| subject != &message.subject) {
+            return false;
+        }
+        message.content.clone_from(content);
+        true
+    });
+    Ok(())
+}
+
+fn is_notes_digest(message: &MessageView) -> bool {
+    message.from == "daemon/runtime"
+        && message.tags.iter().any(|tag| tag == crate::notes_digest::TAG)
+}
+
 /// The mail a seat's delivery offers now. A held message that has not been offered stays back
 /// until a message that wakes the seat is offered, then goes with it; one already offered stays.
 pub fn release(messages: &mut Vec<MessageView>) {
@@ -178,6 +210,19 @@ mod tests {
 
     fn tags(values: &[&str]) -> Vec<String> {
         values.iter().map(|tag| (*tag).to_owned()).collect()
+    }
+
+    #[test]
+    fn notes_digest_with_no_current_notes_is_dropped() {
+        let store = crate::store::Store::open_memory("example").unwrap();
+        let digest = message("message/example-notes", "daemon/runtime", "sent",
+            &[SILENT_TAG, crate::notes_digest::TAG]);
+        let wake = message("message/example-wake", "agent/example/writer", "sent", &[]);
+        let mut batch = vec![digest, wake];
+        refresh_notes(&store, &mut batch).unwrap();
+        release(&mut batch);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].subject, "message/example-wake");
     }
 
     #[test]

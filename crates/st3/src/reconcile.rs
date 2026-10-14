@@ -3413,6 +3413,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]),
             )?;
         }
+        // Note context follows live assignment/lease/runtime state, independently of work wakes.
+        // This stage also revisits timed currency changes when the expiry deadline fires.
+        for subject in desired.iter().filter(|subject| subject.subject.starts_with("agent/")
+            && subject.member.as_ref().is_some_and(|member| member.host == self.host)) {
+            let (emitted, expiry) = crate::notes_digest::reconcile_agent(&self.store, &subject.subject)?;
+            if emitted { self.signal_changed(); }
+            if let Some(expiry) = expiry {
+                self.arm_restart(&format!("notes-expiry:{}", subject.subject), expiry);
+            }
+        }
         #[cfg(test)]
         if let Some(raised) = self.raised_faults.lock().unwrap().as_mut() {
             let raised = std::mem::take(raised);
@@ -3785,6 +3795,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Only a final outcome marks the incarnation handled: an error (a busy database, say)
         // leaves it for the next pass.
         self.decide_session_start(subject, incarnation)?;
+        if crate::notes_digest::emit_for_incarnation(&self.store, subject, incarnation)? {
+            self.signal_changed();
+        }
         self.session_starts
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
