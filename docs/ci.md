@@ -326,12 +326,15 @@ checksums. Fleet CI downloads, verifies and extracts the published native archiv
 rebuilding an old workspace. Messaging consumes the pinned published archive too; Nix adjusts
 its Linux interpreter path for sandbox execution without recompiling the channel.
 
-The public-repository workflow runs `python3 scripts/compat-baseline-release check` on every
-PR, merge group and main push (and manual dispatch). It paginates the actual published release
+The public-repository workflow runs `python3 scripts/compat-baseline-release check` on ready
+PRs, merge groups and main pushes (and manual dispatch). It paginates the actual published release
 list and excludes drafts, prereleases and unpublished tags. A baseline more than one published
 stable release behind the newest publication fails unless `exception_reason` gives an explicit
 temporary older-hold reason. An ordinary policy `why` does not waive freshness; blank reasons
 are invalid. Holds should identify the boundary and the condition for removing them.
+Failures distinguish `baseline is stale` from `release API unreachable`; the latter means
+freshness could not be determined, not that a pin needs updating. Archive downloads have a
+60-second network timeout and still fail closed.
 
 Daily and tag publication verify that the candidate's unheld pins already name the latest
 published stable release. After publication, `compat-baseline-release advance TAG` verifies
@@ -339,16 +342,20 @@ the published `RELEASE.json` source against the dereferenced Git tag, checks arc
 against `SHA256SUMS` and embedded `BUILD.json`, and opens a labelled draft baseline maintenance PR with
 an upgrade-impact fragment. Explicit holds are preserved. The release source itself stays
 immutable; the new pins reach `main` only through human review and the existing merge queue.
-No auto-merge or enrollment is enabled by publication. The next release waits until that PR
-lands, except for explicitly held pins. A baseline-only maintenance delta is not a new daily
-release candidate, avoiding an endless release/repin loop.
+The upstream maintainers own review and merge of these maintenance PRs before the next stable
+release. No auto-merge or enrollment is enabled by publication. The next release waits until
+that PR lands, except for explicitly held pins. A baseline-only maintenance delta is not a new
+daily release candidate, avoiding an endless release/repin loop.
 
-The publisher's token needs `contents: write`, `pull-requests: write` and `actions: write`;
-the read-only freshness job needs only `contents: read`. GitHub must allow Actions to create
-pull requests. Because PRs created with `GITHUB_TOKEN` do not trigger PR workflows, automation
-explicitly dispatches the existing Workspace CI and the public-repository workflow on the
-maintenance branch. A permission failure leaves the published release intact and fails the
-publication job; it never switches credentials or bypasses main protection.
+The tag publisher's token needs only `contents: write`; daily publication also needs
+`actions: read` to retrieve verified workflow artifacts. Only the separate postpublish advance
+job receives `contents: write`, `pull-requests: write` and `actions: write`; the read-only
+freshness job needs only `contents: read`. Repository **Settings → Actions → General → Workflow
+permissions → Allow GitHub Actions to create and approve pull requests** must be enabled
+(and allowed by the organization policy). Because PRs created with `GITHUB_TOKEN` do not trigger
+PR workflows, automation explicitly dispatches Workspace CI and the public-repository workflow
+on the maintenance branch. A permission failure leaves the published release intact and fails
+the advance job; it never switches credentials or bypasses main protection.
 
 Focused commands (Python standard library, Git and authenticated `gh` only):
 

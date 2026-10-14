@@ -36,7 +36,7 @@ def main():
             work = Path(temporary)
             archive = work / "bundle.tar.gz"
             digest = hashlib.sha256()
-            with urllib.request.urlopen(bundle["url"]) as response, archive.open("wb") as stream:
+            with urllib.request.urlopen(bundle["url"], timeout=60) as response, archive.open("wb") as stream:
                 while chunk := response.read(1024 * 1024):
                     digest.update(chunk)
                     stream.write(chunk)

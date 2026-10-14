@@ -27,7 +27,7 @@ export default githubWorkflow(auditCaches({
       name: 'daily-release',
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
-      permissions: { contents: 'write', actions: 'write', 'pull-requests': 'write' },
+      permissions: { contents: 'write', actions: 'read' },
       env: {
         GH_TOKEN: '${{ github.token }}',
         GH_REPO: '${{ github.repository }}',
@@ -41,5 +41,23 @@ export default githubWorkflow(auditCaches({
         },
       ],
     },
+    advance: {
+      name: 'advance-compatibility-baselines',
+      needs: 'release',
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 20,
+      permissions: { contents: 'write', actions: 'write', 'pull-requests': 'write' },
+      env: {
+        GH_TOKEN: '${{ github.token }}',
+        GH_REPO: '${{ github.repository }}',
+      },
+      steps: [
+        { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
+        {
+          name: 'Propose baselines for the latest published stable release',
+          run: 'set -euo pipefail\nTAG=$(python3 scripts/compat-baseline-release latest)\npython3 scripts/compat-baseline-release advance "$TAG"\n',
+        },
+      ],
+    },
   },
-}, {"release": "Reuses verified main release artifacts; builds nothing."}))
+}, {"release": "Reuses verified main release artifacts; builds nothing.", "advance": "Verifies published archives and proposes the baseline maintenance PR; builds nothing."}))

@@ -28,6 +28,10 @@ class BaselineError(ValueError):
     pass
 
 
+class ReleaseAPIError(BaselineError):
+    pass
+
+
 def run(*args, cwd=ROOT, input=None):
     return subprocess.run(args, cwd=cwd, input=input, text=True, capture_output=True,
                           check=True).stdout.strip()
@@ -54,8 +58,12 @@ def stable_releases(rows):
 
 
 def published_releases():
-    pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
-                           f'repos/{repository()}/releases?per_page=100'))
+    try:
+        pages = json.loads(run('gh', 'api', '--paginate', '--slurp',
+                               f'repos/{repository()}/releases?per_page=100'))
+    except subprocess.CalledProcessError as error:
+        raise ReleaseAPIError('release API unreachable; baseline freshness could not be determined: '
+                              + error.stderr.strip()) from error
     return stable_releases([row for page in pages for row in page])
 
 
@@ -89,7 +97,7 @@ def check(pins, releases, require_latest=False):
             raise BaselineError(f'{path}: {pin["tag"]} is not a published stable release')
         behind = tags.index(pin['tag'])
         if behind > (0 if require_latest else 1) and pin['exception_reason'] is None:
-            raise BaselineError(f'{path}: {pin["tag"]} is {behind} published stable releases behind '
+            raise BaselineError(f'baseline is stale: {path}: {pin["tag"]} is {behind} published stable releases behind '
                                 f'{tags[0]}; merge the postpublish baseline PR or record a temporary exception_reason')
         if behind and pin['exception_reason'] is not None:
             print(f'{path}: temporary hold at {pin["tag"]}: {pin["exception_reason"]}')

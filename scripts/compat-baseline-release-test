@@ -11,6 +11,8 @@ from pathlib import Path
 import shutil
 import tarfile
 import tempfile
+import subprocess
+import re
 import unittest
 from unittest.mock import patch
 
@@ -58,11 +60,17 @@ class Policy(unittest.TestCase):
         self.assertIn('--paginate', run.call_args.args)
         self.assertIn('--slurp', run.call_args.args)
 
+    def test_unreachable_api_does_not_claim_a_stale_baseline(self):
+        error = subprocess.CalledProcessError(1, ['gh', 'api'], stderr='HTTP 503')
+        with patch.object(baseline, 'run', side_effect=error):
+            with self.assertRaisesRegex(baseline.ReleaseAPIError, 'release API unreachable; baseline freshness could not be determined'):
+                baseline.published_releases()
+
     def test_current_and_one_behind_pass(self):
         baseline.check({'fleet': pin('v0.3.18'), 'messaging': pin()}, self.releases)
 
     def test_policy_why_is_not_an_exception(self):
-        with self.assertRaisesRegex(baseline.BaselineError, '2 published stable releases behind'):
+        with self.assertRaisesRegex(baseline.BaselineError, 'baseline is stale:.*2 published stable releases behind'):
             baseline.check({'fleet': pin('v0.3.16')}, self.releases)
 
     def test_explicit_older_hold_passes_both_gates(self):
@@ -92,6 +100,22 @@ class Policy(unittest.TestCase):
         updates = baseline.changes(pins, pin())
         self.assertEqual(set(updates), {baseline.BASELINES[0]})
         self.assertIsNone(json.loads(updates[baseline.BASELINES[0]])['exception_reason'])
+
+    def test_generated_publication_tokens_do_not_gain_maintenance_writes(self):
+        for filename, publisher in [('release-smalltalk.yml', 'publish'), ('release-daily.yml', 'release')]:
+            workflow = (ROOT / '.github/workflows' / filename).read_text()
+            jobs = dict(re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)',
+                                   workflow.split('\njobs:\n', 1)[1]))
+            publish = jobs[publisher]
+            advance = jobs['advance']
+            self.assertIn('contents: write', publish)
+            self.assertNotIn('actions: write', publish)
+            self.assertNotIn('pull-requests: write', publish)
+            self.assertNotIn('compat-baseline-release advance', publish)
+            for permission in ('contents: write', 'actions: write', 'pull-requests: write'):
+                self.assertIn(permission, advance)
+            self.assertIn(f'needs: {publisher}', advance)
+            self.assertIn('compat-baseline-release advance', advance)
 
 
 class Archives(unittest.TestCase):
@@ -215,7 +239,7 @@ class Publication(unittest.TestCase):
              patch('sys.argv', ['release-smalltalk-daily']):
             process.return_value.returncode = 1
             self.assertEqual(daily.main(), 0)
-        self.assertTrue(any(args[-2:] == ('advance', 'v0.3.17') for args in calls))
+        self.assertFalse(any('advance' in args for args in calls))
         self.assertFalse(any(args[0] == 'gh' for args in calls))
 
 
