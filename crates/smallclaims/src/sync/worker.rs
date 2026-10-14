@@ -1317,7 +1317,12 @@ async fn dial_peer<B: Backend>(
                         tokio::time::Instant::now() + fabric_refusal_delay(),
                     ));
                     let _ = backend
-                        .record_failure(&peer.name, "refused", &refusal.to_string())
+                        .record_failure(
+                            &peer.name,
+                            "refused",
+                            &refusal.to_string(),
+                            Some(carrier),
+                        )
                         .await;
                     continue;
                 }
