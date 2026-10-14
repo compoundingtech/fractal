@@ -31,7 +31,7 @@ jobs:
   observe:
     name: observe
     if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'merge_group' && github.event.workflow_run.head_repository.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    runs-on: evidence-ci
+    runs-on: [evidence-observers, evidence-ci]
     timeout-minutes: 30
     defaults:
       run:

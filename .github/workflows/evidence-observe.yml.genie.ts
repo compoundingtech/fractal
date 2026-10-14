@@ -5,6 +5,11 @@ import { auditCaches } from './cache-audit.ts'
 // It names no pull-request pool: this workflow starts only from a finished merge-group run of
 // the default branch's own workflow file, never from a pull request's code.
 export const evidenceRunner = 'evidence-ci'
+// A second label, equal to the runner group's name: the job needs a runner with both, so a stray
+// `evidence-ci` label elsewhere cannot attract it. The generator's validation accepts string labels
+// only (no `{group, labels}` form); the group's own restriction to this workflow file at refs/heads/main
+// is set on the runner group by the operator.
+export const evidenceGroup = 'evidence-observers'
 
 export default githubWorkflow(auditCaches({
   name: 'Evidence observe',
@@ -20,7 +25,7 @@ export default githubWorkflow(auditCaches({
   permissions: { contents: 'write', actions: 'read' },
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), evidenceRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), evidenceGroup, evidenceRunner],
   },
   // One observation at a time: the scratch repository persists between runs.
   concurrency: { group: 'evidence-observe', 'cancel-in-progress': false },
@@ -30,7 +35,7 @@ export default githubWorkflow(auditCaches({
       // Merge-group runs of this repository only; a manual replay only from main. No pull
       // request event, fork or branch workflow can reach the observer or its credentials.
       if: "${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'merge_group' && github.event.workflow_run.head_repository.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}",
-      'runs-on': evidenceRunner,
+      'runs-on': [evidenceGroup, evidenceRunner],
       'timeout-minutes': 30,
       defaults: { run: { shell: 'bash' } },
       steps: [
