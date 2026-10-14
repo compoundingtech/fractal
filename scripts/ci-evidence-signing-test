@@ -167,7 +167,6 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='../x')).returncode == 1
     print('passed: a stage note carries the stage command, its real exit status and the digest of its exact log; a missing or garbled timing is a failure')
 
-<<<<<<< HEAD
     # --- step-facts: jobs with no stage log record the outcomes of the steps that ran
     base_env = dict(STEP_CHECK='isolation-vm', STEP_COMMAND=json.dumps(['isolation-vm', 'nixos-test-driver']), GITHUB_RUN_ID='7',
                     RUNNER_OS='Linux')
@@ -183,7 +182,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='not json')).returncode == 1
     assert helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES='{}')).returncode == 1
     print('passed: a step-based job note records each step outcome; a skipped, cancelled or missing step means no note, a failed one a failure')
-=======
+
     # --- a job whose gate said skip makes no note even if its logs and steps look like a success
     assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='false')).returncode == 0
     gated = helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests', GATE_SKIP='true'))
@@ -191,7 +190,6 @@ with tempfile.TemporaryDirectory() as directory:
     gated = helper('step-facts', str(out), env=dict(base_env, STEP_OUTCOMES=json.dumps({'driver': 'success'}), GATE_SKIP='true'))
     assert gated.returncode == 1 and 'evidence gate skipped' in gated.stdout
     print('passed: a job whose own evidence gate said skip makes no note, whatever its logs or steps show')
->>>>>>> agent/evidence-stage-notes
 
     # --- cleanup: key overwritten and removed
     alias = tmp / 'alias'
