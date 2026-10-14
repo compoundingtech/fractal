@@ -604,6 +604,7 @@ group base), never from the change under test, and says per check what a note mu
 ```json
 {"version": 1, "checks": {"linux-gate": {
   "trust_levels": ["fleet"],
+  "enforce": false,
   "max_age_s": null,
   "kinds": {
     "observed": {"command": ["github-actions", "{repository}", ".github/workflows/fleet.yml", "{check}"],
@@ -611,6 +612,14 @@ group base), never from the change under test, and says per check what a note mu
     "wrapper": {"command": ["..."], "required_inputs": ["flake_lock_sha256", "toolchain_sha256"],
                 "bind_inputs": {"flake_lock_sha256": "flake.lock"}}}}}}
 ```
+
+`enforce` is the per-check switch for skipping and is **off unless it says `true`** (absent means
+false; any other value is an error). With it off the gate still looks the note up and verifies it, and
+prints `outcome=satisfied` with `decision=run` and a reason starting `shadow:`, so the proof that a
+note would have covered the check accumulates while the check keeps running as today. Turning a check
+on is the one-line change `"enforce": false` to `"enforce": true` in this file, reviewed and queued
+like any change (the file is read from the accepted base, so the change takes effect for the runs
+after it merges).
 
 Each kind has its own rule: the exact `command` the record must have run, an optional
 `runner_prefix`, optional per-kind `trust_levels`, the `required_inputs` it must carry (every one a nonempty string) and
@@ -696,7 +705,7 @@ values and `-` for none:
 
 ```
 evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
-reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=…
+reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=… enforce=true|false
 tree=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
 ```
 

@@ -489,6 +489,8 @@ class SkipPolicy(unittest.TestCase):
         self.assertEqual(broken(lambda d: entry(d).update(kinds={})), 'error')
         self.assertEqual(broken(lambda d: entry(d).update(max_age_s=True)), 'error')
         self.assertEqual(broken(lambda d: entry(d).update(max_age_s=0)), 'error')
+        for bad in ('yes', 1, None, 'true'):
+            self.assertEqual(broken(lambda d, bad=bad: entry(d).update(enforce=bad)), 'error', repr(bad))  # enforce is a boolean
         self.assertEqual(broken(lambda d: entry(d)['kinds'].update(hand={'command': ['x']})), 'error')
         self.assertEqual(broken(lambda d: entry(d)['kinds']['wrapper'].update(typo=1)), 'error')
         self.assertEqual(broken(lambda d: entry(d)['kinds']['wrapper'].pop('command')), 'error')
@@ -648,6 +650,7 @@ class CommittedPolicy(unittest.TestCase):
             rules = self.rules(check)
             self.assertEqual(rules['trust_levels'], ('fleet',), check)
             self.assertIsNone(rules['max_age_s'], check)  # no age limit by default
+            self.assertIs(rules['enforce'], False, check)  # skipping is off until the policy says otherwise
             observed = rules['kinds']['observed']
             self.assertEqual(observed['command'], ['github-actions', 'compoundingtech/smalltalk',
                                                    '.github/workflows/fleet.yml', check])

@@ -64,11 +64,19 @@ RUNNER = f'github:{REPOSITORY}/actions/runs/7/attempts/1/jobs/9'
 
 def skip_policy(**per_check):
     """The repository's skip policy as a base commit would carry it, for all five checks."""
-    entry = {'trust_levels': ['fleet'],
+    entry = {'trust_levels': ['fleet'], 'enforce': True,
              'kinds': {'observed': {'command': ['github-actions', '{repository}', '.github/workflows/fleet.yml', '{check}'],
                                     'runner_prefix': 'github:{repository}/'}}}
     entry.update(per_check)
     return json.dumps({'version': 1, 'checks': {check: entry for check in CHECKS}})
+
+
+def enforcing(path):
+    """The repository's real skip policy with skipping turned on for every check: the one-line change per check."""
+    doc = json.loads(Path(path).read_text())
+    for entry in doc['checks'].values():
+        entry['enforce'] = True
+    return json.dumps(doc)
 
 
 def decision(text):
@@ -106,7 +114,7 @@ class Decide(unittest.TestCase):
         record = 'a' * 40
         now = gate.datetime.now(gate.timezone.utc).isoformat()
         context = {'check': 'linux-gate', 'fork': 'false', 'event': 'merge_group', 'protected_changed': []}
-        result = {'satisfied': True, 'policy': True, 'tier': 'full', 'kind': 'observed', 'trust_level': 'fleet',
+        result = {'satisfied': True, 'policy': True, 'enforce': True, 'tier': 'full', 'kind': 'observed', 'trust_level': 'fleet',
                   'tree': 'b' * 40, 'check': 'linux-gate', 'record': record, 'signer': 'fleet/ci', 'observed_at': now}
         return context, result, 'b' * 40
 
@@ -445,8 +453,37 @@ class EndToEnd(unittest.TestCase):
             self.note(commit, tree, **note_kwargs)
         return base, commit, tree
 
+    def test_skipping_is_off_unless_the_policy_turns_it_on_for_the_check(self):
+        for label, change in (('false', dict(enforce=False)), ('absent', None)):
+            doc = json.loads(skip_policy())
+            for entry in doc['checks'].values():
+                if change is None:
+                    entry.pop('enforce')
+                else:
+                    entry.update(change)
+            base, _, _ = self.scenario(policy=json.dumps(doc))
+            fields = self.assertRuns(base, label)
+            # The note is found and trusted - the proof - but the decision stays `run`, and says why.
+            self.assertEqual(fields['outcome'], 'satisfied', label)
+            self.assertEqual(fields['enforce'], 'False', label)  # absent means false
+            self.assertIn('shadow', fields['reason'], label)
+        base, _, _ = self.scenario(policy=skip_policy())
+        self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')  # the same note, with enforce true
+        for bad in ('yes', 1, None):
+            base, _, _ = self.scenario(policy=skip_policy(enforce=bad))
+            self.assertEqual(self.assertRuns(base, repr(bad))['outcome'], 'unavailable', repr(bad))
+
+    def test_the_repository_policy_turns_skipping_on_only_for_the_checks_listed_here(self):
+        # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
+        enforced = ()
+        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        self.assertEqual(sorted(policy['checks']), sorted(CHECKS))
+        self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
+        for check, entry in policy['checks'].items():
+            self.assertIn(entry.get('enforce', False), (True, False), check)
+
     def test_adding_a_required_input_tightens_future_notes_without_breaking_anything(self):
-        entry = {'trust_levels': ['fleet'], 'kinds': {'observed': {
+        entry = {'trust_levels': ['fleet'], 'enforce': True, 'kinds': {'observed': {
             'command': ['github-actions', '{repository}', '.github/workflows/fleet.yml', '{check}'],
             'runner_prefix': 'github:{repository}/', 'required_inputs': ['flake_lock_sha256', 'toolchain_sha256']}}}
         tight_policy = json.dumps({'version': 1, 'checks': {c: entry for c in CHECKS}})
@@ -500,7 +537,7 @@ class EndToEnd(unittest.TestCase):
         self.machine = self.f.key('machine', 'machine/box')
         self.stranger = self.f.key('stranger')
         (self.f.repo / 'flake.lock').write_text(LOCK)
-        base = self.commit_base(policy=(ROOT / '.st/evidence-skip-policy.json').read_text())
+        base = self.commit_base(policy=enforcing(ROOT / '.st/evidence-skip-policy.json'))
         commit, tree = self.head()
         return base, commit, tree, hashlib.sha256(LOCK.encode()).hexdigest()
 
@@ -760,7 +797,7 @@ class EndToEnd(unittest.TestCase):
         fields, outputs = self.run_gate(base, PR_NUMBER='123', EVENT_NAME='pull_request')
         self.assertEqual(list(fields), [
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
-            'observed_at', 'age_s', 'max_age_s', 'attempts', 'tree', 'head', 'base', 'event', 'pr', 'repo', 'run',
+            'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'tree', 'head', 'base', 'event', 'pr', 'repo', 'run',
             'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
                          ('123', REPOSITORY, '42', '1', 'false'))
