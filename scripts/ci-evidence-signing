@@ -109,6 +109,14 @@ def aggregate(path):
     gate = env('GATE_JOB', 'linux-gate')
     if gate not in results:
         raise Refused(f'the {gate!r} job is not among the needed jobs, so there is no verdict to record')
+    # A needed job that did not run (skipped by the evidence gate, or for any other reason) means this
+    # run did not itself test those stages. A note that says success would let one real run refresh
+    # its own skips forever, so no note is made. Only the merge-queue-only shards may be skipped, and
+    # only outside merge groups.
+    merge_only = {'linux-tests-shard-3', 'linux-tests-shard-4'} if env('GITHUB_EVENT_NAME') != 'merge_group' else set()
+    not_run = sorted(name for name, result in results.items() if result == 'skipped' and name not in merge_only)
+    if not_run:
+        raise Refused(f'not recording: {", ".join(not_run)} did not run in this workflow run (skipped), so it did not test this tree itself')
     facts = {
         'command': [gate, 'aggregate', *results],
         'exit_code': 0 if results[gate] == 'success' else 1,

@@ -125,6 +125,13 @@ with tempfile.TemporaryDirectory() as directory:
     needs['linux-gate']['result'] = 'failure'
     helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(needs)))
     assert json.loads(out.read_text())['exit_code'] == 1
+    needs['linux-gate']['result'] = 'success'
+    skipped = {**needs, 'linux-tests': {'result': 'skipped'}}
+    refused = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(skipped), GITHUB_EVENT_NAME='merge_group'))
+    assert refused.returncode == 1 and 'did not run' in refused.stdout, 'a skipped stage means this run did not test the tree itself'
+    shards = {**needs, 'linux-tests-shard-3': {'result': 'skipped'}}
+    assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(shards), GITHUB_EVENT_NAME='pull_request')).returncode == 0, 'merge-only shards may be skipped outside merge groups'
+    assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(shards), GITHUB_EVENT_NAME='merge_group')).returncode == 1
     missing = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({'linux-tests': {'result': 'success'}})))
     assert missing.returncode == 1 and 'no verdict' in missing.stdout
     print('passed: the aggregate note records the needed jobs and the gate job\'s own verdict, and refuses to invent one')
