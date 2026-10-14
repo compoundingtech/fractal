@@ -78,6 +78,7 @@ mod hermetic;
 mod hook_telemetry;
 mod human_gates;
 mod idle_budget;
+mod invariants;
 mod log_diet;
 mod message_send_once;
 mod message_wait;
@@ -102,6 +103,7 @@ mod subagent_publisher;
 mod subagents_seat;
 mod terminal_attach;
 mod terminal_binding;
+mod tiles_root;
 mod version;
 mod typed_keys;
 

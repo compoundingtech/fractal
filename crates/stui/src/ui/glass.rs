@@ -5167,7 +5167,7 @@ mod tests {
         ctrl(&mut ui, 'a');
         assert_eq!(ui.popover.as_deref(), Some("actions:agent/example/atlas/builder"));
         let shown = screen(&ui);
-        for action in ["Restart", "Suspend", "Retire", "Copy id", "ACTIONS · ESC CLOSES"] {
+        for action in ["Restart", "Suspend", "Stop", "Copy id", "ACTIONS · ESC CLOSES"] {
             assert!(shown.contains(action), "{action}: {shown}");
         }
         // Restart asks first; Esc would keep it, y restarts.
@@ -5189,6 +5189,14 @@ mod tests {
         press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE);
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ui.effects.is_empty());
+    }
+
+    #[test]
+    fn a_retired_identity_has_no_start_resume_or_runtime_actions() {
+        let agent = Agent { state: AgentState::Retired, terminal: false, ..glass().world.agents.items()[0].clone() };
+        let keys = screens::agent_actions(&agent).iter().map(|action| action.key).collect::<String>();
+        for key in ['s','u','r','x','p','t'] { assert!(!keys.contains(key), "{keys}"); }
+        assert_eq!(screens::agent_word(agent.state), "retired");
     }
 
     #[test]
