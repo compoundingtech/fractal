@@ -528,6 +528,23 @@ workflow-level path filters. `linux-gate` does not depend on them.
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
 
+The strict kit play lane runs every indexed story at both 440/1440 widths and
+dark/light schemes, with up to six workers bounded by available CPUs. Each worker
+reuses a Chromium context and its HTTP asset cache for the job's immutable build;
+each case still gets a fresh page. Before a new case, the worker closes all prior
+pages/popups, clears cookies and permissions, and clears every origin-storage type
+for all observed HTTP(S) origins. Cookie/quota audits and a first-document
+local/session-storage audit reject residual state. Case-internal navigation may
+retain its own state; it is never inherited by another case.
+
+`kit-play-isolation.browser-test.mjs` runs in the same kit-input-gated CI lane before
+the full play matrix. It exercises storage/service-worker/popup isolation, concurrent
+worker independence, retained HTTP asset caching, and failing-story/leaked-state
+negative controls against real Chromium. The matrix receipt retains story/case/worker
+counts and per-case seconds and adds reset, page-creation, guard, navigation-to-DOM,
+post-DOM readiness, assertion and close timings. The strict lifecycle assertions,
+story-identity checks, matrix size and job timeout are unchanged.
+
 Run SDK tests with their own `vitest.config.ts`, not the parent app's narrower test patterns.
 The rejected-mission diagnostic proof checks its fixture against the generated decoder:
 negative step attempts are rejected, while person assignees are valid actor references.
