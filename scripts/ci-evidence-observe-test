@@ -260,6 +260,15 @@ else:
     assert done.returncode == 0, done.stdout
     assert out['records'] == [] and out['skip_taken'][0]['checks'] == ['linux-gate'] and out['published'] == 0
     assert git(tmp / 'skip-taken', 'for-each-ref', 'refs/notes/evidence/') == '', 'no ref for a skipped check'
+    # Second, independent signal: the check's own job ran the covered step although its gate job shows no marker.
+    covered = jobs(('evidence-gate-linux-gate', [('Verify', 'success')]),
+                   ('linux-gate', [('Run', 'success'), ('evidence covered by a trusted note', 'success')]))
+    done, out = execute(answer([(full, 'full')], pack(full)), scratch=tmp / 'covered', remote=remote, env={'GH_JOBS': covered})
+    assert done.returncode == 0 and out['records'] == [] and out['skip_taken'][0]['checks'] == ['linux-gate'] and out['published'] == 0
+    assert git(tmp / 'covered', 'for-each-ref', 'refs/notes/evidence/') == '', 'no ref when the check job itself was covered'
+    not_covered = jobs(('linux-gate', [('evidence covered by a trusted note', 'skipped')]))
+    done, out = execute(answer([(full, 'full')], pack(full)), scratch=tmp / 'not-covered', env={'GH_JOBS': not_covered})
+    assert done.returncode == 0 and len(out['records']) == 1, 'a covered step that did not run does not count'
     ran = jobs(('evidence-gate-linux-gate', [('Verify', 'success'), ('evidence skip taken', 'skipped')]))
     done, out = execute(answer([(full, 'full')], pack(full)), scratch=tmp / 'skip-not-taken', env={'GH_JOBS': ran})
     assert done.returncode == 0 and len(out['records']) == 1 and 'skip_taken' not in out, 'a gate that did not skip is recorded as before'
