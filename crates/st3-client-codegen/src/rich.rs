@@ -758,6 +758,50 @@ impl Object {
     }
 }
 
+/// One positive schema allowlist gates both decoded targets and every emitted assertion.
+fn validate_condition_schema(value: &Value, cx: &Cx, depth: usize) -> Result<()> {
+    if depth > 64 {
+        bail!("recursive conditional schemas are not translated");
+    }
+    if value.is_boolean() {
+        return Ok(());
+    }
+    let object = value.as_object().context("conditional allowlisted schema")?;
+    if nullable_inner(value).is_some() {
+        bail!("conditional nullable schemas are not translated");
+    }
+    let scalar = |value: &Value| value.is_boolean() || value.is_string() || value.is_number();
+    for (key, part) in object {
+        match key.as_str() {
+            "$comment" | "description" | "title" | "examples" | "required"
+            | "minItems" | "maxItems" | "uniqueItems" | "minLength" | "maxLength"
+            | "pattern" | "format" | "minimum" | "maximum" | "exclusiveMinimum"
+            | "exclusiveMaximum" | "multipleOf" => {}
+            "type" if matches!(part.as_str(), Some("boolean" | "string" | "number" | "integer" | "array" | "object")) => {}
+            "const" if scalar(part) => {}
+            "enum" if part.as_array().is_some_and(|values| !values.is_empty() && values.iter().all(scalar)) => {}
+            "$ref" => {
+                let name = part.as_str().context("conditional reference")?
+                    .strip_prefix("#/$defs/").context("only #/$defs/ refs")?;
+                validate_condition_schema(cx.normalized.get(name).context("conditional definition")?, cx, depth + 1)?;
+            }
+            "properties" => {
+                for schema in part.as_object().context("conditional properties")?.values() {
+                    validate_condition_schema(schema, cx, depth + 1)?;
+                }
+            }
+            "items" => validate_condition_schema(part, cx, depth + 1)?,
+            "oneOf" | "allOf" => {
+                for schema in part.as_array().context("conditional alternatives")? {
+                    validate_condition_schema(schema, cx, depth + 1)?;
+                }
+            }
+            _ => bail!("conditional schema keyword `{key}` is outside the wire-identity allowlist"),
+        }
+    }
+    Ok(())
+}
+
 /// Decoded-object filters may only inspect fields whose wire representation survives decoding.
 fn validate_condition_fields(
     assertion: &Value,
@@ -765,6 +809,7 @@ fn validate_condition_fields(
     cx: &Cx,
     depth: usize,
 ) -> Result<()> {
+    validate_condition_schema(assertion, cx, depth)?;
     if depth > 64 {
         bail!("recursive conditional assertions are not translated");
     }
@@ -776,6 +821,7 @@ fn validate_condition_fields(
                     let name = name.as_str().context("conditional required name")?;
                     let field = fields.get(name)
                         .with_context(|| format!("conditional field `{name}` is undeclared"))?;
+                    validate_condition_schema(field, cx, depth + 1)?;
                     if nullable_inner(field).is_some() {
                         bail!("conditional presence of nullable field `{name}` is not translated");
                     }
@@ -791,8 +837,7 @@ fn validate_condition_fields(
                     validate_condition_value(assertion, field, cx, depth + 1)?;
                 }
             }
-            "not" => validate_condition_fields(value, fields, cx, depth + 1)?,
-            "allOf" | "anyOf" | "oneOf" => {
+            "allOf" | "oneOf" => {
                 for part in value.as_array().context("conditional alternatives")? {
                     validate_condition_fields(part, fields, cx, depth + 1)?;
                 }
@@ -813,15 +858,7 @@ fn validate_condition_value(assertion: &Value, field: &Value, cx: &Cx, depth: us
     if depth > 64 {
         bail!("recursive conditional fields are not translated");
     }
-    let object = field.as_object().context("conditional target must be an allowlisted schema")?;
-    if object.keys().any(|key| !matches!(key.as_str(),
-        "$ref" | "$comment" | "description" | "title" | "examples" | "type" | "const" | "enum"
-        | "oneOf" | "items" | "minItems" | "maxItems" | "uniqueItems"
-        | "minLength" | "maxLength" | "pattern" | "format"
-        | "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf"
-    )) {
-        bail!("conditional target is outside the wire-identity allowlist");
-    }
+    validate_condition_schema(field, cx, depth)?;
     if let Some(reference) = field.get("$ref").and_then(Value::as_str) {
         let name = reference.strip_prefix("#/$defs/").context("only #/$defs/ refs")?;
         return validate_condition_value(
@@ -904,7 +941,6 @@ fn condition_predicate(value: &Value, target: &str, cx: &mut Cx) -> Result<Strin
                     ));
                 }
             }
-            "not" => checks.push(format!("!({})", condition_predicate(value, target, cx)?)),
             "maxItems" | "minItems" => {
                 let limit = value.as_u64().context("conditional item limit")?;
                 checks.push(format!(
@@ -912,7 +948,7 @@ fn condition_predicate(value: &Value, target: &str, cx: &mut Cx) -> Result<Strin
                     if key == "maxItems" { "<=" } else { ">=" }
                 ));
             }
-            "allOf" | "anyOf" | "oneOf" => {
+            "allOf" | "oneOf" => {
                 let parts = value
                     .as_array()
                     .context("conditional alternatives")?
@@ -929,7 +965,7 @@ fn condition_predicate(value: &Value, target: &str, cx: &mut Cx) -> Result<Strin
                         .iter()
                         .map(|part| format!("({part})"))
                         .collect::<Vec<_>>()
-                        .join(if key == "allOf" { " && " } else { " || " })
+                        .join(" && ")
                 });
             }
             _ => bail!("unsupported conditional assertion `{key}`"),
@@ -1626,6 +1662,22 @@ mod tests {
         assert!(format!("{:#}", models(&referenced).unwrap_err()).contains("allowlist"));
         let union = independent_fixture(json!({"oneOf": [field, {"const": "known"}]}), assertion);
         assert!(format!("{:#}", models(&union).unwrap_err()).contains("allowlist"));
+    }
+
+    #[test]
+    fn transformed_assertion_references_fail_closed_on_every_predicate_path() {
+        for assertion in [
+            json!({"$ref": "#/$defs/Instant"}),
+            json!({"oneOf": [{"$ref": "#/$defs/Instant"}, {"const": "x"}]}),
+            json!({"allOf": [{"allOf": [{"$ref": "#/$defs/Instant"}]}]}),
+        ] {
+            for side in ["if", "then"] {
+                let mut schema = independent_fixture(json!({"type": "string"}), Value::Bool(true));
+                schema["$defs"]["Instant"] = json!({"type": "string", "format": "date-time", "x-st-codec": "timestamp"});
+                schema["$defs"]["Entry"]["allOf"][0][side] = json!({"properties": {"tags": assertion}});
+                assert!(format!("{:#}", models(&schema).unwrap_err()).contains("allowlist"));
+            }
+        }
     }
 
     #[test]
