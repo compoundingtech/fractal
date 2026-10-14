@@ -1567,11 +1567,11 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
     )?;
     anyhow::ensure!(
         table_count == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses an unsupported st schema; start with a new state directory"
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
     );
     anyhow::ensure!(
         version == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
-        "this database uses unsupported st schema version {version}"
+        "this database uses unsupported st schema version {version}; this build supports storage schema versions 10 through {CURRENT_SCHEMA_VERSION}"
     );
     Ok(())
 }
