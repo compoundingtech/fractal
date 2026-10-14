@@ -4,8 +4,6 @@
 name: Nix
 
 on:
-  push:
-    tags: ["**"]
   schedule:
     - cron: 17 1 * * *
   workflow_dispatch: {}

@@ -11,11 +11,7 @@ export default githubWorkflow(readyPRJobs({
   },
   "name": "Nix",
   "on": {
-    "push": {
-      "tags": [
-        "**"
-      ]
-    },
+    // Releases do not depend on this workflow: a release tag no longer starts a Nix build.
     "schedule": [{ "cron": "17 1 * * *" }],
     "workflow_dispatch": {},
     "pull_request": {
