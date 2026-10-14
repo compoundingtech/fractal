@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Key handling for a CI job that signs its own result. Testable without GitHub.
 
-  guard             may this job use the signing key? (event and ref, never a fork)
+  guard             may this job use the signing key? (event, ref, never a fork; a pull request: its authors)
   configure         write the signer's configuration and the key (mode 0600) and mask the key
   once CHECK        record that this job signs CHECK, and refuse a second signature for it
   aggregate FILE    write the facts of an aggregate gate (from the `needs` context) for evidence-wrap
@@ -10,18 +10,21 @@
   cleanup           overwrite and remove the key and everything configure made (run it always)
 
 The key arrives only as the environment secret EVIDENCE_SIGNING_KEY of the `evidence-signing`
-environment. The jobs reach that environment only for merge_group and push to main (their
-`environment:` is conditional), and this script refuses anything else in code. The signer script and
+environment. The jobs reach that environment only for merge_group, push to main, manual runs on main and
+pull requests from this repository (their `environment:` is conditional), and this script refuses anything
+else in code; a pull request also needs its authors on the list at the base commit (see check_authors). The signer script and
 this one must come from the base commit of the change, never from the tree under test; the
 workflow that calls them takes them from there.
 
-Documented gap (accepted): code under test in a job that holds the key can read it.
+Documented gap (accepted): code under test in a job that holds the key can read it, including, for a pull
+request from this repository, the code of its author.
 """
 import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -61,7 +64,7 @@ def guard():
         head, repository = env('PR_HEAD_REPOSITORY'), env('GITHUB_REPOSITORY')
         if not head or not repository or head != repository:
             raise Refused(f'refusing pull request from {head or "an unknown repository"!r}: only pull requests from {repository or "this repository"} may use the key')
-        check_authors(env('PR_BASE_SHA'), env('PR_HEAD_SHA'), env('PR_USER'), env('GITHUB_ACTOR'))
+        check_authors(env('PR_BASE_SHA'), env('PR_HEAD_SHA'), env('PR_USER'), env('GITHUB_ACTOR'), env('GITHUB_TRIGGERING_ACTOR'))
     return f'{event} on {ref}'
 
 
@@ -77,26 +80,44 @@ def _git(*args):
     return done.stdout
 
 
-def check_authors(base, head, opener, actor):
+def _strings(value, what):
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise Refused(f'{AUTHORS_FILE}: {what} must be a list of nonempty strings')
+    return [item.lower() for item in value]
+
+
+def check_authors(base, head, opener, *actors):
     """A pull request run signs only when its authors are the repository's own. The list is read from the BASE
-    commit, so the pull request cannot widen it. Two kinds of check: the GitHub logins of whoever opened the
-    pull request and of whoever triggered this run are authenticated by GitHub; the commit author emails are
-    free text in git (anyone can write any of them), so they only catch a stray commit by someone else."""
+    commit, so the pull request cannot widen it. Two kinds of check. GitHub authenticates the account that
+    opened the pull request and the accounts that started the run (GITHUB_ACTOR is the account that first
+    triggered the workflow and does not change on a re-run; GITHUB_TRIGGERING_ACTOR is whoever re-ran it).
+    Commit author and committer emails are free text in git (anyone can write any of them), so they only
+    catch a stray commit by someone else; Co-authored-by trailers are not read at all. Emails match exactly
+    (case-insensitively), or, for the `noreply_logins`, as `[ID+]LOGIN@users.noreply.github.com`; no glob."""
     if not base or not head:
         raise Refused('the pull request base and head commits are not known, so its authors cannot be checked')
     try:
         allowed = json.loads(_git('show', f'{base}:{AUTHORS_FILE}'))
-        logins = {login.lower() for login in allowed['logins']}
-        emails = [pattern.lower() for pattern in allowed['emails']]
-    except (Refused, ValueError, KeyError, TypeError) as error:
+        logins = set(_strings(allowed['logins'], 'logins'))
+        emails = set(_strings(allowed['emails'], 'emails'))
+        noreply = [re.compile(r'(?:[0-9]+\+)?' + re.escape(login) + r'@users\.noreply\.github\.com', re.IGNORECASE)
+                   for login in _strings(allowed['noreply_logins'], 'noreply_logins')]
+        web = set(_strings(allowed['committers_also'], 'committers_also'))
+    except (Refused, ValueError, KeyError, TypeError, AttributeError) as error:
         raise Refused(f'no usable author list at the base commit ({AUTHORS_FILE}): {error}')
-    for role, login in (('opened the pull request', opener), ('triggered this run', actor)):
+
+    def known(email):
+        return email.lower() in emails or any(pattern.fullmatch(email) for pattern in noreply)
+
+    for role, login in (('opened the pull request', opener), *(('started or re-ran this run', actor) for actor in actors if actor)):
         if not login or login.lower() not in logins:
             raise Refused(f'refusing: {login or "an unknown account"!r}, who {role}, is not in the author list')
-    for line in _git('log', '--no-merges', '--format=%H %ae', f'{base}..{head}').splitlines():
-        sha, _, email = line.partition(' ')
-        if not any(fnmatch.fnmatchcase(email.lower(), pattern) for pattern in emails):
-            raise Refused(f'refusing: commit {sha[:12]} is authored by {email!r}, who is not in the author list')
+    for line in _git('log', '--no-merges', '--format=%H %ae %ce', f'{base}..{head}').splitlines():
+        sha, author, committer = (line.split(' ') + ['', ''])[:3]
+        if not known(author):
+            raise Refused(f'refusing: commit {sha[:12]} is authored by {author!r}, who is not in the author list')
+        if not (known(committer) or committer.lower() in web):
+            raise Refused(f'refusing: commit {sha[:12]} is committed by {committer!r}, who is not in the author list')
 
 
 def configure(root):
