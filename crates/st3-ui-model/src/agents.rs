@@ -22,12 +22,14 @@ pub enum State {
     /// Declared, with no running session after its launch window.
     Down,
     Stopped,
+    /// Retired by a person: it takes no more work and is never started again.
+    Retired,
     Unknown,
 }
 
 impl State {
     /// Every state, in `words.json` order.
-    pub const ALL: [State; 10] = [
+    pub const ALL: [State; 11] = [
         State::NeedsYou,
         State::NeedsLogin,
         State::Fault,
@@ -37,6 +39,7 @@ impl State {
         State::Starting,
         State::Down,
         State::Stopped,
+        State::Retired,
         State::Unknown,
     ];
 
@@ -49,6 +52,7 @@ impl State {
             State::Working | State::Compacting => Group::Working,
             State::Idle | State::Starting => Group::Idle,
             State::Stopped | State::Unknown => Group::Stopped,
+            State::Retired => Group::Retired,
         }
     }
 }
@@ -64,6 +68,7 @@ pub enum Group {
     Working,
     Idle,
     Stopped,
+    Retired,
 }
 
 /// A step an agent holds or has queued, named for display.
@@ -138,6 +143,8 @@ pub struct Delivery {
 /// The agent's state word, first match wins.
 pub fn state(agent: &Facts) -> State {
     match (agent.state.as_str(), agent.harness_state.as_deref()) {
+        // Retired is final: nothing else about the seat matters.
+        ("retired", _) => State::Retired,
         _ if agent.fault.is_some() => State::Fault,
         // A seat whose message path stopped polling or cannot hand off takes no messages,
         // however ready its harness looks. An `outdated` path still delivers.

@@ -666,6 +666,7 @@ fn agent_state(agent: &st3_client::Agent) -> AgentState {
         Some("starting") => AgentState::Starting,
         Some("down") => AgentState::Down,
         Some("stopped") => AgentState::Stopped,
+        Some("retired") => AgentState::Retired,
         _ => AgentState::Unknown,
     }
 }
@@ -695,7 +696,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                 unmanaged: false,
                 // A running agent with a runtime is worth trying; opening it finds the terminal.
                 terminal: !agent.runtime_ids.is_empty()
-                    && !matches!(agent.state.as_str(), "stopped" | "failed"),
+                    && !matches!(agent.state.as_str(), "stopped" | "failed" | "retired"),
                 parent: agent
                     .under
                     .first()

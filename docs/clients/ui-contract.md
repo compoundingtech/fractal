@@ -394,8 +394,8 @@ Served on the `agents` collection as `Agent.presentation`, and on `GET /v1/clien
 
 | Field | Meaning |
 |---|---|
-| `state` | One of the ten `agent` ids in `words.json`: `needs_you`, `needs_login`, `fault`, `working`, `compacting`, `idle`, `starting`, `down`, `stopped`, `unknown`. |
-| `group` | The list group: `needs_you`, `needs_login`, `fault` (fault, down), `working` (working, compacting), `idle` (idle, starting) or `stopped` (stopped, unknown). Sessions st found running but did not start are not agent rows; clients list them in their own "found running" group. |
+| `state` | One of the eleven `agent` ids in `words.json`: `needs_you`, `needs_login`, `fault`, `working`, `compacting`, `idle`, `starting`, `down`, `stopped`, `retired`, `unknown`. A retired agent is `retired` whatever else st says of it. |
+| `group` | The list group: `needs_you`, `needs_login`, `fault` (fault, down), `working` (working, compacting), `idle` (idle, starting), `stopped` (stopped, unknown) or `retired`. Sessions st found running but did not start are not agent rows; clients list them in their own "found running" group. |
 | `because` | Why it needs someone, in plain words: the fault or why it is broken, when it lost its session, the ask, or the login it needs, for `fault`, `down`, `needs_you` and `needs_login`; otherwise `null`. |
 | `now` | What it holds: `{step, mission, path, title, label, goal, since, holder_down_since}`, or `null`. `label` is `mission › path`. The step's progress is on the mission projection's step. |
 | `next[]`, `queued` | Up to five queued steps as `{step, mission, path, title, label}`, next first, and how many are queued in all. |
@@ -510,7 +510,9 @@ Sidebar:
 1. the live reserved subject, whatever its name;
 2. otherwise the live arrangement named exactly "Sidebar" with the lowest id, which a client
    created before the reserved id;
-3. otherwise none, and the first edit creates the reserved subject named "Sidebar".
+3. otherwise none, and the first edit creates the reserved subject named "Sidebar". If st refuses
+   that create with `arrangement-retired`, the person removed their Sidebar: the client says
+   restoring a removed Sidebar is not available yet and never tries to create it again.
 
 A client edits the Sidebar it picked and never copies a legacy one, so an older client still
 editing it loses nothing. When two clients create the reserved subject at once, the second gets
