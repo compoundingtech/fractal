@@ -948,7 +948,7 @@ mission "example/work" state="ready" {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_revise_carries_notes_through_two_revisions_and_retry() {
+async fn revise_notes_cli_carries_notes_through_two_revisions_and_retry() {
     if st3::test_support::supervise_test() {
         return;
     }
