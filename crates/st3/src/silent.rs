@@ -106,7 +106,22 @@ pub fn refresh_notes(store: &crate::store::Store, messages: &mut Vec<MessageView
     Ok(())
 }
 
-fn is_notes_digest(message: &MessageView) -> bool {
+/// Apply a server-resolved current block to a legacy client's held paging batch.
+pub fn refresh_notes_rendered(messages: &mut Vec<MessageView>, recipient: &str, content: Option<&str>) {
+    let newest = messages.iter().filter(|message| message.to == recipient && is_notes_digest(message))
+        .max_by_key(|message| (message.created_index, &message.subject))
+        .map(|message| message.subject.clone());
+    messages.retain_mut(|message| {
+        if message.to != recipient || !is_notes_digest(message) { return true; }
+        let Some(content) = content else { return false; };
+        if newest.as_deref() != Some(&message.subject) { return false; }
+        message.content.clear();
+        message.content.push_str(content);
+        true
+    });
+}
+
+pub fn is_notes_digest(message: &MessageView) -> bool {
     message.from == "daemon/runtime"
         && message.tags.iter().any(|tag| tag == crate::notes_digest::TAG)
 }
@@ -210,6 +225,22 @@ mod tests {
 
     fn tags(values: &[&str]) -> Vec<String> {
         values.iter().map(|tag| (*tag).to_owned()).collect()
+    }
+
+    #[test]
+    fn paged_notes_refresh_keeps_only_current_latest_digest() {
+        let old = message("message/example-old", "daemon/runtime", "sent",
+            &[SILENT_TAG, crate::notes_digest::TAG]);
+        let mut new = old.clone();
+        new.subject = "message/example-new".into();
+        new.created_index = 1;
+        let mut batch = vec![old, new];
+        refresh_notes_rendered(&mut batch, "agent/example/reader", Some("Current block"));
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].subject, "message/example-new");
+        assert_eq!(batch[0].content, "Current block");
+        refresh_notes_rendered(&mut batch, "agent/example/reader", None);
+        assert!(batch.is_empty());
     }
 
     #[test]

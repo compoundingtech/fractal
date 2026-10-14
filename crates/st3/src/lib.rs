@@ -37,6 +37,7 @@ pub(crate) mod subagent_sessions;
 pub mod fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub mod silent;
+pub mod notes_digest;
 /// `st missions check`: run a mission file's exec gates once, now, the way a run would.
 pub mod gate_check;
 /// Built-in gate kinds: what gates shelled out for most, answered by st itself.

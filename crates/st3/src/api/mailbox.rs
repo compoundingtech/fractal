@@ -891,6 +891,15 @@ async fn stream_with_timers_inner<F, S, H>(
             subscription.messages(&subjects);
             // Held mail stays admitted to this stream, so the next waking message releases it
             // without another read; until then the seat is offered none of it.
+            let currency_store = state.store.clone();
+            let messages = match blocking_store(move || {
+                crate::silent::refresh_notes(&currency_store, &mut messages)?;
+                Ok(messages)
+            }).await {
+                Ok(messages) => messages,
+                Err(_) => return,
+            };
+            let mut messages = messages;
             crate::silent::release(&mut messages);
             let bytes = serde_json::to_vec(&messages).unwrap_or_default();
             if fence.component == "delivery" && bytes != previous_mailbox {

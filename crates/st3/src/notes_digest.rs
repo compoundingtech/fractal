@@ -257,4 +257,28 @@ mod tests {
         assert!(!emit_for_incarnation(&store, AGENT, "first").unwrap());
         assert!(store.messages(Some(AGENT), true).unwrap().is_empty());
     }
+
+    #[test]
+    fn session_end_removes_context_and_records_the_empty_set_once() {
+        let store = enabled_store();
+        let runtime = |status: &str| {
+            store.append_claim(&ClaimInput {
+                subject: AGENT.into(), kind: "runtime.observed".into(), actor: None,
+                fields: serde_json::from_value(json!({"status":status,"runtime_id":"reader",
+                    "host":"example","terminal":true,"incarnation_id":"first"})).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        runtime("running");
+        store.set_subject_note(NOTE_ID, "person/example", AGENT, Some("This session"),
+            "agent", Some("first"), None).unwrap();
+        assert!(emit_for_incarnation(&store, AGENT, "first").unwrap());
+        runtime("exited");
+        assert!(current_notes(&store, AGENT).unwrap().is_empty());
+        assert!(reconcile_agent(&store, AGENT).unwrap().0);
+        assert!(!reconcile_agent(&store, AGENT).unwrap().0);
+        let mut messages = store.messages(Some(AGENT), true).unwrap();
+        crate::silent::refresh_notes(&store, &mut messages).unwrap();
+        assert!(messages.is_empty());
+    }
 }
