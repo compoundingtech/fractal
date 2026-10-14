@@ -6718,7 +6718,11 @@ fn dump(args: &[String]) -> Result<()> {
 /// A stored document: its name, then its text as Markdown.
 fn document_detail(name: &str, text: Option<&Load<String>>, width: usize) -> Doc {
     let mut doc = Doc::new();
-    doc.field("Document", name, width, theme::fg(theme::TEXT));
+    let (title, version) = name.rsplit_once('@').unwrap_or((name, ""));
+    doc.field("Document", title.trim_start_matches("doc/"), width, theme::fg(theme::TEXT));
+    if !version.is_empty() {
+        doc.field("Version", &version[..version.len().min(12)], width, theme::fg(theme::OVERLAY1));
+    }
     doc.blank();
     match text {
         Some(Load::Ready(text)) => doc.lines(text::markdown(text, width, theme::fg(theme::TEXT))),

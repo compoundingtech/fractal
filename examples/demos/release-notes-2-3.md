@@ -2,8 +2,7 @@
 
 ## New
 
-- **Rainfall chart.** Each station's dashboard shows the last 30 days of rainfall, in inches,
-  behind the `new-charts` flag.
+- **Rainfall chart.** Each station's dashboard shows the last 30 days of rainfall, in inches, behind the `new-charts` flag.
 - Stations that miss three readings in a row show a grey dot instead of a stale value.
 
 ## Fixed
