@@ -6694,6 +6694,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         st3::otel::Unit::Daemon,
         Some(if state_identity.is_ok() { &config.node } else { &configured_node }),
     );
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    st3::malloc_trim::spawn()?;
     let startup_telemetry =
         st3::startup_telemetry::StartupTelemetry::begin_at(identity_started, startup_started);
     startup_telemetry.node_identity(
