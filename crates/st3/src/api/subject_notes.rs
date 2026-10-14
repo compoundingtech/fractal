@@ -10,6 +10,13 @@ fn reader(session: &client_v0::ClientSession, write: bool) -> Result<&str, ApiEr
     Ok(actor)
 }
 
+fn validate_audience(actor: &str, audience: &str) -> Result<(), St3Error> {
+    if actor.starts_with("agent/") && audience != "agent" {
+        return Err(St3Error::new("note-forbidden", "agents write audience agent only; self notes are a person's private reminders"));
+    }
+    Ok(())
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NoteQuery {
@@ -61,8 +68,9 @@ pub(super) async fn create(
     Json(input): Json<NoteCreate>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = reader(&session, true)?.to_owned();
+    validate_audience(&actor, &input.audience).map_err(ApiError::bad)?;
     let id = format!("note/{actor}/{}", uuid::Uuid::now_v7());
-    let note = blocking_action(move || {
+    let (id, note) = blocking_action(move || {
         if state.store.latest_claim(&input.target, None).map_err(|error| St3Error::new("internal", error.to_string()))?.is_none() {
             return Err(St3Error::new("note-target-access", "note target is absent"));
         }
@@ -79,9 +87,9 @@ pub(super) async fn create(
         }
         }
         signal_changed(&state);
-        Ok(note)
+        Ok((id, note))
     }).await?;
-    Ok(Json(json!({"note": note})))
+    Ok(Json(json!({"id": id, "note": note})))
 }
 
 pub(super) async fn update(
@@ -105,24 +113,31 @@ pub(super) async fn update(
             return Err(ApiError::bad(St3Error::new("invalid-subject-note", format!("invalid {field}"))));
         }
     }
-    let note = blocking_action(move || {
-        let previous = state.store.subject_note(&id, &actor)?
-            .ok_or_else(|| St3Error::new("subject-note-not-found", "note is absent or not readable"))?;
+    let (id, note) = blocking_action(move || {
+        // Authorship was checked before this lookup. Retain write access to expired and
+        // archived revisions without exposing a private revision through a read surface.
+        let previous = state.store.latest_claim(&id, Some(st3_schema::subject_notes::KIND))
+            .map_err(|error| St3Error::new("internal", error.to_string()))?
+            .ok_or_else(|| St3Error::new("subject-note-not-found", "note is absent"))?;
+        let old = previous.body.get("fields").ok_or_else(|| St3Error::new("internal", "note revision has no fields"))?;
+        let target = old.get("target").and_then(Value::as_str).ok_or_else(|| St3Error::new("internal", "note revision has no target"))?;
+        let old_audience = old.get("audience").and_then(Value::as_str).ok_or_else(|| St3Error::new("internal", "note revision has no audience"))?;
         let fields = input.as_object().expect("validated update object");
-        let audience = fields.get("audience").and_then(Value::as_str).unwrap_or(&previous.audience);
-        let session = fields.get("session").map_or(previous.session.as_deref(), Value::as_str);
-        let expiry = fields.get("expires_at").map_or(previous.expires_at.as_deref(), Value::as_str);
-        let text = fields.get("text").map_or(Some(previous.text.as_str()), Value::as_str);
-        let note = state.store.set_subject_note(&id, &actor, &previous.target, text, audience, session, expiry)?;
-        if audience == "agent" || previous.audience == "agent" {
-        for agent in state.store.subject_note_agents(&previous.target).map_err(|error| St3Error::new("internal", error.to_string()))? {
+        let audience = fields.get("audience").and_then(Value::as_str).unwrap_or(old_audience);
+        validate_audience(&actor, audience)?;
+        let session = fields.get("session").map_or_else(|| old.get("session").and_then(Value::as_str), Value::as_str);
+        let expiry = fields.get("expires_at").map_or_else(|| old.get("expires_at").and_then(Value::as_str), Value::as_str);
+        let text = fields.get("text").map_or_else(|| old.get("text").and_then(Value::as_str), Value::as_str);
+        let note = state.store.set_subject_note(&id, &actor, target, text, audience, session, expiry)?;
+        if audience == "agent" || old_audience == "agent" {
+        for agent in state.store.subject_note_agents(target).map_err(|error| St3Error::new("internal", error.to_string()))? {
             crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| St3Error::new("internal", error.to_string()))?;
         }
         }
         signal_changed(&state);
-        Ok(note)
+        Ok((id, note))
     }).await?;
-    Ok(Json(json!({"note": note})))
+    Ok(Json(json!({"id": id, "note": note})))
 }
 
 #[cfg(test)]
@@ -179,6 +194,7 @@ mod tests {
         let (status, created) = call(&state, "POST", "/v1/subject-notes", "person/example",
             json!({"target":"agent/example/worker","text":"private reminder"})).await;
         assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(created["value"]["id"], created["value"]["note"]["id"]);
         let id = created["value"]["note"]["id"].as_str().unwrap();
         let (status, agent) = call(&state, "GET", "/v1/client/subject-notes", "agent/example/worker", Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{agent}");
@@ -193,5 +209,17 @@ mod tests {
         let (status, archived) = call(&state, "PUT", &path, "person/example", json!({"text":null})).await;
         assert_eq!(status, StatusCode::OK, "{archived}");
         assert!(archived["value"]["note"].is_null());
+        assert_eq!(archived["value"]["id"], id);
+        let (status, rejected) = call(&state, "POST", "/v1/subject-notes", "agent/example/worker",
+            json!({"target":"agent/example/worker","text":"not private","audience":"self"})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{rejected}");
+        let (status, expired) = call(&state, "POST", "/v1/subject-notes", "person/example",
+            json!({"target":"agent/example/worker","text":"past reminder","expires_at":"2000-01-01T00:00:00Z"})).await;
+        assert_eq!(status, StatusCode::OK, "{expired}");
+        assert!(expired["value"]["note"].is_null());
+        let expired_id = expired["value"]["id"].as_str().unwrap();
+        let (status, archived) = call(&state, "PUT", &format!("/v1/subject-notes/{}", urlencoding::encode(expired_id)),
+            "person/example", json!({"text":null})).await;
+        assert_eq!(status, StatusCode::OK, "{archived}");
     }
 }

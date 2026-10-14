@@ -33,7 +33,8 @@ test('subject notes use rich open audiences and nullable archive patches', async
     const patch = { text: null, session: null };
     assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')(patch)), patch);
     assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteUpdate)(Rich.decodeUnknownSync(Rich.SubjectNoteUpdate, 'strict')({})), {});
-    assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteResult)(Rich.decodeUnknownSync(Rich.SubjectNoteResult, 'strict')({ note: null })), { note: null });
+    const archived = { id: wire.notes[0].id, note: null };
+    assert.deepEqual(Schema.encodeSync(Rich.SubjectNoteResult)(Rich.decodeUnknownSync(Rich.SubjectNoteResult, 'strict')(archived)), archived);
     const row = { ...wire.notes[0], kind: 'note' };
     const resource = Rich.decodeUnknownSync(Rich.Resource)(row);
     assert.equal(resource.kind, 'note');

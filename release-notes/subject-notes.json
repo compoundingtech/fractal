@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Only the encoded author writes a note. Self notes are readable only by their person author, never by agents. Agent-audience notes are readable by persons, their author and current resolved agents. Agent authors may target themselves or assigned mission/step runs. Daemon-origin digests inform and never assign work or grant authority."
+    "detail": "Only the encoded author writes a note. Self notes are readable only by their person author, never by agents. Agent-audience notes are readable by persons, their author and current resolved agents. Local API admission allows agent authors to write audience agent only and target themselves or assigned mission/step runs. Daemon-origin digests inform and never assign work or grant authority."
   },
   "compatibility": {
     "status": "changed",

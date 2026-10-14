@@ -8,9 +8,9 @@ use st3::client::{Client, Endpoint};
 use st3::store::directive_notes::DirectiveNote;
 
 #[derive(Args)]
-#[command(after_help = "Notes are explicit reads only: no launch delivery, notifications or UI. Only a person can set or clear their own note. Notes never assign work, approve a gate or grant authority.")]
+#[command(after_help = "Without a subcommand, read person directive notes; set and clear remain person-only. Add, ls and archive manage subject notes. --for me is private; --for agent also delivers non-waking agent context. Notes never assign work, approve a gate or grant authority.")]
 pub(super) struct NoteArgs {
-    /// Read as this person or agent; defaults to the harness identity, else configured person.
+    /// Act as this person or agent; defaults to the harness identity, else configured person.
     #[arg(long, global = true, value_parser = super::parse_actor_subject)]
     actor: Option<String>,
     #[command(subcommand)]
@@ -32,8 +32,9 @@ enum NoteCommand {
     Add {
         target: String,
         text: String,
-        #[arg(long = "for", default_value = "me", value_parser = ["me", "agent"])]
-        audience: String,
+        /// Audience defaults to me for a person and agent for an agent.
+        #[arg(long = "for", value_parser = ["me", "agent"])]
+        audience: Option<String>,
         #[arg(long)]
         session: Option<String>,
         #[arg(long)]
@@ -124,16 +125,25 @@ pub(super) async fn run(
     Ok(())
 }
 
+fn subject_audience(actor: &str, requested: Option<&str>) -> &'static str {
+    match requested {
+        Some("me") => "self",
+        Some("agent") => "agent",
+        _ if actor.starts_with("agent/") => "agent",
+        _ => "self",
+    }
+}
+
 async fn run_subject_note(client: &Client, actor: &str, command: NoteCommand, json_output: bool) -> Result<()> {
     match command {
         NoteCommand::Add { target, text, audience, session, expires_at } => {
             let response: serde_json::Value = client.post("/v1/subject-notes", &json!({
                 "target": target, "text": text,
-                "audience": if audience == "me" { "self" } else { "agent" },
+                "audience": subject_audience(actor, audience.as_deref()),
                 "session": session, "expires_at": expires_at,
             })).await.context("could not add subject note")?;
             if json_output { return super::print_value(&response, true); }
-            println!("{}", response["note"]["id"].as_str().unwrap_or("Note added."));
+            println!("{}", response["id"].as_str().context("note response has no id")?);
         }
         NoteCommand::Ls { target } => {
             let query = target.map_or_else(
@@ -197,7 +207,7 @@ mod tests {
         let Some(NoteCommand::Add { target, text, audience, session, .. }) = args.command else { panic!("expected add") };
         assert_eq!(target, "agent/example/worker");
         assert_eq!(text, "short context");
-        assert_eq!(audience, "agent");
+        assert_eq!(audience.as_deref(), Some("agent"));
         assert_eq!(session.as_deref(), Some("current"));
         for argv in [
             vec!["st", "note", "ls"],
@@ -206,6 +216,9 @@ mod tests {
         ] {
             assert!(super::super::Cli::try_parse_from(argv).is_ok());
         }
+        assert_eq!(subject_audience("person/example", None), "self");
+        assert_eq!(subject_audience("agent/example/worker", None), "agent");
+        assert_eq!(subject_audience("agent/example/worker", Some("me")), "self");
     }
 
     #[tokio::test]
@@ -243,7 +256,7 @@ mod tests {
         listening.await.unwrap();
         let client = Client::unix_as(&socket, "person/example").unwrap();
         run_subject_note(&client, "person/example", NoteCommand::Add {
-            target: "agent/example/worker".into(), text: "Remember the context".into(), audience: "agent".into(),
+            target: "agent/example/worker".into(), text: "Remember the context".into(), audience: Some("agent".into()),
             session: None, expires_at: None,
         }, true).await.unwrap();
         let notes = store.list_subject_notes(None, Some("person/example"), "person/example").unwrap();

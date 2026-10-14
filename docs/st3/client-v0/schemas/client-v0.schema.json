@@ -32,7 +32,7 @@
       }
     },
     "SubjectNotes": {"type": "object", "additionalProperties": false, "required": ["notes"], "properties": {"notes": {"type": "array", "items": {"$ref": "#/$defs/SubjectNote"}}}},
-    "SubjectNoteResult": {"type": "object", "additionalProperties": false, "required": ["note"], "properties": {"note": {"oneOf": [{"$ref": "#/$defs/SubjectNote"}, {"type": "null"}]}}},
+    "SubjectNoteResult": {"type": "object", "additionalProperties": false, "required": ["id", "note"], "properties": {"id": {"type": "string", "pattern": "^note/"}, "note": {"oneOf": [{"$ref": "#/$defs/SubjectNote"}, {"type": "null"}]}}},
     "SubjectNoteCreate": {
       "type": "object", "additionalProperties": false, "required": ["target", "text"],
       "properties": {

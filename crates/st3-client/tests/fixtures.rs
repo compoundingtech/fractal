@@ -72,8 +72,9 @@ fn subject_note_updates_preserve_omitted_fields_and_send_explicit_nulls() {
     assert_eq!(patch.session, Some(None));
     assert_eq!(patch.expires_at, None);
     assert_eq!(serde_json::to_value(patch).unwrap(), serde_json::json!({"text":null,"session":null}));
-    let archived: SubjectNoteResult = serde_json::from_value(serde_json::json!({"note":null})).unwrap();
-    assert!(archived.note.is_none());
+    let archived: Envelope<SubjectNoteResult> = decode("subject-note-archive.json");
+    assert!(archived.value.note.is_none());
+    assert_eq!(archived.value.id, "note/person/ada/019a0000-0000-7000-8000-000000000001");
     let empty: SubjectNotes = serde_json::from_value(serde_json::json!({"notes":[]})).unwrap();
     assert!(empty.notes.is_empty());
 }

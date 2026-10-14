@@ -90,7 +90,7 @@ Wire shape (client-v0, generated into Rust, TypeScript and Swift):
 | Actor | May create notes on | May edit or archive |
 |---|---|---|
 | `person/example` | any target it can read | own notes |
-| `agent/<org>/<name>` | itself; mission runs and step runs it is assigned to | own notes |
+| `agent/<org>/<name>` | itself; mission runs and step runs it is assigned to; agents write audience `agent` only | own notes |
 
 The new `SubjectEncodedAuthor` write policy requires the claim actor to equal
 the author encoded in the note subject. This rule is stateless, analogous to
@@ -100,6 +100,9 @@ the author encoded in the note subject. This rule is stateless, analogous to
 Target access and agent assignment restrictions require graph state and are
 enforced only at local API admission. Replicated admission does not enforce
 these restrictions; see `DQ8`.
+Local API admission also rejects `self`-audience writes by agent authors.
+Self notes are a person's private reminders; agent-authored notes stay visible
+to persons. The schema retains an open audience enum.
 
 ### Read access
 
@@ -138,6 +141,10 @@ incarnation; incarnation-id equality alone is not sufficient.
 | `subject-notes.update` | `PUT /v1/subject-notes/{id}` | updated note; `text: null` archives |
 | collection stream | `notes` window on the existing st3-feed collection socket | inserts, updates and removals |
 
+Create and update responses include the stable note `id` even when the
+`note` is null because it is archived or no longer current. An author can
+archive an expired note without making its text readable to other actors.
+
 Clients subscribe to the `notes` window and derive counts and newest-note
 previews from it. Agent and mission collection rows have no note fields.
 
@@ -156,8 +163,8 @@ st note                       # unchanged: person directive notes
 st note set|clear             # unchanged: person directive notes
 ```
 
-`--for` defaults to `me` (DQ3). `--session current` resolves the target
-agent's current incarnation.
+`--for` defaults to `me` for a person and `agent` for an agent (DQ3/DQ9).
+`--session current` resolves the target agent's current incarnation.
 
 ## Agent context delivery
 
@@ -262,3 +269,6 @@ A note kind registration includes:
   agent target/assignment restrictions too? This requires
   `AuthorizedParticipant` with ownership evidence; the draft enforces these
   graph-state restrictions only at local API admission.
+- **DQ9 Agent privacy:** Should agents get a private `self` audience? The
+  prototype rejects agent-authored `self` notes at local API admission; agents
+  write `agent` audience only, while the schema remains open.

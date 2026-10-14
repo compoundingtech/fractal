@@ -52,12 +52,14 @@ test('subject notes reads encode target and author and writes preserve omitted v
         fetchImpl: async (url, init) => {
             calls.push([String(url), init]);
             if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
-            return response(init.method === 'PUT' ? archived : wire);
+            return response(init.method === 'GET' ? wire : archived);
         },
     });
     assert.deepEqual(await client.subjectNotesList('agent/example/reviewer'), wire);
     assert.deepEqual(await client.subjectNotesMine('person/ada'), wire);
-    await client.subjectNotesCreate({ target: 'mission/example', text: 'Inform, never assign.' });
+    const created = await client.subjectNotesCreate({ target: 'mission/example', text: 'Inform, never assign.' });
+    assert.deepEqual(created, archived);
+    assert.equal(created.value.id, wire.value.notes[0].id, 'even non-current creates return their stable note id');
     assert.deepEqual(await client.subjectNotesUpdate(wire.value.notes[0].id, { text: null, session: null }), archived);
     const reads = calls.filter(([, init]) => init.method === 'GET');
     assert.equal(reads[1][0], 'https://example.test/v1/client/subject-notes?target=agent%2Fexample%2Freviewer');

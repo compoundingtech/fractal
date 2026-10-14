@@ -74,6 +74,7 @@ pub struct SubjectNotes {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SubjectNoteResult {
+    pub id: String,
     pub note: Option<SubjectNote>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -55,8 +55,9 @@ final class St3ClientTests: XCTestCase {
         XCTAssertNil(patch.expiresAt)
         XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONEncoder().encode(patch)) as? NSDictionary,
             try JSONSerialization.jsonObject(with: wire) as? NSDictionary)
-        let archive = try JSONDecoder().decode(SubjectNoteResult.self, from: Data(#"{"note":null}"#.utf8))
+        let archive = try JSONDecoder().decode(SubjectNoteResult.self, from: Data(#"{"id":"note/person/ada/019a0000-0000-7000-8000-000000000001","note":null}"#.utf8))
         XCTAssertNil(archive.note)
+        XCTAssertEqual(archive.id, "note/person/ada/019a0000-0000-7000-8000-000000000001")
         let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(archive)) as? [String: Any])
         XCTAssertTrue(encoded["note"] is NSNull)
     }
