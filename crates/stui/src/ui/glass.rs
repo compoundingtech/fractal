@@ -4756,10 +4756,11 @@ mod tests {
     #[test]
     fn the_strip_keeps_still_until_the_front_tab_passes_its_end() {
         let widths = [10u16; 8];
-        // Room for three tabs and a marker: 3 × 11 + 4 = 37.
+        // Room for three tabs and a marker: 3 × 11 + 4 = 37. In the middle both ends need a
+        // marker (8 cells), so only two tabs fit.
         assert_eq!(visible_tabs(&widths, 0, 37), (0, 2));
         assert_eq!(visible_tabs(&widths, 2, 37), (0, 2));
-        assert_eq!(visible_tabs(&widths, 3, 37), (1, 3));
+        assert_eq!(visible_tabs(&widths, 3, 37), (2, 3));
         assert_eq!(visible_tabs(&widths, 7, 37), (5, 7));
         // Everything fits: no scrolling.
         assert_eq!(visible_tabs(&widths, 7, 200), (0, 7));
