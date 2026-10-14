@@ -603,7 +603,8 @@ pub(crate) fn status_source(claim: &ClaimRecord) -> bool {
         && seat_status::history_source(claim)
 }
 
-/// The claim IDs a claim cites as evidence, or pins as a mission run's input. Those claims are
+/// The claim IDs a claim cites as evidence, pins as a mission run's input, or references as a
+/// review record (binding, withdrawal, verdict, attempt relation, predecessors). Those claims are
 /// read by their IDs, so they stay.
 pub(crate) fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
     let body = &claim.body;
@@ -619,13 +620,13 @@ pub(crate) fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
         .into_iter()
         .flat_map(|inputs| inputs.values())
         .filter_map(|input| input.get("claim_id").and_then(Value::as_str));
-    evidence.chain(inputs)
-        .chain(st3_schema::review::claim_references(&claim.kind, body))
-        .chain(
-            st3_schema::review::KINDS.contains(&claim.kind.as_str())
-                .then_some(claim.predecessors.iter().map(String::as_str))
-                .into_iter().flatten(),
-        )
+    let review = st3_schema::review::claim_references(&claim.kind, body);
+    let predecessors = st3_schema::review::KINDS
+        .contains(&claim.kind.as_str())
+        .then_some(claim.predecessors.iter().map(String::as_str))
+        .into_iter()
+        .flatten();
+    evidence.chain(inputs).chain(review).chain(predecessors)
 }
 
 /// Whether claims of `kind` are never dropped, because their validation reads them: a kind that
