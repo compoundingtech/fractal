@@ -7739,9 +7739,9 @@ impl Store {
                AND json_extract(body, '$.evidence[0]')=?2
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
         ))?.query_row(params![seat, message, incarnation], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }).optional()?;
-        row.map(|(body, at)| Ok((serde_json::from_str(&body)?, at as u128))).transpose()
+        row.map(|(body, at)| Ok((serde_json::from_str(&body)?, at.parse()?))).transpose()
     }
 
     pub fn next_active_mission_deadline(&self, origin: &str) -> Result<Option<u128>> {
