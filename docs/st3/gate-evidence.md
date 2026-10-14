@@ -294,6 +294,22 @@ runs, and a replay of one reports "nothing to attest" instead of failing. The ob
 is about 20 MB (the base64 object pack), so the script streams it to a file. The same code
 serves a degraded profile (no key) and a full one; the operator's profile decides.
 
+The same script runs outside GitHub Actions, for a timer on an operator host:
+
+```
+python3 scripts/ci-evidence-observe --poll --publish --checkout CHECKOUT_OF_MAIN \
+  --keys-from origin/main --state-dir /var/lib/evidence-observe
+python3 scripts/ci-evidence-observe --run RUN_ID --publish --checkout CHECKOUT_OF_MAIN   # one run
+```
+
+`--poll` lists the last `--limit` (20) completed merge-group `Workspace CI` runs, skips cancelled
+or skipped ones and runs already done, observes the rest and records each in
+`STATE_DIR/observed.jsonl`; a run that fails three times is marked `gave_up` and never retried
+(loop protection). `--run` takes the run id alone (the attempt is read from GitHub). Environment:
+`EVIDENCE_OBSERVER` (observer argument vector as JSON), `GH_TOKEN` or the operator's own `gh` login
+for GitHub reads and the push, and the observer's own `HOME` for its private configuration. State
+(`scratch.git`, `observed.jsonl`) lives in `--state-dir` (default `~/.local/state/evidence-observe`).
+
 The server rejects a shallow push, and the pack carries the source commit without its history, so
 the script first fetches the source's missing parents from the repository. Run
 `python3 scripts/ci-evidence-observe-test` for the cases (signature verified, verifier refusal,
