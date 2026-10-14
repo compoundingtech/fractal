@@ -11271,8 +11271,7 @@ async fn dispatch_action(
             let parameters: st3_client::AgentRestartParameters =
                 serde_json::from_value(p.clone())
                     .map_err(|error| validation(error.to_string()))?;
-            let incarnation_id = request.fence.runtime_incarnation.clone()
-                .ok_or_else(|| validation("agent.restart requires runtime_incarnation"))?;
+            let incarnation_id = request.fence.runtime_incarnation.clone().unwrap_or_default();
             let agent = client_detail_id("agent", &parameters.agent);
             request_agent_restart(state, AgentRestartRequest {
                 subject: agent.clone(),
@@ -15330,6 +15329,32 @@ subscription "watch/source" {
             .0;
             assert_eq!(retry["affected_ids"], result["affected_ids"]);
         }
+    }
+
+    #[tokio::test]
+    async fn typed_restart_without_an_incarnation_accepts_a_keyless_seat() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = "version 2\nagent \"example/restart\" { workspace \"/tmp\"; harness \"codex\"; restart \"never\" }\n";
+        let intent = crate::graph::parse_intent(source, &state.node).unwrap();
+        let preview = state.store.mission(&intent, IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply(&intent, &preview.subject_tokens, "keyless-fixture").unwrap();
+        let snapshot = new_client_snapshot(&state);
+        let request = st3_client::ActionRequest::agent_restart(
+            "action/keyless-restart", "keyless-restart-key",
+            st3_client::Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
+            st3_client::AgentRestartParameters {
+                agent: "agent/example/restart".into(), fresh_context: false,
+            },
+        ).unwrap();
+        let request: ActionRequest = serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+        let result = action(State(state.clone()), Extension(snapshot),
+            Extension(ClientSession::local(Some("person/alex")).unwrap()), Json(request)).await.unwrap().0;
+        assert_eq!(result["status"], "completed");
+        let claim = state.store.latest_claim("agent/example/restart", Some("runtime.action.requested")).unwrap().unwrap();
+        assert_eq!(claim.body["fields"]["incarnation_id"], "");
     }
 
     #[tokio::test]

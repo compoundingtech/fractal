@@ -14213,7 +14213,7 @@ async fn run_agents(
                 .map(|actual| actual.get("fields").unwrap_or(actual))
                 .and_then(|fields| fields.get("incarnation_id"))
                 .and_then(Value::as_str)
-                .context("the seat has no runtime incarnation to restart")?;
+                .unwrap_or("");
             let request: ClaimRecord = client
                 .post(
                     "/v1/agents/restart",
