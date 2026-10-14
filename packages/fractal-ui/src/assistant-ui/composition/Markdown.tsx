@@ -26,7 +26,12 @@ export type MarkdownImageResolution = { readonly _tag: 'Load'; readonly src: str
 export type MarkdownImageResolver = (src: string) => MarkdownImageResolution
 /** Host handoff for a deferred image. When set, the placeholder action calls it instead of loading the image inline. */
 export type MarkdownImageOpener = (src: string) => void
-export interface MarkdownImageOptions { readonly resolveImage?: MarkdownImageResolver; readonly onLoadImage?: MarkdownImageOpener }
+export interface MarkdownImageOptions {
+  readonly resolveImage?: MarkdownImageResolver
+  readonly onLoadImage?: MarkdownImageOpener
+  /** A host's own inline references (for example `doc/…` names), for every Markdown below it. */
+  readonly renderInlineReference?: InlineReferenceRenderer
+}
 const NO_IMAGE_OPTIONS: MarkdownImageOptions = {}
 export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_IMAGE_OPTIONS)
 export interface MarkdownProps { text: string; streaming?: boolean; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
@@ -54,7 +59,7 @@ function markStreamingTail() {
 
 export const Markdown = React.memo(function Markdown({ text, streaming = false, resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
   const inherited = React.useContext(MarkdownImagePolicy)
-  const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
+  const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference: renderInlineReference ?? inherited.renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
   const source = React.useMemo(() => streaming ? completeStreamingTail(text) : text, [text, streaming])
   return <ReferenceContext.Provider value={references}><div data-testid="markdown" {...stylex.props(styles.markdown)}><ReactMarkdown skipHtml urlTransform={(url, key) => key === 'src' ? url : defaultUrlTransform(url)} remarkPlugins={REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div></ReferenceContext.Provider>
 })
