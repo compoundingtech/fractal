@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "summary": "The published summary reads its machines again only when a claim can change them, not on every commit, cutting most of the daemon CPU its refreshes spend",
+  "summary": "The published summary reads its machines again only when a claim can change them, not on every commit: a runtime observation reduces that runtime alone, and the machines are read again only when the set of hosts running runtimes changes",
   "replay": {
     "status": "none",
     "detail": "No claim is added or changed, and every claim replays unchanged. The change is to when an in-memory published view rereads its machines."
   },
   "schema": {
     "status": "none",
-    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. The new read uses the existing runtime-subject index, one seek per claim since the machines were read."
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. The new read uses the existing runtime-subject index, two seeks per claim since the machines were read, and reduces at most 64 changed runtimes through the existing status reduction."
   },
   "rules": {
     "status": "none",

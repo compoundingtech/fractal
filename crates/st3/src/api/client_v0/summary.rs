@@ -340,9 +340,11 @@ pub(in crate::api) fn refresh_published(
 }
 
 /// The machines the shared counts count at `snapshot`: the ones read before while they still
-/// hold (`Store::summary_machines_hold`), else read again. They are read again each clock
-/// `period` too, since a peer's replication successes change them with no claim, as do a new
-/// conflicting operation and the fleet's membership, compared each time.
+/// hold (`Store::summary_machines_hold`), else read again. A runtime with claims since is reduced
+/// again alone: the machines hold while the current runtimes run on the same hosts as before,
+/// whichever runtimes those are. They are read again each clock `period` too, since a peer's replication
+/// successes change them with no claim, as do a new conflicting operation and the fleet's
+/// membership, compared each time.
 pub(in crate::api) fn published_machines(
     state: &AppState,
     generation: u64,
@@ -357,13 +359,46 @@ pub(in crate::api) fn published_machines(
     let held = store.summary_machines().filter(|held| {
         held.period == period && held.conflicts == conflicts && held.fleet == fleet
     });
-    let machines = match held {
-        Some(held) if store.summary_machines_hold(held.cut, index)? => held.machines,
-        _ => Arc::new(machine_summary_resources(state, snapshot, session)?),
+    let kept = match held {
+        Some(held) => match store.summary_machines_hold(held.cut, index)? {
+            Some(changed) if changed.is_empty() => Some((held.machines, held.runtimes)),
+            Some(changed) => {
+                let status = store.status_for_subject_names_at(changed.clone(), index, false)?;
+                let hosts = runtime_resources_from_status(state, snapshot, session, status)?
+                    .into_iter()
+                    .filter_map(|runtime| {
+                        Some((
+                            runtime["owner_id"].as_str()?.to_owned(),
+                            runtime["owner_host_id"].as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let mut runtimes = (*held.runtimes).clone();
+                for runtime in changed {
+                    match hosts.get(&runtime) {
+                        Some(host) => runtimes.insert(runtime, host.clone()),
+                        None => runtimes.remove(&runtime),
+                    };
+                }
+                // The machines are the same hosts while the runtimes' hosts are.
+                (held.runtimes.values().collect::<BTreeSet<_>>()
+                    == runtimes.values().collect::<BTreeSet<_>>())
+                .then(|| (held.machines, Arc::new(runtimes)))
+            }
+            None => None,
+        },
+        None => None,
+    };
+    let (machines, runtimes) = match kept {
+        Some(kept) => kept,
+        None => {
+            let (machines, runtimes) = machine_summary_resources_and_hosts(state, snapshot, session)?;
+            (Arc::new(machines), Arc::new(runtimes))
+        }
     };
     store.keep_summary_machines(
         generation,
-        SummaryMachines { cut: index, period, conflicts, fleet, machines: machines.clone() },
+        SummaryMachines { cut: index, period, conflicts, fleet, machines: machines.clone(), runtimes },
     );
     Ok(machines)
 }

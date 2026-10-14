@@ -20,6 +20,10 @@ const SELECTIONS: usize = 64;
 /// More claims than this since the machines were read reads them again rather than every claim.
 const MACHINES_DELTA_LIMIT: usize = 10_000;
 
+/// More runtimes than this with claims since the machines were read reads them again rather
+/// than reducing each of them.
+const MACHINES_RUNTIMES_LIMIT: usize = 64;
+
 /// One selection's published row.
 #[derive(Clone)]
 pub(crate) struct SummaryRow {
@@ -52,7 +56,9 @@ pub(crate) struct SummaryInputs {
 }
 
 /// The machines the shared counts were counted from and what they were read under: the graph
-/// cut, the clock period, the count of conflicting operations and the fleet's membership.
+/// cut, the clock period, the count of conflicting operations and the fleet's membership. Kept
+/// past their cut, the machines' hosts, states and transports still hold; their runtimes, work
+/// and update times may not, and the counts read none of those.
 #[derive(Clone)]
 pub(crate) struct SummaryMachines {
     pub(crate) cut: u64,
@@ -60,6 +66,8 @@ pub(crate) struct SummaryMachines {
     pub(crate) conflicts: u64,
     pub(crate) fleet: smallclaims::fleet::FleetView,
     pub(crate) machines: Arc<Vec<Value>>,
+    /// The host each current runtime runs on, by runtime subject.
+    pub(crate) runtimes: Arc<BTreeMap<String, String>>,
 }
 
 #[derive(Default)]
@@ -291,47 +299,72 @@ impl Store {
             .query_row([], |row| row.get(0))?)
     }
 
-    /// Whether the machines read at `after` still hold at `through`, read in the snapshot at
-    /// `through`: no claim admitted between them can change one. A machine is a configured,
-    /// fleet or current runtime's host with that host's own status. A runtime is a subject with
-    /// a runtime observation; whether it is current, and where it runs, come from its claims
-    /// other than its harness reports, from a harness report with a live status
-    /// (`CURRENT_VIEW_CLAIM`), and from the claims about the run and generation that own it. So
-    /// only claims about hosts, runtimes, runs and generations change machines; the rest, most
-    /// of a busy host's claims (harness reports, messages, lease renewals, documents), cannot.
-    /// Conflicting operations, fleet membership and replication successes change machines
-    /// without a claim: the caller compares those.
-    pub(crate) fn summary_machines_hold(&self, after: u64, through: u64) -> Result<bool> {
+    /// Whether the machines read at `after` may still hold at `through`, read in the snapshot at
+    /// `through`: `None` when a claim admitted between them may change one, else the runtimes
+    /// whose claims did, which may have started, stopped or moved to another host. A machine is
+    /// a configured, fleet or current runtime's host with that host's own status. A runtime is a
+    /// subject with a runtime observation; whether it is current, and where it runs, come from
+    /// the claims about it or that it acted in, other than its harness reports without a live
+    /// status (`CURRENT_VIEW_CLAIM`), and from the claims about the run and generation that own
+    /// it. So only claims about hosts, runs and generations change machines, and claims about
+    /// runtimes change only those runtimes; the rest, most of a busy host's claims (harness
+    /// reports, messages, documents), change none. Conflicting operations, fleet membership and
+    /// replication successes change machines without a claim: the caller compares those.
+    pub(crate) fn summary_machines_hold(
+        &self,
+        after: u64,
+        through: u64,
+    ) -> Result<Option<BTreeSet<String>>> {
         if through < after {
-            return Ok(false);
+            return Ok(None);
         }
         let connection = self.readers.get();
+        let runtime = |of: &str| {
+            format!(
+                "EXISTS(SELECT 1 FROM claims AS runtime INDEXED BY claims_runtime_subject_index
+                        WHERE runtime.kind='runtime.observed' AND runtime.subject=claims.{of}
+                          AND runtime.store_index<=?2)"
+            )
+        };
         let mut statement = connection.prepare_cached(&format!(
-            "SELECT subject, kind, {CURRENT_VIEW_CLAIM},
-                    EXISTS(SELECT 1 FROM claims AS runtime INDEXED BY claims_runtime_subject_index
-                           WHERE runtime.kind='runtime.observed' AND runtime.subject=claims.subject
-                             AND runtime.store_index<=?2)
-             FROM claims WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3"
+            "SELECT subject, actor, kind, {CURRENT_VIEW_CLAIM}, {}, {}
+             FROM claims WHERE store_index>?1 AND store_index<=?2 ORDER BY store_index LIMIT ?3",
+            runtime("subject"),
+            runtime("actor"),
         ))?;
         let claims = statement
             .query_map(params![after, through, MACHINES_DELTA_LIMIT as u64 + 1], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<bool>>(2)?.unwrap_or(false),
-                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<bool>>(3)?.unwrap_or(false),
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, Option<bool>>(5)?.unwrap_or(false),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if claims.len() > MACHINES_DELTA_LIMIT {
-            return Ok(false);
+            return Ok(None);
         }
-        Ok(!claims.iter().any(|(subject, kind, live, runtime)| {
-            subject.starts_with("host/")
+        let mut runtimes = BTreeSet::new();
+        for (subject, actor, kind, live, subject_runtime, actor_runtime) in claims {
+            if subject.starts_with("host/")
                 || subject.starts_with("mission-run/")
                 || subject.starts_with("run-generation/")
-                || kind == "runtime.observed"
-                || (*runtime || runtime_subject(subject)) && (!kind.starts_with("harness.") || *live)
-        }))
+            {
+                return Ok(None);
+            }
+            if kind.starts_with("harness.") && !live {
+                continue;
+            }
+            if subject_runtime {
+                runtimes.insert(subject);
+            }
+            if actor_runtime && let Some(actor) = actor {
+                runtimes.insert(actor);
+            }
+        }
+        Ok((runtimes.len() <= MACHINES_RUNTIMES_LIMIT).then_some(runtimes))
     }
 }
