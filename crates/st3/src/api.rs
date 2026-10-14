@@ -92,6 +92,13 @@ mod client_observations;
 mod terminal_view;
 mod work_response;
 mod published_lists;
+#[cfg(target_os = "linux")]
+mod tile_endpoint;
+#[cfg(target_os = "linux")]
+pub use tile_endpoint::{
+    SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
+    spawn_from as spawn_tile_endpoints_from,
+};
 pub use published_lists::start_published_lists;
 mod changes;
 
@@ -387,7 +394,10 @@ pub(crate) struct ApiError {
 impl ApiError {
     fn bad(error: St3Error) -> Self {
         let status = match error.code {
-            "stale-subject"
+            "recipient-retired"
+            | "lifecycle-unavailable"
+            | "retirement-upgrade-required"
+            | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -461,11 +471,12 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({ "code": self.code, "message": self.message, "details": self.details })),
-        )
-            .into_response()
+        let mut body =
+            json!({ "code": self.code, "message": self.message, "details": self.details });
+        if let Some(applied) = body["details"].get("applied").cloned() {
+            body["applied"] = applied;
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -1585,7 +1596,7 @@ fn client_host_id(node: &str) -> String {
 }
 
 fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
-    json!({
+    let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
         "error_version": "st3.client.error.v0",
         "request_id": request_id,
@@ -1593,7 +1604,11 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
         "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
         "retryable": client_error_retryable(status, raw.get("code").and_then(Value::as_str)),
         "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
-    })
+    });
+    if let Some(applied) = raw.get("applied") {
+        envelope["applied"] = applied.clone();
+    }
+    envelope
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
@@ -1637,7 +1652,10 @@ fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
 
 fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
-        "not-found"
+        "recipient-retired"
+        | "lifecycle-unavailable"
+        | "retirement-upgrade-required"
+        | "not-found"
         | "forbidden"
         | "attention-migrated"
         | "unsupported-capability"
@@ -3239,6 +3257,9 @@ fn client_agent_cards_presented(
                 Some("snapshotting" | "fencing-source" | "transferring" | "restoring") if state == "stopped" => "suspended",
                 _ => state,
             };
+            let state = if subject.desired.as_ref().is_some_and(|desired| desired.get("retirement").is_some()) {
+                "retired"
+            } else { state };
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
@@ -11372,6 +11393,9 @@ struct AgentRestartRequest {
     subject: String,
     actor: String,
     idempotency_key: String,
+    /// Restart without first asking the seat for its handoff.
+    #[serde(default)]
+    now: bool,
 }
 
 async fn restart_agent(
@@ -11484,7 +11508,15 @@ async fn restart_agent(
                     Value::String(member.runtime_id.clone()),
                 ),
                 ("incarnation_id".into(), Value::String(incarnation.into())),
-            ]),
+            ])
+            .into_iter()
+            .chain(request.now.then(|| {
+                (
+                    "operation".to_owned(),
+                    Value::String(crate::handoff::RESTART_NOW_OPERATION.into()),
+                )
+            }))
+            .collect(),
             evidence: vec![token],
             expected_subject: None,
             idempotency_key: Some(key),
@@ -20643,7 +20675,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             assert_eq!(admitted.iter().map(|claim| &claim.id).collect::<Vec<_>>(), expected_ids);
         }
 
-        let app = router(state);
+        let app = router(state.clone());
         let path = |after| {
             format!(
                 "/v1/events/page?after={after}&owner_run={}&limit=2&wait=false",
@@ -20683,12 +20715,89 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         assert_eq!(third["has_more"], json!(false));
         assert!(third["frontier"].as_u64().unwrap() >= accepted[4].store_index);
 
-        let (status, done) = get_request(app, &path(accepted[4].store_index)).await;
+        let (status, done) = get_request(app.clone(), &path(accepted[4].store_index)).await;
         assert_eq!(status, StatusCode::OK, "{done}");
         let done = done.get("value").unwrap_or(&done);
         assert_eq!(done["items"], json!([]));
         assert_eq!(done["next_after"], Value::Null);
         assert_eq!(done["has_more"], json!(false));
+
+        // Read the original five-event window through the same router before and
+        // after ownership changes. New apply events lie after this raw scan.
+        let owner_window = |owner: &str| {
+            format!(
+                "/v1/events/page?after={setup_cursor}&owner_run={}&limit=5&wait=false",
+                owner.replace('/', "%2F")
+            )
+        };
+        let unrelated_path = format!(
+            "{}&subject={}",
+            owner_window(&runs[1].subject),
+            subject_b.replace('/', "%2F")
+        );
+        let expected_all = accepted.iter().map(|claim| json!({
+            "store_index": claim.store_index,
+            "kind": &claim.kind,
+            "subject": &claim.subject,
+            "body": &claim.body,
+        })).collect::<Vec<_>>();
+        let expected_b = expected_all.iter()
+            .filter(|event| event["subject"].as_str() == Some(subject_b))
+            .cloned().collect::<Vec<_>>();
+        let (status, before_b) = get_request(app.clone(), &owner_window(&runs[1].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{before_b}");
+        let before_b = before_b.get("value").unwrap_or(&before_b);
+        assert_eq!(before_b["items"], json!(expected_b));
+        let (status, unrelated_before) = get_request(app.clone(), &unrelated_path).await;
+        assert_eq!(status, StatusCode::OK, "{unrelated_before}");
+        let unrelated_before = unrelated_before.get("value").unwrap_or(&unrelated_before);
+        assert_eq!(unrelated_before["items"], json!(expected_b));
+        assert_eq!(unrelated_before["next_after"], json!(accepted[4].store_index));
+
+        let desired = intent.subjects.get_mut(subject_a).unwrap();
+        desired.owner_run = Some(runs[1].subject.clone());
+        desired.owner_generation = Some(runs[1].generation.clone());
+        desired.owner_step = Some(runs[1].steps[0].subject.clone());
+        roster_fixture_apply(&state.store, &intent, "event-page-owner-reassigned");
+        assert!(!state.store.desired_subjects_for_owner_run(&runs[0].subject).unwrap()
+            .iter().any(|desired| desired.subject == subject_a));
+        let reassigned = state.store.desired_subjects_for_owner_run(&runs[1].subject).unwrap();
+        assert!(reassigned.iter().any(|desired| desired.subject == subject_a));
+        assert!(reassigned.iter().any(|desired| desired.subject == subject_b));
+
+        let (status, old_owner) = get_request(app.clone(), &owner_window(&runs[0].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{old_owner}");
+        let old_owner = old_owner.get("value").unwrap_or(&old_owner);
+        assert_eq!(old_owner["items"], json!([]));
+        assert_eq!(old_owner["next_after"], json!(accepted[4].store_index));
+        let (status, new_owner) = get_request(app.clone(), &owner_window(&runs[1].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{new_owner}");
+        let new_owner = new_owner.get("value").unwrap_or(&new_owner);
+        assert_eq!(new_owner["items"], json!(expected_all));
+        assert_eq!(new_owner["next_after"], json!(accepted[4].store_index));
+        let (status, unrelated_after) = get_request(app.clone(), &unrelated_path).await;
+        assert_eq!(status, StatusCode::OK, "{unrelated_after}");
+        let unrelated_after = unrelated_after.get("value").unwrap_or(&unrelated_after);
+        assert_eq!(unrelated_after["items"], unrelated_before["items"]);
+        assert_eq!(unrelated_after["next_after"], unrelated_before["next_after"]);
+
+        let desired = intent.subjects.get_mut(subject_a).unwrap();
+        desired.owner_run = Some(runs[0].subject.clone());
+        desired.owner_generation = Some(runs[0].generation.clone());
+        desired.owner_step = Some(runs[0].steps[0].subject.clone());
+        roster_fixture_apply(&state.store, &intent, "event-page-owner-restored");
+        assert!(state.store.desired_subjects_for_owner_run(&runs[0].subject).unwrap()
+            .iter().any(|desired| desired.subject == subject_a));
+        assert!(!state.store.desired_subjects_for_owner_run(&runs[1].subject).unwrap()
+            .iter().any(|desired| desired.subject == subject_a));
+        let (status, restored_a) = get_request(app.clone(), &owner_window(&runs[0].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{restored_a}");
+        let restored_a = restored_a.get("value").unwrap_or(&restored_a);
+        assert_eq!(restored_a["items"], second["items"]);
+        let (status, restored_b) = get_request(app, &owner_window(&runs[1].subject)).await;
+        assert_eq!(status, StatusCode::OK, "{restored_b}");
+        let restored_b = restored_b.get("value").unwrap_or(&restored_b);
+        assert_eq!(restored_b["items"], before_b["items"]);
     }
 
     #[tokio::test]
