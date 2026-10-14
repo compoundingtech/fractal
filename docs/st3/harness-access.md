@@ -94,6 +94,37 @@ A resumed thread keeps the same access. Codex 0.160.1 refuses any permission con
 resume ("Permission overrides are not supported when resuming a remote task"), so the resume argv
 omits the profile's `-c` entries (and an authored `-c` entry for the same keys): the app server holds them and `thread/resume` selects the profile and carries the approval policy, reviewer, sandbox, model and effort; `sandbox_workspace_write.*` stays on the app server only.
 
+The approval reviewer (`approvals_reviewer = "auto_review"`) can reject an unattended seat's push of its
+own branch with "a fleet-agent message cannot establish the required trusted user authorization", however
+the mission step quotes its scope, because only a user turn counts as authorization. It is not
+deterministic: on 2026-10-13, on Codex 0.160.1 with gpt-6.1-sol, a plain seat's push was rejected 3 times
+in 7 live runs. A seat can opt in to a standing authorization by declaring the permission in its `env`:
+
+```kdl
+env {
+  ST_PERMISSIONS "push-own-branch"
+}
+```
+
+It is off by default, applies only to auto-mode Codex seats (Claude's classifier and bypass seats are
+unaffected), and an unknown permission name fails the launch. It sets `auto_review.extra_policy` to a text
+that says, for these actions only, the operator is the user: committing in the workspace, pushing the
+branch the seat created for its assigned step to the workspace's own `origin`, and opening or updating that
+branch's pull request with `gh`; a st-delivered mission step counts as that authorization for exactly
+those actions and nothing else. It names what stays unauthorized: the default branch, another seat's
+branch, deleting remote branches, merging or closing pull requests, and any other remote or repository.
+With it the push succeeded 10 times in 10. The wording matters ("the operator authorized" was rejected)
+and is a behavior of that model version; `scripts/st3-codex-minimal-eval/push-check` re-runs the probe.
+Nothing is opted in by this change; opting a seat in is the operator's decision, made in its declaration.
+st does not restrict who may publish that declaration: in [free mode](kdl-lifecycle.md#free-mode) any person
+or agent may publish a seat declaration as itself, so an agent that can publish can write this entry into a
+declaration, including its own. The control is review of the declarations before they are published,
+not an st check. The "not authorized" list is advice to a model and was not tested adversarially. The real boundary is
+branch protection on the repository the seat pushes to (someone should decide whether to enable a ruleset on a repository before a seat that works there opts in): a seat whose `origin` has none can push any branch
+it creates there, and mission steps can carry text from untrusted places (issue and pull request
+snapshots), which this permission turns into authorization for those actions only. Because Codex refuses
+permission config on a remote resume, the entry is held by the app server and left off a resumed TUI.
+
 A saved thread that has not yet taken a turn has no rollout on disk, and Codex cannot resume it. Under
 declared permissions the launch fails closed (the driver does not guess that the thread is empty and
 replace it) and says so: `saved Codex resume binding has no persisted rollout for thread ...`. Give the
