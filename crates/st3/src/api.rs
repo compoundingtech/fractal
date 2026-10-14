@@ -403,8 +403,9 @@ impl ApiError {
             "launch-review-not-authorized"
             | "wrong-message-recipient"
             | "lane-approval-denied"
-            | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            | "glass-owner-forbidden"
+            | "note-forbidden" | "note-author-forbidden" | "note-target-access" => StatusCode::FORBIDDEN,
+            "lane-not-found" | "not-found" | "subject-note-not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" => StatusCode::SERVICE_UNAVAILABLE,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
             "internal" => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1705,9 +1706,11 @@ fn client_error_code(code: Option<&str>) -> String {
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
+        | "note-forbidden" | "note-author-forbidden" | "note-target-access"
         | "foreign-agent-actor" => "forbidden".into(),
-        "lane-not-found" => "not-found".into(),
+        "lane-not-found" | "subject-note-not-found" => "not-found".into(),
         "invalid-person-ask"
+        | "invalid-note-subject" | "invalid-subject-note" | "subject-note-feature-barrier"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"

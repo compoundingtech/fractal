@@ -207,4 +207,53 @@ mod tests {
             assert!(super::super::Cli::try_parse_from(argv).is_ok());
         }
     }
+
+    #[tokio::test]
+    async fn subject_note_cli_roundtrip_over_authenticated_unix_socket() {
+        use std::sync::Arc;
+        use st3::{api::AppState, model::ClaimInput, store::Store};
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_memory("example").unwrap());
+        let fleet = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+        let key = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
+        store.bind_fleet(fleet).unwrap();
+        store.pin_fleet_anchor(key.public()).unwrap();
+        store.set_member_key(Some(key.clone())).unwrap();
+        store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
+        for (subject, kind, fields) in [
+            ("daemon/example", "daemon.started", json!({"status":"running","features":{"subject_notes":1}})),
+            ("agent/example/worker", "harness.observed", json!({"state":"ready"})),
+        ] {
+            store.append_claim(&ClaimInput { subject: subject.into(), kind: kind.into(), actor: None,
+                fields: serde_json::from_value(fields).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None }).unwrap();
+        }
+        let state = AppState {
+            store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0, node: "example".into(),
+            state_dir: root.path().into(), pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+            fleet_id: Some(fleet.into()), configured_peers: vec![], client_relay: None,
+            native_session_home: None, planner_default: st3::model::PlannerSpec::default(),
+        };
+        let socket = root.path().join("st.sock");
+        let server_socket = socket.clone();
+        let (ready, listening) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            st3::api::serve_unix_with_ready(&server_socket, st3::api::router(state), || { let _ = ready.send(()); }).await.unwrap();
+        });
+        listening.await.unwrap();
+        let client = Client::unix_as(&socket, "person/example").unwrap();
+        run_subject_note(&client, "person/example", NoteCommand::Add {
+            target: "agent/example/worker".into(), text: "Remember the context".into(), audience: "agent".into(),
+            session: None, expires_at: None,
+        }, true).await.unwrap();
+        let notes = store.list_subject_notes(None, Some("person/example"), "person/example").unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].text, "Remember the context");
+        assert!(store.messages(Some("agent/example/worker"), false).unwrap().iter()
+            .any(|message| message.tags.iter().any(|tag| tag == st3::notes_digest::TAG)));
+        run_subject_note(&client, "person/example", NoteCommand::Ls { target: None }, true).await.unwrap();
+        run_subject_note(&client, "person/example", NoteCommand::Archive { id: notes[0].id.clone() }, true).await.unwrap();
+        assert!(store.list_subject_notes(None, Some("person/example"), "person/example").unwrap().is_empty());
+        server.abort();
+    }
 }

@@ -91,6 +91,8 @@ pub(super) async fn update(
     Json(input): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let actor = reader(&session, true)?.to_owned();
+    st3_schema::subject_notes::validate_actor(&id, st3_schema::subject_notes::KIND, Some(&actor))
+        .map_err(|error| ApiError::bad(St3Error::new(error.code, error.message)))?;
     let fields = input.as_object().ok_or_else(|| ApiError::bad(St3Error::new("invalid-subject-note", "expected an update object")))?;
     if fields.keys().any(|field| !matches!(field.as_str(), "text" | "audience" | "session" | "expires_at")) {
         return Err(ApiError::bad(St3Error::new("invalid-subject-note", "update accepts text, audience, session and expires_at only")));
