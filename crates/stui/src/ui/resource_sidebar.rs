@@ -92,6 +92,9 @@ pub(crate) struct Sidebar {
     pub writable: bool,
     pub writing: bool,
     draft: Option<(String, bool)>,
+    /// st refused to create the reserved Sidebar because the person retired it. Retired
+    /// arrangements leave the window, so that refusal is how a client learns it.
+    pub reserved_retired: bool,
     seen: BTreeMap<String, ResourceRow>,
     choices: Choices,
     path: Option<PathBuf>,
@@ -100,12 +103,24 @@ pub(crate) struct Sidebar {
     pub filtering: bool,
     pub focused: bool,
 }
+/// What a person reads when their Sidebar was removed and no older one exists to edit.
+pub(super) const SIDEBAR_RETIRED: &str =
+    "This Sidebar was removed; restoring a removed Sidebar is not available yet.";
+
 impl Sidebar {
+    /// The person's one Sidebar: the reserved subject whatever its name (#2043), else the oldest
+    /// live arrangement named "Sidebar", which clients created before the reserved id. Every
+    /// client picks the same one, so their edits land in the same arrangement.
     pub(super) fn arrangement(&self) -> Option<&st3_client::Arrangement> {
-        self.arrangements
-            .iter()
-            .filter(|a| !a.deleted)
-            .min_by_key(|a| (a.body.name.value != "Sidebar", a.header.id.clone()))
+        let reserved = format!("/{}", st3_client::SIDEBAR_ARRANGEMENT_UUID);
+        let live = || self.arrangements.iter().filter(|a| !a.deleted);
+        live()
+            .find(|a| a.header.id.ends_with(&reserved))
+            .or_else(|| {
+                live()
+                    .filter(|a| a.body.name.value == "Sidebar")
+                    .min_by(|a, b| a.header.id.cmp(&b.header.id))
+            })
     }
     pub(super) fn location(&self, subject: &str) -> Option<&str> {
         let a = self.arrangement()?;
@@ -363,11 +378,7 @@ impl Sidebar {
         }
     }
     pub fn rows(&self) -> Vec<Row> {
-        let arrangement = self
-            .arrangements
-            .iter()
-            .filter(|a| !a.deleted)
-            .min_by_key(|a| (a.body.name.value != "Sidebar", a.header.id.clone()));
+        let arrangement = self.arrangement();
         let mut catalog = self.seen.clone();
         if let Some(a) = arrangement {
             for id in a.body.placements.keys() {
@@ -575,13 +586,21 @@ impl Ui {
             .resource_sidebar
             .arrangement()
             .map(|a| a.header.id.clone());
+        if existing.is_none() && self.resource_sidebar.reserved_retired {
+            self.flash(SIDEBAR_RETIRED);
+            return;
+        }
         let mut operations = operations;
         let (subject, creating) = match existing {
             Some(id) => (id, false),
             None => {
                 let draft = self.resource_sidebar.draft.get_or_insert_with(|| {
                     (
-                        format!("arrangement/{}/{}", self.world.person, uuid::Uuid::now_v7()),
+                        format!(
+                            "arrangement/{}/{}",
+                            self.world.person,
+                            st3_client::SIDEBAR_ARRANGEMENT_UUID
+                        ),
                         false,
                     )
                 });
@@ -936,6 +955,42 @@ mod tests {
                 .iter()
                 .any(|row| matches!(row, Row::Group { title, .. } if title == "First"))
         );
+    }
+    #[test]
+    fn the_reserved_subject_is_the_sidebar_and_legacy_ones_pick_the_oldest_by_name() {
+        let named = |uuid: &str, name: &str| {
+            let mut a = arrangement();
+            a.header.id = format!("arrangement/person/avery/{uuid}");
+            a.body.name.value = name.into();
+            a
+        };
+        let picked = |sidebar: &Sidebar| sidebar.arrangement().map(|a| a.header.id.clone());
+        let reserved = format!(
+            "arrangement/person/avery/{}",
+            st3_client::SIDEBAR_ARRANGEMENT_UUID
+        );
+        let oldest = "arrangement/person/avery/019a0000-0000-7000-8000-000000000002";
+        let mut sidebar = Sidebar {
+            arrangements: vec![named("019a0000-0000-7000-8000-000000000009", "Desk")],
+            ..Default::default()
+        };
+        assert_eq!(picked(&sidebar), None, "only a Sidebar is the Sidebar");
+        for uuid in [
+            "019a0000-0000-7000-8000-000000000003",
+            "019a0000-0000-7000-8000-000000000002",
+        ] {
+            sidebar.arrangements.push(named(uuid, "Sidebar"));
+        }
+        assert_eq!(picked(&sidebar).as_deref(), Some(oldest));
+        let renamed = named(st3_client::SIDEBAR_ARRANGEMENT_UUID, "Renamed");
+        sidebar.arrangements.push(renamed);
+        assert_eq!(
+            picked(&sidebar),
+            Some(reserved),
+            "the reserved subject wins whatever its name"
+        );
+        sidebar.arrangements.last_mut().unwrap().deleted = true;
+        assert_eq!(picked(&sidebar).as_deref(), Some(oldest));
     }
     #[test]
     fn busy_groups_collapse_search_opens_them_and_choices_stay_on_this_device() {

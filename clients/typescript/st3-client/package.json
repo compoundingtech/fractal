@@ -16,7 +16,7 @@
     "./schema": "./Schema.generated.ts"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.118"
+    "effect": "4.0.0"
   },
   "peerDependenciesMeta": {
     "effect": {
@@ -24,7 +24,7 @@
     }
   },
   "devDependencies": {
-    "effect": "4.0.0-rc.118",
+    "effect": "4.0.0",
     "typescript": "6.0.3"
   }
 }
