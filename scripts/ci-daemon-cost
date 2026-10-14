@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Run deterministic cost controls from this run's verified integration archive."""
+import hashlib
+import json
+import os
+import re
+from pathlib import Path
+import subprocess
+import time
+
+def required(source):
+    names = re.findall(r"#\[(?:tokio::)?test(?:\([^]\n]*\))?\]\s*(?:#\[[^\n]*\]\s*)*(?:async\s+)?fn\s+(\w+)", source)
+    expected = {"daemon_cost::" + name for name in names}
+    if len(names) != len(expected) or not {
+        "daemon_cost::no_request_does_work_that_grows_with_the_store",
+        "daemon_cost::the_cost_check_covers_every_route",
+    } <= expected:
+        raise ValueError('cannot establish the source cost-control inventory')
+    return expected
+
+
+def selected(document, expected):
+    found = []
+    for suite in document['rust-suites'].values():
+        for name, test in suite['testcases'].items():
+            if not test['ignored'] and test['filter-match']['status'] == 'matches':
+                found.append(name)
+    if len(found) != len(set(found)) or set(found) != expected:
+        raise ValueError('deterministic cost inventory missing, ignored, duplicated or unexpected: ' + repr(found))
+    return sorted(found)
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def main():
+    target = Path(os.environ['CI_TEST_EXTRACTED']) / 'workspace/target'
+    out = Path(os.environ['RUNNER_TEMP']) / 'perf/daemon-cost'
+    out.mkdir(parents=True, exist_ok=True)
+    # Fresh per-job templates: no performance-cache restore or inherited scale override.
+    bench = out / 'templates'
+    bench.mkdir(exist_ok=False)
+    report = out / 'cost.json'
+    report.unlink(missing_ok=True)
+    common = ['--binaries-metadata', str(target / 'nextest/binaries-metadata.json'),
+              '--cargo-metadata', str(target / 'nextest/cargo-metadata.json'),
+              '--target-dir-remap', str(target), '--workspace-remap', os.environ['CI_TEST_WORKSPACE'],
+              '--profile', 'ci', '--ignore-default-filter',
+              '-E', 'package(=st3) and binary(=integration) and test(/^daemon_cost::/)']
+    env = {**os.environ, 'ST_BENCH_DIR': str(bench), 'ST_COST_REPORT': str(report),
+           'ST_COST_SCALES': '0.01,0.1', 'TMPDIR': os.environ['RUNNER_TEMP']}
+    listing = subprocess.check_output(['cargo', 'nextest', 'list', *common, '--message-format', 'json'],
+                                      text=True, env=env)
+    (out / 'inventory.json').write_text(listing)
+    inventory = selected(json.loads(listing), required(Path('crates/st3/tests/daemon_cost.rs').read_text()))
+    manifest = json.loads((Path(os.environ['RUNNER_TEMP']) / 'ci-test-archives/manifest.json').read_text())
+    revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    if manifest['identity']['source'] != revision or revision != os.environ['GITHUB_SHA']:
+        raise ValueError('cost archive must match the effective tested checkout')
+    identity = {'source': manifest['identity'], 'archive_files': manifest['files'],
+                'build_profile': 'shared producer default Cargo test profile; no optimization override',
+                'fixture_sources': {p: digest(Path(p)) for p in (
+                    'crates/st3/tests/daemon_cost.rs', 'crates/st3/tests/daemon_bench.rs')},
+                'scales': [0.01, 0.1], 'selected': inventory, 'retries': 0, 'test_threads': 1}
+    (out / 'identity.json').write_text(json.dumps(identity, indent=2) + '\n')
+    start = time.monotonic()
+    with (out / 'cost.log').open('w') as log:
+        command = ['cargo', 'nextest', 'run', *common, '--test-threads', '1', '--retries', '0',
+                   '--no-tests', 'fail', '--success-output', 'immediate', '--failure-output', 'immediate']
+        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, env=env)
+    print((out / 'cost.log').read_text(), end='', flush=True)
+    # Keep the actual exit status and partial reports even on a failed test.
+    (out / 'result.json').write_text(json.dumps({'exit': result.returncode,
+                                               'seconds': time.monotonic() - start}) + '\n')
+    # Hash persistent database/WAL files only; transient -shm files are not fixture inputs.
+    fixtures = {str(p.relative_to(bench)): digest(p) for p in bench.rglob('*')
+                if p.is_file() and (p.name.endswith('.sqlite3') or p.name.endswith('.sqlite3-wal'))}
+    (out / 'fixture-hashes.json').write_text(json.dumps(fixtures, indent=2) + '\n')
+    if result.returncode:
+        raise SystemExit(result.returncode)
+    measured = json.loads(report.read_text())
+    if (measured.get('scales') != [0.01, 0.1] or measured.get('growth_limit') != 3.0
+            or measured.get('slack') != 5000 or measured.get('failures') != []
+            or not measured.get('small') or not measured.get('large')):
+        raise ValueError('missing or invalid deterministic cost report')
+    if not fixtures:
+        raise ValueError('generated fixture database identity is missing')
+    with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+        summary.write(f'All {len(inventory)} deterministic cost controls passed on `{revision}` with zero retries.\n')
+
+
+if __name__ == '__main__':
+    main()

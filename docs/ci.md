@@ -674,10 +674,17 @@ uploaded with the stage logs.
 
 ### Performance gate
 
-Two jobs check the daemon's rules that reads are instant, writes are short, and no query's cost
-grows with the whole store. Neither is part of `linux-gate`; making one required is a decision
-for the repository's owner. Both run `scripts/ci-perf`, and `.config/nextest.toml` keeps their
-tests out of `linux-tests`.
+The merge-group `daemon-cost` job requires the deterministic SQLite work controls on the
+effective queued composition. It reuses the successful producer's verified default-profile
+integration archive, selects every `daemon_cost::` control with one test thread and zero retries,
+and contributes a real SUCCESS to `linux-gate`. Missing, skipped, cancelled or failing results
+fail that gate. Fresh per-job templates use the existing scales, thresholds and known-debt ratchet;
+no performance cache or scale override supplies its fixture. Its always-uploaded artifact retains
+the selected inventory, producer/source identity, fixture source and database hashes, log and cost
+report. Hosted qualification must establish its actual duration and effective-source coverage.
+
+The separate `perf-cost` and `perf-load` jobs retain their existing policies and timing evidence.
+`.config/nextest.toml` keeps their tests out of the ordinary Linux shards.
 
 The isolated `link_minutes` case writes its preserved daemon, link-event, trace and
 replication evidence under `RUNNER_TEMP/perf/link-minutes-evidence`. Its supervised
@@ -688,9 +695,9 @@ leave partial evidence; an uploaded directory is not a completed-test verdict.
 
 `perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every pull request and
 `main` push, on the stages' runner. It skips
-merge-queue entries, which wait only for required checks, so a queued entry needs no more runners
-than before (see [Measured concurrency](#measured-concurrency)); if it becomes required, it must
-run there too. It generates a store at scale 0.01 and one at 0.1 with the
+merge-queue entries; the deterministic `daemon-cost` consumer above protects those compositions
+without adding the link recovery or outbound timing cases to the merge gate. It generates a store
+at scale 0.01 and one at 0.1 with the
 `daemon_bench` generator, serves each from an in-process daemon, and counts the SQLite work of
 every route: virtual machine steps, steps through a table without an index, sorts and
 auto-index rows, read from each statement's counters as it finishes
