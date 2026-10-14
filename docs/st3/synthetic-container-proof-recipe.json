@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "status": "source-only-unqualified",
+  "scope": "synthetic-seat-container-v1",
+  "contract_issue": 2839,
+  "fixture": {
+    "seat": "agent/example/synthetic-container-proof",
+    "person": "person/example-synthetic",
+    "real_seat_or_credentials_allowed": false,
+    "turn_canary_prefix": "ST_SYNTH_TURN_CANARY_V1:",
+    "handover_fixture": "Invented working context, open tasks and next steps; separate from the volatile turn canary",
+    "handover_bytes_in_receipt": false
+  },
+  "proposed_executor": {
+    "class": "normal ephemeral Namespace8x16",
+    "priority": 3,
+    "review_state": "unqualified-until-actual-slot-runner-quota-and-cleanup-bound",
+    "serial_jobs": [
+      {"id": "f1", "hard_owned_bytes": 268435456, "fresh_owned_state": true},
+      {"id": "slice0-pair", "hard_owned_bytes": 2147483648, "fresh_owned_state": true},
+      {"id": "synthetic-seat", "hard_owned_bytes": 2147483648, "fresh_owned_state": true}
+    ],
+    "overlap_allowed": false,
+    "aggregate_includes": ["owned tmpfs", "engine metadata", "images", "all writable guest state", "logs"],
+    "actual_slot": null,
+    "actual_runner": null,
+    "actual_hard_quota_provider": null,
+    "actual_cleanup_provider": null
+  },
+  "fixed_operator_binding": {
+    "unit": null,
+    "root_trigger": null,
+    "image_id": null,
+    "image_digest": null,
+    "native_omp_pty_session_provider": null,
+    "generation_and_handover_provider": null,
+    "host_owned_persistence_manifest": null,
+    "out_of_band_egress_provider": null,
+    "uid_map_provider": null,
+    "operator_receipt_signer": null,
+    "caller_selects_argv_path_image_endpoint_or_unit": false
+  },
+  "uid_map": {
+    "guest_range_start": 0,
+    "host_range_start": null,
+    "range_length": null,
+    "guest_app_uid": 1000,
+    "host_app_uid": null,
+    "guest_broker_uid": 1001,
+    "host_broker_uid": null,
+    "overflow_uid_forbidden": 65534,
+    "gid_map_must_be_independently_pinned": true,
+    "expected_map_must_be_pinned_by_operator": true,
+    "mismatched_or_changed_map_refuses_before_child": true
+  },
+  "limits": {
+    "whole_job_seconds": 1800,
+    "technical_receipt_bytes": 65536,
+    "plain_words_page_bytes": 8192,
+    "memory_swap_max_bytes": 0,
+    "memory_swap_current_bytes": 0,
+    "core_rlimit_bytes": 0,
+    "coredump_storage": "none",
+    "memory_max_must_be_finite": true,
+    "tasks_max_must_be_finite": true,
+    "zswap_disabled_if_supported": true
+  },
+  "ordered_phases": [
+    "operator preflight and fixed binding attestation",
+    "wrong UID and GID map refusal before any child",
+    "start fresh synthetic seat and prove actual OMP, PTY and daemon binding",
+    "generate volatile turn canary inside guest and commit separate invented handover",
+    "run socket, peer, seat, API, filesystem and network refusals separately",
+    "fence work, prove zero in-flight writes and suspend",
+    "prove cgroup empty, volatile tmpfs erased and canary absent from owned host persistence",
+    "resume with larger generation and distinct actual native OMP and PTY session IDs",
+    "prove first handover read before readiness and changed UID or GID map refusal",
+    "stop, prove teardown, publish technical receipt then plain-words result"
+  ],
+  "required_controls": [
+    "fresh-native-session",
+    "generation-and-first-handover-read",
+    "volatile-canary-absent-from-owned-host-persistence",
+    "owned-tmpfs-empty-and-cgroup-empty",
+    "host-decoy-files-inaccessible",
+    "swap-zswap-core-and-coredump-disabled",
+    "socket-refused",
+    "wrong-peer-uid-refused",
+    "wrong-seat-refused",
+    "unexposed-api-refused",
+    "filesystem-refused",
+    "network-ipv4-and-ipv6-refused",
+    "wrong-uid-gid-map-refused",
+    "changed-uid-gid-map-refused",
+    "hard-aggregate-quota-and-cleanup-attested"
+  ],
+  "receipt_outcomes": ["pass", "fail", "incomplete"],
+  "qualification": "All bindings and source, package, egress and executor reviews precede a synthetic run. A source-only or missing-native receipt is incomplete, never pass. No production seat, key, state, daemon or container may be used."
+}
