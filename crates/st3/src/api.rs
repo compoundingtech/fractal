@@ -94,6 +94,7 @@ mod terminal_view;
 mod work_response;
 mod published_lists;
 pub use published_lists::start_published_lists;
+mod changes;
 
 pub(crate) use client_v0::raw_terminal::splice as raw_terminal_splice;
 pub(crate) use client_v0::raw_terminal::{
@@ -580,6 +581,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         )
         .route("/v1/client/launches/{id}", get(client_launches_detail))
         .route("/v1/client/work", get(client_work))
+        .route("/v1/client/changes", get(changes::list))
+        .route("/v1/client/changes/sync", post(changes::sync))
+        .route("/v1/client/change", get(changes::show))
         .route("/v1/client/work/{*id}", get(client_work_detail))
         .route("/v1/client/agents", get(client_agents))
         .route("/v1/client/resources", get(client_v0::resources::list))
