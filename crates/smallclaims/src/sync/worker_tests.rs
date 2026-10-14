@@ -18,17 +18,13 @@ use crate::store::{CheckpointAction, CheckpointManifestNeed};
 use crate::store::{Runtime as _, Store};
 use crate::sync::Local;
 
-/// A store on the plain runtime that heals without waiting, as the tests of smalltalk's stores do.
+/// A store on the plain runtime.
 fn plain_memory(origin: &str) -> anyhow::Result<Store> {
-    let mut store = Store::open_memory(origin, Arc::new(Plain))?;
-    store.heal_replay_backoff_ms = 0;
-    Ok(store)
+    Store::open_memory(origin, Arc::new(Plain))
 }
 
 fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
-    let mut store = Store::open(path, origin, Arc::new(Plain))?;
-    store.heal_replay_backoff_ms = 0;
-    Ok(store)
+    Store::open(path, origin, Arc::new(Plain))
 }
 
 /// Different checkpoint lineages leave payloadless ranges that can never settle through
@@ -141,7 +137,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
     .await
     .unwrap();
     assert!(
-        result.0,
+        result,
         "a divergent compact exchange must reach live ranges beyond the tombstones"
     );
     {
@@ -192,8 +188,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
             &fleet_context
         )
         .await
-        .unwrap()
-        .0,
+        .unwrap(),
         "tombstone-only divergence must let the worker rest"
     );
     note(&left, "published-after-quiet-comparison");
@@ -208,7 +203,6 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         )
         .await
         .unwrap()
-        .0
     );
     assert!(
         right
@@ -656,8 +650,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(pushed, "the peer stored what this node pushed");
     assert!(
         target
@@ -686,8 +679,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(pulled, "this node stored what the peer sent");
     assert!(
         source
@@ -715,8 +707,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(
         !moved,
         "converged nodes store nothing, so the worker may rest"
@@ -1544,6 +1535,109 @@ mod retry_tests {
         }
     }
 
+    /// `fabric dial` never connects, so a member's refusal reaches the worker as a tunnel that
+    /// closes. The worker then asks `fabric probe --json`, and only a refusal class puts the
+    /// route to sleep.
+    #[tokio::test]
+    async fn a_tunnel_that_closes_is_a_refusal_only_when_the_probe_says_so() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fleet_id = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
+        let auth = FleetAuth::test(fleet_id, &[37; 32]);
+        let answer = |outcome: &str, code: &str, class: &str| {
+            format!(
+                "{{\"peer\":\"amber\",\"outcome\":\"{outcome}\",\"error\":\"fabric:{code} words\",\"code\":\"{code}\",\"class\":\"{class}\"}}"
+            )
+        };
+        for (probe, refused) in [
+            (
+                answer("unreachable", "peer_not_permitted_for_service", "refusal"),
+                true,
+            ),
+            (
+                answer("unreachable", "peer_not_in_allow_list", "refusal"),
+                true,
+            ),
+            (answer("unreachable", "unreachable", "fault"), false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(plain_open(&root.path().join("indigo.db"), "indigo").unwrap());
+            store.bind_fleet(fleet_id).unwrap();
+            // A tunnel that accepts and closes at once, as a refused one does.
+            let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = dead.local_addr().unwrap();
+            let closer = tokio::spawn(async move {
+                loop {
+                    let _ = dead.accept().await;
+                }
+            });
+            let probes = root.path().join("probes");
+            let program = root.path().join("fabric");
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\n  dial) echo '{{\"address\":\"{address}\"}}';;\n  probe) echo \"$2\" >> '{}'; echo '{probe}'; exit 2;;\nesac\n",
+                    probes.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut context = FleetContext::legacy(["amber".into()].into());
+            context.fabric = Some(Fabric::new(program));
+            let (_routes, receiver) = watch::channel(vec![Route::Fabric {
+                node: "amber".into(),
+                protocol: "st3-peer-v1".into(),
+            }]);
+            let wake = watch::channel(0).0;
+            let worker = tokio::spawn(dial_peer(
+                Local(store.clone()),
+                "indigo".into(),
+                "amber".into(),
+                receiver,
+                auth.clone(),
+                context,
+                wake.subscribe(),
+            ));
+            // Wait until the worker has asked Fabric what the closed tunnel meant.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while std::fs::read_to_string(&probes)
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+                    == 0
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{probe}: the probe was never asked"));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let peer = store
+                .replication_status(true, Some(fleet_id), &["amber".into()])
+                .unwrap()
+                .peers
+                .remove(0);
+            if refused {
+                assert_eq!(peer.status, "refused", "{probe}");
+                assert!(peer.last_error.is_none());
+                assert!(
+                    peer.refusal_reason
+                        .as_ref()
+                        .unwrap()
+                        .contains("that member's Fabric grants")
+                );
+                // Asleep: more time passes and the probe is not asked again.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let asked = std::fs::read_to_string(&probes).unwrap().lines().count();
+                assert_eq!(asked, 1, "{probe}");
+            } else {
+                assert_ne!(peer.status, "refused", "{probe}");
+                assert!(peer.refusal_reason.is_none(), "{probe}");
+            }
+            worker.abort();
+            closer.abort();
+        }
+    }
+
     #[test]
     fn absent_members_cost_a_few_attempts_per_hour_after_exponential_backoff() {
         // Use the shortest jitter so this bounds the most aggressive retry schedule.
@@ -2050,21 +2144,6 @@ impl Backend for SlowExport {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(result)
     }
-    async fn heal_answer(
-        &self,
-        peer: &str,
-        fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> Result<ReplicationHealAnswer> {
-        self.local.heal_answer(peer, fleet_id, query).await
-    }
-    async fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> Result<ReplicationHealStep> {
-        self.local.heal_next(peer, answer).await
-    }
     async fn checkpoint_manifest(
         &self,
         request: &CheckpointManifestRequest,
@@ -2371,7 +2450,7 @@ async fn worker_phase_status_is_local_and_reports_retry_deadline() {
     let store = Arc::new(plain_memory("birch").unwrap());
     let index = store.index().unwrap();
     let attempt = crate::store::now_ms();
-    for phase in ["exchange", "heal", "backoff", "idle"] {
+    for phase in ["exchange", "backoff", "idle"] {
         let retry = (phase == "backoff").then_some(Duration::from_secs(30));
         record_worker(&Local(store.clone()), "cedar", phase, attempt, retry).await;
         let status = store
