@@ -8416,7 +8416,7 @@ mod tests {
         let text = frame(&quiet, 140, 50).join("\n");
         assert!(text.contains(screens::HOME_IDLE_TEXT) && !text.contains(screens::HOME_UNKNOWN_TEXT), "{text}");
 
-        world.behind = vec!["hetz has 26,820 envelopes this host lacks · caught up in about 14m".into()];
+        world.behind = vec!["harbor has 26,820 envelopes this host lacks · caught up in about 14m".into()];
         let mut ui = Ui::new(world);
         ui.live = true;
         let rows = frame(&ui, 140, 50);
@@ -8425,7 +8425,7 @@ mod tests {
         assert!(text.contains(screens::HOME_UNKNOWN_TEXT) && text.contains("26,820 envelopes"), "{text}");
         assert!(!text.contains(screens::HOME_IDLE_TEXT), "{text}");
         ui.show_connection();
-        assert!(ui.flash.as_ref().is_some_and(|(text, _)| text.contains("Catching up: hetz has 26,820")));
+        assert!(ui.flash.as_ref().is_some_and(|(text, _)| text.contains("Catching up: harbor has 26,820")));
     }
 
     #[test]
