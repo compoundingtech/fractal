@@ -1,6 +1,7 @@
 // Explicit-clock presentation only.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
+import { VisuallyHidden } from 'react-aria-components'
 import { geometryVars as g, spaceVars as s, statusVars as tone, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { compactTime, statuses, type AgentStatus } from './model'
 import { Spinner } from '../composition/Spinner'
@@ -34,15 +35,18 @@ export function SidebarStatus({ status, statusLabel = statuses[status].label, va
   const boundary = statusSince === undefined ? 'Status boundary unavailable' : `Observed status since ${new Date(statusSince).toISOString()}`
   const elapsed = statusSince !== undefined && now !== undefined ? compactTime({ at: statusSince, now }) : undefined
   const shapeCue = variant === 'SG-1' && discRefinement === 'G3' && status !== 'working' && status !== 'idle'
+  // Hosts own the only hover disclosure; glyph descriptions remain accessible.
+  const descriptionId = React.useId()
   return <span {...stylex.props(styles.root, status === 'working' && styles.working, status === 'waiting' && styles.waiting, status === 'stale' && styles.stale)}>
-    {status === 'working' ? <Spinner label={`${statusLabel}; ${boundary}; ${freshness} observation`} /> : <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation`} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{shapeCue && paths[status]}</>}</svg>}
+    {status === 'working' ? <Spinner label={`${statusLabel}; ${boundary}; ${freshness} observation`} descriptionId={descriptionId} /> : <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation`} aria-describedby={descriptionId} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{shapeCue && paths[status]}</>}</svg>}
+    <VisuallyHidden elementType="span"><span id={descriptionId}>{`${statusLabel}. ${boundary}. Observation ${freshness}.`}</span></VisuallyHidden>
     {variant === 'SG-2' && !iconOnly && <span>{statusLabel}</span>}
     {/* Icon-only glyphs sit in a fixed icon column; visible text there would overrun the next column. */}
     {elapsed !== undefined && !iconOnly && <time dateTime={new Date(statusSince!).toISOString()} aria-label={`Elapsed in ${statusLabel}: ${elapsed}`}>{elapsed}</time>}
   </span>
 }
 const styles = stylex.create({
-  root: { display: 'inline-flex', alignItems: 'center', gap: s.xs, color: ink.sidebarFgMuted, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', flexShrink: 0 },
+  root: { display: 'inline-flex', alignItems: 'center', gap: s.xs, color: ink.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', flexShrink: 0 },
   icon: { width: g.icon, height: g.icon, flexShrink: 0 },
-  working: { color: ink.fgSoft }, waiting: { color: tone.attention }, stale: { color: tone.dangerFg },
+  working: { color: tone.runningFg }, waiting: { color: tone.attention }, stale: { color: tone.dangerFg },
 })

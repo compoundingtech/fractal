@@ -17,6 +17,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "missions",
             "alerts",
             "usage",
+            "slo",
             "terminals",
             "machines",
             "launch",
@@ -28,7 +29,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Inside an agent seat",
-        &["work", "gh", "claim", "diagnostic", "trace", "skill"],
+        &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
     ),
     (
         "Running st on a machine or fleet",
@@ -140,6 +141,7 @@ pub(super) fn agent_state(
             fault.unwrap_or("the agent process failed")
         ),
         "stopped" => "Stopped — the agent is no longer running.".into(),
+        "down" => "Down — st sees no running session for the agent; `st agents show` says since when.".into(),
         "suspended" => {
             "Suspended — the agent stopped at a quiet moment; `st agents resume` brings back its session.".into()
         }
@@ -345,6 +347,7 @@ mod tests {
             ("starting", Some("starting"), "initializing"),
             ("waiting", Some("needs-login"), "Waiting for you"),
             ("failed", None, "Could not start"),
+            ("down", None, "Down — st sees no running session"),
         ] {
             let state = agent_state(state, harness, None, "reachable");
             assert!(state.contains(expected), "{state}");
