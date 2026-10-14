@@ -55,7 +55,7 @@ impl Context {
         smallclaims::read_budget::check().map_err(ApiError::bad)?;
         let started = Instant::now();
         let mut diagnostic = crate::relay_trace::span(crate::relay_trace::Phase::Envelope);
-        let status = response.status();
+        let mut status = response.status();
         let (mut parts, body) = response.into_parts();
         let snapshot = parts
             .extensions
@@ -113,6 +113,7 @@ impl Context {
                     message: "the entire assistant response envelope exceeds its approved byte budget".into(),
                     details: Box::default(),
                 });
+                status = error.status;
                 parts.status = error.status;
                 encoded = self.encode(error.status, None, Ok(serde_json::to_vec(
                     &json!({"code":error.code,"message":error.message}),
