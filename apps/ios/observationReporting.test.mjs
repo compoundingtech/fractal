@@ -65,3 +65,42 @@ test('an empty restored batch is acknowledged and releases the preparation slot'
   assert.equal(observations.waiting, 0);
   assert.equal(sent.length, 0);
 });
+
+test('a synchronous preparation failure releases busy and the next send still runs', async () => {
+  const { clock, observations, state, sent, pending } = setup();
+  const expected = new Error('invented preparation failure');
+  const nextReport = observations.nextReport.bind(observations);
+  observations.nextReport = () => { throw expected; };
+  assert.throws(() => state.send(), error => error === expected);
+  assert.equal(state.busy, false);
+  assert.equal(state.last, 0);
+  observations.nextReport = nextReport;
+  observations.observe('ios-connect', 100);
+  clock.at += MINUTE_MS;
+  state.send();
+  assert.equal(sent.length, 1);
+  pending.resolve({});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(state.busy, false);
+});
+
+test('transport rejection releases busy and preserves the batch for the next send', async () => {
+  const { clock, observations, state, sent, pending } = setup();
+  observations.observe('ios-connect', 100);
+  clock.at += MINUTE_MS;
+  state.send();
+  assert.equal(state.busy, true);
+  pending.reject(new Error('invented transport failure'));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(state.busy, false);
+  assert.equal(observations.waiting, 1);
+  state.last = 0;
+  state.send();
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1], sent[0]);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(state.busy, false);
+});
