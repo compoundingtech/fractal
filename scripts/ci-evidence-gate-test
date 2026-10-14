@@ -36,9 +36,9 @@ CHECKS = ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 
 WEEK = 7 * 24 * 3600
 # The wrapper notes' exact strings, as the note jobs record them (nix-evidence, #2795 / #2803), written out
 # here independently of the policy file so a typo in either cannot make the test agree with itself.
-GATE_ARGV = ['linux-gate', 'aggregate', 'linux-clippy', 'linux-fleet-compat', 'linux-gate', 'linux-test-build',
-             'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
-             'mail-redelivery-canaries', 'upgrade-impact']
+GATE_ARGV = ['linux-gate', 'aggregate', 'genie-freshness', 'isolation-vm', 'linux-clippy', 'linux-fleet-compat',
+             'linux-gate', 'linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
+             'linux-tests-shard-4', 'mail-redelivery-canaries', 'typescript-client', 'upgrade-impact']
 CANARIES_ARGV = ['bash', 'scripts/ci-linux', 'mail-redelivery-canaries']
 # The step-outcome notes of the other three checks (nix-evidence, agent/evidence-more-checks).
 STEP_ARGV = {
@@ -1089,6 +1089,40 @@ class WorkflowStructure(unittest.TestCase):
             self.assertNotIn('python3 scripts/ci-evidence-gate', body, name)  # never the tree under test
             self.assertIn("- name: evidence skip taken\n        id: taken\n        if: steps.gate.outputs.skip == 'true'", body, name)
 
+
+    def test_the_linux_gate_wrapper_rule_is_the_argv_the_aggregate_job_records_from_its_needs(self):
+        """The aggregate note records ['linux-gate', 'aggregate'] + its needed jobs sorted, gates left out.
+        Derived here from the generated workflow so adding a needed job cannot silently disable skipping."""
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
+        needs = re.search(r'^    needs:\n((?:      - .*\n)+)', job, re.M).group(1)
+        names = [line.strip()[2:] for line in needs.splitlines()]
+        derived = ['linux-gate', 'aggregate'] + sorted(n for n in names if not n.startswith('evidence-gate-'))
+        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        self.assertEqual(policy['checks']['linux-gate']['kinds']['wrapper']['command'], derived)
+        self.assertEqual(GATE_ARGV, derived)
+        self.assertIn('linux-gate', names)
+        # Every real gate job is awaited, so a skip taken anywhere stops the note.
+        self.assertEqual(sorted(n for n in names if n.startswith('evidence-gate-')),
+                         sorted(f'evidence-gate-{c}' for c in CHECKS))
+
+    def test_the_aggregate_note_job_never_runs_for_a_pull_request(self):
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        job = re.search(r'^  evidence-note-linux-gate:\n((?:    .*\n|\n)+)', text, re.M).group(1)
+        condition = re.search(r'^    if: (.*)$', job, re.M).group(1)
+        # Other conjuncts (the draft filter) may be added around it; this one must stay whole, and nothing
+        # may offer a pull request an alternative way in.
+        self.assertIn("(always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && "
+                      "github.ref == 'refs/heads/main')))", condition)
+        self.assertNotIn("github.event_name == 'pull_request'", condition)
+        self.assertNotIn('true', condition)
+        self.assertEqual(condition.count('||'), 1 + condition.count("github.event_name != 'pull_request' ||"))
+
+    def test_every_evidence_test_script_runs_in_the_required_genie_freshness_check(self):
+        listed = (ROOT / 'scripts/ci-genie-freshness').read_text()
+        for path in sorted((ROOT / 'scripts').iterdir()):
+            if re.fullmatch(r'(?:ci-)?evidence-[a-z-]*test', path.name):
+                self.assertRegex(listed, rf'(?<![\w-]){re.escape(path.name)}(?![\w-])', f'{path.name} is not run by scripts/ci-genie-freshness')
 
 if __name__ == '__main__':
     unittest.main()
