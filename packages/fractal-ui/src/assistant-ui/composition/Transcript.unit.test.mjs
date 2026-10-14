@@ -16,6 +16,9 @@ after(() => server.close())
 const { Transcript, LiveActivity } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
 const { EmbraceRuntimeProvider } = await server.ssrLoadModule('/src/assistant-ui/EmbraceRuntime.tsx')
 const { SendUnconfirmed } = await server.ssrLoadModule('/src/assistant-ui/composition/TranscriptFeedback.tsx')
+const { ThinkingRun } = await server.ssrLoadModule('/src/assistant-ui/composition/ThinkingEntry.tsx')
+const { WorkLogV1 } = await server.ssrLoadModule('/src/assistant-ui/taste/WorkLogV1.tsx')
+const { workLogTurnFromItems } = await server.ssrLoadModule('/src/assistant-ui/taste/work-log.ts')
 
 const now = Date.parse('2026-01-15T12:30:00Z')
 const prompt = { _tag: 'Text', id: 'prompt/example', role: 'user', text: 'Keep the visible rows grouped.', attachments: [], streaming: false, at: new Date(now).toISOString() }
@@ -74,4 +77,32 @@ test('host-owned header omits only the duplicate band, including unavailable his
     assert.match(render(undefined), /data-testid="transcript-header"/)
     assert.match(render(false), /transcript-(empty|unavailable)/)
   }
+})
+
+test('read-only work uses a static summary and the reasoning button is named Thinking', () => {
+  const items = Array.from({ length: 11 }, (_, index) => ({ _tag: 'Reasoning', id: `thought/${index}`, text: `Thought ${index}`, streaming: false, at: new Date(now).toISOString() }))
+  const work = workLogTurnFromItems(items, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
+  const markup = renderToStaticMarkup(React.createElement(WorkLogV1, {
+    turn: work, interactiveCalls: false, expandedBody: React.createElement(ThinkingRun, { items }),
+  }))
+  assert.match(markup, /Worked/)
+  assert.equal((markup.match(/<button\b/g) ?? []).length, 1)
+  assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>[\s\S]*?<span>Thinking<\/span><\/button>/)
+  assert.equal((markup.match(/data-testid="thinking-entry"/g) ?? []).length, 1)
+  assert.doesNotMatch(markup, /Thought 0/)
+})
+
+for (const withTool of [false, true]) test(`server-rendered transcript groups reasoning${withTool ? ' across a tool call' : ''} per work log, not across turns`, () => {
+  const at = new Date(now).toISOString()
+  const reasoning = Array.from({ length: 11 }, (_, index) => ({ _tag: 'Reasoning', id: `thought/${index}`, text: `Thought ${index}`, streaming: false, at }))
+  const tool = { _tag: 'ToolCall', id: 'read', callId: 'read', name: 'read', input: { path: 'rows.ts' }, status: 'success', callSeen: true, at }
+  const items = withTool ? [...reasoning.slice(0, 5), tool, ...reasoning.slice(5)] : reasoning
+  const makeTurn = (id, items) => ({ id, items, work: workLogTurnFromItems(items, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) })
+  const render = turns => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
+    options: { messages: turns.flatMap(turn => turn.items), isRunning: false, onNew: async () => {} },
+  }, React.createElement(Transcript, { turns, title: 'Reasoning', sync: { _tag: 'Live', since: now }, now, observedAt: now })))
+  assert.equal((render([makeTurn('grouped', items)]).match(/data-testid="thinking-entry"/g) ?? []).length, 1)
+  assert.equal((render([makeTurn('first', items.slice(0, 3)), makeTurn('second', items.slice(3))]).match(/data-testid="thinking-entry"/g) ?? []).length, 2)
+  assert.doesNotMatch(render([makeTurn('empty', [{ _tag: 'Reasoning', id: 'blank', text: '  ', streaming: false, at }])]), /data-testid="thinking-entry"/)
+  assert.doesNotMatch(render([makeTurn('none', [])]), /data-testid="thinking-entry"/)
 })

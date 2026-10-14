@@ -60,16 +60,59 @@ type Story = StoryObj<typeof meta>
 const adjacentReasoning = Array.from({ length: 11 }, (_, index): ConversationItem => ({
   _tag: 'Reasoning', id: `reasoning-run/${index}`, text: `Check ${index + 1}: keep the observed reasoning in order.`, streaming: false, at,
 }))
-const adjacentReasoningData: TranscriptStoryData = {
-  sync: { _tag: 'Live', since: now },
-  turns: [{ id: 'reasoning-run', items: adjacentReasoning, work: workLogTurnFromItems(adjacentReasoning, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) }],
+function reasoningData(id: string, items: readonly ConversationItem[], running = false): TranscriptStoryData {
+  return { sync: { _tag: 'Live', since: now }, turns: [{ id, items, work: workLogTurnFromItems(items, { kindFor: () => 'read', running, failed: false, interrupted: false, completeHistory: true }) }] }
+}
+function ReasoningExamples({ scheme = 'dark' }: { scheme?: Scheme }) {
+  const [grown, setGrown] = React.useState(false)
+  const tool = cases.settled.turns[0]!.items[0]!
+  const split = [...adjacentReasoning.slice(0, 5), tool, ...adjacentReasoning.slice(5)]
+  const streaming: ConversationItem[] = [{ _tag: 'Reasoning', id: 'growing/first', text: 'Initial streaming thought.', streaming: true, at }, ...(grown ? [{ _tag: 'Reasoning' as const, id: 'growing/next', text: 'New streaming thought.', streaming: true, at }] : [])]
+  const separate = { sync: cases.settled.sync, turns: [reasoningData('first-turn', [adjacentReasoning[0]!]).turns[0]!, reasoningData('second-turn', [adjacentReasoning[1]!]).turns[0]!] }
+  const examples: readonly (readonly [string, TranscriptStoryData])[] = [
+      ['Adjacent reasoning', reasoningData('reasoning-run', adjacentReasoning)],
+      ['Tools between reasoning', reasoningData('tool-split', split)],
+      ['Empty reasoning', reasoningData('empty-reasoning', [{ _tag: 'Reasoning', id: 'empty/thinking', text: '  ', streaming: false, at }])],
+      ['Separate turns control', separate],
+      ['Streaming reasoning', reasoningData('growing', streaming, true)],
+  ]
+  return <section {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    {examples.map(([label, data]) => <section key={label} aria-label={label} {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onRetry={() => {}} /></section>)}
+    <button onClick={() => setGrown(true)}>Grow reasoning</button>
+  </section>
 }
 export const AdjacentReasoning: Story = {
-  render: args => <section {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><div {...stylex.props(styles.frame)}><RuntimeTranscript data={adjacentReasoningData} onRetry={() => {}} /></div></section>,
+  render: args => <ReasoningExamples scheme={args.scheme} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await userEvent.click(await canvas.findByRole('button', { name: 'Worked' }))
-    await expect(canvas.getAllByRole('button', { name: 'Thinking' })).toHaveLength(1)
+    // RuntimeTranscript has no onOpenTool: the work summary is static, not a "Worked" button.
+    for (const label of ['Adjacent reasoning', 'Tools between reasoning']) {
+      const region = within(canvas.getByRole('region', { name: label }))
+      const thinking = await region.findByRole('button', { name: 'Thinking' })
+      await expect(region.getAllByRole('button', { name: 'Thinking' })).toHaveLength(1)
+      await expect(thinking).toHaveAttribute('aria-expanded', 'false')
+      await userEvent.click(thinking)
+      for (let index = 0; index < 11; index++) await expect(region.getByText(`Check ${index + 1}: keep the observed reasoning in order.`)).toBeVisible()
+    }
+    await expect(within(canvas.getByRole('region', { name: 'Empty reasoning' })).queryByRole('button', { name: 'Thinking' })).toBeNull()
+    // Negative control: grouping is per work log, never across distinct turns.
+    const separate = within(canvas.getByRole('region', { name: 'Separate turns control' }))
+    await expect(separate.getAllByRole('button', { name: 'Thinking' })).toHaveLength(2)
+    for (const thinking of separate.getAllByRole('button', { name: 'Thinking' })) await userEvent.click(thinking)
+    await expect(separate.getByText('Check 1: keep the observed reasoning in order.')).toBeVisible()
+    await expect(separate.getByText('Check 2: keep the observed reasoning in order.')).toBeVisible()
+    const streaming = within(canvas.getByRole('region', { name: 'Streaming reasoning' }))
+    const thinking = streaming.getByRole('button', { name: 'Thinking' })
+    await userEvent.click(thinking)
+    await expect(streaming.getByText('Initial streaming thought.')).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'Grow reasoning' }))
+    await waitFor(async () => {
+      await expect(streaming.getAllByRole('button', { name: 'Thinking' })).toHaveLength(1)
+      await expect(streaming.getByRole('button', { name: 'Thinking' })).toBe(thinking)
+      await expect(thinking).toHaveAttribute('aria-expanded', 'true')
+      await expect(streaming.getByText('Initial streaming thought.')).toBeVisible()
+      await expect(streaming.getByText('New streaming thought.')).toBeVisible()
+    })
   },
 }
 export const AdjacentReasoningLight: Story = { ...AdjacentReasoning, args: { scheme: 'light' } }
