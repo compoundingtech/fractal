@@ -342,7 +342,8 @@ enum Fetched {
         reason: String,
     },
     /// st answered a glass write: the glass, the write's key, and the revision it accepted.
-    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), String> },
+    /// An error carries whether st refused it because the Sidebar was retired.
+    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), (String, bool)> },
     GlassSaved {
         id: String,
         key: String,
@@ -942,7 +943,15 @@ pub fn run(context: Context) -> Result<()> {
                 },
                 Fetched::SidebarSaved { write, outcome } => {
                     ui.resource_sidebar.saved(&write, outcome.is_ok());
-                    if let Err(error) = outcome { ui.flash(format!("Sidebar edit not done: {error}")); }
+                    match outcome {
+                        Ok(()) => {}
+                        // The reserved Sidebar is retired: never create it again.
+                        Err((_, true)) if write.creating => {
+                            ui.resource_sidebar.reserved_retired = true;
+                            ui.flash(super::resource_sidebar::SIDEBAR_RETIRED);
+                        }
+                        Err((error, _)) => ui.flash(format!("Sidebar edit not done: {error}")),
+                    }
                 }
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
@@ -1311,7 +1320,13 @@ pub fn run(context: Context) -> Result<()> {
                 } else {
                     let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone(); let model = model.clone();
                     runtime.spawn(async move {
-                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| plain(&error));
+                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| {
+                            let retired = error.chain().any(|cause| matches!(
+                                cause.downcast_ref::<st3_client::ClientError>(),
+                                Some(st3_client::ClientError::Api(st3_client::ErrorCode::ArrangementRetired, ..))
+                            ));
+                            (plain(&error), retired)
+                        });
                         let _ = tx.send(Fetched::SidebarSaved { write, outcome });
                     });
                 }
