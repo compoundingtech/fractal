@@ -1,0 +1,87 @@
+#!/usr/bin/python3
+"""Source-authored controls; run only after fixture source/testing review."""
+import hashlib
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+path = Path(__file__).with_name("st3-scratch-pair-proof")
+loader = importlib.machinery.SourceFileLoader("pair_proof", str(path))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+proof = importlib.util.module_from_spec(spec)
+loader.exec_module(proof)
+
+
+def rows():
+    return [{"name": proof.PREFIX + f"{i:02d}",
+             "hash": hashlib.sha256(proof.document_bytes(i)).hexdigest(),
+             "size": len(proof.document_bytes(i)), "latest": True,
+             "binding_claim_id": f"claim-{i}", "created_index": i + 1,
+             "created_at_unix_ms": 1000, "owner": None} for i in range(50)]
+
+
+class FixtureContract(unittest.TestCase):
+    def test_complete_fields_not_just_fifty_rows(self):
+        values = rows()
+        self.assertEqual(proof.compare_documents(values), values)
+        values[49]["hash"] = "0" * 64
+        with self.assertRaisesRegex(proof.Refused, "document-hash"):
+            proof.compare_documents(values)
+
+    def test_duplicate_or_missing_document_refuses(self):
+        values = rows()
+        values[49] = dict(values[48])
+        with self.assertRaisesRegex(proof.Refused, "duplicate-document"):
+            proof.compare_documents(values)
+
+    def test_equal_count_different_binding_or_time_refuses(self):
+        left = {"scope": "fixture", "build": proof.BUILD, "claim_count": 50,
+                "input_sha256": "a", "documents": rows(), "documents_sha256": "b"}
+        right = dict(left)
+        right["documents"] = [dict(row) for row in left["documents"]]
+        right["documents"][0]["binding_claim_id"] = "another-claim"
+        with self.assertRaisesRegex(proof.Refused, "member-field-mismatch-documents"):
+            proof.compare_cuts(left, right)
+        right["documents"][0] = dict(left["documents"][0])
+        right["documents"][0]["created_at_unix_ms"] = 999
+        with self.assertRaisesRegex(proof.Refused, "member-field-mismatch-documents"):
+            proof.compare_cuts(left, right)
+
+    def test_inputs_cannot_hide_behind_equal_documents(self):
+        left = {"scope": "fixture", "build": proof.BUILD, "claim_count": 50,
+                "input_sha256": "a", "documents": rows(), "documents_sha256": "b"}
+        right = dict(left, input_sha256="different-admitted-input")
+        with self.assertRaisesRegex(proof.Refused, "member-field-mismatch-input_sha256"):
+            proof.compare_cuts(left, right)
+
+    def test_host_writable_root_and_missing_noexec_refuse(self):
+        text = ("1 0 0:1 / / ro - overlay overlay ro\n"
+                "2 1 0:2 / /state rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n"
+                "3 1 0:3 / /tmp rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n")
+        proof.check_mounts(text)
+        with self.assertRaisesRegex(proof.Refused, "root-not-readonly"):
+            proof.check_mounts(text.replace("/ / ro", "/ / rw"))
+        with self.assertRaisesRegex(proof.Refused, "private-tmpfs-required"):
+            proof.check_mounts(text.replace(",noexec", "", 1))
+
+    def test_cold_overbudget_history_refuses_before_document_copy(self):
+        called = []
+        def local(method, path, body=None):
+            called.append(path)
+            if path == "/v1/replication/status":
+                return dict(configured=True, fleet_id="fixture",
+                            **{key: 0 for key in ("pending_records", "unknown_records", "invalid_records",
+                              "unsigned_envelopes", "fenced_envelopes", "unhealthy_projections")})
+            if path == "/v1/health":
+                return {"build": {"commit": proof.BUILD}, "store_index": 50}
+            return {"next_cursor": 500, "claims": []}
+        with patch.object(proof, "local", local):
+            with self.assertRaisesRegex(proof.Refused, "claim-history-over-budget"):
+                proof.capture_cut()
+        self.assertFalse(any(path.startswith("/v1/documents") for path in called))
+
+
+if __name__ == "__main__":
+    unittest.main()

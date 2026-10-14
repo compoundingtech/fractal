@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Prepare a fixed, review-gated disposable two-member fixture for50 invented documents.",
+  "replay": {"status": "none", "detail": "No production replay or projection algorithm change."},
+  "schema": {"status": "none", "detail": "No database, claim registry or storage version change."},
+  "rules": {"status": "none", "detail": "No production authority, admission or checkpoint change."},
+  "compatibility": {"status": "none", "detail": "Standalone candidate fixture source only; not installed or active. Candidate old binary pin remains explicit."},
+  "downtime": {"status": "none", "detail": "No service or host deployment."},
+  "manual": {"status": "changed", "detail": "Fixture source/testing and image/trigger/backend review are required before invocation. No production host run, Docker group grant or credentials use. Operations owns isolated packaging and cleanup."},
+  "recovery": {"status": "none", "detail": "No production state conversion or repair; fixture child cleanup is tested separately before use."}
+}

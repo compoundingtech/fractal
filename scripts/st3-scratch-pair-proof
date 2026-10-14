@@ -1,0 +1,401 @@
+#!/usr/bin/python3
+"""Review-gated, operator-installed Slice0 fixture. Never execute on a host.
+
+The image/trigger/egress/guest bootstrap principal require separate approval.
+This file contains no Docker, sudo, environment-clearing or service-install command.
+"""
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+
+BUILD = "21fd968d3c5534a1ebb33458e8ff25c6d4e2da90"
+BINARY_SHA = "eeae8c11562b4c048ce59c52dd0b75b543bb139e68caae274ad45da06d3f5938"
+BINARY = Path("/opt/st-scratch/st3")
+ROOT = Path("/state")
+SOCKET = ROOT / "run/st3.sock"
+PREFIX = "doc/scratch-pair-proof/"
+MAX_REPLY = 8 * 1024 * 1024
+MAX_CLAIMS = 500
+MAX_RECEIPT = 48 * 1024
+PORTS = {"a": 31313, "b": 31314}
+CONTROL = 31320
+
+
+class Refused(Exception):
+    pass
+
+
+def require(condition, code):
+    if not condition:
+        raise Refused(code)
+
+
+def encoded(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def digest(value):
+    return hashlib.sha256(encoded(value)).hexdigest()
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(SOCKET))
+
+
+def request(connection, method, path, body=None):
+    """Bound the wire bytes before JSON decode; API errors reveal no response bodies."""
+    try:
+        payload = None if body is None else encoded(body)
+        require(payload is None or len(payload) <= MAX_REPLY, "request-width")
+        connection.request(method, path, payload, {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        data = response.read(MAX_REPLY + 1)
+        require(len(data) <= MAX_REPLY, "response-width")
+        require(response.status == 200, f"http-{response.status}")
+        return json.loads(data)
+    finally:
+        connection.close()
+
+
+def local(method, path, body=None):
+    return request(UnixHTTP("local", timeout=15), method, path, body)
+
+
+def peer(method, path, body=None):
+    return request(http.client.HTTPConnection("a", CONTROL, timeout=15), method, path, body)
+
+
+def await_ready(check, children, seconds=120):
+    """Startup/sync condition waiting, not retry of a failed mutation."""
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        require(all(child.poll() is None for child in children), "child-exited")
+        try:
+            if check():
+                return
+        except (ConnectionError, FileNotFoundError, socket.timeout):
+            pass
+        time.sleep(0.2)
+    raise Refused("condition-not-reached")
+
+
+def document_bytes(number):
+    return f"invented fixture document {number:02d}\n".encode()
+
+
+def check_mounts(text):
+    mounts = {}
+    for line in text.splitlines():
+        fields = line.split()
+        separator = fields.index("-")
+        mounts[fields[4]] = (set(fields[5].split(",")), fields[separator + 1])
+    require("ro" in mounts.get("/", (set(), ""))[0], "root-not-readonly")
+    for path in ("/state", "/tmp"):
+        flags, kind = mounts.get(path, (set(), ""))
+        require(kind == "tmpfs" and {"rw", "noexec", "nodev", "nosuid"} <= flags,
+                "private-tmpfs-required")
+
+
+def compare_documents(rows):
+    require(isinstance(rows, list) and len(rows) == 50, "document-count")
+    by_name = {row["name"]: row for row in rows}
+    require(len(by_name) == 50, "duplicate-document")
+    for number in range(50):
+        name = PREFIX + f"{number:02d}"
+        require(name in by_name, "missing-document")
+        body = document_bytes(number)
+        row = by_name[name]
+        require(row["hash"] == hashlib.sha256(body).hexdigest(), "document-hash")
+        require(row["size"] == len(body), "document-size")
+        require(row["latest"] is True, "document-not-current")
+        require(isinstance(row["binding_claim_id"], str) and row["binding_claim_id"], "binding-id")
+    return [by_name[PREFIX + f"{number:02d}"] for number in range(50)]
+
+
+def capture_cut():
+    """Exhaustive bounded *fixture document/input* cut, not a global Source capability.
+
+    The approved external backend supplies exclusive writer ownership. A whole claim
+    page must fit; physical index stability refuses concurrent changes. Physical arrival
+    indices are retained locally but excluded from cross-member semantic comparison.
+    All projected document fields and content are checked, not cached digests alone.
+    """
+    status = local("GET", "/v1/replication/status")
+    require(status["configured"] is True and status["fleet_id"], "not-a-fleet")
+    for field in ("pending_records", "unknown_records", "invalid_records", "unsigned_envelopes",
+                  "fenced_envelopes", "unhealthy_projections"):
+        require(status[field] == 0, "unready-admission-" + field)
+    before = local("GET", "/v1/health")
+    require(before["build"]["commit"] == BUILD, "wrong-running-build")
+    page = local("GET", f"/v1/claims?after_index=0&limit={MAX_CLAIMS}")
+    require(page.get("next_cursor") is None, "claim-history-over-budget")
+    claims = page["claims"]
+    require(isinstance(claims, list) and len(claims) < MAX_CLAIMS, "claim-count")
+    require(len({claim["id"] for claim in claims}) == len(claims), "duplicate-claim")
+    listing = local("GET", "/v1/documents?prefix=" + urllib.parse.quote(PREFIX, safe="") + "&limit=51")
+    require(listing.get("has_more") is False, "document-page-incomplete")
+    semantic = []
+    for row in compare_documents(listing["items"]):
+        reference = row["name"] + "@" + row["hash"]
+        content = local("GET", "/v1/documents/content?reference=" + urllib.parse.quote(reference, safe=""))
+        require(content["reference"] == reference, "content-reference")
+        number = int(row["name"].removeprefix(PREFIX))
+        require(content["bytes"] == list(document_bytes(number)), "content-field-mismatch")
+        require(any(claim["id"] == row["binding_claim_id"] for claim in claims), "binding-not-in-cut")
+        # created_index is a physical arrival index, not a replicated logical field.
+        semantic.append({key: value for key, value in row.items() if key != "created_index"})
+    after = local("GET", "/v1/health")
+    require(before["store_index"] == after["store_index"], "cut-changed")
+    require(after["build"]["commit"] == BUILD, "build-changed")
+    logical_claims = [{key: value for key, value in claim.items() if key != "store_index"}
+                      for claim in sorted(claims, key=lambda item: item["id"])]
+    return {
+        "scope": "exhaustive-fixture-documents-and-admitted-claims-v1",
+        "not_global_source_or_projection_oracle": True,
+        "build": BUILD,
+        "physical_store_index": after["store_index"],
+        "claim_count": len(claims),
+        "input_sha256": digest(logical_claims),
+        "documents": semantic,
+        "documents_sha256": digest(semantic),
+    }
+
+
+def compare_cuts(left, right):
+    for key in ("scope", "build", "claim_count", "input_sha256", "documents", "documents_sha256"):
+        require(left[key] == right[key], "member-field-mismatch-" + key)
+
+
+class Relay(socketserver.ThreadingTCPServer):
+    allow_reuse_address = False
+    daemon_threads = True
+
+
+class RelayHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        # Fixed loopback tunneling for a local-TCP fixture, NOT Fabric/Tailscale.
+        with socket.create_connection(self.server.destination, timeout=10) as other:
+            def copy(source, target):
+                transferred = 0
+                try:
+                    while True:
+                        data = source.recv(65536)
+                        if not data:
+                            break
+                        transferred += len(data)
+                        require(transferred <= 16 * 1024 * 1024, "relay-byte-budget")
+                        target.sendall(data)
+                finally:
+                    try:
+                        target.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+            worker = threading.Thread(target=copy, args=(self.request, other), daemon=True)
+            worker.start()
+            copy(other, self.request)
+            worker.join(timeout=15)
+
+
+class Fixture:
+    def __init__(self, role):
+        self.role = role
+        self.children = []
+        self.servers = []
+        self.files = []
+        self.manifest = None
+        self.code = None
+        self.cut = None
+        self.finished = threading.Event()
+
+    def cli(self, *arguments):
+        # File-backed capture, bounded before copy; never print a join code/error body.
+        with (ROOT / "command-out").open("w+b") as out, (ROOT / "command-err").open("w+b") as err:
+            result = subprocess.run([str(BINARY), "--daemon-wait", "0", *arguments],
+                                    stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                                    timeout=30, check=False)
+            require(result.returncode == 0, "cli-failed")
+            require(out.tell() <= 65536 and err.tell() <= 65536, "cli-output-width")
+            out.seek(0)
+            return out.read()
+
+    def child(self, *arguments):
+        log = (ROOT / f"child-{len(self.children)}.log").open("xb")
+        self.files.append(log)
+        child = subprocess.Popen([str(BINARY), *arguments], stdin=subprocess.DEVNULL,
+                                 stdout=log, stderr=log)
+        self.children.append(child)
+
+    def prepare(self):
+        require(self.role in PORTS and os.geteuid() == 65534, "wrong-role-or-uid")
+        require(not any(key == "ST_AGENT" or key.startswith("ST3_") for key in os.environ), "host-seat-environment")
+        require(os.environ.get("HOME") == "/state/home", "wrong-home")
+        require(os.environ.get("XDG_CONFIG_HOME") == "/state/config", "wrong-config-home")
+        require(os.environ.get("XDG_STATE_HOME") == "/state/data", "wrong-state-home")
+        require(os.environ.get("XDG_RUNTIME_DIR") == "/state/run", "wrong-runtime-home")
+        require(not os.environ.get("SSH_AUTH_SOCK"), "host-credential-agent")
+        check_mounts(Path("/proc/self/mountinfo").read_text())
+        require(ROOT.is_dir() and not ROOT.is_symlink() and ROOT.stat().st_uid == 65534,
+                "wrong-state-root")
+        require(hashlib.sha256(BINARY.read_bytes()).hexdigest() == BINARY_SHA, "wrong-binary")
+        require(not (ROOT / "data").exists() and not SOCKET.exists(), "state-not-empty")
+        for directory in ("home", "config/st3", "data", "run"):
+            (ROOT / directory).mkdir(parents=True, exist_ok=False)
+        # Synthetic guest-local test principal, not a host person/seat. Security review
+        # of this operator-owned bootstrap path is mandatory before any fixture run.
+        (ROOT / "config/st3/config.toml").write_text(
+            f'node="{self.role}"\nperson="person/scratch-fixture"\n'
+            f'peer_listen="0.0.0.0:{PORTS[self.role]}"\n'
+            'peer_listen_allow_plain_http=true\n')
+        other = "b" if self.role == "a" else "a"
+        relay = Relay(("127.0.0.1", PORTS[other]), RelayHandler)
+        relay.destination = (other, PORTS[other])
+        self.servers.append(relay)
+        threading.Thread(target=relay.serve_forever, daemon=True).start()
+
+    def start(self):
+        self.child("up")
+        await_ready(lambda: local("GET", "/v1/health")["status"] == "ready", self.children)
+        self.child("replication-worker")
+
+    def cleanup(self):
+        for server in self.servers:
+            server.shutdown()
+            server.server_close()
+        for child in reversed(self.children):
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=10)
+        for file in self.files:
+            file.close()
+
+
+def main():
+    require(len(sys.argv) == 2 and sys.argv[1] in PORTS, "fixed-member-argv-only")
+    fixture = Fixture(sys.argv[1])
+    receipt = {"kind": "interim-scratch-proof", "member": fixture.role, "accepted": False}
+    try:
+        fixture.prepare()
+        if fixture.role == "a":
+            fixture.cli("fleet", "create", "--name", "a", "--no-service", "--port", str(PORTS["a"]),
+                        "--transports", "tailscale", "--advertise-loopback")
+            fixture.start()
+            for number in range(50):
+                local("POST", "/v1/documents", {"name": PREFIX + f"{number:02d}",
+                      "bytes": list(document_bytes(number)), "expected_document": None,
+                      "idempotency_key": f"fixed-fixture-document-{number:02d}"})
+            fixture.cli("fleet", "invite", "b", "--via", "loopback", "--expires", "15m",
+                        "--code-file", "/state/invite.code")
+            fixture.code = (ROOT / "invite.code").read_text().strip()
+            # Force sealing before the later guarded cut capture; no proof from digests alone.
+            local("GET", "/v1/replication/status")
+            run_sponsor(fixture)
+            receipt["cut"] = fixture.cut
+        else:
+            run_joiner(fixture)
+            receipt["cut"] = fixture.cut
+        receipt["accepted"] = True
+    except Exception as error:
+        # Never serialize arbitrary API, child or join-code error text.
+        receipt["error"] = str(error) if isinstance(error, Refused) else type(error).__name__
+    finally:
+        try:
+            fixture.cleanup()
+        except Exception as error:
+            receipt["accepted"] = False
+            receipt["cleanup_error"] = type(error).__name__
+        receipt["owned_children_reaped"] = all(child.poll() is not None for child in fixture.children)
+    output = encoded(receipt)
+    require(len(output) <= MAX_RECEIPT, "receipt-width")
+    print(output.decode(), flush=True)
+    return 0 if receipt["accepted"] and receipt["owned_children_reaped"] else 1
+
+
+def run_sponsor(fixture):
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *arguments):
+            pass
+
+        def do_GET(self):
+            if self.path == "/invite":
+                answer = {"code": fixture.code}
+            elif self.path == "/readiness":
+                answer = {"graph_digest": local("GET", "/v1/replication/status")["graph_digest"]}
+            elif self.path == "/cut":
+                fixture.cut = capture_cut()
+                answer = fixture.cut
+            else:
+                self.send_error(404)
+                return
+            data = encoded(answer)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_POST(self):
+            require(self.path == "/done", "unknown-control")
+            size = int(self.headers.get("Content-Length", "0"))
+            require(0 < size <= MAX_RECEIPT, "control-width")
+            remote = json.loads(self.rfile.read(size))
+            compare_cuts(fixture.cut, capture_cut())
+            compare_cuts(fixture.cut, remote)
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            fixture.finished.set()
+    server = HTTPServer(("0.0.0.0", CONTROL), Handler)
+    fixture.servers.append(server)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    require(fixture.finished.wait(600), "peer-proof-not-finished")
+
+
+def run_joiner(fixture):
+    invite = None
+    def sponsor_ready():
+        nonlocal invite
+        invite = peer("GET", "/invite")
+        return bool(invite.get("code"))
+    await_ready(sponsor_ready, fixture.children)
+    code = invite["code"]
+    require(isinstance(code, str) and len(code) <= 8192 and code.startswith("stj1-"), "invite-shape")
+    path = ROOT / "invite.code"
+    path.write_text(code)
+    path.chmod(0o600)
+    fixture.cli("fleet", "join", "--name", "b", "--no-service", "--no-wait",
+                "--code-file", str(path), "--port", str(PORTS["b"]),
+                "--transports", "tailscale", "--advertise-loopback")
+    fixture.start()
+    def complete():
+        listing = local("GET", "/v1/documents?prefix=" + urllib.parse.quote(PREFIX, safe="") + "&limit=51")
+        return len(listing["items"]) == 50
+    await_ready(complete, fixture.children)
+    # Digest equality is only readiness; the subsequent complete field/input capture
+    # still refuses stale/missing inputs and cannot pass on this cached value alone.
+    await_ready(lambda: local("GET", "/v1/replication/status")["graph_digest"]
+                == peer("GET", "/readiness")["graph_digest"], fixture.children)
+    sponsor = peer("GET", "/cut")
+    fixture.cut = capture_cut()
+    compare_cuts(sponsor, fixture.cut)
+    peer("POST", "/done", fixture.cut)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

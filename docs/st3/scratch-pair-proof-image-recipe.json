@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "status": "source-recipe-not-built-or-qualified",
+  "fixture": "replication-pair-50-v1",
+  "rootfs": {
+    "owner": "Operations",
+    "required_input": "Qualified minimal Linux x86_64 rootfs local image ID, actual contents and environment audit",
+    "image_id": null,
+    "requirements": ["Python3 standard library and its exact runtime dependencies", "Candidate st3 ELF loader, libc and libm with recorded checksums", "Non-root uid/gid65534 with a reviewed immutable login shell", "No production HOME, state, sockets, credentials, SSH agents, transport homes or caller env"]
+  },
+  "st3": {
+    "source": "21fd968d3c5534a1ebb33458e8ff25c6d4e2da90",
+    "sha256": "eeae8c11562b4c048ce59c52dd0b75b543bb139e68caae274ad45da06d3f5938",
+    "destination": "/opt/st-scratch/st3",
+    "interpreter": "/lib64/ld-linux-x86-64.so.2",
+    "needed": ["libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"],
+    "validation": "Read-only local ELF and hash inspection, not an ABI/rootfs/native receipt"
+  },
+  "fixture_script": {
+    "repository_path": "scripts/st3-scratch-pair-proof",
+    "destination": "/opt/st-scratch/st3-scratch-pair-proof",
+    "owner": "root",
+    "runtime_mode": "read-only, not copied from caller checkout"
+  },
+  "members": {
+    "a": ["/usr/bin/python3", "/opt/st-scratch/st3-scratch-pair-proof", "a"],
+    "b": ["/usr/bin/python3", "/opt/st-scratch/st3-scratch-pair-proof", "b"]
+  },
+  "environment": {
+    "HOME": "/state/home",
+    "XDG_CONFIG_HOME": "/state/config",
+    "XDG_STATE_HOME": "/state/data",
+    "XDG_RUNTIME_DIR": "/state/run",
+    "PATH": "/usr/bin:/bin",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "runtime": {
+    "uid": 65534,
+    "readonly_root": true,
+    "tmpfs": {"/state": "256MiB rw,noexec,nodev,nosuid owned65534", "/tmp": "64MiB rw,noexec,nodev,nosuid"},
+    "capabilities": "ALL dropped",
+    "no_new_privileges": true,
+    "memory_max_bytes": 2147483648,
+    "cpu_max": 4,
+    "pids_max": 512,
+    "whole_run_max_seconds": 1800,
+    "network": "Two fixed aliases a/b on internal network; no published ports, external DNS or egress. Native peer31313/31314 and fixed control31320 only. Not Fabric/Tailscale.",
+    "mounts": "No host mounts beyond operator-qualified private tmpfs/runtime provisions"
+  },
+  "outputs": {
+    "member_stdout": "One final secret-free JSON line <=48KiB",
+    "operator_capture": "Per-member exit and64KiB tails; actual outer cleanup receipt separate",
+    "saved_image_tar_sha256": null,
+    "resulting_local_image_id": null
+  },
+  "qualification": "Source/testing and operator image/script/backend/security review before any fixture run; actual saved tarball checksum/local image ID and fixture hash required. No invented artifact, no Docker pull/build in trigger."
+}
