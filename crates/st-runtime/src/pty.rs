@@ -14,6 +14,8 @@ use pty_core::registry::SessionInfo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use crate::pty_identity::{self, BOOT_TAG, Owner};
+
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -155,7 +157,27 @@ impl PtyRuntime {
     }
 
     pub fn snapshot(&self) -> Result<Vec<PtyObservation>> {
-        self.sessions()?.into_iter().map(observation).collect()
+        self.sessions()?
+            .into_iter()
+            .map(|session| self.recorded_session(session).and_then(observation))
+            .collect()
+    }
+
+    fn recorded_session(&self, mut session: SessionInfo) -> Result<SessionInfo> {
+        // The producer's listing drops dead PIDs and judges life by PID
+        // existence. Observation retains the recorded PID independently,
+        // while control keeps its existing incarnation-refusal behavior.
+        let path = self.root.join(format!("{}.pid", session.name));
+        session.pid = match std::fs::read_to_string(&path) {
+            Ok(pid) => Some(pid.trim().parse::<i32>().unwrap_or(-1)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("read PTY process identity failed: {}", path.display())
+                });
+            }
+        };
+        Ok(session)
     }
 
     /// One bounded read of the registry. `pty_client` lists an unreadable root as empty, but the
@@ -299,12 +321,15 @@ impl PtyRuntime {
                 .with_context(|| format!("read PTY publication fence {}", fence.display()))?;
             // Give the unknown launch one recovery window to publish. If it still has not,
             // retire its fence and let this pass replace it with `pty run --force`.
-            match self.wait_for_publication(id, (!previous.is_empty()).then_some(previous.as_str())) {
+            match self.wait_for_publication(id, (!previous.is_empty()).then_some(previous.as_str()))
+            {
                 Ok(_) => {}
                 Err(error)
-                    if error.downcast_ref::<PtySpawnTimeout>().is_some_and(|timeout| {
-                        timeout.phase == PtySpawnTimeoutPhase::Publication
-                    }) => {}
+                    if error
+                        .downcast_ref::<PtySpawnTimeout>()
+                        .is_some_and(|timeout| {
+                            timeout.phase == PtySpawnTimeoutPhase::Publication
+                        }) => {}
                 Err(error) => return Err(error),
             }
             std::fs::remove_file(&fence)
@@ -315,27 +340,28 @@ impl PtyRuntime {
                 .find(|observation| observation.name == id);
         }
         if let Some((predecessor, operation)) = cutover
-            && let Some(observed) = before.as_ref() {
+            && let Some(observed) = before.as_ref()
+        {
+            anyhow::ensure!(
+                observed.status != "unknown",
+                "rollout cannot spawn while the PTY identity is unknown"
+            );
+            if observation_is_live(observed) {
                 anyhow::ensure!(
-                    observed.status != "unknown",
-                    "rollout cannot spawn while the PTY identity is unknown"
+                    observed.tags.get("st3.rollout").map(String::as_str) == Some(operation)
+                        && observation_incarnation(observed)
+                            .as_deref()
+                            .is_some_and(|inc| inc != predecessor),
+                    "rollout cannot adopt another live PTY incarnation"
                 );
-                if observation_is_live(observed) {
-                    anyhow::ensure!(
-                        observed.tags.get("st3.rollout").map(String::as_str) == Some(operation)
-                            && observation_incarnation(observed)
-                                .as_deref()
-                                .is_some_and(|inc| inc != predecessor),
-                        "rollout cannot adopt another live PTY incarnation"
-                    );
-                } else {
-                    let same = observation_incarnation(observed).as_deref() == Some(predecessor)
-                        || (observed.pid.is_none()
-                            && predecessor.split_once(':').is_some_and(|(_, created)| {
-                                observed.created_at.as_deref() == Some(created)
-                            }));
-                    anyhow::ensure!(same, "rollout predecessor changed before spawn");
-                }
+            } else {
+                let same = observation_incarnation(observed).as_deref() == Some(predecessor)
+                    || (observed.pid.is_none()
+                        && predecessor.split_once(':').is_some_and(|(_, created)| {
+                            observed.created_at.as_deref() == Some(created)
+                        }));
+                anyhow::ensure!(same, "rollout predecessor changed before spawn");
+            }
         }
         if before.as_ref().is_some_and(observation_is_live) {
             anyhow::ensure!(
@@ -344,9 +370,81 @@ impl PtyRuntime {
             );
             return Ok(());
         }
+        anyhow::ensure!(
+            before
+                .as_ref()
+                .is_none_or(|observed| observed.status != "unknown"),
+            "rollout cannot spawn while the PTY identity is unknown"
+        );
+        // A lost owner can leave a PID naming a bystander. Retire that exact
+        // registry record before asking the producer to launch under its name.
+        let mut retired_owner = false;
+        if let Some(session) = self
+            .sessions()?
+            .into_iter()
+            .find(|session| session.name == id)
+            .map(|session| self.recorded_session(session))
+            .transpose()?
+        {
+            let current = observation(session.clone())?;
+            anyhow::ensure!(
+                pty_identity::missing_recorded_identity(&session).is_none(),
+                "rollout cannot spawn while the PTY identity is unknown"
+            );
+            if cutover.is_some() {
+                anyhow::ensure!(
+                    before
+                        .as_ref()
+                        .is_some_and(|before| observation_incarnation(before)
+                            == observation_incarnation(&current)),
+                    "rollout predecessor changed before spawn"
+                );
+            }
+            match pty_identity::owner(&session) {
+                Owner::Unknown => {
+                    anyhow::bail!("rollout cannot spawn while the PTY identity is unknown")
+                }
+                Owner::Matching if current.status != "exited" => {
+                    if let Some((predecessor, operation)) = cutover {
+                        anyhow::ensure!(
+                            current.tags.get("st3.rollout").map(String::as_str) == Some(operation)
+                                && observation_incarnation(&current)
+                                    .as_deref()
+                                    .is_some_and(|inc| inc != predecessor),
+                            "rollout cannot adopt another live PTY incarnation"
+                        );
+                    } else {
+                        anyhow::ensure!(
+                            guard.is_none(),
+                            "guarded start cannot attribute an existing incarnation to a new launch"
+                        );
+                    }
+                    return Ok(());
+                }
+                Owner::Mismatch => {
+                    anyhow::ensure!(
+                        cutover.is_none(),
+                        "rollout predecessor changed before spawn"
+                    );
+                    self.retire_lost_owner(&session)?;
+                    retired_owner = true;
+                    before = None;
+                }
+                Owner::Matching | Owner::Gone => {}
+            }
+        }
         // What the previous incarnation left running ends before its replacement starts. Each
         // launch has a scope of its own, so this never reaches the replacement.
-        if let Err(error) = self.end_previous_scopes(id, before.as_ref()) {
+        if !retired_owner
+            && before.is_none()
+            && let Some(unit) = self.recorded_scope(id)?
+        {
+            anyhow::ensure!(
+                crate::isolate::is_launch_scope(&unit, id),
+                "rollout cannot spawn while the PTY identity is unknown"
+            );
+        }
+        if !retired_owner && let Err(error) = self.end_previous_scopes(id, before.as_ref()) {
             eprintln!(
                 "st3: WARN what the last incarnation of {id} left running did not end: {error:#}"
             );
@@ -387,6 +485,11 @@ impl PtyRuntime {
             ]);
         }
         let mut effective_tags = tags.clone();
+        // Caller-supplied evidence never authorizes a control action.
+        effective_tags.remove(BOOT_TAG);
+        if let Some(boot) = pty_identity::boot_identity() {
+            effective_tags.insert(BOOT_TAG.into(), boot);
+        }
         if let Some((_, operation)) = cutover {
             effective_tags.insert("st3.rollout".into(), operation.into());
         }
@@ -583,8 +686,42 @@ impl PtyRuntime {
         self.stop_if(id, None)
     }
 
+    /// Explain refusal without granting signal authority or changing control
+    /// error codes. Explicit operator requests use the existing diagnostic.
+    pub fn stop_refusal_reason(&self, id: &str) -> Result<Option<String>> {
+        let session = self.session(id)?;
+        Ok(pty_identity::missing_recorded_identity(&session).map(|missing| {
+            format!("PTY `{id}` has no process identity: missing or malformed {missing}; explicit stop requires proof of the recorded owner")
+        }))
+    }
+
     pub fn stop_if(&self, id: &str, expected_incarnation: Option<&str>) -> Result<()> {
+        self.stop_if_with(id, expected_incarnation, |session| {
+            self.stop_matching(id, session)
+        })
+    }
+
+    fn stop_if_with(
+        &self,
+        id: &str,
+        expected_incarnation: Option<&str>,
+        stop: impl FnOnce(SessionInfo) -> Result<()>,
+    ) -> Result<()> {
         let session = self.require_incarnation(id, expected_incarnation)?;
+        anyhow::ensure!(
+            session.status == pty_core::registry::SessionStatus::Running,
+            "stop PTY failed: {}",
+            StopError::NotRunning { name: id.into() }
+        );
+        anyhow::ensure!(
+            pty_identity::owner(&session) == Owner::Matching,
+            "stop PTY failed: {}",
+            StopError::SignalFailed { name: id.into() }
+        );
+        stop(session)
+    }
+
+    fn stop_matching(&self, id: &str, session: SessionInfo) -> Result<()> {
         // Fence the stop on the generation this read saw as well, so a replacement published
         // after the incarnation check is never stopped in its place.
         let generation = session
@@ -631,6 +768,7 @@ impl PtyRuntime {
 
     pub fn kill_if(&self, id: &str, expected_incarnation: Option<&str>) -> Result<()> {
         let session = self.require_incarnation(id, expected_incarnation)?;
+        self.require_signal_owner(&session)?;
         // Everything else the harness started ends with it, but the server leaves the work scope
         // first: it outlives the harness to record the exit.
         let unit = work_scope(&session).filter(|unit| {
@@ -653,7 +791,20 @@ impl PtyRuntime {
         expected_incarnation: Option<&str>,
         signal: i32,
     ) -> Result<()> {
+        self.signal_if_with(id, expected_incarnation, signal, |pid, signal| unsafe {
+            libc::kill(pid, signal)
+        })
+    }
+
+    fn signal_if_with(
+        &self,
+        id: &str,
+        expected_incarnation: Option<&str>,
+        signal: i32,
+        mut send_signal: impl FnMut(i32, i32) -> i32,
+    ) -> Result<()> {
         let session = self.require_incarnation(id, expected_incarnation)?;
+        self.require_signal_owner(&session)?;
         let daemon_pid = session
             .pid
             .with_context(|| format!("PTY `{id}` has no process identity"))?;
@@ -661,9 +812,8 @@ impl PtyRuntime {
         // The registry names the supporting daemon, not the process group leader running inside
         // the terminal. Signalling that PID makes the registry disappear while leaving the
         // provider tree alive. Resolve the terminal child through the same daemon and fence it
-        // against the registry read before delivering the signal. `pty_client::signal_in` would
-        // also prove the daemon by a start token that daemons before pty-rust a2bfa66 never
-        // record, so it refuses every session those daemons run.
+        // against the registry read before delivering the signal. The owner
+        // must independently prove its recorded kernel identity as well.
         let status = pty_core::registry::with_root(&self.root, || {
             pty_client::query_status_json(id, pty_client::STATS_TIMEOUT)
         })
@@ -693,9 +843,10 @@ impl PtyRuntime {
             pid > 1 && pid != unsafe { libc::getpgrp() },
             "PTY `{id}` reported the process identity {pid}, which cannot be signalled alone"
         );
-        let group = unsafe { libc::kill(-pid, signal) };
+        self.require_signal_owner(&session)?;
+        let group = send_signal(-pid, signal);
         if group != 0 {
-            let direct = unsafe { libc::kill(pid, signal) };
+            let direct = send_signal(pid, signal);
             if direct != 0 {
                 let error = std::io::Error::last_os_error();
                 if error.raw_os_error() != Some(libc::ESRCH) {
@@ -704,6 +855,56 @@ impl PtyRuntime {
             }
         }
         Ok(())
+    }
+
+    fn require_signal_owner(&self, session: &SessionInfo) -> Result<()> {
+        anyhow::ensure!(
+            pty_identity::owner(session) == Owner::Matching,
+            "PTY `{}` has no process identity",
+            session.name
+        );
+        Ok(())
+    }
+
+    fn retire_lost_owner(&self, session: &SessionInfo) -> Result<()> {
+        // The pinned producer holds its creation lock through PID/metadata
+        // publication and readiness. A partial publication may look like a
+        // mismatch to a reader, but cannot pass this lock and record fence.
+        pty_core::registry::with_root(&self.root, || {
+            pty_core::registry::with_both_locks(&session.name, || -> Result<()> {
+                let current = pty_core::registry::read_metadata(&session.name);
+                let pid = pty_core::registry::read_session_pid(&session.name);
+                anyhow::ensure!(
+                    current.as_ref() == session.metadata.as_ref()
+                        && pid == session.pid
+                        && pty_identity::missing_recorded_identity(session).is_none()
+                        && pty_identity::owner(session) == Owner::Mismatch,
+                    "PTY `{}` changed incarnation before the control action",
+                    session.name
+                );
+                for path in [
+                    pty_core::registry::socket_path(&session.name),
+                    pty_core::registry::pid_path(&session.name),
+                    pty_core::registry::events_path(&session.name),
+                    pty_core::registry::recovery_revision_path(&session.name),
+                    pty_core::registry::output_activity_path(&session.name),
+                    pty_core::registry::metadata_path(&session.name),
+                ] {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error)
+                                .with_context(|| format!("retire PTY {}", path.display()));
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|error| {
+                anyhow::anyhow!("remove PTY failed: {}", error.message(&session.name))
+            })?
+        })
     }
 
     fn require_incarnation(
@@ -725,6 +926,14 @@ impl PtyRuntime {
     /// removed itself. A session whose harness still runs keeps everything; [`Self::stop_if`]
     /// ends it.
     pub fn end_leftovers(&self, id: &str) -> Result<()> {
+        self.end_leftovers_with(id, crate::end_scope)
+    }
+
+    fn end_leftovers_with(
+        &self,
+        id: &str,
+        end_scope: impl FnMut(&str, Duration) -> Result<bool>,
+    ) -> Result<()> {
         // A launch under way ends its predecessor's scope itself, and its own is no leftover.
         let Some(_lock) = self.try_spawn_lock(id)? else {
             return Ok(());
@@ -732,9 +941,27 @@ impl PtyRuntime {
         let session = self
             .sessions()?
             .into_iter()
-            .find(|session| session.name == id)
-            .map(observation)
-            .transpose()?;
+            .find(|session| session.name == id);
+        if session.is_none()
+            && self
+                .root
+                .join(format!("{id}.json"))
+                .try_exists()
+                .with_context(|| format!("read PTY `{id}` registry identity"))?
+        {
+            // An unreadable registry entry is not registry self-removal.
+            return Ok(());
+        }
+        if session.as_ref().is_some_and(|session| {
+            pty_identity::missing_recorded_identity(session).is_some()
+                || matches!(
+                    pty_identity::owner(session),
+                    Owner::Mismatch | Owner::Unknown
+                )
+        }) {
+            return Ok(());
+        }
+        let session = session.map(observation).transpose()?;
         // A session the registry cannot rule out as running keeps its scope.
         if session
             .as_ref()
@@ -742,7 +969,7 @@ impl PtyRuntime {
         {
             return Ok(());
         }
-        self.end_previous_scopes(id, session.as_ref())
+        self.end_previous_scopes_with(id, session.as_ref(), end_scope)
     }
 
     /// [`Self::end_leftovers`] on a background worker, when the last launch of `id` left a scope
@@ -763,18 +990,27 @@ impl PtyRuntime {
     /// its session if the record is still there, names. Then it forgets the recorded one. The
     /// caller holds the spawn lock.
     fn end_previous_scopes(&self, id: &str, ended: Option<&PtyObservation>) -> Result<()> {
-        let recorded = self.spawn_state_path(id, "scope");
-        let mut units = BTreeSet::new();
-        match std::fs::read_to_string(&recorded) {
-            Ok(unit) => {
-                units.insert(unit.trim().to_owned());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("read PTY scope {}", recorded.display()));
-            }
+        self.end_previous_scopes_with(id, ended, crate::end_scope)
+    }
+
+    fn end_previous_scopes_with(
+        &self,
+        id: &str,
+        ended: Option<&PtyObservation>,
+        mut end_scope: impl FnMut(&str, Duration) -> Result<bool>,
+    ) -> Result<()> {
+        let unit = self.recorded_scope(id)?;
+        // Original UUID scope evidence survives registry self-removal. A
+        // legacy PID/counter name without a registry gives no authority.
+        if ended.is_none()
+            && unit
+                .as_ref()
+                .is_some_and(|unit| !crate::isolate::is_launch_scope(unit, id))
+        {
+            return Ok(());
         }
+        let recorded = self.spawn_state_path(id, "scope");
+        let mut units: BTreeSet<_> = unit.into_iter().collect();
         units.extend(
             ended
                 .and_then(|session| session.tags.get("st3.scope-unit"))
@@ -785,7 +1021,7 @@ impl PtyRuntime {
         let mut done = true;
         for unit in &units {
             if server_apart(id, unit, server) {
-                crate::end_scope(unit, crate::SCOPE_GRACE)?;
+                end_scope(unit, crate::SCOPE_GRACE)?;
             } else {
                 done = false;
             }
@@ -803,7 +1039,28 @@ impl PtyRuntime {
         Ok(())
     }
 
+    fn recorded_scope(&self, id: &str) -> Result<Option<String>> {
+        let recorded = self.spawn_state_path(id, "scope");
+        match std::fs::read_to_string(&recorded) {
+            Ok(unit) => Ok(Some(unit.trim().to_owned())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => {
+                Err(error).with_context(|| format!("read PTY scope {}", recorded.display()))
+            }
+        }
+    }
+
     pub fn remove(&self, id: &str) -> Result<()> {
+        if let Some(session) = self
+            .sessions()?
+            .into_iter()
+            .find(|session| session.name == id)
+        {
+            anyhow::ensure!(
+                pty_identity::missing_recorded_identity(&session).is_none(),
+                "PTY `{id}` has no process identity"
+            );
+        }
         // The record is the last place that names the session's work scope.
         self.end_leftovers(id)?;
         pty_client::remove_in(&self.root, id)
@@ -998,16 +1255,7 @@ fn process_runs(pid: u32) -> bool {
 }
 
 fn observation_is_live(observation: &PtyObservation) -> bool {
-    if observation.status != "running" {
-        return false;
-    }
-    observation.pid.is_some_and(|pid| {
-        if pid == 0 || pid > i32::MAX as u32 {
-            return false;
-        }
-        let result = unsafe { libc::kill(pid as i32, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    })
+    observation.status == "running"
 }
 
 /// The registry entry as `pty list --json` printed it.
@@ -1025,8 +1273,21 @@ fn observation(session: SessionInfo) -> Result<PtyObservation> {
             tags: BTreeMap::new(),
         });
     }
+    let status = if session.status != pty_core::registry::SessionStatus::Exited {
+        match pty_identity::owner(&session) {
+            Owner::Matching => "running",
+            Owner::Mismatch | Owner::Gone => "vanished",
+            Owner::Unknown => "unknown",
+        }
+    } else {
+        session.status.as_str()
+    }
+    .to_owned();
     let pid = session
-        .pid
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.daemon_pid)
+        .or(session.pid)
         .map(|pid| {
             u32::try_from(pid).map_err(|_| {
                 anyhow::anyhow!(
@@ -1050,7 +1311,7 @@ fn observation(session: SessionInfo) -> Result<PtyObservation> {
     };
     Ok(PtyObservation {
         name: session.name,
-        status: session.status.as_str().into(),
+        status,
         exit_code,
         pid,
         created_at,
@@ -1110,7 +1371,7 @@ publish() {{
   mkdir -p "$PTY_ROOT"
   test -e "$PTY_ROOT/work.sock" || : > "$PTY_ROOT/work.sock"
   cat "$0.pid" > "$PTY_ROOT/work.pid"
-  printf '{{"createdAt":"%s"}}' "$1" > "$PTY_ROOT/work.json"
+  printf '{{"createdAt":"%s","daemonPid":{pid},"daemonStartToken":"{token}","tags":{{"st3.boot-id":"{boot}"}}}}' "$1" > "$PTY_ROOT/work.json"
 }}
 if [ "$1" = run ]; then
   printf '%s\n' "$@" > "$0.args"
@@ -1121,14 +1382,34 @@ if [ "$1" = run ]; then
 {on_run}
 fi
 exit 0
-"#
+"#,
+                pid = std::process::id(),
+                token = pty_core::registry::read_process_start_token(std::process::id() as i32)
+                    .unwrap(),
+                boot = pty_identity::boot_identity().unwrap(),
             ),
         );
         fs::write(binary.with_extension("pid"), std::process::id().to_string()).unwrap();
         binary
     }
 
-    fn write_record(registry: &Path, name: &str, record: serde_json::Value) {
+    fn write_record(registry: &Path, name: &str, mut record: serde_json::Value) {
+        if record.get("exitedAt").is_none() || registry.join(format!("{name}.pid")).exists() {
+            let pid = record["daemonPid"]
+                .as_i64()
+                .unwrap_or(std::process::id() as i64) as i32;
+            record["daemonPid"] = serde_json::json!(pid);
+            if record.get("daemonStartToken").is_none() {
+                record["daemonStartToken"] =
+                    serde_json::json!(pty_core::registry::read_process_start_token(pid));
+            }
+            if record.get("tags").is_none() {
+                record["tags"] = serde_json::json!({});
+            }
+            if record["tags"].get(BOOT_TAG).is_none() {
+                record["tags"][BOOT_TAG] = serde_json::json!(pty_identity::boot_identity());
+            }
+        }
         fs::create_dir_all(registry).unwrap();
         fs::write(registry.join(format!("{name}.json")), record.to_string()).unwrap();
     }
@@ -1136,6 +1417,446 @@ exit 0
     /// A live session's pid file, naming `pid` as its daemon.
     fn write_pid(registry: &Path, name: &str, pid: u32) {
         fs::write(registry.join(format!("{name}.pid")), pid.to_string()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_identity_refuses_control(runtime: &PtyRuntime, expected: &str) {
+        let mut stops = Vec::new();
+        let error = runtime
+            .stop_if_with("work", Some(expected), |_| {
+                stops.push(libc::SIGTERM);
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "stop PTY failed: Failed to kill session \"work\"."
+        );
+        assert!(stops.is_empty(), "stop dispatched a signal: {stops:?}");
+
+        let mut signals = Vec::new();
+        let error = runtime
+            .signal_if_with("work", Some(expected), libc::SIGKILL, |pid, signal| {
+                signals.push((pid, signal));
+                0
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "PTY `work` has no process identity");
+        assert!(signals.is_empty(), "control sent signals: {signals:?}");
+    }
+
+    #[test]
+    fn a_matching_owner_still_dispatches_stop_and_terminal_signals() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        let daemon = std::process::id();
+        let terminal = i32::MAX - 1;
+        fake_daemon(
+            &registry,
+            "work",
+            format!(
+                r#"{{"name":"work","process":{{"alive":true,"pid":{terminal}}},"daemon":{{"pid":{daemon}}}}}"#
+            ),
+            b"",
+        );
+        write_pid(&registry, "work", daemon);
+        write_record(
+            &registry,
+            "work",
+            serde_json::json!({ "createdAt": "matching" }),
+        );
+        let runtime = PtyRuntime::new(registry);
+        let expected = format!("{daemon}:matching");
+        assert_eq!(runtime.snapshot().unwrap()[0].status, "running");
+        let mut stops = Vec::new();
+        runtime
+            .stop_if_with("work", Some(&expected), |_| {
+                stops.push(libc::SIGTERM);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(stops, [libc::SIGTERM]);
+        let mut signals = Vec::new();
+        runtime
+            .signal_if_with("work", Some(&expected), libc::SIGKILL, |pid, signal| {
+                signals.push((pid, signal));
+                0
+            })
+            .unwrap();
+        assert_eq!(signals, [(-terminal, libc::SIGKILL)]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pid_identity_mismatches_and_unknown_owners_refuse_stop_signal_and_cutover() {
+        let daemon = std::process::id();
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+        assert_ne!(tid, daemon, "this fixture must run on a nonleader thread");
+        for case in [
+            "reused-pid",
+            "nonleader",
+            "boot-mismatch",
+            "malformed-boot",
+            "missing-boot",
+            "unreadable-record",
+            "legacy-reuse-within-slack",
+            "legacy-backward-clock",
+            "legacy-future-created-at",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let registry = root.path().join("registry");
+            let pid = if case == "nonleader" { tid } else { daemon };
+            let data = fake_daemon(&registry, "work", "{}".into(), b"");
+            write_pid(&registry, "work", pid);
+            write_record(
+                &registry,
+                "work",
+                serde_json::json!({
+                    "createdAt": "old", "daemonPid": pid,
+                }),
+            );
+            let record_path = registry.join("work.json");
+            let mut record: serde_json::Value =
+                serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+            match case {
+                "reused-pid" => record["daemonStartToken"] = serde_json::json!("linux:0"),
+                "boot-mismatch" => {
+                    record["tags"][BOOT_TAG] =
+                        serde_json::json!("00000000-0000-0000-0000-000000000000")
+                }
+                "malformed-boot" => record["tags"][BOOT_TAG] = serde_json::json!("malformed"),
+                "missing-boot" => {
+                    record["tags"].as_object_mut().unwrap().remove(BOOT_TAG);
+                }
+                "legacy-reuse-within-slack"
+                | "legacy-backward-clock"
+                | "legacy-future-created-at" => {
+                    // Neither wall-clock ordering nor a small slack proves an
+                    // incarnation. The old owner can die at 14:00:01 and its
+                    // PID be reused at 14:00:02, inside a five-second slack;
+                    // a backward clock step can date the bystander before the
+                    // record; a future record date admits any current process.
+                    // These legacy records lack both recorded identity fields.
+                    record["createdAt"] = serde_json::json!(match case {
+                        "legacy-reuse-within-slack" => "2026-01-01T14:00:00Z",
+                        "legacy-backward-clock" => "2026-01-01T14:00:00Z",
+                        _ => "2099-01-01T00:00:00Z",
+                    });
+                    record.as_object_mut().unwrap().remove("daemonStartToken");
+                    record["tags"].as_object_mut().unwrap().remove(BOOT_TAG);
+                }
+                _ => {}
+            }
+            fs::write(&record_path, record.to_string()).unwrap();
+            if case == "unreadable-record" {
+                fs::remove_file(&record_path).unwrap();
+                fs::create_dir(&record_path).unwrap();
+            }
+            let binary = fake_pty(root.path(), "refused-producer", "  publish replacement");
+            let runtime = PtyRuntime::new(registry).with_binary(binary.to_string_lossy());
+            let expected = format!("{pid}:{}", record["createdAt"].as_str().unwrap());
+            let observed = runtime.snapshot().unwrap().remove(0);
+            let known = matches!(case, "reused-pid" | "nonleader" | "boot-mismatch");
+            assert_eq!(
+                observed.status,
+                if known { "vanished" } else { "unknown" },
+                "{case}"
+            );
+            // An unreadable record cannot establish an incarnation, so that
+            // refusal precedes the kernel-identity refusal.
+            if case == "unreadable-record" {
+                let mut signals = Vec::new();
+                assert!(
+                    runtime
+                        .signal_if_with("work", None, libc::SIGKILL, |pid, signal| {
+                            signals.push((pid, signal));
+                            0
+                        })
+                        .is_err()
+                );
+                assert!(signals.is_empty());
+                let mut stops = Vec::new();
+                assert!(
+                    runtime
+                        .stop_if_with("work", None, |_| {
+                            stops.push(libc::SIGTERM);
+                            Ok(())
+                        })
+                        .is_err()
+                );
+                assert!(stops.is_empty());
+            } else {
+                assert_identity_refuses_control(&runtime, &expected);
+            }
+            assert!(
+                runtime
+                    .spawn_after(
+                        "work",
+                        &Launch::Argv(vec!["true".into()]),
+                        root.path(),
+                        &BTreeMap::new(),
+                        None,
+                        &BTreeMap::new(),
+                        None,
+                        &expected,
+                        "cutover"
+                    )
+                    .is_err(),
+                "{case}"
+            );
+            assert!(
+                !binary.with_extension("args").exists(),
+                "{case}: cutover reached the producer"
+            );
+            assert!(
+                data.lock().unwrap().is_empty(),
+                "{case}: control reached the terminal"
+            );
+            assert!(
+                runtime.root.join("work.pid").exists(),
+                "{case}: refusal removed the record"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_records_keep_their_registry_and_scope_during_automatic_cleanup() {
+        for case in ["live", "nonleader", "gone", "exited"] {
+            let root = tempfile::tempdir().unwrap();
+            let registry = root.path().join("registry");
+            fs::create_dir(&registry).unwrap();
+            let pid = match case {
+                "nonleader" => (unsafe { libc::syscall(libc::SYS_gettid) }) as u32,
+                "gone" => i32::MAX as u32,
+                _ => std::process::id(),
+            };
+            write_pid(&registry, "work", pid);
+            drop(UnixListener::bind(registry.join("work.sock")).unwrap());
+            let mut record = serde_json::json!({"createdAt":"old", "daemonPid":pid});
+            if case == "exited" {
+                record["exitedAt"] = serde_json::json!("2026-01-01T00:00:00Z");
+            }
+            // Write directly: the matching-fixture helper deliberately supplies
+            // identity, while these are genuine legacy records lacking both.
+            fs::write(registry.join("work.json"), record.to_string()).unwrap();
+            let binary = fake_pty(root.path(), "legacy-producer", "  publish replacement");
+            let runtime = PtyRuntime::new(registry).with_binary(binary.to_string_lossy());
+            let scope = runtime.spawn_state_path("work", "scope");
+            fs::create_dir_all(scope.parent().unwrap()).unwrap();
+            fs::write(&scope, "st3-work-legacy-fixture.scope").unwrap();
+            let session = runtime.session("work").unwrap();
+            assert!(runtime.retire_lost_owner(&session).is_err(), "{case}");
+            assert!(
+                spawn_work(&runtime, root.path(), &BTreeMap::new()).is_err(),
+                "{case}"
+            );
+            assert!(!binary.with_extension("args").exists(), "{case}");
+            let mut scope_calls = Vec::new();
+            runtime
+                .end_leftovers_with("work", |unit, grace| {
+                    scope_calls.push((unit.to_owned(), grace));
+                    Ok(true)
+                })
+                .unwrap();
+            assert!(
+                scope_calls.is_empty(),
+                "{case}: cleanup initiated scope signals"
+            );
+            assert!(runtime.remove("work").is_err(), "{case}");
+            assert_eq!(
+                fs::read_to_string(&scope).unwrap(),
+                "st3-work-legacy-fixture.scope",
+                "{case}"
+            );
+            assert_eq!(
+                fs::read_to_string(runtime.root().join("work.json")).unwrap(),
+                record.to_string(),
+                "{case}"
+            );
+            assert!(runtime.root().join("work.pid").exists(), "{case}");
+            assert!(runtime.root().join("work.sock").exists(), "{case}");
+            let reason = runtime.stop_refusal_reason("work").unwrap().unwrap();
+            assert!(reason.contains("daemon start token") && reason.contains("boot identity"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_bare_scope_record_cannot_authorize_cleanup_or_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        let binary = fake_pty(root.path(), "bare-scope-producer", "  publish replacement");
+        let runtime = PtyRuntime::new(registry).with_binary(binary.to_string_lossy());
+        let scope = runtime.spawn_state_path("work", "scope");
+        fs::create_dir_all(scope.parent().unwrap()).unwrap();
+        fs::write(&scope, "st3-work-orphan-fixture.scope").unwrap();
+        let mut calls = Vec::new();
+        runtime
+            .end_leftovers_with("work", |unit, grace| {
+                calls.push((unit.to_owned(), grace));
+                Ok(true)
+            })
+            .unwrap();
+        assert!(calls.is_empty(), "a bare scope initiated signals");
+        assert!(spawn_work(&runtime, root.path(), &BTreeMap::new()).is_err());
+        assert!(!binary.with_extension("args").exists());
+        assert_eq!(
+            fs::read_to_string(&scope).unwrap(),
+            "st3-work-orphan-fixture.scope"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_original_launch_scope_keeps_cleanup_authority_after_registry_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        let runtime = PtyRuntime::new(registry);
+        let scope = runtime.spawn_state_path("work", "scope");
+        fs::create_dir_all(scope.parent().unwrap()).unwrap();
+        let unit = crate::scope_unit("st3", "work");
+        fs::write(&scope, &unit).unwrap();
+        let mut calls = Vec::new();
+        runtime
+            .end_leftovers_with("work", |unit, grace| {
+                calls.push((unit.to_owned(), grace));
+                Ok(true)
+            })
+            .unwrap();
+        assert_eq!(calls, [(unit.clone(), crate::SCOPE_GRACE)]);
+        assert!(!scope.exists());
+        // Unknown metadata must not be mistaken for actual self-removal,
+        // even with otherwise sound launch-scope evidence.
+        fs::write(&scope, &unit).unwrap();
+        fs::create_dir(runtime.root().join("work.json")).unwrap();
+        calls.clear();
+        runtime
+            .end_leftovers_with("work", |unit, grace| {
+                calls.push((unit.to_owned(), grace));
+                Ok(true)
+            })
+            .unwrap();
+        assert!(calls.is_empty());
+        assert!(scope.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_socket_and_reused_pid_are_replaced_without_signalling_the_bystander() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        // A stale socket whose listener has gone, alongside a reused live PID.
+        drop(UnixListener::bind(registry.join("work.sock")).unwrap());
+        write_pid(&registry, "work", std::process::id());
+        write_record(
+            &registry,
+            "work",
+            serde_json::json!({
+                "generation": "old-generation", "createdAt": "old",
+                "daemonStartToken": "linux:0",
+            }),
+        );
+        let binary = fake_pty(
+            root.path(),
+            "replacement-producer",
+            r#"  test ! -e "$PTY_ROOT/work.pid" || exit 91
+  test ! -e "$PTY_ROOT/work.json" || exit 92
+  publish replacement"#,
+        );
+        let runtime = PtyRuntime::new(registry).with_binary(binary.to_string_lossy());
+        assert_eq!(runtime.snapshot().unwrap()[0].status, "vanished");
+        assert_identity_refuses_control(&runtime, &format!("{}:old", std::process::id()));
+        spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap();
+        let replacement = runtime.snapshot().unwrap().remove(0);
+        assert_eq!(replacement.status, "running");
+        assert_eq!(replacement.created_at.as_deref(), Some("replacement"));
+        assert_eq!(
+            fs::read_to_string(binary.with_extension("count"))
+                .unwrap()
+                .trim(),
+            "1"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn signal_free_retirement_rechecks_the_exact_record_under_its_locks() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        drop(UnixListener::bind(registry.join("work.sock")).unwrap());
+        write_pid(&registry, "work", std::process::id());
+        write_record(
+            &registry,
+            "work",
+            serde_json::json!({"createdAt":"old", "daemonStartToken":"linux:0"}),
+        );
+        let runtime = PtyRuntime::new(registry);
+        let old = runtime.session("work").unwrap();
+        // Same PID and even the same generation/createdAt cannot authorize
+        // removal when another part of the atomic owner evidence changed.
+        write_record(
+            runtime.root(),
+            "work",
+            serde_json::json!({"createdAt":"old"}),
+        );
+        assert!(runtime.retire_lost_owner(&old).is_err());
+        assert_eq!(runtime.snapshot().unwrap()[0].status, "running");
+        assert!(runtime.root().join("work.sock").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_pid_metadata_disagreement_during_publication_is_never_retired() {
+        struct Bystander(std::process::Child);
+        impl Drop for Bystander {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut bystander = Bystander(Command::new("sleep").arg("60").spawn().unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        drop(UnixListener::bind(registry.join("work.sock")).unwrap());
+        write_record(&registry, "work", serde_json::json!({ "createdAt":"old" }));
+        let publishing = pty_core::registry::with_root(&registry, || {
+            pty_core::registry::acquire_lock("work").unwrap()
+        });
+        // The new PID is visible before the producer publishes its metadata.
+        write_pid(&registry, "work", bystander.0.id());
+        let runtime = PtyRuntime::new(registry);
+        let partial = runtime.session("work").unwrap();
+        assert_eq!(pty_identity::owner(&partial), Owner::Mismatch);
+        let before = fs::read(runtime.root().join("work.json")).unwrap();
+        assert!(runtime.retire_lost_owner(&partial).is_err());
+        assert_eq!(fs::read(runtime.root().join("work.json")).unwrap(), before);
+        assert!(runtime.root().join("work.sock").exists());
+        assert_eq!(
+            fs::read_to_string(runtime.root().join("work.pid")).unwrap(),
+            bystander.0.id().to_string()
+        );
+        assert!(bystander.0.try_wait().unwrap().is_none());
+        write_record(
+            runtime.root(),
+            "work",
+            serde_json::json!({
+                "createdAt":"replacement", "daemonPid":bystander.0.id(),
+            }),
+        );
+        drop(publishing);
+        assert_eq!(runtime.snapshot().unwrap()[0].status, "running");
+        assert!(runtime.retire_lost_owner(&partial).is_err());
+        assert_eq!(
+            runtime.snapshot().unwrap()[0].created_at.as_deref(),
+            Some("replacement")
+        );
+        assert!(bystander.0.try_wait().unwrap().is_none());
     }
 
     #[test]
@@ -1308,7 +2029,10 @@ exit 0
                     pid: Some(std::process::id()),
                     created_at: Some("2026-09-28T00:00:00.000Z".into()),
                     display_name: Some("Live".into()),
-                    tags: BTreeMap::from([("st3.subject".into(), "pty/live".into())]),
+                    tags: BTreeMap::from([
+                        ("st3.subject".into(), "pty/live".into()),
+                        (BOOT_TAG.into(), pty_identity::boot_identity().unwrap()),
+                    ]),
                 },
             ]
         );
@@ -1327,6 +2051,41 @@ exit 0
         assert_eq!(observed.name, "bad");
         assert_eq!(observed.status, "unknown");
         assert_eq!(observed.pid, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snapshot_uses_recorded_kernel_identity_instead_of_the_producers_pid_liveness() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        drop(UnixListener::bind(registry.join("work.sock")).unwrap());
+        let runtime = PtyRuntime::new(registry);
+        write_record(
+            runtime.root(),
+            "work",
+            serde_json::json!({ "createdAt": "matching" }),
+        );
+        // The producer can omit a PID when the sidecar is missing, even
+        // though its atomic metadata still proves the recorded owner.
+        let matching = runtime.snapshot().unwrap().remove(0);
+        assert_eq!(matching.status, "running");
+        assert_eq!(matching.pid, Some(std::process::id()));
+        write_record(
+            runtime.root(),
+            "work",
+            serde_json::json!({
+                "createdAt":"lost", "daemonPid":i32::MAX, "daemonStartToken":"linux:0",
+            }),
+        );
+        write_pid(runtime.root(), "work", i32::MAX as u32);
+        let lost = runtime.snapshot().unwrap().remove(0);
+        assert_eq!(lost.status, "vanished");
+        assert_eq!(lost.pid, Some(i32::MAX as u32));
+        assert_eq!(
+            observation_incarnation(&lost),
+            Some(format!("{}:lost", i32::MAX))
+        );
     }
 
     #[test]
@@ -1513,6 +2272,34 @@ exit 0
     }
 
     #[test]
+    fn spawn_overwrites_caller_boot_evidence_with_the_kernel_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "boot-stamp-producer", "  publish new");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+        runtime
+            .spawn(
+                "work",
+                &Launch::Argv(vec!["true".into()]),
+                root.path(),
+                &BTreeMap::new(),
+                None,
+                &BTreeMap::from([(
+                    BOOT_TAG.into(),
+                    "00000000-0000-0000-0000-000000000000".into(),
+                )]),
+                None,
+            )
+            .unwrap();
+        let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
+        assert!(
+            arguments.lines().any(|argument| argument
+                == format!("{BOOT_TAG}={}", pty_identity::boot_identity().unwrap()))
+        );
+        assert!(!arguments.contains("00000000-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
     fn spawn_preserves_an_explicit_terminal_type() {
         let root = tempfile::tempdir().unwrap();
         let binary = fake_pty(root.path(), "fake-pty-term", "  publish new");
@@ -1600,7 +2387,10 @@ exit 0
             "work",
             serde_json::json!({
                 "generation": "previous",
+                "daemonPid": 2147483647,
+                "daemonStartToken": "linux:0",
                 "createdAt": "old",
+                "tags": {"st3.boot-id": pty_identity::boot_identity().unwrap()},
                 "exitCode": 0,
                 "exitedAt": "2026-09-27T00:00:00.000Z",
             }),
@@ -1799,8 +2589,14 @@ exit 0
         publisher.join().unwrap();
 
         assert!(!fence.exists());
-        assert!(!binary.with_extension("count").exists(), "do not double spawn");
-        assert_eq!(runtime.snapshot().unwrap()[0].created_at.as_deref(), Some("late"));
+        assert!(
+            !binary.with_extension("count").exists(),
+            "do not double spawn"
+        );
+        assert_eq!(
+            runtime.snapshot().unwrap()[0].created_at.as_deref(),
+            Some("late")
+        );
     }
 
     #[test]
@@ -1948,6 +2744,8 @@ exit 0
             "protect-old".into(),
             "--tag".into(),
             format!("st3.scope-unit={unit}"),
+            "--tag".into(),
+            format!("{BOOT_TAG}={}", pty_identity::boot_identity().unwrap()),
             "--".into(),
         ];
         arguments.extend(harness_argv);

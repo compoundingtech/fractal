@@ -347,6 +347,11 @@ pub struct RuntimeObservation {
 pub trait RuntimeControl: Send + Sync + 'static {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>>;
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
+    /// A read-only explanation for an explicit stop whose observation is
+    /// unknown. Returning a reason never grants physical control authority.
+    fn stop_refusal_reason(&self, _runtime_id: &str, _terminal: bool) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Inspect the resulting runtime. Callers must still verify its operation provenance.
     fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
         if member.terminal {
@@ -484,32 +489,14 @@ fn record_member_commands(
     Ok(())
 }
 
-fn observed_pty_status(observation: &st_runtime::PtyObservation) -> String {
-    if observation.status == "running"
-        && observation
-            .pid
-            .is_some_and(|pid| !local_process_is_alive(pid))
-    {
-        return "vanished".into();
-    }
-    observation.status.clone()
-}
-
-#[cfg(unix)]
-fn local_process_is_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
-    }
-    let result = unsafe { libc::kill(pid as i32, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(not(unix))]
-fn local_process_is_alive(_pid: u32) -> bool {
-    true
-}
-
 impl RuntimeControl for NativeRuntime {
+    fn stop_refusal_reason(&self, runtime_id: &str, terminal: bool) -> Result<Option<String>> {
+        if terminal {
+            self.pty()?.stop_refusal_reason(runtime_id)
+        } else {
+            Ok(None)
+        }
+    }
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
         let observations = self.pty()?.snapshot()?;
         // A PTY server started before st moved servers out of their harness's scope moves here.
@@ -521,7 +508,7 @@ impl RuntimeControl for NativeRuntime {
                     (Some(pid), Some(created)) => Some(format!("{pid}:{created}")),
                     _ => None,
                 };
-                let status = observed_pty_status(&item);
+                let status = item.status.clone();
                 Ok(RuntimeObservation {
                     runtime_id: item.name,
                     terminal: true,
@@ -5994,6 +5981,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.revoke_start(subject)?;
         if observation.is_none() && self.store.runtime_start_for(subject)?.is_some() {
             // Absence during launch is not verified stop. Completion/observation wakes this path.
+            return Ok(false);
+        }
+        // A terminal exit or absent PID does not prove legacy scope retirement.
+        // An explicit stop retains its refusal until original identity exists.
+        if observation.is_some()
+            && let Some(token) = self.store.selected_desired_token(subject)?
+            && self.store.claim_by_id(&token)?.is_some_and(|claim| claim.body["kind"] == "stop")
+            && let Some(reason) = self.runtime.stop_refusal_reason(runtime_id, terminal)?
+        {
+            self.record_once_with_evidence(subject, "runtime.action.failed", BTreeMap::from([
+                ("action".into(), Value::String("terminate".into())),
+                ("reason".into(), Value::String(format!("explicit stop refused: {reason}"))),
+            ]), vec![token])?;
             return Ok(false);
         }
         // A runtime whose state could not be read may still run. Wait for a readable observation.
@@ -17586,6 +17586,8 @@ mod tests {
     mod github_watch_selection;
     mod incremental_deadlines;
     mod ownership_guard_tests;
+    #[cfg(target_os = "linux")]
+    mod pid_identity_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
     mod ref_watch_tests;
@@ -17908,38 +17910,6 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 assert_eq!(survivor_diagnostics, usize::from(survived && !decision));
             }
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_running_pty_with_a_dead_pid_is_observed_as_vanished() {
-        let observation = st_runtime::PtyObservation {
-            name: "stale-worker".into(),
-            status: "running".into(),
-            exit_code: None,
-            pid: Some(i32::MAX as u32),
-            created_at: Some("2026-09-22T12:00:00.000Z".into()),
-            display_name: None,
-            tags: BTreeMap::new(),
-        };
-
-        assert_eq!(observed_pty_status(&observation), "vanished");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_running_pty_with_a_live_pid_remains_running() {
-        let observation = st_runtime::PtyObservation {
-            name: "live-worker".into(),
-            status: "running".into(),
-            exit_code: None,
-            pid: Some(std::process::id()),
-            created_at: Some("2026-09-22T12:00:00.000Z".into()),
-            display_name: None,
-            tags: BTreeMap::new(),
-        };
-
-        assert_eq!(observed_pty_status(&observation), "running");
     }
 
     #[derive(Default)]
