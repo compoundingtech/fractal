@@ -1878,6 +1878,17 @@ mod tests {
                         .iter()
                         .find(|source| source["id"] == item["id"])
                         .unwrap();
+                    // Timeline reads may hold a bounded preview; compare owner chunks
+                    // against the complete record, not that preview.
+                    let source_locator =
+                        serde_json::from_value(source["_source"].clone()).unwrap();
+                    let record =
+                        crate::external_sessions::normalized_record(&native, &source_locator)
+                            .unwrap();
+                    let source = record
+                        .iter()
+                        .find(|source| source["id"] == item["id"])
+                        .unwrap();
                     assert_eq!(full, source["body"]);
                     match index {
                         0 => {
