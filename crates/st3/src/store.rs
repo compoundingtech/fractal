@@ -603,9 +603,13 @@ WHERE kind IN ('work.claimed', 'work.progress');
 CREATE INDEX IF NOT EXISTS claims_subagent_appeared_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.appeared';
-CREATE INDEX IF NOT EXISTS claims_subagent_renewed_index
-ON claims(subject, json_extract(body, '$.fields.subagent_id'))
+-- Include the numeric lease so MAX for one live pair seeks its final index entry instead
+-- of folding all its renewals. A new name upgrades existing stores at schema initialization.
+CREATE INDEX IF NOT EXISTS claims_subagent_renewed_max_lease_index
+ON claims(subject, json_extract(body, '$.fields.subagent_id'),
+          CAST(json_extract(body, '$.fields.lease_expires_at_unix_ms') AS INTEGER))
 WHERE kind='subagent.renewed';
+DROP INDEX IF EXISTS claims_subagent_renewed_index;
 CREATE INDEX IF NOT EXISTS claims_subagent_ended_index
 ON claims(subject, json_extract(body, '$.fields.subagent_id'))
 WHERE kind='subagent.ended';
