@@ -154,6 +154,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     } else {
         Config {
             access_mode: Some(st_drivers::access::AccessMode::Auto),
+            seat_priority: None,
             ..Config::default()
         }
     };

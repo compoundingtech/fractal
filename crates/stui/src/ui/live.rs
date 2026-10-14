@@ -54,6 +54,10 @@ struct Pending {
 }
 
 /// How long a message waits for st's answer before it says st has not confirmed it.
+/// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
+/// input) slower than that, is written to slow.log with what was on screen.
+const SLOW_DRAW: Duration = Duration::from_millis(120);
+const SLOW_TURN: Duration = Duration::from_millis(250);
 const UNANSWERED_AFTER: Duration = Duration::from_secs(30);
 
 /// A message request as sent: st keys its receipt on the whole request.
@@ -62,6 +66,9 @@ struct Sent {
     id: String,
     idempotency_key: String,
     snapshot_id: String,
+    /// What it said, as sent: rebuilt later, it could name the agent's newer session, and st
+    /// refuses a repeat that differs as a conflict.
+    parameters: MessageSendParameters,
 }
 
 /// Read evidence belongs to a presented frame, so navigation cannot cancel retries.
@@ -536,6 +543,11 @@ pub fn run(context: Context) -> Result<()> {
         && !stopping.load(std::sync::atomic::Ordering::Relaxed)
         && !crate::stdin_hung_up()
     {
+        let turn_started = Instant::now();
+        // A program written over on disk while it runs is told to the person at once, and noted.
+        if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
+            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+        }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
             .flash
@@ -1674,6 +1686,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
+        let draw_started = Instant::now();
         terminal.draw(|frame| {
             ui.render(frame);
             if hyperlinks {
@@ -1684,6 +1697,16 @@ pub fn run(context: Context) -> Result<()> {
         for entry in pending.iter_mut().filter(|entry| !entry.echoed) {
             entry.echoed = true;
             super::slo::METRICS.observe("send_echo_ms", entry.since.elapsed());
+        }
+        // A slow draw, or a whole turn that took long before it waited for input, is written
+        // down with what was on screen, so that "it was slow" can be explained afterwards.
+        let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
+        if drew >= SLOW_DRAW || turn >= SLOW_TURN {
+            super::lastrun::note_slow(
+                &format!("draw {} ms, turn {} ms", drew.as_millis(), turn.as_millis()),
+                &ui.slow_context(),
+                &crate::version::short(crate::version::now()),
+            );
         }
         if hyperlinks && !links.is_empty() {
             super::hyperlinks::write_links(terminal.backend_mut(), &links)?;
@@ -1849,6 +1872,13 @@ pub fn run(context: Context) -> Result<()> {
             },
         )?;
     }
+    super::lastrun::note_exit(if ui.quit {
+        "quit (Ctrl+Q)"
+    } else if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+        "signal (INT, TERM or HUP)"
+    } else {
+        "terminal closed (stdin hung up)"
+    });
     // Leave no attachment behind.
     if let Some(current) = attached.take() {
         let _ = runtime.block_on(feed::detach(
@@ -2678,13 +2708,13 @@ async fn send_message(
                 earlier.id,
                 earlier.idempotency_key,
                 fence,
-                parameters.clone(),
+                earlier.parameters,
             )
             .await
         {
             Ok(result) => return Ok(message_id(result)),
             // st checks a repeat before the fence: a stale fence means it never took it.
-            Err(error) if error.to_string().contains("StaleFence") => {}
+            Err(ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -2708,6 +2738,7 @@ async fn send_message(
                 id: id.clone(),
                 idempotency_key: idem.clone(),
                 snapshot_id: snapshot.clone(),
+                parameters: parameters.clone(),
             });
         }
         let fence = Fence {
@@ -2719,7 +2750,9 @@ async fn send_message(
             .await
         {
             Ok(result) => return Ok(message_id(result)),
-            Err(error) if error.to_string().contains("StaleFence") => last = Some(error),
+            Err(error @ ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {
+                last = Some(error)
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -2802,6 +2835,153 @@ mod tests {
             .downcast_ref::<ClientError>()
             .unwrap()
             .outcome_unknown());
+    }
+
+    /// st answers a send it could not confirm in time `message-send-unconfirmed`, `applied:
+    /// "unknown"`: it may still complete. Nothing here sends it again by itself, and the person's
+    /// resend repeats the exact request. st keys its receipt on the whole request but the fence,
+    /// so a repeat that differs in anything else (here, the agent moved to a new session in
+    /// between) would be refused as a conflict and the message could never be confirmed.
+    #[tokio::test]
+    async fn an_unconfirmed_send_waits_for_the_person_and_goes_again_unchanged() {
+        use axum::{body::Bytes, extract::State, http::StatusCode, routing};
+        #[derive(Default)]
+        struct Daemon {
+            posted: Vec<serde_json::Value>,
+            receipts: BTreeMap<String, serde_json::Value>,
+        }
+        type Shared = Arc<Mutex<Daemon>>;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/st3/client-v0/fixtures/capabilities.json"
+        ))
+        .unwrap();
+        let snapshot = capabilities["snapshot"].clone();
+        // The first request under a key is taken but not confirmed; the same request again gets
+        // its result; a different request under that key is a conflict, as st answers.
+        let action = move |State(daemon): State<Shared>, body: Bytes| {
+            let snapshot = snapshot.clone();
+            async move {
+                let action: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let mut daemon = daemon.lock().unwrap();
+                daemon.posted.push(action.clone());
+                let key = action["idempotency_key"].as_str().unwrap().to_owned();
+                let mut digest = action.clone();
+                digest.as_object_mut().unwrap().remove("fence");
+                let refusal = |code: &str, retryable: bool, details: serde_json::Value| {
+                    serde_json::json!({
+                        "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                        "request_id": "request/example", "code": code, "message": code,
+                        "retryable": retryable, "details": details,
+                    })
+                };
+                let (status, body) = match daemon.receipts.get(&key) {
+                    Some(seen) if *seen != digest => (
+                        StatusCode::CONFLICT,
+                        refusal("idempotency-conflict", false, serde_json::json!({})),
+                    ),
+                    Some(_) => (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "api_version": "st3.client.v0", "request_id": "request/example",
+                            "snapshot": snapshot,
+                            "value": {
+                                "kind": "action-result", "action_id": action["id"],
+                                "operation_id": "operation/example", "status": "completed",
+                                "affected_ids": ["message/example-tally"],
+                                "snapshot_id": snapshot["id"],
+                            },
+                        }),
+                    ),
+                    None => {
+                        daemon.receipts.insert(key.clone(), digest);
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            refusal(
+                                "message-send-unconfirmed",
+                                false,
+                                serde_json::json!({
+                                    "applied": "unknown", "action_id": action["id"],
+                                    "idempotency_key": key,
+                                }),
+                            ),
+                        )
+                    }
+                };
+                (status, axum::Json(body))
+            }
+        };
+        let daemon = Shared::default();
+        let router = axum::Router::new()
+            .route(
+                "/v1/client/capabilities",
+                routing::get(move || std::future::ready(axum::Json(capabilities.clone()))),
+            )
+            .route("/v1/client/actions", routing::post(action))
+            .with_state(daemon.clone());
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::unix_as(&socket, "person/avery");
+        let in_session = |session: &str| {
+            let mut model = Model::default();
+            model.agents.items.push(
+                serde_json::from_value(serde_json::json!({
+                    "kind": "agent", "id": "agent/example/harbor/keeper", "revision": "a",
+                    "updated_at": "2026-10-03T08:28:00Z", "name": "Keeper", "state": "running",
+                    "reachability": "reachable", "current_session_id": session,
+                }))
+                .unwrap(),
+            );
+            model
+        };
+        let send = Effect::Send {
+            agent: "agent/example/harbor/keeper".into(),
+            text: "Count the harbor crates".into(),
+            in_reply_to: None,
+            tags: vec!["tally".into()],
+            images: Vec::new(),
+        };
+        // The live loop's own path: the same effect and the one `sent` slot for its pending copy.
+        let sent = Arc::new(Mutex::new(None));
+        let error = perform_steadily(
+            &client,
+            "person/avery",
+            &in_session("session/first"),
+            send.clone(),
+            Some(&*sent),
+        )
+        .await
+        .unwrap_err();
+        // What `Fetched::Sent` marks the pending copy with: unconfirmed, so it stays and offers
+        // a resend, not a plain failure.
+        assert!(error
+            .downcast_ref::<ClientError>()
+            .is_some_and(ClientError::outcome_unknown));
+        assert!(!not_applied(&error, &send));
+        assert_eq!(
+            super::plain(&error),
+            "st may have taken it and has not confirmed it yet; sending it again is safe"
+        );
+        assert_eq!(daemon.lock().unwrap().posted.len(), 1, "not sent again by itself");
+        // The agent moved to a new session before the person sent it again.
+        let (_, message) = perform_steadily(
+            &client,
+            "person/avery",
+            &in_session("session/second"),
+            send,
+            Some(&*sent),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.as_deref(), Some("message/example-tally"));
+        let posted = std::mem::take(&mut daemon.lock().unwrap().posted);
+        assert_eq!(posted.len(), 2);
+        for field in ["id", "type", "idempotency_key", "parameters"] {
+            assert_eq!(posted[1][field], posted[0][field], "{field} differs on the resend");
+        }
+        assert_eq!(posted[0]["parameters"]["session_id"], "session/first");
+        server.abort();
     }
 
     #[test]
