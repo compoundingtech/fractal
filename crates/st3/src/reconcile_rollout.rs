@@ -410,6 +410,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             }
             "starting" => {
+                if self.store.runtime_start_for(agent)?.is_some() { return Ok(true); }
                 let start = self
                     .store
                     .observations_for(agent, "runtime.action.succeeded")?
