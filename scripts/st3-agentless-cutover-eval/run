@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Private authored when-idle controls; no live fleet endpoint or stored-state repair."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+import time
+import traceback
+
+shared = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'st3-subagents-eval/run'))
+Node, until = shared['Node'], shared['until']
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('binary', type=Path)
+    parser.add_argument('output', type=Path)
+    parser.add_argument('--expect', choices=['baseline', 'fixed'], default='fixed')
+    args = parser.parse_args()
+    binary, output = args.binary.resolve(), args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    node = Node(output / 'node', binary)
+    node.subjects = []
+    checks = {
+        'binary': str(binary),
+        'sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+        'version': subprocess.check_output([str(binary), '--version'], text=True).strip(),
+        'expect': args.expect,
+    }
+
+    def cli(*words):
+        return json.loads(node.cli('--json', *words))
+
+    def write(name, source):
+        path = output / name
+        path.write_text(source)
+        return str(path)
+
+    def source(added=False):
+        # The candidate cannot override the predecessor's when-idle policy.
+        policy = 'restart-active' if added else 'when-idle'
+        extra = 'step "sorter" { assigned-to "person/lichen"; goal "Inspect invented rows." }' if added else ''
+        return f'''version 2
+mission "orchid-cutover" state="ready" revision-cutover="{policy}" {{
+ goal "Preserve a false external hold while adding independent work."
+ completion {{ when "all-steps-exhausted" }}
+ step "hold" {{
+  agentless
+  gate "Explicit orchid release" {{ exists "resource/orchid/cutover-release" }}
+ }}
+ {extra}
+}}'''
+
+    def run():
+        return cli('missions', 'show', 'mission-run/orchid/cutover')
+
+    def hold(value):
+        return next(step for step in value['steps'] if step['step'] == 'hold')
+
+    try:
+        node.start()
+        cli('apply', write('initial.kdl', source()), '--as', 'person/lichen')
+        cli('missions', 'start', 'orchid-cutover', '--id', 'orchid/cutover',
+            '--workspace', str(output), '--as', 'person/lichen')
+        initial = until(lambda: (value if hold(value := run())['status'] == 'working' else None),
+                        30, 'the false agentless hold starts its ordinary execution interval')
+        original = hold(initial)
+        assert original['agentless'] and not original.get('claimant')
+        revision = cli('work', 'revise', 'mission-run/orchid/cutover',
+                       write('added.kdl', source(True)), '--as', 'person/lichen',
+                       '--reason', 'Add unrelated invented sorter work')
+        checks['initial'] = initial
+        checks['revision'] = revision
+        proposal = revision['proposal']
+        assert proposal['cutover'] == 'when-idle', 'the predecessor policy governs adoption'
+        assert 'hold' in proposal['compatible_steps'], 'the hold definition is unchanged'
+        if args.expect == 'baseline':
+            # A bounded observation of the actual private daemon, without writing the hold.
+            deadline = time.monotonic() + 3
+            samples = []
+            while time.monotonic() < deadline:
+                value = run()
+                samples.append(value)
+                assert value['generation'] == initial['generation']
+                assert value['phase'] == 'revision-draining'
+                assert hold(value)['status'] == 'working'
+                assert not any(step['step'] == 'sorter' for step in value['steps'])
+                time.sleep(0.25)
+            checks['draining_samples'] = samples
+            result = {'verdict': 'baseline-confirmed', 'checks': checks}
+        else:
+            current = until(lambda: (value if (value := run())['generation'] != initial['generation'] else None),
+                            30, 'compatible passive hold permits additive revision')
+            carried = hold(current)
+            assert carried['status'] == 'working' and carried['agentless']
+            for field in ['attempt', 'readiness_epoch', 'claimant', 'claim_incarnation',
+                          'claim_expires_at_unix_ms', 'worker_reported']:
+                assert carried.get(field) == original.get(field), field
+            assert not carried.get('claimant')
+            until(lambda: any(step['step'] == 'sorter' and step['status'] == 'ready' for step in run()['steps']),
+                  30, 'independent added work is admitted without releasing the hold')
+            checks['carried'] = current
+            result = {'verdict': 'pass', 'checks': checks}
+    except Exception as error:
+        result = {'verdict': 'fail', 'reason': str(error), 'checks': checks,
+                  'trace': traceback.format_exc(), 'daemon_tail': node.tail()}
+    finally:
+        # Stop only this private fixture daemon. No mission/gate/production control is used.
+        node.stop()
+    (output / 'result.json').write_text(json.dumps(result, indent=2))
+    print(json.dumps({'verdict': result['verdict'], 'reason': result.get('reason'), 'output': str(output)}))
+    return 0 if result['verdict'] in ['pass', 'baseline-confirmed'] else 1
+
+
+if __name__ == '__main__':
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from st3_test_process import supervised_main
+    raise SystemExit(supervised_main(main))
