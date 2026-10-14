@@ -57211,6 +57211,11 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         assert!(shown.answers.is_empty(), "{:?}", shown.answers);
         assert!(shown.detail.contains("waited longer than st can answer it"), "{}", shown.detail);
         assert_eq!(
+            shown.requested_at_unix_ms,
+            u128::from(now - window - 1_000),
+            "it has waited since it opened, not since its latest restatement"
+        );
+        assert_eq!(
             store
                 .answer_native_prompt(seat, &late.id, "allow", "person/avery")
                 .unwrap_err()

@@ -201,7 +201,14 @@ impl Store {
                 mission_run: None,
                 step: None,
                 targets: vec![seat.clone()],
-                requested_at_unix_ms: at,
+                // Since the prompt opened, not since its latest restatement: a prompt that has
+                // waited for hours must not read as minutes old. An opening time of zero or after
+                // the restatement is not one, so the restatement's time stands.
+                requested_at_unix_ms: harness["observed_since_ms"]
+                    .as_u64()
+                    .map(u128::from)
+                    .filter(|since| (1..=at).contains(since))
+                    .unwrap_or(at),
                 actions: vec![attention_action(
                     "Attach to answer",
                     &["st", "terminals", "attach", &seat],

@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "A Claude prompt older than its hook's 10-minute wait is answered in the terminal; nothing else changes, and the hook registration is unchanged, so no seat restarts."
+    "detail": "A Claude prompt older than its hook's 10-minute wait is answered in the terminal, and its alert is dated from when the prompt opened, not from its latest restatement; nothing else changes, and the hook registration is unchanged, so no seat restarts."
   },
   "downtime": {
     "status": "none",
