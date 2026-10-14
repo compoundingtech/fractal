@@ -62,6 +62,10 @@ On 2026-10-04, an iOS 27 simulator running the Debug native app reached a real i
 
 Both device and simulator static libraries and their XCFramework built. Rust fixtures, pinned-daemon checks and clippy passed; app typecheck and 32 tests passed. A physical-device run, network migration, relay/NAT behavior and the broader capabilities listed in the protocol document remain to be proved before adopting this carrier.
 
+## Several members
+
+Fleet › carrier keeps an ordered list of members. The app walks it in that order, 4 seconds per member and 10 seconds in all; a member that dropped is redialed after 1, 2 and 5 seconds before the walk moves on. A refusal stops the walk at that member, names it by its saved name and says what was refused; nothing after it is dialed until the person picks another member. Each member other than the device's own is paired on its own and gets only its own credential; the walk skips a member not paired yet. See [several members](../../../../docs/st3/ios-fabric-protocol.md#several-members-an-ordered-list) for the rules and the older-build compatibility.
+
 ## Full-client phone trial
 
 Add `client=1` to the Debug proof pairing link to use the normal Home, conversation and other screens with a temporary, in-memory client. The ordinary store is unmounted during this trial. No loopback URL, proof credential or projection is saved, and the ordinary signing key is not used or replaced. The temporary pairing uses the gateway's legacy unsigned-device path; it does not prove enrolled action signing. Close the trial to restore the ordinary saved gateway. A full-client pairing needs the message scope (`devices pair --full-control` on the test member). For a phone trial, append `auto`, `direct` or `relay` to the helper's `grant` command. That creates a full-control challenge and writes a separate-app link with `client=1` and the requested path mode. The helper rejects fabric versions other than its pin.
