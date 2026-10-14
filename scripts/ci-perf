@@ -2,11 +2,11 @@
 # Run one performance stage inside the pinned devShell: the cost check or the load test.
 # Each is its own GitHub Actions job; neither is part of the required linux-gate (docs/ci.md).
 set -euo pipefail
-stage=${1:?usage: scripts/ci-perf cost|load}
+stage=${1:?usage: scripts/ci-perf cost|load|load-hog}
 if [ -z "${GITHUB_ACTIONS:-}" ]; then
   # A run outside CI. On hetz2 the load test takes the perf slot itself, so two runs never
   # measure at once (scripts/ci-perf-slot --help); elsewhere nothing shares the machine.
-  if [ "$stage" = load ] && [ -z "${ST_PERF_SLOT_HELD:-}" ] && [ "$(< /proc/sys/kernel/hostname)" = hetz2 ]; then
+  if { [ "$stage" = load ] || [ "$stage" = load-hog ]; } && [ -z "${ST_PERF_SLOT_HELD:-}" ] && [ "$(< /proc/sys/kernel/hostname)" = hetz2 ]; then
     exec python3 "$(dirname "$0")/ci-perf-slot" -- bash "$0" "$@"
   fi
   # Persistent, so generated stores survive between runs; the checkout is the workspace.
@@ -145,6 +145,25 @@ PY
       summarize_load "$out/load.json"
     else
       echo "::error::load test produced no measurement report"
+      status=1
+    fi
+    ;;
+  load-hog)
+    rm -rf "$out/hog"
+    python3 scripts/ci-perf-cache remember-sources
+    unset AGENT_SPEC_REVISION
+    if [ -s "$RUNNER_TEMP/perf-source-state.json" ]; then
+      export AGENT_SPEC_REVISION="$(git rev-parse HEAD)"
+    fi
+    # The daemon beside a CPU and disk hog at seat priority; reported against slo/targets.toml,
+    # never a required check (docs/ci.md).
+    ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT="$out/hog" \
+      cargo test --release -p st3 --features perf-load --test perf_load --locked a_seat_priority_hog -- --nocapture \
+      2>&1 | tee "$out/load-hog.log" || status=$?
+    if [ -s "$out/hog/summary.md" ]; then
+      { printf '\n'; cat "$out/hog/summary.md"; } >> "$GITHUB_STEP_SUMMARY"
+    else
+      echo "::error::hog load test produced no summary"
       status=1
     fi
     ;;
