@@ -10,6 +10,110 @@ use std::sync::{
 use std::time::Instant;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
+/// Mirror bounded profiler sections without exporting per-subject isolate operations.
+pub(crate) struct Phase {
+    _profile: Option<crate::profile::Span>,
+    span: Option<opentelemetry::global::BoxedSpan>,
+    members: Option<[MemberTotals; 2]>,
+}
+
+#[derive(Default)]
+struct MemberTotals {
+    count: u64,
+    total: std::time::Duration,
+    max: std::time::Duration,
+}
+
+pub(crate) struct Member<'a> {
+    _profile: Option<crate::profile::Span>,
+    phase: &'a mut Phase,
+    started: Option<Instant>,
+    stop: bool,
+}
+
+impl Drop for Member<'_> {
+    fn drop(&mut self) {
+        if let (Some(started), Some(members)) = (self.started, &mut self.phase.members) {
+            let elapsed = started.elapsed();
+            let totals = &mut members[usize::from(!self.stop)];
+            totals.count += 1;
+            totals.total += elapsed;
+            totals.max = totals.max.max(elapsed);
+        }
+    }
+}
+
+pub(crate) fn phase(scope: &str) -> Phase {
+    use opentelemetry::trace::Tracer as _;
+    let profile = crate::profile::span(scope);
+    let name = match scope {
+        "pass/changes" => "st.reconcile.changes",
+        "pass/gate-runners" => "st.reconcile.gate-runners",
+        "pass/desired" => "st.reconcile.desired",
+        "pass/pty-snapshot" => "st.reconcile.pty-snapshot",
+        "pass/render" => "st.reconcile.render",
+        "pass/unreadable-members" => "st.reconcile.unreadable-members",
+        "pass/members" => "st.reconcile.members",
+        "pass/work-messages" => "st.reconcile.work-messages",
+        "stage/intake" => "st.reconcile.stage.intake",
+        "stage/observers" => "st.reconcile.stage.observers",
+        "stage/schedules" => "st.reconcile.stage.schedules",
+        "stage/scheduled-work" => "st.reconcile.stage.scheduled-work",
+        "stage/subscriptions" => "st.reconcile.stage.subscriptions",
+        "stage/provider-capacity-retries" => "st.reconcile.stage.provider-capacity-retries",
+        "stage/person-asks" => "st.reconcile.stage.person-asks",
+        "stage/disk-space" => "st.reconcile.stage.disk-space",
+        "stage/faults" => "st.reconcile.stage.faults",
+        "stage/github-watches" => "st.reconcile.stage.github-watches",
+        "stage/missions" => "st.reconcile.stage.missions",
+        "stage/subagents" => "st.reconcile.stage.subagents",
+        "fault_snapshot" => "st.reconcile.fault_snapshot",
+        _ => return Phase { _profile: profile, span: None, members: None },
+    };
+    let span = smallclaims::sqlite::telemetry::phase_spans_enabled().then(|| {
+        let tracer = opentelemetry::global::tracer("st3");
+        tracer.span_builder(name)
+            .with_attributes([KeyValue::new("span.label", name.strip_prefix("st.reconcile.").unwrap_or(name))])
+            .start_with_context(&tracer, &tracing::Span::current().context())
+    });
+    let members = (scope == "pass/members" && span.is_some()).then(Default::default);
+    Phase { _profile: profile, span, members }
+}
+
+impl Phase {
+    pub(crate) fn member(&mut self, stop: bool) -> Member<'_> {
+        let profile = crate::profile::span(if stop { "pass/member stop" } else { "pass/member live" });
+        let started = self.members.as_ref().map(|_| Instant::now());
+        Member { _profile: profile, phase: self, started, stop }
+    }
+
+    pub(crate) fn items(&mut self, count: usize) {
+        use opentelemetry::trace::Span as _;
+        if let Some(span) = &mut self.span {
+            span.set_attribute(KeyValue::new("st.reconcile.items", i64::try_from(count).unwrap_or(i64::MAX)));
+        }
+    }
+}
+
+impl Drop for Phase {
+    fn drop(&mut self) {
+        use opentelemetry::trace::Span as _;
+        if let Some(span) = &mut self.span {
+            if let Some(members) = &self.members {
+                for (totals, keys) in members.iter().zip([
+                    ["st.reconcile.members.stop.count", "st.reconcile.members.stop.total_ms", "st.reconcile.members.stop.max_ms"],
+                    ["st.reconcile.members.live.count", "st.reconcile.members.live.total_ms", "st.reconcile.members.live.max_ms"],
+                ]) {
+                    span.set_attribute(KeyValue::new(keys[0], i64::try_from(totals.count).unwrap_or(i64::MAX)));
+                    span.set_attribute(KeyValue::new(keys[1], totals.total.as_secs_f64() * 1000.));
+                    span.set_attribute(KeyValue::new(keys[2], totals.max.as_secs_f64() * 1000.));
+                }
+            }
+            span.end();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub(crate) enum WakeCause {
@@ -253,6 +357,21 @@ impl Drop for Operation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_timings_aggregate_without_member_spans() {
+        let mut phase = Phase { _profile: None, span: None, members: Some(Default::default()) };
+        drop(phase.member(true));
+        drop(phase.member(false));
+        drop(phase.member(false));
+        let members = phase.members.as_ref().unwrap();
+        assert_eq!(members[0].count, 1);
+        assert_eq!(members[1].count, 2);
+        assert_eq!(members[0].total, members[0].max);
+        assert!(members[1].total >= members[1].max);
+        assert!(phase.span.is_none());
+    }
+
     #[test]
     fn otel_existing_wake_sources_are_closed() {
         let sources = [
