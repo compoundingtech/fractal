@@ -3,6 +3,25 @@
 # Each is its own GitHub Actions job; neither is part of the required linux-gate (docs/ci.md).
 set -euo pipefail
 stage=${1:?usage: scripts/ci-perf cost|load}
+if [ -z "${GITHUB_ACTIONS:-}" ]; then
+  # A run outside CI. On hetz2 the load test takes the perf slot itself, so two runs never
+  # measure at once (scripts/ci-perf-slot --help); elsewhere nothing shares the machine.
+  if [ "$stage" = load ] && [ -z "${ST_PERF_SLOT_HELD:-}" ] && [ "$(< /proc/sys/kernel/hostname)" = hetz2 ]; then
+    exec python3 "$(dirname "$0")/ci-perf-slot" -- bash "$0" "$@"
+  fi
+  # Persistent, so generated stores survive between runs; the checkout is the workspace.
+  : "${RUNNER_TEMP:=/var/tmp/st-perf-$(id -u)}"
+  : "${GITHUB_WORKSPACE:=$(cd "$(dirname "$0")/.." && pwd)}"
+  export RUNNER_TEMP GITHUB_WORKSPACE
+  # The devShell hides the host's tools; cargo's test runner on hetz2 needs systemd-run.
+  command -v systemd-run > /dev/null || PATH="$PATH:/run/current-system/sw/bin"
+  mkdir -p "$RUNNER_TEMP"
+  if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
+    export GITHUB_STEP_SUMMARY="$RUNNER_TEMP/perf-summary.md"
+    : > "$GITHUB_STEP_SUMMARY"
+  fi
+  echo "perf report summary: $GITHUB_STEP_SUMMARY" >&2
+fi
 # Logs and reports stay outside the checkout: the public-content test scans untracked files.
 out="$RUNNER_TEMP/perf"
 mkdir -p "$out"
@@ -43,7 +62,10 @@ case "$stage" in
     # run once without retries, and report its failure independently of cost results.
     # Finish the isolated native case before process-wide cost measurements start.
     link_start=$SECONDS link_status=0
-    cargo test -p st3 --features test-support --test integration --locked messaging_faults::link_minutes \
+    # The supervised child inherits this explicit parent. Keep its detailed daemon/trace
+    # evidence inside the existing always-uploaded perf tree, not an uncollected temp root.
+    ST3_MESSAGING_FAULTS_EVIDENCE="$out/link-minutes-evidence" \
+      cargo test -p st3 --features test-support --test integration --locked messaging_faults::link_minutes \
       -- --exact --nocapture --test-threads 1 2>&1 | tee "$out/link-minutes.log" || link_status=$?
     if [ "$link_status" -eq 0 ]; then
       python3 - "$out/link-minutes.log" <<'PY' || link_status=$?

@@ -25,7 +25,7 @@ assert.equal(currentWorkSummary({ current_work: [{ ...route, path: 'review/diff'
 assert.equal(currentWorkSummary({ current_work: [{ ...route, title: 'Route output', state: 'claimed' }] }), 'Current: Route output (claimed)');
 assert.equal(currentWorkSummary({}), null);
 
-// Control groups and describes missions from the steps st joined into each run: no work list.
+// The mission list groups and describes missions from the steps st joined into each run: no work list.
 const step = (path, state) => ({ id: `step-run/9f/${path}`, path, state, attempt: 1, since: '2026-09-25T08:00:00Z' });
 const release = { id: 'mission/fleet/app/release', title: 'fleet/app/release', state: 'running', runs: ['mission-run/9f'], visualization: { nodes: [{ kind: 'step' }, { kind: 'step' }, { kind: 'group' }], groups: [] }, run_details: [{ id: 'mission-run/9f', steps: [step('build', 'completed'), step('review', 'claimed')] }] };
 assert.deepEqual(missionSteps(release).map(s => s.path), ['build', 'review']);

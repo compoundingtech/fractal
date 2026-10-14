@@ -1,10 +1,10 @@
 # Talking to agents
 
-Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker from [getting started](getting-started.md), restarting it if you stopped it.
+Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat), starting it again if you stopped it.
 
 ## From the terminal UI or phone
 
-Run `stui`, open **Agents**, and select `garden/worker`. Click the conversation composer, type, and press **Enter** to send. In v0.3.4, **c** opens the composer from the conversation. **Ctrl+K** finds an agent or mission; **Ctrl+H** opens Home, and **Ctrl+Q** quits. The conversation shows your Smalltalk messages alongside the harness's transcript and tool calls.
+Run `st`, open **Agents**, and select `garden/worker`. Click the conversation composer, type, and press **Enter** to send. In v0.3.4, **c** opens the composer from the conversation. **Ctrl+K** finds an agent or mission; **Ctrl+H** opens Home, and **Ctrl+Q** quits. The conversation shows your Smalltalk messages alongside the harness's transcript and tool calls.
 
 On the phone, open **Agents**, select the worker, and use its composer. [Build and run the iOS app](ios-app.md) covers local installation first. A phone reads and acts through a paired member; it does not become a replica or run a seat. To begin pairing on your daemon machine:
 
@@ -66,7 +66,9 @@ st conversations ls person/ada
 
 `send` and `reply` safely recognize a retry with the same content. If a send times out, check its status or retry it; do not assume it failed. An agent's answer belongs in the conversation where you asked it.
 
-Attach an existing PNG, JPEG, GIF, or WebP image (up to four, at most 10 MiB each):
+Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
+the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,
+and says when it changed a file. HEIC, AVIF, TIFF and PDF are refused with a way to convert them.
 
 ```sh
 printf 'Path to an image to share with the worker: '
@@ -76,6 +78,22 @@ st conversations send agent/garden/worker --from person/ada \
 ```
 
 Attachments are fetched by the member that reads or delivers the message. Ordinary workspace files do not replicate; put longer text in a graph document or a repository and send its reference. See [message examples](../examples/st3/SEND-A-MESSAGE-PROPERLY.md).
+
+## Keep a current person note
+
+Use a note for bounded context that the agents you own or work with can explicitly read:
+
+```sh
+st note
+st note set 'Prefer a small reviewed change over a broad rewrite.' --expires-at 2099-01-01T00:00:00Z
+st note clear
+```
+
+The actor defaults to your configured person outside a harness and the harness identity inside one; `--actor person/ada` makes a human read explicit. Set and clear always target the resolved person's own note, not another person. Agents cannot set or clear notes or impersonate a person. Each note shows its author, time, optional UTC expiry and revision. Text must be nonblank and at most 4096 UTF-8 bytes; expired notes are absent.
+
+Notes inform, never assign work, approve a gate, answer an ask or grant authority. Use messages and missions for work and the actual approval or answer controls for decisions. This slice is explicit read-only delivery: no launch delivery, notifications or UI. CLI reads and writes use the authenticated trusted local Unix socket; this adds no new principal authentication system.
+
+Before publishing, fleet membership must be anchored and every active member must advertise `features.person_directive_note=1`. Fence legacy peers from replication before enabling notes: feature advertisement alone cannot prove that all legacy peers were discovered.
 
 ## Home shows your alerts
 
@@ -190,7 +208,7 @@ message may have landed: the error prints its key and the command that tells whe
 `st conversations status --idempotency-key KEY`. Running the same command again is safe.
 
 `st conversations sessions` lists harness sessions and `st conversations timeline SESSION`
-shows one conversation as stui shows it: messages, Smalltalk, and tool calls folded to a line
+shows one conversation as the terminal UI shows it: messages, Smalltalk, and tool calls folded to a line
 or two. `--raw` prints every stored entry instead (message boundaries, tool input and output in
 full), and `--json` prints the page.
 

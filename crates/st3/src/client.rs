@@ -61,6 +61,7 @@ pub enum FollowTestReply {
     Delayed(serde_json::Value, Duration),
     Timeout,
     Disconnect,
+    ConnectError(i32),
     Error(u16),
     MissingRoute,
     CursorGap { floor: u64, frontier: u64 },
@@ -167,6 +168,7 @@ pub struct DaemonUnreachable {
     waited: Option<Duration>,
     starting: bool,
     full_replay: bool,
+    socket_os_error: Option<i32>,
 }
 
 impl DaemonUnreachable {
@@ -178,6 +180,7 @@ impl DaemonUnreachable {
             waited: None,
             starting: false,
             full_replay: false,
+            socket_os_error: None,
         }
     }
 
@@ -189,6 +192,7 @@ impl DaemonUnreachable {
             waited: None,
             starting: false,
             full_replay: false,
+            socket_os_error: None,
         }
     }
 
@@ -209,7 +213,8 @@ impl DaemonUnreachable {
 
     fn connect_io(endpoint: impl Into<String>, error: &std::io::Error) -> Self {
         let endpoint = endpoint.into();
-        if let Some(outage) = Self::during_startup(Path::new(&endpoint)) {
+        if !error.raw_os_error().is_some_and(st_drivers::work_claim_failure::is_socket_access_defect)
+            && let Some(outage) = Self::during_startup(Path::new(&endpoint)) {
             return outage;
         }
         let reason = match error.kind() {
@@ -217,7 +222,9 @@ impl DaemonUnreachable {
             std::io::ErrorKind::ConnectionRefused => "connection refused".to_owned(),
             _ => error.to_string(),
         };
-        Self::connect(endpoint, reason)
+        let mut outage = Self::connect(endpoint, reason);
+        outage.socket_os_error = error.raw_os_error();
+        outage
     }
 
     fn after(mut self, waited: Duration) -> Self {
@@ -237,8 +244,24 @@ impl DaemonUnreachable {
         &self.endpoint
     }
 
+    pub fn socket_os_error(&self) -> Option<i32> { self.socket_os_error }
+
+    fn permission_denied(&self) -> bool {
+        matches!(self.socket_os_error, Some(libc::EPERM | libc::EACCES))
+    }
+
+    fn local_connect_defect(&self) -> bool {
+        self.socket_os_error.is_some_and(st_drivers::work_claim_failure::is_socket_access_defect)
+    }
+
     /// A short present-tense summary without advice, for callers that say what they do next.
     pub fn summary(&self) -> String {
+        if self.permission_denied() {
+            return format!("access to the st daemon Unix socket {} was denied ({}); inspect sandbox permissions and the socket path. Nothing was sent", self.endpoint, self.reason);
+        }
+        if self.local_connect_defect() {
+            return format!("connecting to the st daemon Unix socket {} failed ({}); inspect the socket path. Nothing was sent", self.endpoint, self.reason);
+        }
         if self.starting {
             return self.reason.clone();
         }
@@ -521,6 +544,9 @@ impl Client {
                 }
                 Err(error) => error,
             };
+            if daemon_unreachable(&error).is_some_and(DaemonUnreachable::local_connect_defect) {
+                return Err(error);
+            }
             if let Some(retry) = &self.follow_retry
                 && method == "GET"
                 && daemon_did_not_answer(&error)
@@ -576,6 +602,7 @@ impl Client {
                 FollowTestReply::Delayed(value, delay) => (value, delay),
                 FollowTestReply::Timeout => (serde_json::Value::Null, deadline * 2),
                 FollowTestReply::Disconnect => return Err(DaemonUnreachable::response("fixture", "no response").into()),
+                FollowTestReply::ConnectError(errno) => return Err(DaemonUnreachable::connect_io("/tmp/fixture.sock", &std::io::Error::from_raw_os_error(errno)).into()),
                 FollowTestReply::Error(status) => return Err(api_error(status, br#"{"code":"fixture-refusal","message":"fixture read refused"}"#)),
                 FollowTestReply::MissingRoute => return Err(api_error(404,b"")),
                 FollowTestReply::CursorGap {floor,frontier} => return Err(api_error(410,&serde_json::to_vec(&serde_json::json!({
@@ -1235,6 +1262,13 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     }
 }
 
+/// How long a seat's driver waits before it reconnects to the daemon or retries a call the daemon
+/// could not take. Every driver loses the daemon in the same instant when it stops, so without a
+/// random share they would all retry together and reach it in the instant it starts to listen.
+pub fn driver_retry_pause() -> Duration {
+    jittered(Duration::from_secs(1))
+}
+
 /// Half to one and a half times `pause`. Every seat and command waiting out one daemon restart
 /// retries on the same doubling schedule; without a random share they would all reach the daemon
 /// in the same instant it starts to listen.
@@ -1568,6 +1602,75 @@ mod tests {
             follow_retry: None,
             follow_test: None,
         }
+    }
+
+    #[test]
+    fn claim_socket_permission_denial_is_not_a_restart_outage() {
+        for errno in [libc::EPERM, libc::EACCES] {
+            let outage = DaemonUnreachable::connect_io("/tmp/st.sock", &std::io::Error::from_raw_os_error(errno));
+            assert!(outage.permission_denied());
+            assert!(outage.local_connect_defect());
+            assert_eq!(outage.socket_os_error(), Some(errno));
+            assert!(outage.summary().contains("was denied"));
+            assert!(!outage.summary().contains("restarting"));
+        }
+        let outage = DaemonUnreachable::connect_io("/tmp/st.sock", &std::io::Error::from_raw_os_error(libc::ECONNREFUSED));
+        assert!(!outage.permission_denied());
+        assert!(!outage.local_connect_defect());
+        assert_eq!(outage.phase(), OutagePhase::Connect);
+        let invalid_path = DaemonUnreachable::connect_io("/tmp/st.sock", &std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+        assert!(invalid_path.local_connect_defect());
+        assert_eq!(invalid_path.socket_os_error(), Some(libc::ENAMETOOLONG));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn claim_socket_access_defects_skip_wait_and_follow_but_pressure_keeps_existing_wait() {
+        for errno in [libc::EPERM, libc::EACCES, libc::EINVAL, libc::ENAMETOOLONG,
+            libc::ENOTDIR, libc::ENOTSOCK, libc::ELOOP] {
+            for follow in [false, true] {
+                let mut client = Client::scripted_follow_test(vec![
+                    ("/v1/test".into(), FollowTestReply::ConnectError(errno)),
+                ]).with_outage_wait(Duration::from_secs(30), false);
+                if follow { client = client.with_follow_retry(); }
+                let started = tokio::time::Instant::now();
+                let error = client.get::<Value>("/v1/test").await.unwrap_err();
+                assert_eq!(daemon_unreachable(&error).unwrap().socket_os_error(), Some(errno));
+                assert_eq!(client.follow_test_result().0.len(), 1);
+                assert_eq!(started.elapsed(), Duration::ZERO);
+            }
+        }
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::ENOBUFS, libc::EIO,
+            libc::ENOENT, libc::ECONNREFUSED, libc::EINTR, libc::EAGAIN, libc::ETIMEDOUT] {
+            for follow in [false, true] {
+                let mut client = Client::scripted_follow_test(vec![
+                    ("/v1/test".into(), FollowTestReply::ConnectError(errno)),
+                    ("/v1/test".into(), FollowTestReply::Value(json!({"recovered": true}))),
+                ]).with_outage_wait(Duration::from_secs(30), false);
+                if follow { client = client.with_follow_retry(); }
+                let value = client.get::<Value>("/v1/test").await.unwrap();
+                assert_eq!(value, json!({"recovered": true}));
+                let (requests, _) = client.follow_test_result();
+                assert_eq!(requests.len(), 2);
+                assert!(requests[1].1 > requests[0].1, "existing backoff was skipped for errno {errno}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn claim_socket_path_defect_is_not_hidden_by_a_live_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("loop");
+        std::os::unix::fs::symlink("loop", &socket).unwrap();
+        let _startup = crate::startup::Startup::begin(&socket).unwrap();
+        let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(30), false);
+        let error = tokio::time::timeout(Duration::from_secs(1), client.get::<Value>("/v1/health"))
+            .await.expect("a local path defect was hidden by startup wait").unwrap_err();
+        let outage = daemon_unreachable(&error).unwrap();
+        assert_eq!(outage.socket_os_error(), Some(libc::ELOOP));
+        assert!(outage.local_connect_defect());
+        assert!(!outage.starting);
+        assert!(outage.summary().contains("inspect the socket path"));
     }
 
     #[cfg(target_os = "linux")]
@@ -1913,6 +2016,17 @@ mod tests {
                 .len()
                 > 8
         );
+    }
+
+    /// Drivers that lost one daemon reconnect at different times, within half to one and a half
+    /// seconds of losing it.
+    #[test]
+    fn driver_retries_are_spread_around_one_second() {
+        let pauses = (0..64).map(|_| driver_retry_pause()).collect::<Vec<_>>();
+        assert!(pauses.iter().all(|pause| {
+            (Duration::from_millis(500)..=Duration::from_millis(1500)).contains(pause)
+        }));
+        assert!(pauses.iter().collect::<std::collections::BTreeSet<_>>().len() > 8);
     }
 
     #[tokio::test]

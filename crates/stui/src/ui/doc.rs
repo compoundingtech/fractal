@@ -16,6 +16,8 @@ pub enum AlertTap {
     Answer(String),
     /// Open the alert's whole card in Now, where every kind is answered.
     Open,
+    /// Expand or collapse the band: the `Hit` names the agent's conversation, not an alert.
+    Toggle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +34,10 @@ pub enum Hit {
     SidebarRow(usize),
     ResourceRow(usize),
     ResourceFilter,
+    ResourceNewFolder,
+    ResourceAdd(String),
+    ResourceFolderMenu(String),
+    ResourceFolderDrag(String),
     /// One of the sidebar's sections across its top.
     SidebarSection(usize),
     /// Glasses: the top bar's usage slot, which shows and hides the sidebar's Usage.
