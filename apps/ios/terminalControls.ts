@@ -57,6 +57,8 @@ export type TerminalFollowHandlers = {
   /** Route and failure reason persist independently of stream issues. */
   onRoute?: (route: string) => void;
   onReady?: (ready: boolean) => void;
+  /** Owner-local control grant; undefined returns the UI to gateway capabilities. */
+  onControl?: (allowed: boolean | undefined) => void;
   /** Local, content-free attach/stream transitions. */
   onQuality?: (event: 'attempt' | 'attached' | 'error' | 'dead') => void;
 };

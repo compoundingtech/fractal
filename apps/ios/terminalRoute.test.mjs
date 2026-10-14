@@ -8,11 +8,12 @@ const id = 'terminal/agent/demo/worker';
 const descriptor = { terminal_id: id, runtime_incarnation: 'runtime:one', owner_host_id: 'host/owner-a', fabric: { node: 'a'.repeat(64), service: 'st3/client/demo-fleet' } };
 const settle = (ms = 15) => new Promise(resolve => setTimeout(resolve, ms));
 const failure = (message, code) => Object.assign(new Error(message), code ? { response: { code } } : {});
-function harness({ refused, openError, built = true, fallback = true, first = true, describeError, open, attemptMs = 1000 } = {}) {
+function harness({ refused, openError, built = true, fallback = true, first = true, describeError, open, attemptMs = 1000, ownerControl = true } = {}) {
   function terminalClient(host) {
     const { client, sockets } = fakeClient();
     const calls = { reads: 0, attaches: [], detaches: [], inputs: [], resizes: [], incarnation: 'runtime:one' };
     const screen = () => ({ kind: 'terminal-screen', terminal_id: id, runtime_incarnation: calls.incarnation, lines: [], next_sequence: calls.reads });
+    client.capabilities = async () => ({ value: { capabilities: [{ id: 'terminal.input', state: ownerControl ? 'granted' : 'denied' }] } });
     client.terminalScreen = async () => ({ snapshot: { id: `snapshot/${host}/${++calls.reads}` }, value: screen() });
     client.terminalAttach = async input => { calls.attaches.push(input); if (host === 'owner' && refused) throw refused; return { value: { terminal_attachment: { attachment_id: `terminal-attachment/${host}/${input.id}`, runtime_incarnation: calls.incarnation, stream_capability: `cap/${host}` } } }; };
     client.terminalDetach = async input => { calls.detaches.push(input); return { value: {} }; };
@@ -35,10 +36,10 @@ function harness({ refused, openError, built = true, fallback = true, first = tr
     open: async (_route, signal) => { state.opens++; if (openError) throw openError; if (open) await open(signal); return { client: owner.client, cleanup: owner.client, release: async () => { state.releases++; }, failure: async error => ({ reason: error.message, unreachable: !error.response }) }; },
   };
   const feed = new Feed(gateway.client, { onWindow() {}, onConnection() {} }, gate, () => `action/${Math.random()}`, [5], 1000, false, 30_000, undefined, routing);
-  const screens = [], issues = [], routes = [], ready = [], quality = [];
-  const follow = () => feed.followTerminal(id, { onScreen: screen => screens.push(screen.runtime_incarnation), onIssue: issue => issues.push(issue), onRoute: route => routes.push(route), onReady: value => ready.push(value), onQuality: event => quality.push(event) });
+  const screens = [], issues = [], routes = [], ready = [], quality = [], controls = [];
+  const follow = () => feed.followTerminal(id, { onScreen: screen => screens.push(screen.runtime_incarnation), onIssue: issue => issues.push(issue), onRoute: route => routes.push(route), onReady: value => ready.push(value), onQuality: event => quality.push(event), onControl: allowed => controls.push(allowed) });
   const subscriptions = socket => socket.sent.filter(frame => frame.collection === 'terminal');
-  return { feed, gateway, owner, state, gate, follow, screens, issues, routes, ready, quality, subscriptions };
+  return { feed, gateway, owner, state, gate, follow, screens, issues, routes, ready, quality, controls, subscriptions };
 }
 test('owner capability, snapshot and socket stay local; gateway windows stay connected', async () => {
   const h = harness(); h.follow(); await settle();
@@ -46,7 +47,8 @@ test('owner capability, snapshot and socket stay local; gateway windows stay con
   assert.equal(h.subscriptions(h.owner.sockets[0])[0].capability, 'cap/owner');
   const control = h.feed.terminalControl(id, 'runtime:one'); assert.equal(control.client, h.owner.client); assert.equal(control.snapshot, 'snapshot/owner/frame');
   assert.throws(() => h.feed.terminalControl(id, 'runtime:two'), /restarted/);
-  h.gateway.sockets[0].drop(new Error('gateway changed')); await settle(); assert.equal(h.state.releases, 0); assert.equal(h.owner.calls.attaches.length, 1); assert.equal(h.ready.at(-1), true);
+  assert.equal(h.controls.at(-1), true);
+  h.gateway.sockets[0].drop(new Error('gateway changed')); await settle(); assert.equal(h.controls.at(-1), true, 'the owner grant survives loss of gateway capabilities'); assert.equal(h.state.releases, 0); assert.equal(h.owner.calls.attaches.length, 1); assert.equal(h.ready.at(-1), true);
   h.feed.close(); await settle(); assert.equal(h.owner.calls.detaches.length, 1); assert.equal(h.owner.calls.detaches[0].parameters.target_id, `terminal-attachment/owner/${h.owner.calls.attaches[0].id}`); assert.equal(h.gateway.calls.detaches.length, 0); assert.equal(h.state.releases, 1);
   assert.throws(() => h.feed.terminalControl(id, 'runtime:one'), /not ready/);
   assert.deepEqual(h.quality, ['attempt', 'attached'], 'gateway loss and intentional close do not count a healthy owner as dead');
@@ -127,4 +129,13 @@ test('routed quality counts owner loss once and excludes background suspension',
   h.gate.update('background');
   h.feed.close();
   assert.equal(h.quality.filter(event => event === 'dead').length, 1);
+});
+
+test('an owner read-only grant disables controls independently of gateway capabilities', async () => {
+  const h = harness({ ownerControl: false }); h.follow(); await settle();
+  assert.equal(h.ready.at(-1), true);
+  assert.equal(h.controls.at(-1), false);
+  h.gateway.sockets[0].drop(new Error('gateway disconnected')); await settle();
+  assert.equal(h.controls.at(-1), false);
+  h.feed.close(); assert.equal(h.controls.at(-1), undefined);
 });

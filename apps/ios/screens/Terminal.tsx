@@ -39,6 +39,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
   const [issue, setIssue] = useState(''), [notice, setNotice] = useState('');
   const [terminalRoute, setTerminalRoute] = useState('');
   const [terminalReady, setTerminalReady] = useState(false);
+  const [ownerControl, setOwnerControl] = useState<boolean | undefined>();
   const [ctrl, setCtrl] = useState(false), [typing, setTyping] = useState(false);
   const [area, setArea] = useState({ width: 0, height: 0 });
   const qualityOpen = useRef(0), qualityDirect = useRef(false);
@@ -49,7 +50,8 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
   const live = useRef({ screen, ready: terminalReady, ctrl });
   live.current = { screen, ready: terminalReady, ctrl };
   const headerHeight = useHeaderHeight();
-  const canType = canControlTerminal && terminalReady && !issue;
+  const canControl = ownerControl ?? canControlTerminal;
+  const canType = canControl && terminalReady && !issue;
 
   // The store's actions change identity on every render; one queue serves the screen's life,
   // so keys stay in order.
@@ -84,6 +86,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
       expectedIncarnation: incarnation.current || undefined,
       onRoute: setTerminalRoute,
       onReady: setTerminalReady,
+      onControl: setOwnerControl,
       onScreen: next => {
         if (!incarnation.current) {
           incarnation.current = next.runtime_incarnation;
@@ -141,7 +144,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
   useLayoutEffect(() => {
     navigation.setOptions({
       title: (route.params.title ? `${route.params.title} · terminal` : 'Terminal') + (terminalRoute ? ` · ${terminalRoute}` : ''),
-      unstable_headerRightItems: () => canControlTerminal ? [
+      unstable_headerRightItems: () => canControl ? [
         { type: 'menu' as const, label: 'Terminal', icon: { type: 'sfSymbol' as const, name: 'ellipsis.circle' as const }, menu: { items: [
           { type: 'action' as const, label: 'Fit to this phone', onPress: fitToPhone },
           { type: 'action' as const, label: 'Send Ctrl-C', onPress: () => Alert.alert('Interrupt the program?', 'Sends Ctrl-C to this terminal.', [{ text: 'Cancel' }, { text: 'Interrupt', style: 'destructive', onPress: () => send('\x03') }]) },
@@ -149,7 +152,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
         { type: 'button' as const, label: 'Keyboard', icon: { type: 'sfSymbol' as const, name: 'keyboard' as const }, onPress: () => (typing ? keyboard.current?.blur() : keyboard.current?.focus()) },
       ] : [],
     });
-  }, [navigation, route.params.title, terminalRoute, canControlTerminal, fitToPhone, send, typing]);
+  }, [navigation, route.params.title, terminalRoute, canControl, fitToPhone, send, typing]);
 
   // A swipe over a program that reads the mouse turns its wheel; over a full-screen program
   // that does not, it presses the arrows. The plain shell has no history here to scroll.
@@ -171,9 +174,9 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
       const one = current.modes.mouse_tracking !== 'none'
         ? wheelBytes(up, Math.floor(current.columns / 2), Math.floor(current.rows / 2), current.modes)
         : keyBytes(up ? 'up' : 'down', current.modes);
-      if (canControlTerminal) send(one.repeat(Math.abs(steps)));
+      if (canControl) send(one.repeat(Math.abs(steps)));
     },
-  }), [lineHeight, canControlTerminal, send]);
+  }), [lineHeight, canControl, send]);
 
   const cursor = screen?.cursor.visible ? screen.cursor : undefined;
   const lines = screen?.lines.map(line => {
@@ -198,16 +201,16 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
     </View>
     <View style={styles.strip}>
       <T dim style={styles.stripText}>
-        {!terminalReady ? 'offline · the last frame' : !canControlTerminal ? 'read-only: this phone was paired without terminal control' : typing ? 'typing into the terminal' : 'tap the screen to type'}
+        {!terminalReady ? 'offline · the last frame' : !canControl ? 'read-only: this phone was paired without terminal control' : typing ? 'typing into the terminal' : 'tap the screen to type'}
         {screen ? ` · ${screen.columns}×${screen.rows}` : ''}
       </T>
       {canType && screen && contentHeight < area.height * 0.8 ? <Pressable onPress={fitToPhone} hitSlop={8}><T style={styles.stripText} color={theme.accent}>fit to phone</T></Pressable> : null}
     </View>
-    {canControlTerminal ? <TextInput
+    {canControl ? <TextInput
       ref={keyboard}
       style={styles.hidden}
       // Stays editable while the terminal reconnects, so the keyboard does not drop.
-      editable={canControlTerminal}
+      editable={canControl}
       autoCapitalize="none"
       autoCorrect={false}
       autoComplete="off"

@@ -4,7 +4,7 @@ import { daemonRouteLabel, fabricRouteLabel, terminalRoute, TerminalRouteMemory 
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type TerminalFollowHandlers } from './terminalControls';
 import type { HeartbeatSocketFactory } from './collectionSocket';
 
-export type TerminalClient = Pick<St3Client, 'terminalScreen' | 'terminalAttach' | 'terminalDetach' | 'terminalInput' | 'terminalResize' | 'collectionStream'>;
+export type TerminalClient = Pick<St3Client, 'capabilities' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach' | 'terminalInput' | 'terminalResize' | 'collectionStream'>;
 export type OwnerTarget = {
   client: TerminalClient;
   /** Detach through this issuer even after the attempt's HTTP reads were cancelled. */
@@ -83,6 +83,10 @@ export class RoutedTerminalFollow {
           if (!valid() || controller.signal.aborted) return;
           this.check(screen.value);
           this.snapshot = screen.snapshot.id;
+          const capabilities = await target.client.capabilities();
+          if (!valid() || controller.signal.aborted) return;
+          const canControl = capabilities.value.capabilities.some(
+            capability => capability.id === 'terminal.input' && capability.state === 'granted');
           const attachment = await this.obtain(target.client);
           if (!valid() || controller.signal.aborted) { void this.detach(target.cleanup, attachment.id); return; }
           this.attached = { client: target.cleanup, id: attachment.id };
@@ -98,6 +102,7 @@ export class RoutedTerminalFollow {
                 try { this.check(frame.value); } catch (error) { this.first?.reject(error as Error); this.stop(plainError(error)); return; }
                 this.snapshot = frame.snapshot.id;
                 this.direct = true;
+                this.handlers.onControl?.(canControl);
                 this.handlers.onReady?.(true);
                 this.handlers.onRoute?.(fabricRouteLabel(route));
                 this.handlers.onIssue('');
@@ -262,6 +267,7 @@ export class RoutedTerminalFollow {
 
   private dispose(): void {
     this.qualityAttached = false;
+    this.handlers.onControl?.(undefined);
     this.handlers.onReady?.(false);
     this.controller?.abort(); this.controller = undefined;
     this.first?.reject(new Error('Terminal route cancelled')); this.first = undefined;

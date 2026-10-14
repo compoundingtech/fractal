@@ -379,15 +379,15 @@ function useAppStore(proof?: FabricProfile) {
     } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
 
-  const ownerFailures = useRef({ credential, memory: new TerminalRouteMemory() });
-  if (ownerFailures.current.credential !== credential) ownerFailures.current = { credential, memory: new TerminalRouteMemory() };
+  const ownerFailures = useRef({ credential: clientCredential, memory: new TerminalRouteMemory() });
+  if (ownerFailures.current.credential !== clientCredential) ownerFailures.current = { credential: clientCredential, memory: new TerminalRouteMemory() };
   const terminalOptions = useRef({ built: fabricBuilt, fallback: fallbackOn, target: fabricTarget, route: selected.route });
   terminalOptions.current = { built: fabricBuilt, fallback: fallbackOn, target: fabricTarget, route: selected.route };
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
   // current. It closes in the background and opens fresh, snapshots first, in the foreground.
   useEffect(() => {
-    if (!client || !credential) { if (!credential) setStatus('setup'); return; }
+    if (!client || !credential || !clientCredential) { if (!credential) setStatus('setup'); return; }
     const generation = cacheGeneration.current;
     let active = true;
     let connection = 0;
@@ -450,7 +450,7 @@ function useAppStore(proof?: FabricProfile) {
       onConversationFrame: (rows, replace) => { if (current()) proofRef.current?.record('conversation', { rows, replace }); },
       onTiming: (target, ms) => { if (current() && !proofRef.current) observations.observe(target, ms); },
     }, foreground.current, actionId, undefined, undefined, false, undefined, nativeCollectionSocket, ownerTerminalRouting({
-      gatewayUrl: connectUrl, credential,
+      gatewayUrl: connectUrl, credential: clientCredential,
       clientName: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD),
       built: () => terminalOptions.current.built,
       fallback: () => terminalOptions.current.fallback,
@@ -461,7 +461,7 @@ function useAppStore(proof?: FabricProfile) {
     setStatus(previous => previous === 'setup' ? 'connecting' : previous);
     setFeed(opened);
     return () => { active = false; opened.close(); setFeed(held => held === opened ? null : held); };
-  }, [client, credential, loadCapabilities, observations, carrier]);
+  }, [client, credential, clientCredential, loadCapabilities, observations, carrier]);
   // No client yet: either nothing is paired, fabric is opening, or neither route can be used.
   useEffect(() => {
     if (client || proof) return;
