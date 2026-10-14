@@ -2001,7 +2001,6 @@ impl Store {
         ownership: u64,
         transition: u64,
     ) -> Result<NativePromptState> {
-        let now = now_ms();
         let connection = self.readers.get();
         // The hook's observation is among the seat's last few: it is published moments after the
         // hook writes it, and a hook that waited past a few later observations has nothing left.

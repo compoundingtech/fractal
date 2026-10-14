@@ -57219,8 +57219,8 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         // Within the hook's wait, the prompt is answered here.
         asked(now - window + 60_000, 3);
         assert_eq!(prompt().unwrap().answers, vec!["allow".to_owned(), "deny".to_owned()]);
-        // The next prompt opened before the hook's wait: still an alert, answered in the terminal,
-        // and so is each restatement of it, which keeps when it opened.
+        // Expiring the hook only disables answering through st. The native dialog
+        // stays open, and each restatement keeps its original opening time.
         append(
             "harness.observed",
             json!({"state":"working", "driver":"claude", "incarnation_id":"one",
@@ -57243,7 +57243,20 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
                 .code,
             "stale-fence"
         );
+        assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), NativePromptState::Open);
+        let index = store.index().unwrap();
+        let held = store.observed_harness_at(seat, index).unwrap().unwrap();
+        assert_eq!(held.blocked_on.as_deref(), Some("human"),
+            "hook expiry must retain the native human mail hold");
+        assert_eq!(store.seat_observation_at(seat, Some(&held), index, now_ms()).unwrap(), "current");
+        append(
+            "harness.observed",
+            json!({"state":"idle", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":null, "ask":null, "ownership_sequence":1, "transition_sequence":6}),
+        );
         assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), NativePromptState::Gone);
+        assert!(store.observed_harness_at(seat, store.index().unwrap()).unwrap().unwrap().blocked_on.is_none(),
+            "authoritative native closure releases the mail hold");
     }
 
     /// A driver writes each prompt as its own transition, so a later prompt for the same tool is

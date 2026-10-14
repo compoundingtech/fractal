@@ -18372,6 +18372,47 @@ mission "expiring-work" state="ready" {
     }
 
     #[test]
+    fn message_delivery_keeps_expired_claude_hook_mail_held_until_native_closure() {
+        let store = Store::open_memory("expired-claude-hook-mail-hold").unwrap();
+        let seat = "agent/expired-claude-hook-mail-hold";
+        let append = |kind: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: seat.into(), kind: kind.into(), actor: Some(seat.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        let now = now_ms();
+        let expired = now - crate::store::CLAUDE_PROMPT_ANSWER_WAIT_MS - 1_000;
+        append("harness.observed", json!({
+            "state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"human", "ask":"permission", "reason":"Read",
+            "observed_at_ms":expired, "ownership_sequence":1, "transition_sequence":5
+        }));
+        let heartbeat = append("harness.observed", json!({
+            "state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"human", "ask":"permission", "reason":"Read",
+            "observed_at_ms":now, "ownership_sequence":1, "transition_sequence":5
+        }));
+        assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), crate::store::NativePromptState::Open);
+        for phase in ["sent", "staged"] {
+            let delivery = message_delivery_value(&store, seat, phase, now, heartbeat.accepted_at_unix_ms).unwrap();
+            assert_eq!(delivery["state"], "waiting");
+            assert!(delivery["reason"].as_str().unwrap().contains("held outside"));
+        }
+        let closed = append("harness.observed", json!({
+            "state":"idle", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":null, "ask":null, "ownership_sequence":1, "transition_sequence":6
+        }));
+        assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), crate::store::NativePromptState::Gone);
+        for phase in ["sent", "staged"] {
+            assert!(!message_delivery_value(&store, seat, phase, now, closed.accepted_at_unix_ms).unwrap()["reason"]
+                .as_str().unwrap().contains("held outside"));
+        }
+    }
+
+    #[test]
     fn message_delivery_holds_native_decisions_until_the_current_observation_clears() {
         for driver in ["omp", "pi", "claude", "codex", "opencode"] {
             for ask in ["question", "permission", "approval"] {
