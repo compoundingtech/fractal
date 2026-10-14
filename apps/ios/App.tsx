@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from 'react';
-import { Linking, StatusBar, View } from 'react-native';
-import { DarkTheme, NavigationContainer, getFocusedRouteNameFromRoute, type RouteProp } from '@react-navigation/native';
+import { Linking, StatusBar, View, useColorScheme } from 'react-native';
+import { DarkTheme, DefaultTheme, ThemeProvider, NavigationContainer, getFocusedRouteNameFromRoute, type RouteProp } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackNavigationOptions } from '@react-navigation/native-stack';
 import { createNativeBottomTabNavigator } from '@react-navigation/bottom-tabs/unstable';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -14,7 +14,7 @@ import { openAlerts } from '@smalltalk/st3-views';
 import { FULL_SCREEN, navigationRef, ROOTS, type StackParams, type TabParams } from './navigation';
 import { StoreProvider, useStore } from './store';
 import { parseDevLink, tabLabel, tabNamed, type Tab } from './tabs';
-import { theme } from './theme';
+import { systemColors, theme } from './theme';
 import { AgentsScreen, HistoryScreen } from './screens/Agents';
 import { ConversationScreen } from './screens/Conversation';
 import { FleetScreen, PairScreen } from './screens/Fleet';
@@ -56,8 +56,18 @@ const stackOptions: NativeStackNavigationOptions = {
 };
 
 function TabStack({ tab }: { tab: Tab }) {
+  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const colors = systemColors[scheme];
+  const systemOptions: NativeStackNavigationOptions = {
+    headerTintColor: colors.action,
+    headerStyle: { backgroundColor: colors.background },
+    headerTitleStyle: { color: colors.text },
+    headerLargeTitleStyle: { color: colors.text },
+    contentStyle: { backgroundColor: colors.background },
+    statusBarStyle: scheme === 'dark' ? 'light' : 'dark',
+  };
   return <Stack.Navigator screenOptions={stackOptions}>
-    {tab === 'Now' ? <Stack.Screen name="NowRoot" component={NowScreen} options={{ title: 'Now' }} /> :
+    {tab === 'Now' ? <Stack.Screen name="NowRoot" component={NowScreen} options={{ ...systemOptions, title: 'Now' }} /> :
      tab === 'Resources' ? <Stack.Screen name="ResourcesRoot" component={SidebarScreen} options={{ title: 'Resources' }} /> :
      tab === 'Fleet' ? <Stack.Screen name="FleetRoot" component={FleetScreen} options={{ title: 'Fleet' }} /> :
      <Stack.Screen name="SpacesRoot" component={GlassesScreen} options={{ title: 'Spaces' }} />}
@@ -69,7 +79,7 @@ function TabStack({ tab }: { tab: Tab }) {
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ title: 'Conversation' }} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />
     <Stack.Screen name="Mission" component={MissionScreen} options={{ title: 'Mission' }} />
-    <Stack.Screen name="Attention" component={AttentionScreen} options={{ title: 'Alert' }} />
+    <Stack.Screen name="Attention" component={AttentionScreen} options={{ ...systemOptions, title: 'Alert' }} />
     <Stack.Screen name="Launch" component={LaunchScreen} options={{ title: 'Launch' }} />
     <Stack.Screen name="History" component={HistoryScreen} options={{ title: 'Past sessions' }} />
     <Stack.Screen name="NewMission" component={NewMissionScreen} options={{ title: 'New mission', presentation: 'modal' }} />
@@ -99,6 +109,8 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
   const homeCount = openAlerts(data.attention, caps?.session_actor).length;
   const paired = !!url && !!credential;
   const shownName = shownRoute?.name ?? ROOTS[order[0]];
+  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const colors = systemColors[scheme];
   const target = (shownRoute?.params as { target?: string } | undefined)?.target;
   const shownMask = qualityVisibility(shownName, paired, target, data.agents, data.sessions);
   useLayoutEffect(() => {
@@ -142,11 +154,15 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
     </Stack.Navigator>;
   }
   const initial = (__DEV__ ? tabNamed(process.env.EXPO_PUBLIC_ST3_TEST_TAB) : null) ?? order[0];
-  return <Tabs.Navigator
+  const systemSurface = shownName === 'NowRoot' || shownName === 'Attention';
+  return <ThemeProvider value={systemSurface ? {
+    ...(scheme === 'dark' ? DarkTheme : DefaultTheme),
+    colors: { ...(scheme === 'dark' ? DarkTheme.colors : DefaultTheme.colors), primary: colors.action, background: colors.background, card: colors.grouped, text: colors.text, border: colors.separator, notification: colors.attention },
+  } : navigationTheme}><Tabs.Navigator
     initialRouteName={initial}
     screenOptions={({ route }) => ({
       headerShown: false,
-      tabBarActiveTintColor: theme.accent,
+      tabBarActiveTintColor: systemSurface ? colors.action : theme.accent,
       // Spaces: one rounded rect, as stui's ▢.
       tabBarIcon: { type: 'sfSymbol', name: ICONS[route.name as Tab] as never },
       tabBarStyle: { display: tabBarHidden(route) ? 'none' : 'flex' },
@@ -156,9 +172,9 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       key={tab}
       name={tab}
       component={TAB_COMPONENTS[tab]}
-      options={{ tabBarLabel: tabLabel(tab), title: tabLabel(tab), ...(tab === 'Now' && homeCount ? { tabBarBadge: homeCount, tabBarBadgeStyle: { backgroundColor: theme.person, color: theme.crust } } : {}) }}
+      options={{ tabBarLabel: tabLabel(tab), title: tabLabel(tab), ...(tab === 'Now' && homeCount ? { tabBarBadge: homeCount, tabBarBadgeStyle: { backgroundColor: systemSurface ? colors.attention : theme.person, color: systemSurface ? colors.background : theme.crust } } : {}) }}
     />)}
-  </Tabs.Navigator>;
+  </Tabs.Navigator></ThemeProvider>;
 }
 
 const qualityLayout = () => quality.commit();
