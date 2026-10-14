@@ -811,7 +811,7 @@ pub(super) fn prepare_one(
         }
         let body = item["body"].as_object_mut().expect("native body");
         for (key, value) in body.iter_mut() {
-            if key != "blocks" {
+            if key != "blocks" && !(omp_event && key == "text") {
                 bound_open_value(value);
                 if !value.is_string() {
                     bound(value);
@@ -1217,24 +1217,57 @@ mod tests {
     }
 
     #[test]
-    fn omp_event_oversized_identity_is_refused_without_clipping_json() {
+    fn omp_event_wide_identities_keep_normal_events_and_cached_pages_readable() {
         let root = tempfile::tempdir().unwrap();
         let native = fixture(root.path(), json!([]));
-        let record = json!({"type":"custom_message", "customType":"x".repeat(CLIENT_MAX_RESPONSE_BYTES), "content":"small"});
-        std::fs::write(&native.transcript, format!("{record}\n")).unwrap();
-        let session = ClientSession::local(Some("person/example")).unwrap();
-        // The normal timeline may preview a wide record. Rehydrate that exact owner locator
-        // to exercise refusal when the actual preparation input still has an oversized ID.
+        let normal = json!({"type":"custom_message", "customType":"notice", "content":"normal"});
+        let record = json!({
+            "type":"custom_message", "customType":"λ".repeat(CLIENT_MAX_RESPONSE_BYTES),
+            "attribution":"a".repeat(CLIENT_MAX_RESPONSE_BYTES), "content":"wide identity",
+            "details":{"large":"x".repeat(CLIENT_MAX_RESPONSE_BYTES)},
+        });
+        std::fs::write(
+            &native.transcript,
+            format!("{normal}\n{record}\n{normal}\n"),
+        )
+        .unwrap();
+        let mut session = ClientSession::local(Some("person/example")).unwrap();
+        session.conversation_blocks = true;
         let preview = crate::external_sessions::normalized_timeline(&native).unwrap();
-        let event = preview
-            .iter()
-            .find(|item| item["body"]["media_type"] == "application/vnd.omp.event+json")
-            .unwrap();
-        let native_locator = serde_json::from_value(event["_source"].clone()).unwrap();
-        let full = crate::external_sessions::normalized_record(&native, &native_locator).unwrap();
-        let error = prepare(&native, &session, &native.id, full).unwrap_err();
-        assert_eq!(error.code, "validation-failed");
-        assert!(error.message.contains("native event"));
+        let locator = serde_json::from_value(preview[1]["_source"].clone()).unwrap();
+        // Complete owner-record preparation also bounds identity fields, independently
+        // of the ordinary timeline's earlier wide-record preview.
+        let full = crate::external_sessions::normalized_record(&native, &locator).unwrap();
+        let full = prepare(&native, &session, &native.id, full).unwrap();
+        let envelope: Value =
+            serde_json::from_str(full[0]["body"]["text"].as_str().unwrap()).unwrap();
+        for key in ["kind", "attribution"] {
+            let value = envelope[key].as_str().unwrap();
+            assert!(value.ends_with("[st truncated this native timeline value]"));
+            assert!(value.len() <= 256 + 48);
+        }
+        let items = read(&native, &session, &native.id).unwrap();
+        assert_eq!(items.len(), 3);
+        for index in [0, 2] {
+            let envelope: Value =
+                serde_json::from_str(items[index]["body"]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(envelope["content"], "normal");
+        }
+        assert!(items.iter().all(|item| item.get("_source").is_none()));
+        assert!(serde_json::to_vec(&items).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
+        let state = super::super::tests::test_state_named(root.path(), "omp-cached-raw");
+        let snapshot = new_client_snapshot(&state);
+        // Cached timeline paging receives wire-prepared items, not complete raw records.
+        let page = client_page(
+            &state,
+            &snapshot,
+            &format!("timeline/{}", native.id),
+            items,
+            &ClientListQuery::default(),
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert!(serde_json::to_vec(&page).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
     }
 
     async fn fetch_json_chunks(state: &AppState, native: &ExternalSession, token: &str) -> Value {

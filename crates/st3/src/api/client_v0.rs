@@ -5950,7 +5950,7 @@ fn native_slice_page_at_generation(
     let _page_preparation = crate::profile::span("conversation/page-preparation");
     // A page never outgrows what a paired reader can take from a remote owner (its reads are
     // capped at 1 MiB): a seat with very large entries gets a shorter newest page and a cursor
-    // for the rest. A single unpageable entry refuses explicitly rather than overflowing.
+    // for the rest. A lone entry can exceed the target budget, but not the hard ceiling.
     has_more |= bound_page_bytes(&mut items, TIMELINE_PAGE_BYTE_BUDGET)?;
     let next_cursor = if has_more {
         let boundary = items.last()
@@ -5988,10 +5988,10 @@ fn native_slice_page_at_generation(
 
 /// The most a timeline page's entries may serialize to, leaving room under a peer's 1 MiB cap on
 /// a remote client read for the envelope and the page header.
-const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
+pub(super) const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
-/// Keep complete newest entries whose encoded array fits `budget`. A single entry that
-/// cannot fit refuses explicitly; a shorter page continues from its actual last entry.
+/// Keep complete newest entries within the target budget. One larger entry may be served
+/// alone up to the hard response ceiling; continuation uses the actual last returned key.
 fn bound_page_bytes<K>(items: &mut Vec<(Value, K)>, budget: usize) -> Result<bool, ApiError> {
     let mut bytes = 2usize; // JSON array delimiters.
     for index in 0..items.len() {
@@ -14731,7 +14731,16 @@ mission "queue-parity" state="ready" {
         let mut small = vec![entry(10), entry(10)];
         assert!(!bound_page_bytes(&mut small, 768 * 1024).unwrap());
         assert_eq!(small.len(), 2);
-        // One oversized entry refuses rather than overflowing, truncating or skipping it.
+        // Above the soft budget but below the hard ceiling: serve it alone and continue.
+        // 896 KiB fits; 900 KiB exceeds the exact 920,576-byte ceiling before JSON overhead.
+        let large = entry(896 * 1024);
+        let mut lone = vec![large.clone()];
+        assert!(!bound_page_bytes(&mut lone, 768 * 1024).unwrap());
+        assert_eq!(lone, vec![large.clone()]);
+        let mut followed = vec![large.clone(), entry(10)];
+        assert!(bound_page_bytes(&mut followed, 768 * 1024).unwrap());
+        assert_eq!(followed, vec![large]);
+        // A single entry beyond the hard ceiling refuses without skipping or mutation.
         let mut huge = vec![entry(2_000_000), entry(10)];
         let original = huge.clone();
         assert_eq!(

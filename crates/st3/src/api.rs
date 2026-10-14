@@ -1837,19 +1837,23 @@ fn client_timeline_page_end(
     }
 
     // Match mission-card paging's reserve for the response, cursor and fleet notice.
-    let budget = CLIENT_MAX_RESPONSE_BYTES - 128_000;
-    let mut used = 2usize; // JSON array delimiters; per-entry charge includes a comma.
+    let budget = client_v0::TIMELINE_PAGE_BYTE_BUDGET;
+    let hard_ceiling = CLIENT_MAX_RESPONSE_BYTES - 128_000;
+    let mut used = 2usize; // JSON array delimiters.
     let mut end = offset.min(items.len());
     for item in items.iter().skip(offset).take(limit) {
         let mut encoded = EncodedSize(0);
         serde_json::to_writer(&mut encoded, item).map_err(ApiError::internal)?;
-        let bytes = encoded.0.saturating_add(1);
+        let bytes = encoded.0.saturating_add(usize::from(end > offset));
         if used.saturating_add(bytes) > budget {
             if end == offset {
-                return Err(ApiError::bad(St3Error::new(
-                    "validation-failed",
-                    "a timeline entry exceeds the client response limit",
-                )));
+                if used.saturating_add(bytes) > hard_ceiling {
+                    return Err(ApiError::bad(St3Error::new(
+                        "validation-failed",
+                        "a timeline entry exceeds the client response limit",
+                    )));
+                }
+                end += 1; // A complete lone entry fits the hard ceiling.
             }
             break;
         }
@@ -19778,6 +19782,41 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             .unwrap();
         }
         assert_eq!(received_ids, expected_ids);
+    }
+
+    #[test]
+    fn timeline_cached_page_serves_lone_entry_above_target_below_hard_ceiling() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let snapshot = new_client_snapshot(&state);
+        let large = json!({"id":"large", "body":{"text":"x".repeat(896 * 1024)}});
+        let small = json!({"id":"small"});
+        let mut query = ClientListQuery {
+            limit: Some(100),
+            ..Default::default()
+        };
+        let page = client_page(
+            &state,
+            &snapshot,
+            "timeline/session/lone",
+            vec![large.clone(), small.clone()],
+            &query,
+        )
+        .unwrap();
+        assert_eq!(page.items, vec![large]);
+        assert!(serde_json::to_vec(&page).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
+        query.cursor = page.page.next_cursor;
+        assert!(query.cursor.is_some());
+        let page = client_page(
+            &state,
+            &snapshot,
+            "timeline/session/lone",
+            Vec::new(),
+            &query,
+        )
+        .unwrap();
+        assert_eq!(page.items, vec![small]);
+        assert!(!page.page.has_more);
     }
 
     #[test]

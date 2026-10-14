@@ -204,8 +204,13 @@ multiple jobs remain one native event unless their body has an authoritative par
 Human, daemon, system, and absent attribution are not inferred to be agents.
 Structured resource observations retain their content and details in the same envelope.
 `display: false` stays hidden; an absent `display` retains the native reader's visible behavior.
-The existing native-value byte bound applies separately to content and details; oversized
-fields become marked truncated text without corrupting the envelope's JSON.
+The native-value byte bound applies separately to content and details (8 KiB each), with
+kind and attribution bounded separately to 256 UTF-8 bytes. Oversized fields become marked
+truncated strings without corrupting the envelope's JSON; the marker is added after the
+retained byte window. In particular, administrative details is the native record object when
+it fits, and a marked JSON-preview STRING when it exceeds 8 KiB. Complete original fields
+remain accessible through the negotiated native-source continuation. A wide identity cannot
+make the surrounding conversation unreadable.
 Timeline page limits are item-count upper bounds: a page can contain fewer entries to stay
 within the gateway response budget. Pagination preserves each complete envelope and advances
 the continuation cursor by the number actually returned; following it does not skip entries.
@@ -224,9 +229,10 @@ visible according to the current native-reader omission table; this change does 
 older hidden-record list. This event whitelist applies only to OMP: Pi and genuinely unknown
 entry types retain their current behavior. Negotiated conversation blocks keep their typed
 view and authenticated continuation to the complete raw record beside the bounded envelope.
-Both legacy and negotiated preparation preserve the envelope's parseable JSON. An individual
-entry that cannot fit the response budget is explicitly refused, never skipped or clipped into
-invalid JSON.
+Both legacy and negotiated preparation preserve the envelope's parseable JSON. A complete lone entry may exceed the 768 KiB page target up to the hard response ceiling
+(1,048,576 minus 128,000 reserved bytes); larger entries retain the current native reader's
+visible size-limit/error continuation behavior. Cached and keyset pagination explicitly refuse
+an entry above that hard ceiling if it still reaches paging; they never silently skip it.
 
 `crates/st3/fixtures/omp-admin-events.jsonl` preserves one native shape per administrative kind
 from a session resumed on 2026-10-04. Native IDs and timestamps remain exact, but every payload

@@ -41,7 +41,7 @@ A torn prefix can produce both a raw block and a recovered typed record.
 
 The sole omission table is `omission_reason` in
 `crates/st3/src/external_sessions.rs`: one named match arm per permitted type with
-an explicit reason. It omits only the four categories below. Nothing else may be
+an explicit reason. It omits only the five categories below. Nothing else may be
 dropped by a parser branch: an otherwise empty projection falls back to raw JSON.
 The coverage test uses harness-specific native record fixtures, the redacted OMP
 resume/tool captures (also exercising Pi’s shared format), and message/part objects
@@ -59,6 +59,7 @@ direct owner reads. Fixture provenance is in `crates/st3/fixtures/native-records
 | Pi/OMP `session` | Omit the native session setup header. |
 | OMP `reset_boundary`, `credential_pin`, `title` | Retain raw plus typed status views; reset/title are quiet events, credential pins are internal bookkeeping hidden by default. |
 | Pi/OMP `custom_message` with explicit `display: false` | Omit because the native extension explicitly marks it hidden from its terminal. |
+| OMP `model_usage`, `title_change`, `session_init`, `ttsr_injection` with explicit `display: false` | Omit the explicitly hidden administrative event; otherwise retain its OmpEvent envelope and existing typed view. |
 | Pi/OMP `custom`, `label`, `session_info`, model/thinking changes and summary records without text | Retain raw; summaries with text remain readable native notes. |
 | OpenCode `snapshot` | Retain raw; visibility is not established across releases. |
 | Claude documents | Retain the complete document payload, with a readable document fallback. |
@@ -101,7 +102,12 @@ subtree uses a continuation to `/body/blocks/{index}/view` or `/metadata`; if an
 remainder already needs that block's continuation, it instead points to the whole
 original `/body` so owner fetch recovers every exact subtree. Clients inspect the
 returned JSON accordingly. The final entry-size guard still runs after all display
-bounding and can replace an over-budget entry with a fetchable error notice.
+bounding and can replace an over-budget entry with a fetchable error notice. OMP event
+fields are bounded before serialization so their JSON envelope remains parseable; kind and
+attribution have 256-byte windows, content and details have 8 KiB windows, plus visible markers.
+Complete raw fields remain available through owner continuations. Page windows target 768 KiB
+but retain one complete larger entry up to the hard response ceiling (1 MiB minus 128,000
+reserved bytes); paging refuses an entry beyond that hard ceiling rather than skipping it.
 
 On `tool_call` blocks, parsed from the native arguments (OMP field `i` becomes
 `intent`; every tool_call view also has `tool`, the native tool name):

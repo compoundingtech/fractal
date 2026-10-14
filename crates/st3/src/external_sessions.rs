@@ -26,6 +26,7 @@ const MAX_TIMELINE_LINES: usize = 4_096;
 const MAX_TIMELINE_BYTES: u64 = 32 * 1024 * 1024;
 // OMP envelope fields are bounded before JSON serialization; pages budget complete entries.
 const MAX_OMP_EVENT_VALUE_BYTES: usize = 8 * 1024;
+const MAX_OMP_EVENT_IDENTITY_BYTES: usize = 256;
 // Wire size limits and owner references are applied by api/client_v0/conversation_blocks.
 const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(2);
 /// How long a saved-history request waits for a background transcript read before it answers
@@ -4522,8 +4523,13 @@ fn push_omp_event(
     let envelope = json!({
         "_tag": "OmpEvent",
         "version": 1,
-        "kind": record.get(if administrative { "type" } else { "customType" }),
-        "attribution": record.get("attribution"),
+        "kind": bounded_omp_value(
+            record.get(if administrative { "type" } else { "customType" }).unwrap_or(&Value::Null),
+            MAX_OMP_EVENT_IDENTITY_BYTES,
+        ),
+        "attribution": bounded_omp_value(
+            record.get("attribution").unwrap_or(&Value::Null), MAX_OMP_EVENT_IDENTITY_BYTES,
+        ),
         "content": if administrative { Value::Null } else {
             bounded_omp_event_value(record.get("content").unwrap_or(&Value::Null))
         },
@@ -4544,14 +4550,18 @@ fn push_omp_event(
 }
 
 fn bounded_omp_event_value(value: &Value) -> Value {
+    bounded_omp_value(value, MAX_OMP_EVENT_VALUE_BYTES)
+}
+
+fn bounded_omp_value(value: &Value, limit: usize) -> Value {
     let text = match value {
         Value::String(text) => text.clone(),
         _ => serde_json::to_string(value).expect("native JSON value encodes"),
     };
-    if text.len() <= MAX_OMP_EVENT_VALUE_BYTES {
+    if text.len() <= limit {
         return value.clone();
     }
-    let mut end = MAX_OMP_EVENT_VALUE_BYTES;
+    let mut end = limit;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
