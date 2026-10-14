@@ -603,6 +603,7 @@ jobs:
           STEP_CHECK: genie-freshness
           STEP_COMMAND: '["bash","scripts/ci-genie-freshness"]'
           STEP_OUTCOMES: '{"freshness":"${{ steps.freshness.outcome }}"}'
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
@@ -706,6 +707,7 @@ jobs:
           STEP_CHECK: typescript-client
           STEP_COMMAND: '["bash","scripts/ci-typescript-client"]'
           STEP_OUTCOMES: '{"install":"${{ steps.install.outcome }}","client":"${{ steps.client.outcome }}"}'
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
@@ -1026,6 +1028,7 @@ jobs:
         env:
           STAGE: tests
           STAGE_JOB: linux-tests
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -1198,6 +1201,7 @@ jobs:
         env:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-2
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -1370,6 +1374,7 @@ jobs:
         env:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-3
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -1542,6 +1547,7 @@ jobs:
         env:
           STAGE: tests
           STAGE_JOB: linux-tests-shard-4
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -1733,6 +1739,7 @@ jobs:
         env:
           STAGE: clippy
           STAGE_JOB: linux-clippy
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -1923,6 +1930,7 @@ jobs:
         env:
           STAGE: fleet-compat
           STAGE_JOB: linux-fleet-compat
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -2133,6 +2141,7 @@ jobs:
         env:
           STAGE: mail-redelivery-canaries
           STAGE_JOB: mail-redelivery-canaries
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STAGE_JOB"
@@ -2643,6 +2652,7 @@ jobs:
           STEP_CHECK: isolation-vm
           STEP_COMMAND: '["isolation-vm","nixos-test-driver","transport-isolation-vm","sekrets-vm"]'
           STEP_OUTCOMES: '{"kvm":"${{ steps.kvm.outcome }}","driver":"${{ steps.driver.outcome }}","vmtest":"${{ steps.vmtest.outcome }}","sekrets-driver":"${{ steps.sekrets-driver.outcome }}","sekrets-test":"${{ steps.sekrets-test.outcome }}"}'
+          PROJECT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
           helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
           python3 "$helper" once "$STEP_CHECK"
