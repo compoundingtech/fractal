@@ -813,7 +813,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&record("question", "human", "replacement", 0)).unwrap()).unwrap();
         assert!(notifications_held(&client, "agent/worker", dir.path(), "replacement").await);
         std::fs::write(&path, serde_json::to_vec(&record("permission", "human", "replacement", now)).unwrap()).unwrap();
-        let unavailable = Client::unix(&dir.path().join("absent-daemon.sock"));
+        let unavailable = Client::unix(dir.path().join("absent-daemon.sock"));
         assert!(notifications_held(&unavailable, "agent/worker", dir.path(), "replacement").await);
         server.abort();
     }
