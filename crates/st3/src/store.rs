@@ -856,27 +856,32 @@ END;
 -- Qualified native identities attached to a newly appended mailbox consumption
 -- receipt in its existing writer savepoint. This is owner-local receipt provenance,
 -- not a replicated claim or transcript payload. There is no historical backfill.
-CREATE TABLE IF NOT EXISTS local_native_delivery_receipts_v1 (
+CREATE TABLE IF NOT EXISTS local_native_delivery_receipts_v2 (
     claim_id TEXT PRIMARY KEY REFERENCES claims(id) ON DELETE CASCADE,
+    claim_hash TEXT NOT NULL,
     session_id TEXT NOT NULL,
     native_id TEXT NOT NULL,
     actor TEXT NOT NULL,
     origin TEXT NOT NULL,
     store_index INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS local_native_delivery_identity_v1
-ON local_native_delivery_receipts_v1(session_id, native_id, actor, origin, store_index);
-CREATE INDEX IF NOT EXISTS local_native_delivery_owner_cut_v1
-ON local_native_delivery_receipts_v1(actor, store_index);
+CREATE INDEX IF NOT EXISTS local_native_delivery_identity_v2
+ON local_native_delivery_receipts_v2(session_id, native_id, actor, origin, store_index);
+CREATE INDEX IF NOT EXISTS local_native_delivery_owner_cut_v2
+ON local_native_delivery_receipts_v2(actor, store_index);
 -- A changed, repaired or deleted physical claim no longer carries the original proof.
 -- No trigger reconstructs or guesses a native identity from a claim body.
-CREATE TRIGGER IF NOT EXISTS local_native_delivery_update_v1 AFTER UPDATE ON claims
+CREATE TRIGGER IF NOT EXISTS local_native_delivery_update_v2
+AFTER UPDATE OF id, subject, kind, actor, origin, body ON claims
+WHEN OLD.id IS NOT NEW.id OR OLD.subject IS NOT NEW.subject OR OLD.kind IS NOT NEW.kind
+  OR OLD.actor IS NOT NEW.actor OR OLD.origin IS NOT NEW.origin OR OLD.body IS NOT NEW.body
 BEGIN
-    DELETE FROM local_native_delivery_receipts_v1 WHERE claim_id=OLD.id;
+    DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
 END;
-CREATE TRIGGER IF NOT EXISTS local_native_delivery_delete_v1 AFTER DELETE ON claims
+CREATE TRIGGER IF NOT EXISTS local_native_delivery_delete_v2 AFTER DELETE ON claims
+WHEN OLD.kind='message.read'
 BEGIN
-    DELETE FROM local_native_delivery_receipts_v1 WHERE claim_id=OLD.id;
+    DELETE FROM local_native_delivery_receipts_v2 WHERE claim_id=OLD.id;
 END;
 
 CREATE TABLE IF NOT EXISTS capabilities (
@@ -59031,9 +59036,11 @@ fn append_claim_with_commit_context(
             }
             if outcome.1 && let Some(native) = context.native_receipt {
                 transaction.execute(
-                    "INSERT INTO local_native_delivery_receipts_v1
-                     (claim_id,session_id,native_id,actor,origin,store_index) VALUES (?1,?2,?3,?4,?5,?6)",
-                    params![outcome.0.id,native.session_id,native.message_id,input.actor,graph.origin,outcome.0.store_index],
+                    "INSERT INTO local_native_delivery_receipts_v2
+                     (claim_id,claim_hash,session_id,native_id,actor,origin,store_index) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![outcome.0.id, crate::conversation_delivery::receipt_fingerprint(&outcome.0.subject,
+                        input.actor.as_deref().unwrap_or_default(), &graph.origin, &outcome.0.body).map_err(internal)?,
+                        native.session_id,native.message_id,input.actor,graph.origin,outcome.0.store_index],
                 ).map_err(internal)?;
             }
             if context.signature.is_some() {

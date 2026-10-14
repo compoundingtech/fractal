@@ -51,6 +51,24 @@ pub(crate) fn claude_record(record: &Value, native_session: &str) -> Option<Nati
     receipt.valid().then_some(receipt)
 }
 
+/// Hash only the receipt's immutable meaning, not its acceptance timestamp or local
+/// row position. This is an equality witness after a table copy, not an authority token.
+pub(crate) fn receipt_fingerprint(
+    subject: &str,
+    actor: &str,
+    origin: &str,
+    body: &Value,
+) -> anyhow::Result<String> {
+    use sha2::{Digest as _, Sha256};
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&(
+        subject,
+        "message.read",
+        actor,
+        origin,
+        body,
+    ))?)))
+}
+
 /// Multiple graph receipts for a native turn are not a single-valued relationship.
 /// Keep the ambiguity rather than choosing the newest claim or comparing message text.
 pub(crate) fn unique_links(

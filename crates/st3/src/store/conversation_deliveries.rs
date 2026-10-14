@@ -8,26 +8,32 @@ const IDS: usize = 200;
 const BODY_BYTES: usize = 4096;
 
 const QUERY: &str = "WITH candidates AS (
-    SELECT requested.value AS native_id, substr(claims.id,1,513) AS id, substr(claims.subject,1,513) AS subject,
-           substr(CAST(claims.body AS BLOB),1,4097) AS body,
-           EXISTS(SELECT 1 FROM main.replica_records INDEXED BY replica_records_repaired_claim
-                  WHERE claim_id=claims.id AND state='repaired') AS repaired
+    SELECT requested.value AS native_id, proof.claim_id, proof.claim_hash
     FROM json_each(?1) AS requested
-    CROSS JOIN main.claims AS claims WHERE claims.id IN (
-        SELECT claim_id FROM main.local_native_delivery_receipts_v1
-            INDEXED BY local_native_delivery_identity_v1
+    CROSS JOIN main.local_native_delivery_receipts_v2 AS proof
+        INDEXED BY sqlite_autoindex_local_native_delivery_receipts_v2_1
+    WHERE proof.claim_id IN (
+        SELECT claim_id FROM main.local_native_delivery_receipts_v2
+            INDEXED BY local_native_delivery_identity_v2
         WHERE session_id=?2 AND native_id=requested.value AND actor=?3 AND origin=?4
-            AND store_index<=?5 ORDER BY store_index DESC LIMIT 3
+        ORDER BY store_index DESC LIMIT 3
     )
 )
-SELECT candidates.native_id, candidates.id, candidates.subject, candidates.body, candidates.repaired,
-       substr(operations.request_digest,1,65), substr(operations.canonical_claim_id,1,513), substr(operations.state,1,33)
-FROM candidates LEFT JOIN main.operations AS operations
-ON operations.id=CASE WHEN json_valid(candidates.body)
-                     THEN json_extract(candidates.body,'$._operation.id') END";
+SELECT candidates.native_id, substr(candidates.claim_id,1,513), substr(claims.subject,1,513),
+       substr(CAST(claims.body AS BLOB),1,4097),
+       EXISTS(SELECT 1 FROM main.replica_records INDEXED BY replica_records_repaired_claim
+              WHERE claim_id=claims.id AND state='repaired'),
+       substr(operations.request_digest,1,65), substr(operations.canonical_claim_id,1,513),
+       substr(operations.state,1,33), substr(candidates.claim_hash,1,65),
+       COALESCE(claims.kind='message.read' AND claims.actor=?3 AND claims.origin=?4 AND claims.store_index<=?5,0)
+FROM candidates LEFT JOIN main.claims AS claims ON claims.id=candidates.claim_id
+LEFT JOIN main.operations AS operations
+ON operations.id=CASE WHEN json_valid(substr(CAST(claims.body AS BLOB),1,4097))
+                     THEN json_extract(substr(CAST(claims.body AS BLOB),1,4097),'$._operation.id') END";
 
 impl Store {
-    /// At most three physical receipts per selected native id. Hitting that limit
+    /// At most three physical receipts per selected native id, including missing
+    /// claim rows and above-cut claims. Hitting that limit
     /// cannot prove uniqueness, so the optional link stays absent. Two qualified
     /// receipts are ambiguous even if their graph subjects happen to be identical.
     pub(crate) fn conversation_delivery_receipts(
@@ -49,21 +55,37 @@ impl Store {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
                     row.get::<_, bool>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, bool>(9)?,
                 ))
             },
         )?;
         let mut counts = BTreeMap::<String, usize>::new();
         let mut qualified = Vec::new();
         for row in rows {
-            let (native, id, subject, bytes, repaired, digest, canonical, state) = row?;
+            let (
+                native,
+                id,
+                subject,
+                bytes,
+                repaired,
+                digest,
+                canonical,
+                state,
+                fingerprint,
+                eligible,
+            ) = row?;
             *counts.entry(native.clone()).or_default() += 1;
-            if repaired || bytes.len() > BODY_BYTES {
+            let (Some(subject), Some(bytes)) = (subject, bytes) else {
+                continue;
+            };
+            if !eligible || repaired || bytes.len() > BODY_BYTES {
                 continue;
             }
             let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
@@ -81,6 +103,15 @@ impl Store {
                 }
             }
             if body.pointer("/fields/status").and_then(Value::as_str) != Some("read") {
+                continue;
+            }
+            if crate::conversation_delivery::receipt_fingerprint(
+                &subject,
+                owner,
+                self.origin(),
+                &body,
+            )? != fingerprint
+            {
                 continue;
             }
             let receipt = NativeReceipt {
@@ -108,8 +139,8 @@ impl Store {
         through: u64,
     ) -> Result<bool> {
         Ok(self.readers.get().query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.local_native_delivery_receipts_v1
-             INDEXED BY local_native_delivery_owner_cut_v1
+            "SELECT EXISTS(SELECT 1 FROM main.local_native_delivery_receipts_v2
+             INDEXED BY local_native_delivery_owner_cut_v2
              WHERE actor=?1 AND store_index>?2 AND store_index<=?3 LIMIT 1)",
             params![owner, after, through],
             |row| row.get(0),
@@ -238,7 +269,7 @@ mod tests {
                 .readers
                 .get()
                 .query_row(
-                    "SELECT count(*) FROM local_native_delivery_receipts_v1",
+                    "SELECT count(*) FROM local_native_delivery_receipts_v2",
                     [],
                     |r| r.get::<_, u64>(0)
                 )
@@ -252,7 +283,7 @@ mod tests {
         let store = Store::open_memory("node").unwrap();
         let (fence, read) = prepared(&store, "message/rollback");
         let before = store.index().unwrap();
-        store.connection.write().execute_batch("CREATE TRIGGER reject_fixture_proof BEFORE INSERT ON local_native_delivery_receipts_v1 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;").unwrap();
+        store.connection.write().execute_batch("CREATE TRIGGER reject_fixture_proof BEFORE INSERT ON local_native_delivery_receipts_v2 BEGIN SELECT RAISE(ABORT,'fixture refusal'); END;").unwrap();
         assert!(
             store
                 .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
@@ -307,6 +338,172 @@ mod tests {
     }
 
     #[test]
+    fn native_delivery_timestamp_updates_keep_proof_and_meaning_updates_drop_it() {
+        let store = Store::open_memory("node").unwrap();
+        let (fence, read) = prepared(&store, "message/timestamp");
+        let (receipt, _) = store
+            .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
+            .unwrap();
+        store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claims SET accepted_at_unix_ms='1792000000000' WHERE id=?1",
+                [&receipt.id],
+            )
+            .unwrap();
+        assert_eq!(
+            links(&store, store.index().unwrap())["native-one"],
+            "message/timestamp"
+        );
+        store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claims SET body=json_set(body,'$.fields.changed_fixture',1) WHERE id=?1",
+                [&receipt.id],
+            )
+            .unwrap();
+        assert!(links(&store, store.index().unwrap()).is_empty());
+        assert_eq!(
+            store
+                .readers
+                .get()
+                .query_row(
+                    "SELECT count(*) FROM local_native_delivery_receipts_v2",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn native_delivery_provenance_survives_real_projection_and_batch_rebuilds() {
+        let store = Store::open_memory("node").unwrap();
+        let (fence, read) = prepared(&store, "message/rebuild");
+        store
+            .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
+            .unwrap();
+        let before = links(&store, store.index().unwrap());
+        store.rebuild_claim_projections().unwrap();
+        store.replay_replication_graph().unwrap();
+        assert_eq!(links(&store, store.index().unwrap()), before);
+        // The cited migration swaps batches, not claims. Run that exact migration
+        // against this isolated fixture; all claim ids and metadata must survive.
+        {
+            let connection = store.connection.write();
+            connection.execute_batch("PRAGMA user_version=11;").unwrap();
+            migrate_schema(&connection).unwrap();
+            connection.execute_batch("PRAGMA user_version=19;").unwrap();
+            let triggers:u64 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN ('local_native_delivery_update_v2','local_native_delivery_delete_v2')",[],|r|r.get(0)).unwrap();
+            assert_eq!(triggers, 2);
+        }
+        assert_eq!(links(&store, store.index().unwrap()), before);
+    }
+
+    #[test]
+    fn native_delivery_foreign_keys_off_identity_change_and_missing_rows_never_rebind() {
+        let store = Store::open_memory("node").unwrap();
+        let (fence, read) = prepared(&store, "message/id-change");
+        let (receipt, _) = store
+            .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
+            .unwrap();
+        {
+            let connection = store.connection.write();
+            connection
+                .execute_batch("PRAGMA foreign_keys=OFF;")
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE claims SET id='replacement-fixture-id' WHERE id=?1",
+                    [&receipt.id],
+                )
+                .unwrap();
+        }
+        assert!(links(&store, store.index().unwrap()).is_empty());
+        assert_eq!(
+            store
+                .readers
+                .get()
+                .query_row(
+                    "SELECT count(*) FROM local_native_delivery_receipts_v2",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn native_delivery_fingerprint_refuses_changed_meaning_even_without_the_guard_trigger() {
+        let store = Store::open_memory("node").unwrap();
+        let (fence, read) = prepared(&store, "message/copied-id");
+        let (receipt, _) = store
+            .append_native_mailbox_receipt_outcome(&read, &fence, Some(&proof("native-one")))
+            .unwrap();
+        {
+            let connection = store.connection.write();
+            connection
+                .execute_batch("DROP TRIGGER local_native_delivery_update_v2;")
+                .unwrap();
+            connection.execute("UPDATE claims SET body=json_set(body,'$.fields.changed_after_copy',1) WHERE id=?1",[&receipt.id]).unwrap();
+        }
+        assert!(links(&store, store.index().unwrap()).is_empty());
+        assert_eq!(
+            store
+                .readers
+                .get()
+                .query_row(
+                    "SELECT count(*) FROM local_native_delivery_receipts_v2",
+                    [],
+                    |r| r.get::<_, u64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn native_delivery_missing_physical_claims_still_count_towards_the_lookup_bound() {
+        let store = Store::open_memory("node").unwrap();
+        let mut receipts = Vec::new();
+        for number in 0..4 {
+            let (fence, read) = prepared(&store, &format!("message/raw-bound-{number}"));
+            receipts.push(
+                store
+                    .append_native_mailbox_receipt_outcome(
+                        &read,
+                        &fence,
+                        Some(&proof("native-one")),
+                    )
+                    .unwrap()
+                    .0,
+            );
+        }
+        // Simulate a foreign-keys-off table-copy/fault that lost the guard trigger.
+        // Two newest missing rows must not expose only one of the bounded candidates
+        // and hide the fourth qualified receipt outside that physical window.
+        {
+            let connection = store.connection.write();
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=OFF; DROP TRIGGER local_native_delivery_delete_v2;",
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "DELETE FROM claims WHERE id IN (?1,?2)",
+                    params![receipts[3].id, receipts[2].id],
+                )
+                .unwrap();
+        }
+        assert!(links(&store, store.index().unwrap()).is_empty());
+    }
+
+    #[test]
     fn native_delivery_query_work_does_not_scan_unrelated_receipt_history() {
         let store = Store::open_memory("node").unwrap();
         let (fence, read) = prepared(&store, "message/selected");
@@ -318,7 +515,7 @@ mod tests {
             for number in 0..10_000 {
                 let claim = append_claim_tx(tx, "node", &format!("message/other-{number}"),
                     "message.read", Some(OWNER), &json!({"fields":{"status":"read"}}), &[], None)?;
-                tx.execute("INSERT INTO local_native_delivery_receipts_v1 VALUES (?1,?2,?3,?4,'node',?5)",
+                tx.execute("INSERT INTO local_native_delivery_receipts_v2 VALUES (?1,'unrelated-fixture',?2,?3,?4,'node',?5)",
                     params![claim.id,SESSION,format!("other-native-{number}"),OWNER,claim.store_index])?;
                 if number==99 || number==9999 {
                     let mut query = tx.prepare(QUERY)?;
@@ -332,8 +529,9 @@ mod tests {
             let plan = tx.prepare(&format!("EXPLAIN QUERY PLAN {QUERY}"))?
                 .query_map(params!["[\"native-one\"]",SESSION,OWNER,"node",i64::MAX], |row| row.get::<_,String>(3))?
                 .collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
-            assert!(plan.contains("local_native_delivery_identity_v1"), "{plan}");
+            assert!(plan.contains("local_native_delivery_identity_v2"), "{plan}");
             assert!(!plan.contains("SCAN claims"), "{plan}");
+            assert!(!plan.contains("SCAN proof"), "{plan}");
             Ok(())
         }).unwrap().unwrap();
         assert!(costs[1] <= costs[0] + 20, "{costs:?}");

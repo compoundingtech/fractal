@@ -1936,8 +1936,36 @@ receipt in the same existing writer savepoint. Claim body, signature, receipt
 operation/idempotency digest and ACK timing are unchanged. This local metadata
 is not replicated, a transcript payload or an admission authority. No history
 is backfilled: restore from claim-only backups leaves these links unavailable.
-A normal reopen retains metadata; changing/deleting its physical receipt drops
-that binding. Reads never initialize or rebuild it.
+A normal reopen retains metadata. Acceptance-time corrections keep the binding;
+updates to the receipt's id, subject, kind, actor, origin or body retire it. The
+conditional deletion trigger also clears it with foreign keys disabled. Reads
+never initialize or rebuild it. A private receipt-meaning fingerprint (subject,
+actor, origin and canonical receipt body) refuses changed/reused ids even if a
+fault or unsupported table copy lost its update trigger. It is an equality
+witness, never native authority. The lookup bounds count missing and above-cut
+physical candidates too; its logical cut checks the current claim row position.
+
+The actual production projection replay/rebuild retains claim ids/rows, this
+local table and its triggers. The old migration in store.rs swaps batches only;
+it does not replace claims, and their native receipt bindings survive. The cited
+foreign-keys-off deletion in peer.rs is a test fault on intent.desired claims.
+Actual retention/repair deletions of receipt rows retire the local binding;
+claim-only reinsertion/restoration does not guess or rebuild it. Arbitrary
+claims-table replacement is not a supported migration: a future implementation
+must preserve proof metadata for unchanged claim identities/meaning, reinstall
+guard triggers, and explicitly retire changed ids. Missing or changed receipts
+never produce a link. Earlier unreleased v1 PR-head metadata is not adopted or
+backfilled into v2; the optional link remains unavailable for those old receipts.
+
+The daemon currently validates only the identity's well-formed shape from its
+authenticated Claude delivery peer. Matching that session/record to the verified
+Claude binding and existing envelope-consumption predicate happens in the
+channel, not again in the daemon. A compromised authenticated seat can therefore
+mislabel links in its own timelines; this feature grants no new native authority.
+If the same-savepoint metadata INSERT fails, the read receipt is rolled back and
+no ACK is issued. Existing receipt recovery retains the frozen proof and retries
+with exponential delay capped at 30 seconds. The delay and each request remain
+bounded; there is no new finite retry count, TTL eviction or silent proof loss.
 
 One statement checks at most 200 selected native ids, at most three indexed
 receipts each, and at most 4 KiB of receipt body each. Two eligible receipts for
