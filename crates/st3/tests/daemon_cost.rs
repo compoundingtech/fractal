@@ -195,6 +195,9 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     // Pairing and fleet membership change who may talk to the daemon; their tests cover them.
     ("POST /v1/client/pairings", "pairs a device"),
     ("POST /v1/client/pairings/{id}/complete", "pairs a device"),
+    ("GET /v1/client/assistant/grants/{id}", "requires trusted-local owner provenance and an issued grant; assistant tests cover indexed grant inspection"),
+    ("POST /v1/client/assistant/grants/{id}/policy", "changes owner-issued assistant permissions; assistant tests cover policy history and consent"),
+    ("POST /v1/client/assistant/grants/{id}/revoke", "revokes owner-issued assistant permissions; assistant tests cover exact revocation"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),
     ("POST /v1/internal/fleet/redeem", "fleet membership"),
