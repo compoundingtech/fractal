@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+mod client;
+
 use crate::fleet::transport::is_permitted_route_address;
 pub use smallclaims::fleet::file::{FleetFile, FleetMode, FleetRemoval, PeerConfig};
 use crate::model::PlannerSpec;
@@ -434,22 +436,44 @@ impl Config {
         Ok(config)
     }
 
+    /// Client loading accepts unknown keys, but never relaxes known value types.
+    /// A process warns at most once, even if a command reloads the config.
+    pub fn load_client(path: Option<&Path>) -> Result<Self> {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let (config, unknown) = Self::load_client_with_unknown(path)?;
+        if !unknown.is_empty() && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("st: config.toml has keys this st does not know: {}; restart the session after an upgrade", unknown.join(", "));
+        }
+        Ok(config)
+    }
+
+    pub fn load_client_with_unknown(path: Option<&Path>) -> Result<(Self, Vec<String>)> {
+        Self::load_document(path, true)
+    }
+
     pub fn load_unvalidated(path: Option<&Path>) -> Result<Self> {
+        Self::load_document(path, false).map(|(config, _)| config)
+    }
+
+    fn load_document(path: Option<&Path>, client: bool) -> Result<(Self, Vec<String>)> {
         let selected = path
             .map(Path::to_path_buf)
             .unwrap_or_else(Self::default_path);
         let bytes = match fs::read_to_string(&selected) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && path.is_none() => {
-                return Ok(Self { access_mode: Some(st_drivers::access::AccessMode::Auto), ..Self::default() });
+                return Ok((Self { access_mode: Some(st_drivers::access::AccessMode::Auto), ..Self::default() }, Vec::new()));
             }
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("read st config {}", selected.display()));
             }
         };
-        let mut config: Self = toml::from_str(&bytes)
-            .with_context(|| format!("parse st config {}", selected.display()))?;
+        let (mut config, unknown) = if client {
+            client::parse(&bytes)
+        } else {
+            toml::from_str(&bytes).map(|config| (config, Vec::new())).map_err(Into::into)
+        }.with_context(|| format!("parse st config {}", selected.display()))?;
         let defaults = Self::default();
         if config.node.is_empty() {
             config.node = defaults.node;
@@ -467,7 +491,7 @@ impl Config {
         if config.client_gateway_socket.as_os_str().is_empty() {
             config.client_gateway_socket = defaults.client_gateway_socket;
         }
-        Ok(config)
+        Ok((config, unknown))
     }
 
     /// Resolve the daemon's published endpoint when this client lacks its runtime directory.
@@ -900,6 +924,41 @@ mod tests {
         assert_eq!(normal.active_seat_priority(), SeatPriority::Normal);
         assert!(toml::from_str::<Config>("seat_priority=\"high\"").is_err());
         assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_priority"));
+    }
+
+    #[test]
+    fn client_config_ignores_unknown_keys_but_daemon_rejects_them() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, "future_key = true\n[checkpoint]\nfuture_setting = \"new\"\nenabled = false\n").unwrap();
+        let (config, unknown) = Config::load_client_with_unknown(Some(&path)).unwrap();
+        assert!(!config.checkpoint.enabled);
+        assert_eq!(unknown, ["checkpoint.future_setting", "future_key"]);
+        assert!(Config::load_client(Some(&path)).is_ok());
+        assert!(Config::load_unvalidated(Some(&path)).is_err());
+        fs::write(&path, "[checkpoint]\nfuture_setting = true\n").unwrap();
+        assert!(Config::load_unvalidated(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn client_config_keeps_known_values_strict() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        for bytes in [
+            "future_key = true\nseat_priority = \"high\"\n",
+            "[checkpoint]\nfuture_key = true\nenabled = \"yes\"\n",
+        ] {
+            fs::write(&path, bytes).unwrap();
+            assert!(Config::load_client(Some(&path)).is_err());
+        }
+    }
+
+    #[test]
+    fn client_config_filters_unknown_peer_keys_without_relaxing_peer_types() {
+        let (config, unknown) = client::parse("[[peers]]\nname = \"remote\"\nurl = \"http://127.0.0.1:9000\"\nfuture_key = true\n").unwrap();
+        assert_eq!(config.peers.len(), 1);
+        assert_eq!(unknown, ["peers[0].future_key"]);
+        assert!(client::parse("[[peers]]\nname = 42\n").is_err());
     }
 
     #[test]

@@ -192,7 +192,7 @@ fn live_claude_label(env: &dyn HookEnv, identity: &str) -> Result<String> {
     let endpoint = match env.var("ST3_ENDPOINT") {
         Some(endpoint) => crate::client::Endpoint::parse(endpoint),
         None => {
-            crate::client::Endpoint::Unix(crate::config::Config::load_unvalidated(None)?.socket)
+            crate::client::Endpoint::Unix(crate::config::Config::load_client(None)?.socket)
         }
     };
     let subject = env
@@ -371,7 +371,7 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
     }
     let endpoint = match env.var("ST3_ENDPOINT") {
         Some(endpoint) => crate::client::Endpoint::parse(endpoint),
-        None => match crate::config::Config::load_unvalidated(None) {
+        None => match crate::config::Config::load_client(None) {
             Ok(config) => crate::client::Endpoint::Unix(config.socket),
             Err(_) => return,
         },
@@ -429,7 +429,7 @@ fn hook_client(
 ) -> Option<(tokio::runtime::Runtime, crate::client::Client, String)> {
     let endpoint = match env.var("ST3_ENDPOINT") {
         Some(endpoint) => crate::client::Endpoint::parse(endpoint),
-        None => crate::client::Endpoint::Unix(crate::config::Config::load_unvalidated(None).ok()?.socket),
+        None => crate::client::Endpoint::Unix(crate::config::Config::load_client(None).ok()?.socket),
     };
     let subject = env
         .var("ST3_SUBJECT")
@@ -698,7 +698,7 @@ pub fn post_diagnostic(env: &dyn HookEnv, diagnostic: &Diagnostic) -> Result<()>
     let endpoint = match env.var("ST3_ENDPOINT") {
         Some(endpoint) => crate::client::Endpoint::parse(endpoint),
         None => {
-            crate::client::Endpoint::Unix(crate::config::Config::load_unvalidated(None)?.socket)
+            crate::client::Endpoint::Unix(crate::config::Config::load_client(None)?.socket)
         }
     };
     let claim = crate::model::ClaimInput {

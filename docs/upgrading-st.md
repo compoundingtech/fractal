@@ -2,6 +2,14 @@
 
 Upgrade each machine in your own fleet to the **same release**. Keep the old archive and read the new release's **Upgrade impact** section before starting it against your state. Patch tags do not promise rollback or mixed-build compatibility; see the [0.x compatibility policy](st3/compatibility.md). For an initial installation, use [getting started](getting-started.md).
 
+Restart existing sessions after installing an upgrade that adds configuration keys: an
+older `st` still on a session's PATH can reject the new config and stop mail, claims and work
+updates. Clients with unknown-key support print one warning naming unrecognized top-level
+and nested keys while continuing to validate known values. `st doctor` lists these keys;
+the daemon always rejects unknown keys so safety-setting typos cannot silently take effect.
+Release upgrade-impact notes must flag new configuration keys as breaking older clients.
+Installing this behavior cannot repair clients already deployed.
+
 ## Install a pinned build on each machine
 
 If a populated v0.3.4 store may contain unsigned delegation grants, read the

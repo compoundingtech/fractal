@@ -5124,7 +5124,7 @@ fn run_admission(command: AdmissionCommand, json_output: bool) -> Result<()> {
     };
     let state_dir = match build.state_dir {
         Some(path) => path,
-        None => Config::load_unvalidated(None)?.state_dir,
+        None => Config::load_client(None)?.state_dir,
     };
     let cache = state_dir.join("drivers/sessions/harness-admission");
     let driver = if build.harness == "omp" {
@@ -5489,7 +5489,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
     if args.driver == "claude-mcp" {
         return Ok(None);
     }
-    let config = Config::load_unvalidated(None)?;
+    let config = Config::load_client(None)?;
     let endpoint = cli
         .endpoint
         .clone()
@@ -5837,7 +5837,7 @@ async fn run(cli: Cli) -> Result<()> {
         telemetry.shutdown();
         return result;
     }
-    let config = Config::load_unvalidated(None)?;
+    let config = Config::load_client(None)?;
     let endpoint = cli
         .endpoint
         .or_else(|| std::env::var("ST3_ENDPOINT").ok())
@@ -9269,7 +9269,7 @@ async fn fabric_route(
 
 /// This machine's `fabric`, the fleet file's override or the one on `PATH`, and its fleet.
 fn configured_fabric() -> Result<(Option<st3::fleet::transport::Fabric>, Option<String>)> {
-    let mut config = Config::load_unvalidated(None)?;
+    let mut config = Config::load_client(None)?;
     config.apply_fleet_file()?;
     let override_path = config
         .fleet
@@ -12152,8 +12152,17 @@ async fn run_doctor(client: &Client, args: DoctorArgs, json_output: bool) -> Res
         print!("{}", render_performance(&report));
         return Ok(());
     }
-    let report: DoctorReport =
+    let mut report: DoctorReport =
         doctor_request(client, "/v1/doctor", readiness.as_ref(), json_output).await?;
+    let (_, unknown) = Config::load_client_with_unknown(None)?;
+    if !unknown.is_empty() {
+        report.checks.push(st3::model::DoctorCheck {
+            name: "config-unknown-keys".into(),
+            status: "warn".into(),
+            message: format!("config.toml has keys this st does not know: {}; restart the session after an upgrade", unknown.join(", ")),
+        });
+        if report.status == "pass" { report.status = "warn".into(); }
+    }
     if json_output {
         let mut value = serde_json::to_value(&report)?;
         if let Some(startup) = &readiness {
@@ -13085,7 +13094,7 @@ fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
         }
         ServiceCommand::Status => {
             let mut report = st3::service::status()?;
-            let config = Config::load_unvalidated(None)?;
+            let config = Config::load_client(None)?;
             if let Some(startup) = st3::startup::read(&config.client_socket()) {
                 for service in &mut report.services {
                     if service.name == "st3.service" || service.name == "com.compoundingtech.st3" {
