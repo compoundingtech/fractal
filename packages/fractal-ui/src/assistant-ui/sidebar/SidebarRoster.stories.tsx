@@ -60,12 +60,26 @@ export const HundredAgentRender: Story = { render: () => <RosterRender />, play:
   const root = canvasElement.querySelector<HTMLElement>('[data-roster-perf]')!
   root.dataset.rosterMeasurement = JSON.stringify({ rows: roster.length, start, windowMs: 1500, maxTaskMs, tasks: renderTasks })
   await expect(within(canvasElement).getAllByTestId('taste-agent-row')).toHaveLength(100)
-  // This mixed cohort used to drop row 91's duration scope against a transient wide peer track and never restore it.
+  // At the pre-restoration 32px track all 100 titles meet the floor, including all 20 chevron parents.
+  // The old restoration widened it to 46px: each parent's 155px title became 141px (<153.6px).
+  const cohort = canvasElement.querySelector<HTMLElement>('[data-frame-rows]')!
+  const rows = [...cohort.querySelectorAll<HTMLElement>('[data-testid="taste-agent-row"]')]
+  const settledTitles = rows.map(row => row.querySelector<HTMLElement>('[data-row-column="title-text"]')!.clientWidth)
+  const settledTrack = cohort.style.getPropertyValue('--sidebar-metric-track')
+  cohort.style.setProperty('--sidebar-metric-track', '32px')
+  const baselineTitles = rows.map(row => row.querySelector<HTMLElement>('[data-row-column="title-text"]')!.clientWidth)
+  cohort.style.setProperty('--sidebar-metric-track', settledTrack)
+  for (const [index, row] of rows.entries()) {
+    const floor = row.clientWidth * 0.6
+    if (baselineTitles[index]! >= floor) await expect(settledTitles[index]!).toBeGreaterThanOrEqual(floor)
+  }
+  await expect(baselineTitles.filter((width, index) => width >= rows[index]!.clientWidth * 0.6)).toHaveLength(100)
+  await expect(settledTrack).toBe('32px')
+  // Row 91's scope is otherwise restorable, but cannot take title room from the chevron parents.
   const retained = canvasElement.querySelector<HTMLElement>('[data-wf-agent-ref="agent/roster-91"] [data-testid="taste-agent-row"]')!
   const scope = retained.querySelector<HTMLElement>('[data-row-column="time"] [data-line1-drop="scope"]')!
-  await expect(scope.style.display).not.toBe('none')
+  await expect(scope.style.display).toBe('none')
   await expect(retained.querySelector<HTMLElement>('[data-row-column="time"]')!.clientWidth).toBeGreaterThanOrEqual(Math.ceil(Number.parseFloat(retained.dataset.rowTimeNatural!)))
-  await expect(retained.querySelector<HTMLElement>('[data-row-column="title-text"]')!.clientWidth).toBeGreaterThanOrEqual(retained.clientWidth * 0.6)
 } }
 const styles = stylex.create({
   root: { height: '100vh', overflowY: 'auto', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },

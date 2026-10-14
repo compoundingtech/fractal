@@ -97,11 +97,22 @@ function restoreLine1Fields(cohorts: Line1Cohort[]) {
       if (field !== undefined) candidates.set(row, field)
     }
     if (candidates.size === 0) continue
+    // Protect every title that meets the floor before the trial, including rows with only a persistent chevron.
+    // Measure before revealing candidates: restoring a subagent count can itself consume title space.
+    const ceilings = new Map<Line1Cohort, number>()
+    for (const cohort of cohorts) {
+      let ceiling = Number.POSITIVE_INFINITY
+      for (const row of cohort.rows) {
+        const titleWidth = row.title.clientWidth
+        if (titleWidth >= row.floor) ceiling = Math.min(ceiling, row.time.clientWidth + titleWidth - row.floor)
+      }
+      ceilings.set(cohort, ceiling)
+    }
     for (const field of candidates.values()) writeStyle(field, 'display', '')
     const decisions: { row: Line1Row; field: HTMLElement; width: number; keep: boolean }[] = []
     for (const cohort of cohorts) {
       const trial = []
-      let ceiling = Number.POSITIVE_INFINITY
+      const ceiling = ceilings.get(cohort)!
       for (const row of cohort.rows) {
         const field = candidates.get(row)
         const bounds = row.content?.getBoundingClientRect()
@@ -109,10 +120,6 @@ function restoreLine1Fields(cohorts: Line1Cohort[]) {
         const capacity = row.time.clientWidth + row.title.clientWidth - row.floor
         const overlap = bounds !== undefined && count !== undefined && count.width > 0 ? count.right + row.gap - bounds.left - 0.5 : Number.NEGATIVE_INFINITY
         const width = row.content === null ? 0 : Math.max(row.content.scrollWidth, bounds!.width)
-        // Rows with no optional fields left cannot meet the title floor at every cohort width (e.g. a persistent chevron).
-        // They must not prevent another row retaining a field that fits its own floor and does not collide.
-        const hasRetainedField = row.drops.some(drop => drop !== field && drop.style.display !== 'none')
-        if (hasRetainedField && field?.dataset.line1Drop !== 'subs') ceiling = Math.min(ceiling, capacity)
         if (field !== undefined) trial.push({ row, field, width, capacity, overlap, track: row.time.clientWidth, blocked: false })
       }
       let target: number
