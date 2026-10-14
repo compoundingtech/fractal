@@ -11615,8 +11615,6 @@ async fn dispatch_action(
                     idempotency_key: Some(request.idempotency_key.clone()),
                 })
                 .map_err(ApiError::bad)?;
-            state.store.remove_push_pairing(&paired.subject)
-                .map_err(|_| ApiError::internal("local push registration cleanup is unavailable"))?;
             // A revoked device's key signs nothing more, on every member.
             let field = |name: &str| paired.body.pointer(&format!("/fields/{name}")).and_then(Value::as_str);
             if let (Some(key), Some(person)) = (field("device_public_key").and_then(device_signing_key), field("person_id")) {

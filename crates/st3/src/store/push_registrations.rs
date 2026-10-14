@@ -113,13 +113,6 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("local push registration update failed"))
     }
 
-    pub(crate) fn remove_push_pairing(&self, grant: &str) -> Result<()> {
-        self.connection.batched(|tx| -> Result<()> {
-            tx.execute("DELETE FROM local_push_registrations WHERE pairing_grant=?1", [grant])?;
-            Ok(())
-        }).map_err(|_| anyhow::anyhow!("local push registration transaction failed"))?
-            .map_err(|_| anyhow::anyhow!("local push registration removal failed"))
-    }
 
     /// Startup and clock-driven cleanup, independent of attention/window reads. The trigger
     /// handles local and replicated grant changes atomically with claim admission.
