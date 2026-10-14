@@ -1792,6 +1792,8 @@ async fn daemon_request_id_and_roster_stages_match_response() {
                 assert_eq!(outcome, "unchanged", "only that wait exit may carry this proof: {span}");
                 assert!(published <= wanted, "proof must cover the actual served publication: {span}");
             }
+            // Eviction after selection can honestly yield Refused. It is not an unchanged
+            // certificate, so an older cut still fails this assertion; never waive it here.
             assert!(published >= requested || (outcome == "unchanged" && verified),
                 "fresh read lacks a current cut or exact-served unchanged proof: {span}");
             if let Some(card_cut) = minimum_card_cut {

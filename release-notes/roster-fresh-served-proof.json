@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Adds bounded request-span fresh-wait outcome/target and exact-served unchanged-proof attributes. The OTEL assertion retains numeric freshness or requires the explicit verified exception; actual card-affecting claim cuts remain a strict lower bound. Wait failure, disconnection and timeout are distinct and cannot supply unchanged verification."
+    "detail": "Adds bounded attributes to an existing request span; no response fields change. Adds bounded request-span fresh-wait outcome/target and exact-served unchanged-proof attributes. The OTEL assertion retains numeric freshness or requires the explicit verified exception; actual card-affecting claim cuts remain a strict lower bound. Wait failure, disconnection and timeout are distinct and cannot supply unchanged verification."
   },
   "downtime": {
     "status": "none",

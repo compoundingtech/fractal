@@ -5628,66 +5628,105 @@ fn client_agents_published_page(
     fresh_wait: Option<RosterFreshWait>,
 ) -> Result<Option<ClientPageResponse>, ApiError> {
     let store = &state.store;
-    let current = store.index().map_err(ApiError::internal)?;
-    let index = current;
-    let Some((index, cards, published_at)) = store.published_agent_roster(index, query.history) else {
-        // Before the first complete roster, an unfiltered first page can come from its head.
-        if query.status.is_some() || query.history {
-            record_roster_fresh_wait(store, query.history, fresh_wait, None);
-            return Ok(None);
-        }
-        let Some((index, refs, head, published_at)) =
-            store.published_agent_roster_head(index, CLIENT_MAX_PAGE_ITEMS + 1)
+    // Keep one recording point after all ordinary returns, including errors. Retain an
+    // Arc only for traced requests; the proof still refers to the selected publication.
+    let recording = fresh_wait.is_some() && crate::otel::roster_recording();
+    let mut served = None;
+    let result = (|| {
+        let current = store.index().map_err(ApiError::internal)?;
+        let index = current;
+        let Some((index, cards, published_at)) = store.published_agent_roster(index, query.history)
         else {
-            record_roster_fresh_wait(store, query.history, fresh_wait, None);
-            return Ok(None);
-        };
-        store.request_agent_roster_refresh();
-        crate::otel::record_roster_read("published_head", requested, Some(index), query.fresh);
-        // A partial head is not the complete publication used by unchanged-through.
-        record_roster_fresh_wait(store, query.history, fresh_wait, None);
-        let snapshot = roster_snapshot(state, index, published_at);
-        let mut page = client_page_read(state, &snapshot, "agents", (*refs).clone(), query, true)?;
-        page.items = client_agent_cards_from_cached(
-            store, page_cards(&head, &page.items), &page.items, &snapshot.created_at,
-        )?;
-        return Ok(Some((Extension(snapshot), Json(page))));
-    };
-    // A roster older than the current cut, its local activity or its queue deadline needs a
-    // refresh; the newest one needs none.
-    if index < current || !store.agent_roster_current(current, query.history).map_err(ApiError::internal)? {
-        if query.history {
-            store.request_agent_roster_history();
-        } else {
+            // Before the first complete roster, an unfiltered first page can come from its head.
+            if query.status.is_some() || query.history {
+                return Ok(None);
+            }
+            let Some((index, refs, head, published_at)) =
+                store.published_agent_roster_head(index, CLIENT_MAX_PAGE_ITEMS + 1)
+            else {
+                return Ok(None);
+            };
             store.request_agent_roster_refresh();
+            crate::otel::record_roster_read("published_head", requested, Some(index), query.fresh);
+            // A partial head is not the complete publication used by unchanged-through.
+            let snapshot = roster_snapshot(state, index, published_at);
+            let mut page =
+                client_page_read(state, &snapshot, "agents", (*refs).clone(), query, true)?;
+            page.items = client_agent_cards_from_cached(
+                store,
+                page_cards(&head, &page.items),
+                &page.items,
+                &snapshot.created_at,
+            )?;
+            return Ok(Some((Extension(snapshot), Json(page))));
+        };
+        // A roster older than the current cut, its local activity or its queue deadline needs a
+        // refresh; the newest one needs none.
+        if index < current
+            || !store
+                .agent_roster_current(current, query.history)
+                .map_err(ApiError::internal)?
+        {
+            if query.history {
+                store.request_agent_roster_history();
+            } else {
+                store.request_agent_roster_refresh();
+            }
         }
-    }
-    let snapshot = roster_snapshot(state, index, published_at);
-    let path = if query.status.is_some() { "filtered_full" } else { "published_complete" };
-    crate::otel::record_roster_read(path, requested, Some(index), query.fresh);
-    record_roster_fresh_wait(store, query.history, fresh_wait, Some((index, published_at, &cards)));
-    if let Some(status) = query.status.as_deref() {
-        let mut cards = (*cards).clone();
-        overlay_agent_resources(store, &mut cards, &snapshot.created_at)
-            .map_err(ApiError::internal)?;
-        cards.retain(|card| card["state"].as_str() == Some(status));
-        let page = client_page_read(state, &snapshot, "agents", cards, query, true)?;
-        return Ok(Some((Extension(snapshot), Json(page))));
-    }
-    // Continuations keep the same membership, order and queue metadata as the exact path's
-    // refs, and read their cards from this same publication.
-    let refs = crate::otel::roster_phase("membership", || cards.iter().map(|card| {
-        let mut reference = serde_json::Map::new();
-        for field in ["id", "name", "host_id"].into_iter().chain(AGENT_QUEUE_FIELDS) {
-            reference.insert(field.to_owned(), card[field].clone());
+        let snapshot = roster_snapshot(state, index, published_at);
+        let path = if query.status.is_some() {
+            "filtered_full"
+        } else {
+            "published_complete"
+        };
+        crate::otel::record_roster_read(path, requested, Some(index), query.fresh);
+        if recording {
+            served = Some((index, published_at, Arc::clone(&cards)));
         }
-        Value::Object(reference)
-    }).collect::<Vec<_>>());
-    let mut page = client_page_read(state, &snapshot, "agents", refs, query, true)?;
-    page.items = client_agent_cards_from_cached(
-        store, page_cards(&cards, &page.items), &page.items, &snapshot.created_at,
-    )?;
-    Ok(Some((Extension(snapshot), Json(page))))
+        if let Some(status) = query.status.as_deref() {
+            let mut cards = (*cards).clone();
+            overlay_agent_resources(store, &mut cards, &snapshot.created_at)
+                .map_err(ApiError::internal)?;
+            cards.retain(|card| card["state"].as_str() == Some(status));
+            let page = client_page_read(state, &snapshot, "agents", cards, query, true)?;
+            return Ok(Some((Extension(snapshot), Json(page))));
+        }
+        // Continuations keep the same membership, order and queue metadata as the exact path's
+        // refs, and read their cards from this same publication.
+        let refs = crate::otel::roster_phase("membership", || {
+            cards
+                .iter()
+                .map(|card| {
+                    let mut reference = serde_json::Map::new();
+                    for field in ["id", "name", "host_id"]
+                        .into_iter()
+                        .chain(AGENT_QUEUE_FIELDS)
+                    {
+                        reference.insert(field.to_owned(), card[field].clone());
+                    }
+                    Value::Object(reference)
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut page = client_page_read(state, &snapshot, "agents", refs, query, true)?;
+        page.items = client_agent_cards_from_cached(
+            store,
+            page_cards(&cards, &page.items),
+            &page.items,
+            &snapshot.created_at,
+        )?;
+        Ok(Some((Extension(snapshot), Json(page))))
+    })();
+    record_roster_fresh_wait(
+        store,
+        query.history,
+        fresh_wait,
+        served
+            .as_ref()
+            .filter(|_| matches!(&result, Ok(Some(_))))
+            .map(|(cut, published_at, cards)| (*cut, *published_at, cards)),
+    );
+    result
 }
 
 /// A page continuing a first page served from a publication: its cards come from the roster

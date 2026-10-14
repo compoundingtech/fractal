@@ -213,3 +213,219 @@ async fn unsatisfied_fresh_wait_times_out_at_the_unchanged_virtual_deadline() {
         RosterUnchangedProof::Verified
     );
 }
+
+// Capture every attribute write rather than an SDK's final deduplicated map: two calls
+// that write the same value must fail the exactly-once assertion too. No global tracer.
+struct AttributeWrites {
+    context: opentelemetry::trace::SpanContext,
+    values: Arc<std::sync::Mutex<Vec<opentelemetry::KeyValue>>>,
+}
+
+impl opentelemetry::trace::Span for AttributeWrites {
+    fn add_event_with_timestamp<T: Into<std::borrow::Cow<'static, str>>>(
+        &mut self,
+        _: T,
+        _: std::time::SystemTime,
+        _: Vec<opentelemetry::KeyValue>,
+    ) {
+    }
+    fn span_context(&self) -> &opentelemetry::trace::SpanContext {
+        &self.context
+    }
+    fn is_recording(&self) -> bool {
+        true
+    }
+    fn set_attribute(&mut self, attribute: opentelemetry::KeyValue) {
+        self.values.lock().unwrap().push(attribute);
+    }
+    fn set_status(&mut self, _: opentelemetry::trace::Status) {}
+    fn update_name<T: Into<std::borrow::Cow<'static, str>>>(&mut self, _: T) {}
+    fn add_link(&mut self, _: opentelemetry::trace::SpanContext, _: Vec<opentelemetry::KeyValue>) {}
+    fn end_with_timestamp(&mut self, _: std::time::SystemTime) {}
+}
+
+fn with_attribute_writes<T>(work: impl FnOnce() -> T) -> (T, Vec<opentelemetry::KeyValue>) {
+    use opentelemetry::trace::TraceContextExt as _;
+    let values = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let context = opentelemetry::Context::new().with_span(AttributeWrites {
+        context: opentelemetry::trace::SpanContext::empty_context(),
+        values: Arc::clone(&values),
+    });
+    let _context = context.attach();
+    let _export = crate::otel::fixture_export_scope();
+    let result = crate::otel::roster_scope(|| {
+        assert!(crate::otel::roster_recording());
+        work()
+    });
+    let attributes = values.lock().unwrap().clone();
+    (result, attributes)
+}
+
+#[test]
+fn fresh_wait_attributes_are_recorded_once_on_each_page_return_path() {
+    // Exercise real page selection/rendering. Missing, filtered/history not-ready,
+    // partial head, full and filtered complete, plus an error during page rendering.
+    for path in [
+        "missing_head",
+        "history_not_ready",
+        "filtered_not_ready",
+        "head",
+        "complete",
+        "filtered_complete",
+        "page_error",
+    ] {
+        let (_root, state) = fixture();
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        let mut query = ClientListQuery {
+            fresh: true,
+            ..Default::default()
+        };
+        if path == "history_not_ready" {
+            query.history = true;
+        }
+        if matches!(path, "filtered_not_ready" | "filtered_complete") {
+            query.status = Some("running".into());
+        }
+        if path == "head" {
+            store
+                .read_snapshot(|index| client_agent_roster_head(store, index))
+                .unwrap();
+            assert!(
+                store
+                    .published_agent_roster(store.index().unwrap(), false)
+                    .is_none()
+            );
+            assert!(
+                store
+                    .published_agent_roster_head(store.index().unwrap(), 1)
+                    .is_some()
+            );
+        } else if matches!(path, "complete" | "filtered_complete" | "page_error") {
+            refresh_agent_roster(store, false).unwrap();
+        }
+        if path == "page_error" {
+            // Direct helper branch fixture: real continuations use their separate handler.
+            query.cursor = Some("invalid-private-cursor".into());
+        }
+        let cut = store.index().unwrap();
+        let waited = RosterFreshWait {
+            wanted: Some(cut),
+            outcome: RosterFreshWaitOutcome::Unchanged,
+        };
+        for fresh in [true, false] {
+            query.fresh = fresh;
+            let (result, attributes) = with_attribute_writes(|| {
+                client_agents_published_page(&state, &query, cut, fresh.then_some(waited))
+            });
+            if path == "page_error" {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(
+                    result.unwrap().is_some(),
+                    matches!(path, "head" | "complete" | "filtered_complete"),
+                    "{path}"
+                );
+            }
+            if fresh {
+                let expected = if matches!(path, "complete" | "filtered_complete") {
+                    "verified"
+                } else {
+                    "refused"
+                };
+                let proof = attributes
+                    .iter()
+                    .find(|attribute| attribute.key.as_str() == "st.roster.fresh_proof")
+                    .unwrap();
+                assert_eq!(proof.value.as_str(), expected, "{path}");
+            }
+            for key in [
+                "st.roster.fresh_wait",
+                "st.roster.fresh_wait_cut",
+                "st.roster.fresh_proof",
+                "st.roster.fresh_unchanged_verified",
+            ] {
+                assert_eq!(
+                    attributes
+                        .iter()
+                        .filter(|attribute| attribute.key.as_str() == key)
+                        .count(),
+                    usize::from(fresh),
+                    "{path}: {key}: {attributes:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn traced_unchanged_proof_reports_work_for_each_churn_interval() {
+    for history in [false, true] {
+        for churn in [0, 64, 1024] {
+            let (_root, state) = fixture();
+            let store = &state.store;
+            let _wake = store.start_agent_roster_refresher().unwrap();
+            refresh_agent_roster(store, history).unwrap();
+            let (cut, cards, published_at) = store
+                .published_agent_roster(store.index().unwrap(), history)
+                .unwrap();
+            for index in 0..churn {
+                unrelated(store, &format!("cost-{index}"));
+            }
+            let through = store.index().unwrap();
+            assert_eq!(through - cut, churn);
+            let waited = wait_for_agent_roster(store, history).await;
+            // At zero churn the ordinary numeric publication already satisfies the wait.
+            assert_eq!(
+                waited.outcome,
+                if churn == 0 {
+                    RosterFreshWaitOutcome::Published
+                } else {
+                    RosterFreshWaitOutcome::Unchanged
+                }
+            );
+            let writes = smallclaims::touched::writes();
+            let refolds = store.agent_resources_refolded_cards_for_test();
+            let proof_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            let started = Instant::now();
+            let verified = store
+                .served_agent_roster_unchanged_through(through, history, cut, published_at, &cards)
+                .unwrap();
+            let proof_elapsed = started.elapsed();
+            let proof_work = proof_scope.finish();
+            assert!(verified);
+            let query = ClientListQuery {
+                history,
+                fresh: true,
+                ..Default::default()
+            };
+            let page_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            let started = Instant::now();
+            let (page, attributes) = with_attribute_writes(|| {
+                client_agents_published_page(&state, &query, through, Some(waited))
+            });
+            let page_elapsed = started.elapsed();
+            let page_work = page_scope.finish();
+            assert_eq!(page.unwrap().unwrap().0.0.store_index, cut);
+            let proof = attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "st.roster.fresh_proof")
+                .unwrap();
+            assert_eq!(
+                proof.value.as_str(),
+                if churn == 0 {
+                    "not_checked"
+                } else {
+                    "verified"
+                }
+            );
+            assert_eq!(smallclaims::touched::writes(), writes);
+            assert_eq!(store.agent_resources_refolded_cards_for_test(), refolds);
+            eprintln!(
+                "fresh-proof-cost history={history} claims={churn} cut={cut} through={through} isolated_proof={proof_work:?} proof_wall_us={} traced_page={page_work:?} page_wall_us={}",
+                proof_elapsed.as_micros(),
+                page_elapsed.as_micros()
+            );
+        }
+    }
+}
