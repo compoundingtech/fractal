@@ -91,6 +91,7 @@
 "mission.produced" = { class = "durable" }
 "mission.provenance" = { class = "durable" }
 "mission.published" = { class = "durable" }
+"note.set" = { class = "durable" }
 "observer.observed" = { class = "current" }
 "observer.refresh-requested" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "observer.state" = { class = "current", pending = "no reader audit yet" }

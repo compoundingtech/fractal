@@ -3389,6 +3389,56 @@
       "mission"
     ]
   },
+  "note.set": {
+    "kind": "note.set",
+    "subjects": [
+      "note"
+    ],
+    "fields": {
+      "audience": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "expires_at": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "session": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "target": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "agent",
+          "mission",
+          "mission-run",
+          "step-run"
+        ]
+      },
+      "text": {
+        "value_type": "string",
+        "required": true,
+        "nullable": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "subject-encoded-author",
+    "cardinality": "state-transition",
+    "projection": "subject-notes",
+    "wakes_reconciler": false
+  },
   "observer.observed": {
     "kind": "observer.observed",
     "subjects": [
