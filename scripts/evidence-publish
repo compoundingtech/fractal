@@ -37,12 +37,12 @@ class Refused(Exception):
     pass
 
 
-def git(*args, stdin=None, check=True, config=()):
+def git(*args, stdin=None, check=True, header=None):
     clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
-    command = ['git', '-c', 'core.hooksPath=/dev/null']
-    for item in config:
-        command += ['-c', item]
-    done = subprocess.run([*command, *args], input=stdin, capture_output=True, timeout=600,
+    if header:
+        # In the environment, not an argument: a process listing must not show the token.
+        clean.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraheader', GIT_CONFIG_VALUE_0=header)
+    done = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', *args], input=stdin, capture_output=True, timeout=600,
                           env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C'))
     if check and done.returncode != 0:
         raise Refused(f'git {args[0]}: {done.stderr.decode(errors="replace").strip()[-400:]}')
@@ -115,12 +115,11 @@ def main(argv):
             result['refused'].append({'record': summary_path.stem, 'reason': str(error)})
     if args.remote and result['accepted']:
         token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
-        config = []
+        header = None
         if token:
-            header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-            config = [f'http.extraheader=Authorization: Basic {header}']
+            header = 'Authorization: Basic ' + base64.b64encode(f'x-access-token:{token}'.encode()).decode()
         pushed = git('push', '--quiet', args.remote, *[f'{NOTES}{a["record"]}:{NOTES}{a["record"]}' for a in result['accepted']],
-                     check=False, config=config)
+                     check=False, header=header)
         if pushed.returncode != 0:
             text = pushed.stderr.decode(errors='replace')
             result['refused'].append({'record': None, 'reason': 'push failed: ' + (text.replace(token, '***') if token else text).strip()[-400:]})

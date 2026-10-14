@@ -93,6 +93,24 @@ with tempfile.TemporaryDirectory() as directory:
     assert len(git(remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/').splitlines()) == 2
     print('passed: signed full notes (a failing stage too) are published; a rogue signer and an unlisted check are refused by name')
 
+    # The push token travels in the environment, never in an argument.
+    import base64
+    log = tmp / 'argv.log'
+    real_git = next(str(Path(d) / 'git') for d in ENV['PATH'].split(':') if 'recorder' not in d and (Path(d) / 'git').exists())
+    shim_dir = tmp / 'shim'
+    shim_dir.mkdir()
+    (shim_dir / 'git').write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {log}\nprintf "ENV %s\\n" "$GIT_CONFIG_VALUE_0" >> {log}\nexec {real_git} "$@"\n')
+    (shim_dir / 'git').chmod(0o755)
+    token_run = subprocess.run([sys.executable, str(PUBLISH), '--notes', str(tmp / 'notes'), '--keys', str(keys),
+                                '--checks', 'linux-tests,linux-clippy', '--remote', 'sink'], cwd=publisher, capture_output=True,
+                               env=dict(ENV, EVIDENCE_PUSH_TOKEN='secret-token-xyz', PATH=f'{shim_dir}:{ENV["PATH"]}'))
+    header = base64.b64encode(b'x-access-token:secret-token-xyz').decode()
+    lines = log.read_text().splitlines()
+    assert 'secret-token-xyz' not in token_run.stdout.decode() + token_run.stderr.decode()
+    assert not any('secret-token-xyz' in l or header in l for l in lines if not l.startswith('ENV ')), 'token in an argument'
+    assert any(header in l for l in lines if l.startswith('ENV ')), 'token reaches git through the environment'
+    print('passed: the push token reaches git through the environment, not through an argument')
+
     again, again_out = publish('--remote', 'sink')
     assert again_out['pushed'] and len(git(remote, 'for-each-ref', 'refs/notes/evidence/').splitlines()) == 2, 'a replay publishes nothing new'
     print('passed: publishing the same notes again is idempotent')
