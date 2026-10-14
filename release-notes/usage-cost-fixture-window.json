@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Make usage cost probes independent of generated-store age and record their existing growth debt",
+  "summary": "Make usage cost probes independent of generated-store age",
   "replay": {
     "status": "none",
     "detail": "Test fixture only; no replay or runtime source change."
@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "The default 3x growth rule, slack and every other route limit remain unchanged. The two usage routes have an explicit 8.9x known-growth debt bound derived from the retained measurements; no production cost saving is claimed."
+    "detail": "Test fixture only: the default 3x growth rule, 5000-step slack, known-growth ledger and every route limit are unchanged from the parent. No production cost saving is claimed; usage scan debt remains tracked in #2733."
   },
   "compatibility": {
     "status": "none",

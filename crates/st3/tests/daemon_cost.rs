@@ -72,15 +72,10 @@ const SLACK: u64 = 5_000;
 const ADAPTER_ACTOR: &str = "agent/bench/cost/adapter";
 
 /// Requests whose work already grows with the store on main, each with at most half again
-/// its measured ratio so it cannot get much worse unnoticed. Original measurements are from
-/// 2026-10-03 at 341f7ad9; #2733 uses the 2026-10-14 current-main and retained hosted reports.
+/// its measured ratio so it cannot get much worse unnoticed. Measured 2026-10-03 at 341f7ad9.
 /// Each breaks the daemon's rule that no query's cost grows with the whole store and is owed
 /// a fix. A fixed one fails the check until it leaves this list.
 const KNOWN_GROWTH: &[(&str, f64)] = &[
-    // #2733: even an empty period seeks every usage series and reads the limits seats.
-    // Worst observed unnormalized work: 5.88x VM / 4.94x scans; 8.9x rounds up 1.5 times that debt.
-    ("GET /v1/client/usage", 8.9),
-    ("GET /v1/usage", 8.9),
     // Attention reads every person ask (11.8x full-scan steps).
     ("GET /v1/attention", 18.0),
     // Checkpoint status walks the sealed set (9.8x).
