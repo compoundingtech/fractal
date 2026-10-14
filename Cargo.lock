@@ -4760,7 +4760,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "st2",
+ "st-drivers",
  "st3",
  "tempfile",
  "walkdir",
