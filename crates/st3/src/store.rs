@@ -22270,6 +22270,20 @@ const CONFLICT_CLAIM_QUERY: &str =
        AND claims.subject=?1 AND claims.store_index<=?2
      ORDER BY operations.id LIMIT 1";
 
+// Seek once per distinct kind; the cut check seeks on the third index term.
+const SUBJECT_KINDS_AT_QUERY: &str = "WITH RECURSIVE kinds(kind) AS (
+    SELECT (SELECT kind FROM claims INDEXED BY claims_subject_kind_index
+            WHERE subject=?1 ORDER BY kind LIMIT 1)
+    UNION ALL
+    SELECT (SELECT kind FROM claims INDEXED BY claims_subject_kind_index
+            WHERE subject=?1 AND kind>kinds.kind ORDER BY kind LIMIT 1)
+    FROM kinds WHERE kind IS NOT NULL
+)
+SELECT kind FROM kinds WHERE kind IS NOT NULL AND EXISTS(
+    SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+    WHERE subject=?1 AND kind=kinds.kind AND store_index<=?2
+) ORDER BY kind";
+
 fn has_unknown_claim_at(
     connection: &Connection,
     subject: &str,
@@ -22300,9 +22314,9 @@ fn has_unknown_claim_at(
     if let Some(operation) = conflict {
         return Ok(Some(format!("idempotency-conflict:{operation}")));
     }
-    let mut statement = connection.prepare_cached(
-        "SELECT DISTINCT kind FROM claims WHERE subject=?1 AND store_index<=?2 ORDER BY kind",
-    )?;
+    // Seek once per distinct kind, then test the cut with the index's third term.
+    // DISTINCT would still visit every retained diagnostic of the subject.
+    let mut statement = connection.prepare_cached(SUBJECT_KINDS_AT_QUERY)?;
     let kinds = statement
         .query_map(params![subject, through], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -26839,6 +26853,38 @@ mod fleet_admission_tests {
             let status = store.status(Some(subject)).unwrap();
             assert_eq!(narrow.reachability, "unreachable");
             assert_eq!(narrow.actual, status.subjects[0].actual);
+        }
+    }
+
+    #[test]
+    fn subject_kind_lookup_seeks_distinct_kinds_at_pinned_cuts() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(subject TEXT,kind TEXT,store_index INTEGER);
+             CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);",
+        ).unwrap();
+        let mut prior = None;
+        for count in [32, 512, 7_900] {
+            connection.execute("DELETE FROM claims", []).unwrap();
+            connection.execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<{count})
+                 INSERT INTO claims SELECT 'agent/worker','harness.diagnostic',i FROM n;
+                 INSERT INTO claims VALUES ('agent/worker','runtime.future',{});", count + 1,
+            )).unwrap();
+            let mut statement = connection.prepare(SUBJECT_KINDS_AT_QUERY).unwrap();
+            let kinds = statement.query_map(params!["agent/worker", count], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(kinds, ["harness.diagnostic"]);
+            let cost = statement.get_status(rusqlite::StatementStatus::VmStep);
+            if let Some(prior) = prior { assert!(cost <= prior + 20, "{prior} -> {cost}"); }
+            prior = Some(cost);
+            let kinds = statement.query_map(params!["agent/worker", count + 1], |row| row.get::<_, String>(0))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(first_unknown_kind(kinds), Some("runtime.future".into()));
+            let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {SUBJECT_KINDS_AT_QUERY}"))
+                .unwrap().query_map(params!["agent/worker", 1], |row| row.get::<_, String>(3))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
+            assert!(plan.contains("kind>?") && plan.contains("store_index<?"), "{plan}");
         }
     }
 
