@@ -1,130 +1,104 @@
 # ChatGPT app: composition and install/use
 
-Status: design note for [#2172](https://github.com/compoundingtech/smalltalk/issues/2172). It builds on the
-assistant principal and grants in [#2290](https://github.com/compoundingtech/smalltalk/pull/2290) and the
-proof-gated assistant reads in [#2541](https://github.com/compoundingtech/smalltalk/pull/2541). Neither is on
-`main` yet. Their normative text is `docs/st3/external-assistants.md` on those branches.
-
-The note answers three questions before any code is written:
-
-1. Which pieces exist and where each one lives.
-2. How a person installs the app and connects it to their own daemon.
-3. How someone who is not the original author does the same with no private infrastructure.
-
-The model is the iOS app ([ios-app.md](../ios-app.md), [client-v0](client-v0/README.md#pairing-and-remote-access)).
+Design for [#2172](https://github.com/compoundingtech/smalltalk/issues/2172), building on the assistant
+principal and grants in [#2290](https://github.com/compoundingtech/smalltalk/pull/2290) and the assistant
+routes in [#2541](https://github.com/compoundingtech/smalltalk/pull/2541). This is a standalone st app.
 
 ## Composition
 
+```text
+ChatGPT web (developer-mode app)        ChatGPT desktop (local plugin)
+              │                                     │
+    Secure MCP Tunnel                         MCP over stdio
+              │                                     │
+    MCP Streamable HTTP                             │
+              └───────────────┬─────────────────────┘
+                       st-chatgpt adapter
+                              │ typed client-v0 assistant operations
+                       paired st gateway
+                              │
+                         st daemon
 ```
-ChatGPT (web, developer mode)
-   │  MCP over OpenAI Secure MCP Tunnel (outbound only, no public URL)
-   ▼
-tunnel-client  ── person's own OpenAI Platform org
-   │  MCP Streamable HTTP over a private Unix socket (0700 dir)
-   ▼
-st-chatgpt adapter  ── this repo; holds the assistant profile and its own shim signing key
-   │  typed client-v0 assistant routes, Bearer + per-request proof
-   ▼
-st3-client.sock (paired-only gateway, local) ── never st3.sock, never reachable from the tunnel
-   ▼
-st daemon  ── authoritative: principal, grant, scopes, fences, receipts
-```
 
-| Piece | Lives in | Owns | Must not |
-| --- | --- | --- | --- |
-| st daemon | `crates/st3` | `assistant/chatgpt` principal, owner-issued grants, allowlisted projections, proof verification, nonce and idempotency receipts | Speak MCP or OAuth; open a public listener |
-| Generated client | `crates/st3-client` (codegen from `operations.json`) | Typed assistant operations | Sign, retry, or widen budgets |
-| `st-chatgpt` adapter | New crate in this repo, shipped with st releases | MCP server; fixed tool list mapped 1:1 to typed operations; tool annotations; assistant profile | Run commands, scrape terminals, touch `st3.sock`, put credentials in tool output |
-| Approval attestor | Pluggable, pinned per grant with `st devices grant read-trust` | Signing the per-read and per-action approval proofs after the owner approves | Share a key with the adapter (#2541 rejects that) |
-| ChatGPT app record | Each person's ChatGPT account | Developer-mode MCP app bound to their tunnel | Hold st credentials |
-| Downstream deployment (for example dotfiles) | Outside this repo | Service units and attestor wiring for one installation | Fork the adapter or its tool list |
-
-Decisions behind the table:
-
-- The adapter is a separate process, not daemon code. This keeps MCP, ChatGPT quirks and the tunnel out of the
-  daemon, as the iOS app keeps Swift and the phone out of it. The adapter is a client like the phone: it reaches the
-  daemon only through the paired gateway and authenticates with its own grant.
-- The tool list is a closed set in the adapter source. Each tool names one client-v0 operation, its scope and its
-  effect. A new tool needs a new typed operation first. There is no passthrough.
-- ChatGPT's confirmation card (`readOnlyHint: false`) is advisory. Authorization comes only from the grant and the
-  owner's approval proof that st verifies. Read tools are annotated read-only; every action tool is annotated as a
-  write so ChatGPT also asks.
-
-## Comparison with the iOS app
-
-| | iOS app | ChatGPT app |
+| Piece | Owns | Must not |
 | --- | --- | --- |
-| Principal | Paired device of `person/ada` | `assistant/chatgpt`, never a person, no signing chain |
-| Pairing | `st devices --as person/ada pair NAME` | `st devices --as person/ada pair --assistant chatgpt --scope … --disclose-to-openai --consent-evidence …` (owner only, trusted-local Unix) |
-| Completion | Phone posts code and device key | `st devices complete URL PAIRING_ID --assistant` on the adapter host |
-| Credential store | iOS Keychain | `assistant-devices.json`, mode 0600, adapter host only |
-| Lifetime | 30 days | 1 hour default, 24 hours maximum, explicit renew |
-| Per request | Bearer + scope | Bearer + scope + one-use approval proof |
-| Carrier | Tailscale, Serve HTTPS, LAN, Fabric | Secure MCP Tunnel to the adapter; adapter to `st3-client.sock` locally |
-| Packaging | Built from source with the person's own Apple team | `st-chatgpt` binary from the st release; app record created by the person |
-| Revocation | `st devices revoke` | `st devices grant revoke`; expiry; principal kill (#2541 slice D) |
+| st daemon (`crates/st3`) | Principal, grants, scopes, owner approvals, fences and action receipts | Speak MCP or expose the control socket to ChatGPT |
+| Typed client (`crates/st3-client`) | Client-v0 assistant operations | Widen authority |
+| Adapter (`crates/st-chatgpt`) | Both MCP transports, closed tool list, annotations and pluggable authentication | Run arbitrary commands, expose `st3.sock` or return credentials |
+| ChatGPT app or plugin record | Connection to the adapter | Hold st credentials |
+| Downstream deployment | Adapter and tunnel services for one installation | Fork the authority model or tool list |
+
+The adapter is a separate client process, like the [iOS app](../ios-app.md). It reaches the daemon through
+the paired gateway, not the privileged control socket. Each tool maps to a typed assistant operation with
+an explicit scope and effect. There is no command runner or generic passthrough.
+
+## Authority and content
+
+- **Separate principal.** ChatGPT acts as `assistant/chatgpt`, never as the owning person. Only the owner
+  can issue, renew or revoke its grants. Grants expire after at most 30 days.
+- **Reads: consent at grant.** The owner selects scopes and consents to disclosure to OpenAI when issuing
+  the grant. The read policy is `caller-bound-allow`; there is no per-read approval or external attestor.
+  Consent covers all content within the selected scope, including conversation transcripts, question
+  text and answer options. Reads remain bounded and return snapshot and freshness information.
+- **Low-risk writes.** Sending a message to an owner-allowlisted agent requires the grant's write scope,
+  recipient allowlist and ChatGPT confirmation card. It does not require a separate st owner approval.
+- **Consequential writes.** Alert answers, reviews and mission starts require a per-action owner approval
+  in st. For a person-ask answer, the approval binds the exact alert, episode, selected option and fence.
+  Execution checks those bindings and records a receipt: retries return the result without executing
+  again. ChatGPT cannot approve its own request. The confirmation card does not replace this approval.
+
+Read tools are annotated read-only; write tools are annotated as writes. Scope checks, expiry, revocation,
+budgets and stale fences are enforced by st, not by ChatGPT's tool annotations.
+
+## Transports and authentication
+
+One adapter serves both surfaces:
+
+- **HTTP:** ChatGPT web reaches MCP Streamable HTTP through OpenAI Secure MCP Tunnel. The tunnel is
+  outbound-only and needs no public MCP URL.
+- **Stdio:** ChatGPT desktop launches the same adapter as a local plugin. This surface is desktop-only
+  and available in Work/Codex threads, not general ChatGPT conversations or mobile/voice.
+
+Authentication is pluggable at the adapter: Secure MCP Tunnel is the dogfood transport; OAuth is the
+next authentication path. The No-auth tunnel has a known caller-binding gap: other keys in the same
+OpenAI Platform organization can call the adapter by `tunnel_id`. A tunnel ID is not authenticated proof
+of a particular ChatGPT caller. This is an accepted, recorded dogfood exception, not a GA security claim.
+OAuth must bind the authenticated caller to the st grant and remove this gap.
 
 ## Install and use
 
-Prerequisites for any person (written for a hypothetical `person/ada`):
+For an example owner, `person/ada`:
 
-- A running st member whose configured owning person is `person/ada`.
-- A ChatGPT plan with developer-mode MCP apps. Pro allows read tools; writes need Business, Enterprise or Edu at
-  the time of writing. ChatGPT reaches custom apps on the web only.
-- An OpenAI Platform organization in which Ada creates a Secure MCP Tunnel (Tunnels Read + Manage), a runtime key
-  restricted to Tunnels Read + Use, and an association between the tunnel and her ChatGPT workspace. A tunnel that
-  exists only in the Platform organization does not appear in ChatGPT.
-- An approval attestor with its own key, distinct from the adapter's shim key (see open question 1).
+1. Run st and the adapter on the owner's host. Issue an `assistant/chatgpt` grant through st's trusted-local
+   owner interface, selecting content scopes, recipient allowlist, disclosure consent and a lifetime of
+   at most 30 days. Complete pairing through the paired gateway; keep the credential on the adapter host.
+2. For web, create a Secure MCP Tunnel in the owner's OpenAI Platform organization, associate it with the
+   ChatGPT workspace, and run its tunnel client against the adapter's HTTP endpoint. The owner creates
+   the developer-mode ChatGPT app record and selects the tunnel.
+3. For desktop, configure the local plugin to launch `st-chatgpt` with the stdio transport in a Work/Codex
+   thread. It uses the same authority model and tool list as HTTP.
+4. Ask what needs attention, read the bounded alert or transcript, or send a message to an allowlisted
+   agent. For a person-ask answer, request the exact option, approve the action in st, then execute it once.
 
-Activation gate: #2290 forbids any live assistant grant, including a read-only one, until slice D (coordinated
-kill) and the adapter's coordinated-kill test pass on the exact candidate revisions, and until a caller-binding and
-disclosure decision and plan/client feasibility are recorded. The steps below describe the workflow after that gate.
+Dogfood uses a real-data owner deployment; scratch scenarios are separate evidence. Neither daemon
+startup nor an app record grants authority. Revocation or expiry denies subsequent requests. An offline
+daemon returns unavailable; a stale fence or exceeded budget returns an explicit error, not a silent retry.
 
-Steps:
+Public directory publication is separate from the tunnel dogfood path. It requires a supported hosted
+HTTPS endpoint, OAuth and the applicable OpenAI review. Mobile and voice are outside these surfaces.
 
-1. Install st as usual. The release contains `st-chatgpt`.
-2. On the daemon host, Ada issues the grant over the trusted-local API:
-   `st devices --as person/ada pair --assistant chatgpt --scope read.assistant.summary --scope read.assistant.attention --disclose-to-openai --consent-evidence <record>`.
-3. On the same host, the adapter completes pairing through the paired gateway:
-   `st devices complete <gateway URL> <pairing ID> --assistant` (code on stdin). Completion currently needs an HTTP
-   gateway URL; see open question 5.
-4. Ada pins read trust with both public keys: `st devices --as person/ada grant read-trust <grant> --issuer … --key-id …
-   --attestor-public-key … --shim-public-key …`. `st-chatgpt` prints its shim public key; the attestor provides its
-   own. Pinning raises the policy revision, so earlier proofs stop working.
-5. Ada starts `st-chatgpt` and `tunnel-client` as user services. Daemon startup never starts them, as it never
-   starts Tailscale Serve or Fabric for the phone.
-6. In ChatGPT, Ada creates an MCP app with connection type Tunnel and selects her tunnel.
-7. Use: "What needs me in st?" calls the alerts tool, ChatGPT shows the confirmation card, the attestor asks Ada to
-   approve the read, and the tool returns the bounded projection with its snapshot and freshness.
+## Prototype evidence
 
-Revocation and failure: `st devices grant revoke` or expiry denies the next request. The principal kill
-(#2541 slice D) revokes every grant, disables the principal and stops the adapter, tunnel and attestor together.
-An offline daemon or adapter returns an explicit unavailable result. A stale fence, used nonce or exceeded budget
-returns its typed error, and the adapter reports it without retrying.
+Prototype commit `777eba9e` passed 24/24 scratch scenarios over HTTP and stdio: MCP initialization, tool
+listing and annotations, tunnel HTTP routing, alert/question/options reads, mission and agent reads,
+bounded transcript content, native owner approval and durable answers, idempotent answers and messages,
+recipient and scope denial, budget exhaustion, stale episode/fence rejection, grant expiry and revocation,
+and daemon-unavailable reporting. This proves the scratch adapter/daemon path, not ChatGPT UI behavior
+or authenticated tunnel caller binding.
 
-Nothing in these steps is specific to one person, host or deployment. A downstream repository may package steps 3–5
-as declarative services, but the binary, tool list and docs come from this repository.
+## Open questions
 
-### Out of scope for this design
-
-- Public directory publication. It needs a stable public HTTPS MCP endpoint, an OAuth 2.1 authorization server
-  whose tokens map to grants, domain verification and OpenAI review. The tunnel path cannot be submitted.
-- Mobile and voice use; ChatGPT does not offer custom apps there.
-
-## Open questions for review
-
-1. **Attestor for installations without SCG.** #2541 names an SCG executor as the minter of read proofs. Other
-   people do not run SCG. Proposal: keep the attestor a pinned role and add an st-native attestor in which the
-   owner approves the request from an st alert on a paired signing device (iOS or stui). SCG stays one valid
-   attestor.
-2. **Answering alerts.** #2290/#2541 deny `prompt.respond` and `work.done` to assistants, and their metadata pages
-   omit question text and options. Slice 1 of #2172 needs an authorized typed answer. Proposal: a dormant
-   `assistant.alert.answer` action that binds the exact alert, episode, chosen option and fence into the owner's
-   approval proof, in the same shape as the approved send in slice C.
-3. **Binary placement.** Separate `st-chatgpt` binary (proposed) or an `st assistant serve` subcommand.
-4. **Grant lifetime.** A 24-hour maximum means a daily owner renewal. Keep it, or allow a longer lifetime with
-   per-request approval unchanged.
-5. **Local gateway transport.** Assistant pairing completion and requests accept only HTTP(S) gateway URLs, and a
-   daemon exposes the paired gateway as `st3-client.sock`. Proposal: let the assistant client use the Unix gateway
-   directly, so a same-host install needs no extra listener. The alternative is a loopback-only bridge, as the
-   phone setup uses when Tailscale Serve fails.
+1. Where does the OAuth authorization server live, and how does it map authenticated callers to grants?
+2. Does GA use a hosted relay or a self-hosted endpoint?
+3. Which transcript redaction policy applies before scoped content is disclosed?
+4. Which consequential actions receive tools beyond the person-ask answer, including reviews and mission starts?
