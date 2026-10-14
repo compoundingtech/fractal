@@ -472,7 +472,7 @@ The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Nod
 After the root frozen install, `bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
 `tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
-6.0.3 and Effect 4.0.0-rc.118. The iOS project allows explicit TypeScript import extensions
+6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
 ### Fractal web
@@ -491,9 +491,10 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
-  without a changed generated client file; root flake-only changes also do not trigger it.
+  without a changed generated client file; root `flake.nix` changes also do not trigger it.
   Other relevant paths are
   root `package.json*`, `pnpm-workspace.yaml*`, `pnpm-lock.yaml`,
+  `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
   `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,

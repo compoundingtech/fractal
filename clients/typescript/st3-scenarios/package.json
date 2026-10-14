@@ -38,12 +38,12 @@
     }
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0-rc.118",
+    "@effect/vitest": "4.0.0",
     "@storybook/react": "10.6.1",
     "@types/node": "26.6.4",
-    "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
-    "effect": "4.0.0-rc.118",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "effect": "4.0.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "typescript": "6.0.3",

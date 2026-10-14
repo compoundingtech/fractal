@@ -57234,6 +57234,79 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         );
     }
 
+    /// A subagent asks while its parent's Task call is still open: the only call the seat's
+    /// conversation shows unanswered is the parent's, so an allow offered beside it would let
+    /// through a call the person never saw. st offers only deny for a subagent's prompt.
+    #[test]
+    fn a_subagents_prompt_is_answered_only_with_deny() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "subagent-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        // The seat's own Task call is open (its conversation shows it unanswered), and the
+        // subagent it started asks to run Bash.
+        let asked = append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"permission", "reason":"subagent:Bash",
+                "ownership_sequence":1, "transition_sequence":3}),
+        );
+        let shown = store
+            .attention_items(Some("person/avery"))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.kind == "harness-prompt")
+            .unwrap();
+        assert_eq!(shown.answers, vec!["deny".to_owned()]);
+        assert!(shown.detail.starts_with("A subagent of this seat asks to use Bash;"), "{}", shown.detail);
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &asked.id, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "invalid-answer"
+        );
+        store
+            .answer_native_prompt(seat, &asked.id, "deny", "person/avery")
+            .unwrap();
+        assert_eq!(
+            store.native_prompt_state(seat, 1, 3).unwrap(),
+            NativePromptState::Answered {
+                answer: "deny".into()
+            }
+        );
+    }
+
     /// A Codex approval prompt is answered the same way. The answer names the Codex driver, whose
     /// control connection reads it and answers the app-server; a Codex question stays terminal-only.
     #[test]
