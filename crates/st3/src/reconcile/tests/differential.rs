@@ -236,13 +236,13 @@ impl Side {
     }
 }
 
-/// Replaces 32- and 64-digit hex identifiers, which hash write order and time.
+/// Replaces claim hashes and operation UUIDs, whose identities vary between equivalent runs.
 fn regex_lite_hex() -> impl Fn(&str) -> String {
     |text: &str| {
         let mut out = String::with_capacity(text.len());
         let mut run = String::new();
         let flush = |run: &mut String, out: &mut String| {
-            if run.len() >= 32 {
+            if run.len() >= 32 && (!run.contains('-') || uuid::Uuid::parse_str(run).is_ok()) {
                 out.push_str("<id>");
             } else {
                 out.push_str(run);
@@ -250,7 +250,9 @@ fn regex_lite_hex() -> impl Fn(&str) -> String {
             run.clear();
         };
         for character in text.chars() {
-            if character.is_ascii_hexdigit() && !character.is_ascii_uppercase() {
+            if character == '-'
+                || (character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+            {
                 run.push(character);
             } else {
                 flush(&mut run, &mut out);
@@ -348,6 +350,7 @@ fn work(store: &Store, action: &str, at: u128) {
         };
         for action in actions {
             let request = crate::model::WorkRequest {
+                wait_ms: None,
                 actor: Some("agent/node.worker".into()),
                 incarnation: Some("current".into()),
                 // A bare renewal writes no claim, only the lease: a change the feed never shows.

@@ -14,7 +14,7 @@ import {
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
 
 import { IconButton } from '../../workbench-kit/IconButton.tsx'
-import { sortModes, type SortMode } from './filter.ts'
+import { parseSidebarQuery, sortModes, type SortMode } from './filter.ts'
 import { defaultFilters, type SidebarFilters } from './state.ts'
 import { statuses, type AgentStatus } from './StatusIcon.tsx'
 
@@ -52,6 +52,7 @@ export const SidebarToolbar = ({
     Number(filters.hideEnded) +
     Number(filters.hideRetired) +
     Number(filters.host !== '') +
+    parseSidebarQuery(filters.query).machines.length +
     filters.statuses.length
   return (
     <div ref={shortcut} {...stylex.props(styles.toolbar)}>
@@ -123,7 +124,7 @@ export const SidebarToolbar = ({
                   size="sm"
                   variant="secondary"
                   onPress={() =>
-                    update({ ...defaultFilters, query: filters.query, sort: filters.sort })
+                    update({ ...defaultFilters, query: parseSidebarQuery(filters.query).query, sort: filters.sort })
                   }
                 >
                   Reset filters
@@ -163,6 +164,7 @@ export const SidebarToolbar = ({
       <div ref={search}>
         <Input
           aria-label="Search agents and folders"
+          aria-description="Use machine:dev3 or host:dev3,dev5 to filter by host; combine with search text."
           placeholder="Search agents…  /"
           size="sm"
           value={filters.query}

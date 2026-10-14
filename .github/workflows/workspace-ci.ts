@@ -8,11 +8,14 @@ import {
 } from '../../repos/effect-utils/genie/external.ts'
 
 // Profiles require controls inline; namespace-features labels apply only to shape labels.
-// Generic workflows retain merge-first ordering. Required Workspace PR checks use
-// the first class too, through namespaceLabels below, rather than sharing benchmarks.
+// Merge groups and releases precede required PR checks; optional work follows both.
 // This orders waiting jobs; it does not preempt active jobs or reserve a runner.
-const linuxJobPriority = "${{ github.event_name == 'merge_group' && 1 || 2 }}"
+const linuxJobPriority = "${{ github.event_name == 'merge_group' && 1 || 3 }}"
 export const linuxRunnerProfile = `namespace-profile-linux-x86-64;job.priority=${linuxJobPriority}`
+const releaseJobPriority = "${{ github.event_name == 'pull_request' && 2 || 1 }}"
+export const releaseLinuxRunnerProfile = `namespace-profile-linux-x86-64;job.priority=${releaseJobPriority}`
+export const releaseMacosRunnerProfile = `namespace-profile-macos-arm64;job.priority=${releaseJobPriority}`
+export const releaseLinuxRunner = "${{ fromJSON(needs['pick-runner'].outputs.ci1 || '[\"ci1-priority\"]') }}"
 export const macosRunnerProfile = 'namespace-profile-macos-arm64'
 export const linuxRunner = [`${linuxRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
 /**
@@ -27,27 +30,20 @@ export const linuxStageRunner = [
   `${linuxStageShape};job.priority=${linuxJobPriority}`,
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
+// Optional load benchmarks follow required PR checks, merge groups and releases.
+export const performanceRunner = [
+  `${linuxStageShape};job.priority=3`,
+  'namespace-features:github.run-id=${{ github.run_id }}',
+] as const
 export const macosRunner = [`${macosRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
 export const linuxActionlintConfig = {
   ...defaultActionlintConfig,
-  selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
+  selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, 'ci1-priority', 'ci2', 'ci2-merge', 'ci2-priority'],
 } as const
 
-/**
- * ci1 takes the primary Workspace CI test partition when enough general runners are idle.
- * The second partition and mail canaries may each take an idle general runner; other supporting
- * jobs stay on Namespace. GitHub has no
- * overflow between runner labels, so the `pick-runner` job asks the
- * GitHub API how many ci1 runners are idle before the other jobs start, and their `runs-on` reads its
- * output. Trusted PRs labelled `ci-priority` use the reserved `ci1-priority` lane.
- * Merge groups use the local pool only when five workers are idle and two general
- * workers remain for PRs. Smaller pools may take the primary test shard and mail
- * canaries, retaining two general slots even if a merge job takes a mixed worker. Explicit
- * CI_MERGE_CI1=on retains the incident's forced-local override.
- *
- * Off unless the repository variable `CI1_RUNNERS` is `on`: then `pick-runner` is skipped, its output
- * is empty and every workload job runs on Namespace. A pull request from a fork never runs on
- * ci1: this repository is public, and a self-hosted runner runs whatever a job asks of it.
+/** Merge groups use the shared owned priority role; the scheduler chooses the host.
+ * Trusted PRs may use distinct idle general workers in group3 or the ci-priority lane.
+ * Fork PR code never reaches a self-hosted runner. CI1_RUNNERS controls PR picking only.
  */
 export const pickRunnerJobId = 'pick-runner'
 
@@ -56,7 +52,7 @@ const ci1MinIdle = 1
 
 export const pickRunnerJob = {
   name: pickRunnerJobId,
-  if: "vars.CI1_RUNNERS == 'on'",
+  if: "github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on'",
   // GitHub-hosted, so the choice never waits for either pool it chooses between.
   'runs-on': 'ubuntu-latest',
   'timeout-minutes': 3,
@@ -65,9 +61,6 @@ export const pickRunnerJob = {
     ci1: '${{ steps.pick.outputs.ci1 }}',
     ci1_secondary: '${{ steps.pick.outputs.ci1_secondary }}',
     ci1_mail: '${{ steps.pick.outputs.ci1_mail }}',
-    merge_ci1: '${{ steps.pick.outputs.merge_ci1 }}',
-    merge_primary: '${{ steps.pick.outputs.merge_primary }}',
-    merge_mail: '${{ steps.pick.outputs.merge_mail }}',
   },
   steps: [
     {
@@ -81,112 +74,31 @@ export const pickRunnerJob = {
         HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
         PR_LABELS: '${{ toJSON(github.event.pull_request.labels.*.name) }}',
         OWNER: '${{ github.repository_owner }}',
-        MERGE_LOCAL_ONLY: '${{ vars.CI_MERGE_CI1 }}',
         NEED: `\${{ vars.CI1_MIN_IDLE || '${ci1MinIdle}' }}`,
+        MERGE_OVERFLOW: '${{ vars.CI_MERGE_OVERFLOW }}',
+        MERGE_NEED: "${{ vars.CI_MERGE_MIN_IDLE || '3' }}",
+        RUN_ID: '${{ github.run_id }}',
       },
-      run: `primary_label=
-namespace() {
-  echo "$1: Namespace"
-  printf 'Unpicked runners: **Namespace** (%s)\\n' "$1" >> "$GITHUB_STEP_SUMMARY"
-  exit 0
-}
-primary() {
-  primary_label=$1
-  printf 'ci1=["%s"]\\n' "$primary_label" >> "$GITHUB_OUTPUT"
-  printf 'Primary runner: **ci1** (%s)\\n' "$primary_label" >> "$GITHUB_STEP_SUMMARY"
-}
-if [ "$EVENT" = pull_request ] && [ "$HEAD_REPOSITORY" != "$REPOSITORY" ]; then
-  namespace "a pull request from a fork never runs on ci1"
-fi
-if [ "$EVENT" = pull_request ] && jq -e 'index("ci-priority") != null' <<< "$PR_LABELS" >/dev/null 2>&1; then
-  primary ci1-priority
-  echo "priority PR: reserved ci1-priority capacity"
-  printf 'Runner: **ci1** (ci1-priority, ahead of ordinary PRs)\\n' >> "$GITHUB_STEP_SUMMARY"
-fi
-if [ "$EVENT" = merge_group ] && [ "$MERGE_LOCAL_ONLY" != on ]; then
-  # Choose once for the whole group. Five simultaneous workload jobs fit locally
-  # only if two general workers remain; priority-only workers are never borrowed.
-  # This is an admission snapshot, not an atomic runner reservation.
-  [ -n "$GH_TOKEN" ] || namespace "merge overflow: no runner status token"
-  if ! runners=$(timeout 20s gh api --paginate --slurp "orgs/$OWNER/actions/runners?per_page=100" 2>/dev/null); then
-    namespace "merge overflow: runner status unavailable"
-  fi
-  if ! capacity=$(jq -ec '
-    [.[].runners[] | select(.status == "online" and .busy == false)] | unique_by(.id) |
-    def has($label): any(.labels[]; .name == $label);
-    ([.[] | select(has("ci1-merge") and (has("ci1-priority") | not))]) as $merge |
-    ([.[] | select(has("ci1") and (has("ci1-priority") | not))] | length) as $general |
-    ([$merge[] | select(has("ci1") | not)] | length) as $dedicated |
-    {whole: (($merge | length) >= 5 and ($general - ([0, 5 - $dedicated] | max)) >= 2),
-     partial: ([2, ($merge | length), ([0, $general - 2] | max)] | min)}' <<< "$runners"); then
-    namespace "merge overflow: invalid runner status"
-  fi
-  if [ "$(jq -r '.whole' <<< "$capacity")" = true ]; then
-    printf 'merge_ci1=["ci1-merge"]\\n' >> "$GITHUB_OUTPUT"
-    printf 'Merge group: **ci1** (five idle workers, two general PR slots retained)\\n' >> "$GITHUB_STEP_SUMMARY"
-    exit 0
-  fi
-  partial=$(jq -r '.partial' <<< "$capacity")
-  [ "$partial" -ge 1 ] || namespace "merge overflow: retain two PR slots or wait for local capacity"
-  printf 'merge_primary=["ci1-merge"]\\n' >> "$GITHUB_OUTPUT"
-  if [ "$partial" -ge 2 ]; then
-    printf 'merge_mail=["ci1-merge"]\\n' >> "$GITHUB_OUTPUT"
-  fi
-  printf 'Merge consumers: **ci1** (primary shard%s; two general PR slots retained); producer and other jobs: **Namespace**\\n' "$( [ "$partial" -ge 2 ] && printf ' and mail canaries' || true )" >> "$GITHUB_STEP_SUMMARY"
-  exit 0
-fi
-if [ "$EVENT" = merge_group ]; then
-  # Merge groups never borrow the PR priority lane: it can have PR work ahead of them.
-  primary ci1-merge
-  echo "merge queue: reserved ci1-merge runners"
-  printf 'Runner: **ci1** (ci1-merge, reserved merge-queue capacity)\\n' >> "$GITHUB_STEP_SUMMARY"
-fi
-[ -n "$GH_TOKEN" ] || namespace "no runner status token"
-[[ "$NEED" =~ ^[1-9][0-9]*$ ]] || namespace "invalid minimum idle runner count"
-if ! runners=$(timeout 20s gh api --paginate --slurp "orgs/$OWNER/actions/runners?per_page=100" 2>&1); then
-  echo "::warning::could not list ci1's runners: $runners"
-  namespace "the runner list is unavailable"
-fi
-if ! idle=$(jq -e '[.[].runners[] | select(.status == "online" and .busy == false and any(.labels[]; .name == "ci1"))] | length' <<< "$runners"); then
-  namespace "the runner list is invalid"
-fi
-if [ -z "$primary_label" ]; then
-  if [ "$idle" -ge "$NEED" ]; then
-    primary ci1
-  else
-    printf 'Primary runner: **Namespace** (%s general runners idle, %s needed)\\n' "$idle" "$NEED" >> "$GITHUB_STEP_SUMMARY"
-  fi
-fi
-# A primary on ci1 or ci1-merge may take a general worker. Account for that worker
-# before offering separate slots to the second shard and canaries. A priority
-# primary has its own reserved label; general workers temporarily lent to priority
-# work no longer carry ci1 and therefore were excluded from the idle count above.
-available=$idle
-case "$primary_label" in ci1|ci1-merge) available=$((available - 1));; esac
-echo "$idle general runners idle; primary minimum $NEED; extra slots $available"
-for output in ci1_secondary ci1_mail; do
-  if [ "$available" -gt 0 ]; then
-    printf '%s=["ci1"]\\n' "$output" >> "$GITHUB_OUTPUT"
-    printf '%s runner: **ci1** (idle general slot)\\n' "$output" >> "$GITHUB_STEP_SUMMARY"
-    available=$((available - 1))
-  else
-    printf '%s runner: **Namespace** (no idle general slot)\\n' "$output" >> "$GITHUB_STEP_SUMMARY"
-  fi
-done`,
+      run: `python3 - <<'CI_PICK_RUNNER'\n${readFileSync(new URL('../../scripts/ci-pick-runner', import.meta.url), 'utf8')}CI_PICK_RUNNER\n`,
     },
   ],
 } as const
 
-// Merge routing applies to the whole group. The explicit local override is retained;
-// otherwise the picker may admit a local group only with room left for PR checks.
-const mergeCi1Labels = `github.event_name == 'merge_group' && (vars.CI_MERGE_CI1 == 'on' && '["ci1-merge"]' || needs.pick-runner.outputs.merge_ci1)`
-const pickedOr = (namespaceLabels: string, output = 'ci1', mergeOutput?: string) =>
-  `\${{ fromJSON(${mergeCi1Labels} || ${mergeOutput ? `(github.event_name == 'merge_group' && needs.${pickRunnerJobId}.outputs.${mergeOutput}) || ` : ''}(github.event_name != 'merge_group' && needs.${pickRunnerJobId}.outputs.${output}) || ${namespaceLabels}) }}`
+/** Releases share the pool choice, without the ordinary PR opt-in variable. */
+export const priorityRunnerJob = {
+  ...pickRunnerJob,
+  if: "github.event_name != 'pull_request'",
+  steps: pickRunnerJob.steps.map(step => ({ ...step, env: { ...step.env, MODE: 'priority' } })),
+} as const
 
-// Required PR and merge checks share the first class. PR checks are prerequisites
-// for the merge queue: serving every new merge ahead of them can starve that input.
-// Optional/manual work retains linuxJobPriority and the second class.
-const workspaceJobPriority = "(github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2"
+// Every required merge job follows one pool decision, including explicit overflow.
+const mergeCi1Labels = `github.event_name == 'merge_group' && (needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-priority"]')`
+const pickedOr = (namespaceLabels: string, output = 'ci1') =>
+  `\${{ fromJSON(${mergeCi1Labels} || (github.event_name != 'merge_group' && needs.${pickRunnerJobId}.outputs.${output}) || ${namespaceLabels}) }}`
+
+// Deployment and merge progress take precedence during saturation. Required PR
+// checks precede optional/manual work; local reservations remain unchanged.
+const workspaceJobPriority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
 // Set this repository variable only after a runner administrator has provisioned
 // the profile with the existing image/cache and left it capacity outside the PR pool.
 // An unset variable retains the existing shapes and Workspace priority policy.
@@ -197,10 +109,10 @@ export const linuxStageRunsOn = pickedOr(
   namespaceLabels(linuxStageRunner),
 )
 
-/** A partial merge allocation goes only to the primary consumer, never its producer. */
-export const primaryTestRunsOn = pickedOr(namespaceLabels(linuxStageRunner), 'ci1', 'merge_primary')
+/** Both test consumers and their producer use the owned merge lane. */
+export const primaryTestRunsOn = pickedOr(namespaceLabels(linuxStageRunner), 'ci1')
 
-/** Extra jobs use idle general slots unless all merge work is routed to the provisioned reserve. */
+/** Extra PR jobs use idle general slots; merges always use the priority reserve. */
 export const secondaryStageRunsOn = pickedOr(
   namespaceLabels(linuxStageRunner),
   'ci1_secondary',
@@ -208,15 +120,18 @@ export const secondaryStageRunsOn = pickedOr(
 export const mailStageRunsOn = pickedOr(
   namespaceLabels(linuxStageRunner),
   'ci1_mail',
-  'merge_mail',
 )
+
+// Extra merge partitions use either host's merge role; an overflowed group stays
+// wholly on its selected Namespace profile rather than mixing source cohorts.
+export const extraMergeTestRunsOn = `\${{ fromJSON(needs.${pickRunnerJobId}.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-merge"]') }}`
 
 /** `runs-on` for a Linux profile job: picked ci1, else the shared Namespace queue class. */
 export const linuxRunsOn = pickedOr(
   namespaceLabels(linuxRunner),
 )
 
-/** Supporting jobs use Namespace unless the merge-only ci1 reservation is enabled. */
+/** Supporting merge jobs use the priority lane; supporting PR jobs use Namespace. */
 export const supportingLinuxRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${namespaceLabels(linuxRunner)}) }}`
 export const supportingStageRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${namespaceLabels(linuxStageRunner)}) }}`
 
@@ -320,8 +235,8 @@ for provider in GITHUB_ISSUE GITHUB_PR PTY_STATS VISTA; do
 done`,
   },
   nixDevelopStep({ name: 'Build selected test targets first (no debug info)', command: ['bash', 'scripts/ci-nextest', 'run', '--no-run'] }),
-  // The integration target already built st2 with the workspace's unified features. Running it
-  // directly avoids a separate cargo run build before those features are unified.
+  // The integration targets already built the driver library's matching hook installer.
+  // Run it directly without the legacy runner CLI or a separate cargo run build.
   nixDevelopStep({ name: 'Install matching rendered hooks', command: ['bash', 'scripts/ci-install-built-hooks'] }),
 ]
 

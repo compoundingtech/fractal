@@ -43,5 +43,5 @@ The moved tests run without phone dependencies. Transcript tests read the origin
 `fixtures/clients/transcripts/*.json` and compare with the Rust model's expected
 entries. Signing tests verify `fixtures/clients/device-signing-v1.json`. Fixtures are
 shared, never copied into this package. CI also typechecks and tests the phone against
-the package. The root frozen install covers all three packages; `bash scripts/ci-typescript-client`
+the package. The root frozen install covers every workspace package; `bash scripts/ci-typescript-client`
 runs the combined checks.

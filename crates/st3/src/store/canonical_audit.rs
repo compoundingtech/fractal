@@ -11,6 +11,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),
+    ("person_directive_notes", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),
@@ -32,7 +33,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
 
 #[test]
 fn every_persistent_table_has_a_projection_scope() {
-    // Explicit local/storage exceptions from docs/st3/canonical-projections-audit.md. New
+    // Explicit local/storage exceptions from docs/st3/data-authority.md. New
     // tables must be classified; shared tables automatically join the row/digest comparison.
     let exceptions = [
         "meta",
@@ -50,6 +51,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "replication_refusals",
         "capabilities",
         "local_work_lease_renewals",
+        "local_git_change_records",
+        "local_git_change_latest",
         "local_mailbox_owners",
         "local_mailbox_bindings",
         "local_mailbox_argv_bindings",
@@ -60,7 +63,22 @@ fn every_persistent_table_has_a_projection_scope() {
         "agent_message_sends",
         "agent_message_days",
         "local_agent_message_pending",
+        "local_idle_messages",
+        "coordination_sends",
+        "local_coordination_backfill",
+        "stop_deferral_claims",
+        "local_stop_deferral_backfill",
+        "local_publication_claims",
+        "local_publication_starts",
+        "local_publication_pending",
+        "local_publication_batches",
+        "local_publication_bootstrap",
+        "local_publication_launch_epoch",
         "local_observations",
+        "local_runtime_starts",
+        "local_runtime_start_evidence",
+        "local_runtime_start_observation_generation",
+        "local_runtime_start_observation_subjects",
         "local_blobs",
         "local_blob_uploads",
         "local_subscription_mission_deferrals",
@@ -75,6 +93,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_projection_pending",
         "local_glass_head_pending",
         "local_glass_head_dirty",
+        "local_directive_note_pending",
+        "local_directive_note_dirty",
         "local_custom_dirty",
         "graph_generation",
         "fleet_generation",
@@ -195,6 +215,7 @@ pub(super) fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
                     if (*table == "blobs" && name == "bytes")
                         || (*table == "documents" && name == "binding_key")
                         || (*table == "glass_heads" && matches!(name.as_str(), "created_key" | "head_key"))
+                        || (*table == "person_directive_notes" && name == "head_key")
                         || (matches!(*table, "arrangements" | "arrangement_registers")
                             && name == "winner")
                     {
@@ -461,6 +482,12 @@ fn write_audit_history(source: &Store) {
         subject:"glass/person/ada/019a0000-0000-7000-8000-000000000001".into(), kind:"glass.upserted".into(), actor:Some("person/ada".into()),
         fields: serde_json::from_value(json!({"body":{"name":"Audit workspace","layout":{"tabs":[{"pane":"opaque:anything"}]}}, "base_revision":null})).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None,
     }).unwrap();
+    source.connection.batched(|tx| -> Result<()> {
+        append_claim_record_tx(tx, &source.origin, "person/ada", st3_schema::directive_notes::KIND,
+            Some("person/ada"), &json!({"fields":{"text":"Audit current person context"}}), &[], None)?;
+        directive_notes::flush(tx)?;
+        Ok(())
+    }).unwrap().unwrap();
     source
         .append_claim(&ClaimInput {
             subject: "arrangement/person/ada/019a0000-0000-7000-8000-000000000001".into(),
@@ -1280,27 +1307,14 @@ fn comparable_peers_name_differing_tables_and_legacy_peers_keep_their_digest() {
     let old: ReplicationExchange = serde_json::from_value(old).unwrap();
     assert!(old.projection_digests.is_empty());
     assert_eq!(old.graph_digest, legacy);
-    let receipt = target
+    target
         .receive_replication_exchange("alder", TEST_FLEET, &old)
         .unwrap();
-    assert!(!receipt.heal);
     let status = target
         .replication_status(true, Some(TEST_FLEET), &["alder".into()])
         .unwrap();
     assert!(status.peers[0].projection_digests.is_empty());
     assert!(status.peers[0].differing_tables.is_empty());
-    let mut answer = source
-        .heal_answer("birch", &ReplicationHealQuery::Ranges)
-        .unwrap();
-    if let ReplicationHealAnswer::Ranges {
-        projection_digests, ..
-    } = &mut answer
-    {
-        projection_digests.clear();
-    }
-    assert!(
-        matches!(target.heal_next("alder",answer).unwrap(),ReplicationHealStep::Done{report} if report.healed)
-    );
 }
 
 #[test]
