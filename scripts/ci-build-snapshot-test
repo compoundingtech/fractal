@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (work / 'src').mkdir()
     agent = work / 'crates/agent-spec'
     (agent / 'src').mkdir(parents=True)
-    shutil.copy(root / 'build.rs', work / 'build.rs')
+    shutil.copy(root / 'crates/st-drivers/build.rs', work / 'build.rs')
     shutil.copy(root / 'crates/agent-spec/build.rs', agent / 'build.rs')
     (work / '.gitignore').write_text('/target/\n')
     (work / 'Cargo.toml').write_text('[package]\nname="snapshot-fixture"\nversion="0.1.0"\nedition="2024"\n[dependencies]\nagent-spec={path="crates/agent-spec"}\n[workspace]\nmembers=["crates/agent-spec"]\n')

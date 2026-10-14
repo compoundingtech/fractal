@@ -1,12 +1,16 @@
-import { linuxActionlintConfig, linuxRunner, linuxRunnerProfile, macosRunnerProfile } from './workspace-ci.ts'
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
+import { linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
-import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
+import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
+import { readFileSync } from 'node:fs'
+
+const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-version', import.meta.url), 'utf8').trim()
 
 // Preserve release triggers, source verification and publishing permissions. Every commit on main
 // also builds and verifies both archives and keeps them as short-lived artifacts, so release
 // breakage fails on main instead of at tag time (the daily release publishes those artifacts).
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Smalltalk tag release",
   "on": {
@@ -20,12 +24,20 @@ export default githubWorkflow(auditCaches({
     },
     "workflow_dispatch": null,
     "pull_request": {
+      types: readyPullRequestTypes,
       "paths": [
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "build.rs",
+        "crates/st-drivers/build.rs",
         "crates/st-drivers/src/version.rs",
+        "install.sh",
+        "scripts/download-install-test",
+        "scripts/linux-release-cc",
+        "scripts/check-linux-release.py",
+        "scripts/release-build-stamp.py",
+        "scripts/release-rust-version",
+        "scripts/fixtures/install-release-v0.3.17",
         "scripts/release-smalltalk*",
         "scripts/release_notes*",
         "scripts/ci-build-snapshot*",
@@ -35,6 +47,8 @@ export default githubWorkflow(auditCaches({
         "scripts/install-release*",
         "scripts/install-macos*",
         "docs/st3/binary-releases.md",
+        ".github/workflows/workspace-ci.ts",
+        "scripts/ci-pick-runner",
         "flake.lock"
       ]
     }
@@ -44,24 +58,23 @@ export default githubWorkflow(auditCaches({
     "actions": "read"
   },
   "concurrency": {
-    "group": "smalltalk-release-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
+    "group": "smalltalk-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
+    "pick-runner": priorityRunnerJob,
     "installer": {
       "name": "installer (${{ matrix.runner }})",
       "strategy": {
         "fail-fast": false,
         "matrix": {
           "runner": [
-            linuxRunnerProfile,
-            macosRunnerProfile
+            'ubuntu-latest',
+            'macos-15'
           ]
         }
       },
-      "runs-on": [
-        "${{ matrix.runner }};github.run-id=${{ github.run_id }}"
-      ],
+      "runs-on": "${{ matrix.runner }}",
       "timeout-minutes": 5,
       "steps": [
         {
@@ -77,26 +90,25 @@ export default githubWorkflow(auditCaches({
       ]
     },
     "build": {
-      "if": "${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request' }}",
+      "needs": ["pick-runner"],
+      "if": "${{ !cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request') }}",
       "name": "release-build (${{ matrix.target }})",
       "strategy": {
         "fail-fast": false,
         "matrix": {
           "include": [
             {
-              "runner": linuxRunnerProfile,
+              "runner": 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}',
               "target": "x86_64-unknown-linux-gnu"
             },
             {
-              "runner": macosRunnerProfile,
+              "runner": "macos-15",
               "target": "aarch64-apple-darwin"
             }
           ]
         }
       },
-      "runs-on": [
-        "${{ matrix.runner }};github.run-id=${{ github.run_id }}"
-      ],
+      "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1 && fromJSON(needs['pick-runner'].outputs.ci1)[0] || 'ci1-priority') || matrix.runner }}",
       "timeout-minutes": 90,
       "env": {
         "MACOSX_DEPLOYMENT_TARGET": "15.0",
@@ -111,7 +123,8 @@ export default githubWorkflow(auditCaches({
           }
         },
         {
-          "uses": "dtolnay/rust-toolchain@stable"
+          "uses": "dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067",
+          "with": { "toolchain": releaseRustVersion }
         },
         { name: 'Name the pinned compiler cache', run: `printf 'CI_ZIG_CACHE_DIR=%s/zig/0.15.2\\n' \"$RUNNER_TOOL_CACHE\" >> \"$GITHUB_ENV\"` },
         buildSnapshotRestore,
@@ -140,6 +153,15 @@ export default githubWorkflow(auditCaches({
           }
         },
         buildSnapshotPrepare,
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }).map(step => ({ ...step, if: "runner.os == 'Linux'" })),
+        {
+          name: 'Provide the pinned Linux host C compiler',
+          if: "runner.os == 'Linux'",
+          run: `set -euo pipefail
+compiler=$(nix build .#release-cc^out --no-link --print-out-paths)
+"$compiler/bin/cc" --version
+printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
+        },
         {
           "name": "Test installer",
           "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-smalltalk-test\npython3 scripts/release_notes_test.py\n"
@@ -166,7 +188,7 @@ export default githubWorkflow(auditCaches({
         "build",
         "installer"
       ],
-      "runs-on": linuxRunner,
+      "runs-on": "ubuntu-latest",
       "steps": [
         {
           "uses": "actions/checkout@v4",
@@ -204,7 +226,7 @@ export default githubWorkflow(auditCaches({
       "name": "release-publish",
       "if": "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
       "needs": "assemble",
-      "runs-on": linuxRunner,
+      "runs-on": "ubuntu-latest",
       "permissions": {
         "contents": "write"
       },
@@ -235,4 +257,4 @@ export default githubWorkflow(auditCaches({
       ]
     }
   }
-}, {"installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."}))
+}, {"pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))

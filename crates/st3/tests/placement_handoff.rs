@@ -333,10 +333,12 @@ impl RuntimeControl for Runtime {
         Ok(self.observations.lock().unwrap().get(id).cloned())
     }
     fn start(&self, member: &MemberSpec) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !*self.refuse_start.lock().unwrap(),
-            "fixture rejected launch"
-        );
+        if *self.refuse_start.lock().unwrap() {
+            return Err(st_runtime::StartRejected {
+                operation: member.tags.get("st3.start-operation").cloned(),
+            }
+            .into());
+        }
         let mut starts = self.starts.lock().unwrap();
         starts.push(member.clone());
         self.observations.lock().unwrap().insert(
@@ -350,6 +352,34 @@ impl RuntimeControl for Runtime {
             },
         );
         Ok(())
+    }
+    fn start_operation(
+        &self,
+        id: &str,
+        terminal: bool,
+        incarnation: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let matches = self
+            .observations
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|observed| {
+                observed.terminal == terminal
+                    && observed.incarnation_id.as_deref() == Some(incarnation)
+            });
+        if !matches {
+            return Ok(None);
+        }
+        Ok(self
+            .starts
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|member| member.runtime_id == id && member.terminal == terminal)
+            .and_then(|member| member.tags.get("st3.start-operation"))
+            .cloned())
     }
     fn stop(&self, id: &str, _: bool, incarnation: Option<&str>) -> anyhow::Result<()> {
         let mut observations = self.observations.lock().unwrap();
@@ -978,13 +1008,9 @@ agent "example/mover" {{
     )
     .unwrap();
     let result = cobalt
-        .cli(&[
-            "agents",
-            "apply",
-            path.to_str().unwrap(),
-            "--as",
-            "person/avery",
-        ])
+        .cli(&["apply", "--no-gate-check", path.to_str().unwrap(),
+        "--as",
+        "person/avery",])
         .await;
     assert!(
         result.status.success(),

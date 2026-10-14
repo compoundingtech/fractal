@@ -6,6 +6,8 @@ pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
 mod generated;
+/// W3C context injection, enabled by the optional `trace-propagation` feature.
+pub mod propagation;
 pub use contract::*;
 pub use generated::*;
 
@@ -436,6 +438,38 @@ impl CollectionStream {
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit, "actor":actor, "status":status})).await
     }
+    /// Follow a usage report for a named period; an omitted end follows current usage.
+    pub async fn subscribe_usage(
+        &mut self,
+        id: &str,
+        limit: usize,
+        since_ms: Option<u64>,
+        until_ms: Option<u64>,
+    ) -> Result<(), ClientError> {
+        let mut command =
+            serde_json::json!({"kind":"subscribe", "id":id, "collection":"usage", "limit":limit});
+        if let Some(since) = since_ms {
+            command["since_ms"] = serde_json::json!(since);
+        }
+        if let Some(until) = until_ms {
+            command["until_ms"] = serde_json::json!(until);
+        }
+        self.send(&command).await
+    }
+    /// Follow active devices for the session person or an explicitly authorized person.
+    pub async fn subscribe_devices(
+        &mut self,
+        id: &str,
+        limit: usize,
+        person: Option<&str>,
+    ) -> Result<(), ClientError> {
+        let mut command =
+            serde_json::json!({"kind":"subscribe", "id":id, "collection":"devices", "limit":limit});
+        if let Some(person) = person {
+            command["person"] = serde_json::json!(person);
+        }
+        self.send(&command).await
+    }
     /// Follow a terminal on this socket. `terminal.attach` returns the incarnation and the
     /// single-use capability; screens then arrive as [`CollectionEvent::Screen`], the latest
     /// only, and a `stale-fence` error ends only this subscription.
@@ -607,6 +641,8 @@ pub enum CollectionEvent {
         items: Vec<TimelineEntry>,
         /// Availability before the live window; absent on deltas means unchanged.
         has_more: Option<bool>,
+        /// The conversation header (contract §3) when this frame carries one.
+        header: Option<serde_json::Value>,
     },
     /// Subscribe again: the server could not bring this subscription up to date.
     /// `code` and `message` say why when a temporary failure caused it, such as a conversation
@@ -666,6 +702,7 @@ impl CollectionEvent {
                 replace: field(&frame, "replace")?,
                 items: field(&frame, "items")?,
                 has_more: field(&frame, "has_more")?,
+                header: frame.get("header").cloned(),
                 id,
             }),
             Some("resync") => Ok(Self::Resync {
@@ -853,6 +890,10 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::BlobQuotaExceeded => {
             "too many images were uploaded recently; try again later".into()
         }
+        // Already worded for the person who sent, naming the limit and what to do.
+        ErrorCode::MessageTooLarge
+        | ErrorCode::MessageStoreFull
+        | ErrorCode::LongMessageSignatureUnsupported => message.to_owned(),
         ErrorCode::BlobNotFound => "this image is not stored on this machine".into(),
         ErrorCode::BlobExpired => {
             "this image was removed after its retention window; the message text remains".into()
@@ -1270,8 +1311,8 @@ impl Client {
         self.list_internal_with_filters("agents", cursor, limit, history, &[("status", status)])
             .await
     }
-    /// The agents list as of this request: the daemon waits briefly for a roster at least as
-    /// new as the request instead of answering from the newest one it has published.
+    /// Fresh agents: request a refresh and wait briefly for its publication. Return the last
+    /// publication at once only after a failed latest attempt with no newer attempt in flight.
     pub async fn agents_list_fresh(
         &self,
         status: Option<&str>,
@@ -1285,6 +1326,90 @@ impl Client {
         }
         self.list_internal_with_filters("agents", cursor, limit, history, &filters)
             .await
+    }
+    /// The current work list's first page as of this request: the daemon waits briefly for a
+    /// publication at least as new as the request. While the list is not ready, or not yet that
+    /// fresh, and while the daemon is unreachable, it asks again within the client's daemon
+    /// wait, measured once from the first attempt across every attempt and pause. A zero wait
+    /// asks once. Only these answers are asked again; any other error returns at once.
+    pub async fn work_list_fresh(
+        &self,
+        actor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut query = vec!["fresh=true".to_owned()];
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if let Some(actor) = actor {
+            query.push(format!("actor={}", percent_encode(actor)));
+        }
+        let path = format!("/v1/client/work?{}", query.join("&"));
+        let started = tokio::time::Instant::now();
+        let deadline = started + self.outage_wait;
+        let mut pause = Duration::from_millis(100);
+        let mut announced = false;
+        loop {
+            let attempt = self.request_once::<Envelope<Page>>(
+                Method::GET,
+                &path,
+                None,
+                None,
+                "application/json",
+            );
+            let outcome = if self.outage_wait.is_zero() {
+                attempt.await
+            } else {
+                // No attempt outlasts what remains of the wait.
+                match tokio::time::timeout_at(deadline, attempt).await {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        return Err(ClientError::Transport(format!(
+                            "the work list did not answer within the daemon wait of {} ms",
+                            self.outage_wait.as_millis()
+                        )));
+                    }
+                }
+            };
+            let again = match &outcome {
+                Err(ClientError::Unreachable(_)) => true,
+                Err(ClientError::Api(_, _, envelope)) => {
+                    envelope.retryable
+                        && matches!(
+                            envelope
+                                .details
+                                .get("reason")
+                                .and_then(serde_json::Value::as_str),
+                            Some("work-list-not-ready" | "work-list-not-fresh")
+                        )
+                }
+                _ => false,
+            };
+            let now = tokio::time::Instant::now();
+            if !again || self.outage_wait.is_zero() || now >= deadline {
+                return match outcome {
+                    Err(ClientError::Unreachable(mut outage)) => {
+                        outage.waited = Some(now - started);
+                        Err(ClientError::Unreachable(outage))
+                    }
+                    outcome => outcome,
+                };
+            }
+            // An unreachable daemon is announced once, as for every other request.
+            if let Err(ClientError::Unreachable(outage)) = &outcome
+                && self.announce_outage_wait
+                && !announced
+            {
+                eprintln!(
+                    "st: {}; retrying for up to {}s",
+                    outage.summary(),
+                    self.outage_wait.as_secs()
+                );
+                announced = true;
+            }
+            tokio::time::sleep(pause.min(deadline - now)).await;
+            pause = (pause * 2).min(Duration::from_secs(1));
+        }
     }
     /// List only native sessions that are not already managed by st3.
     pub async fn sessions_list_native(
@@ -1512,6 +1637,9 @@ impl Client {
         .await
     }
 
+    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
+        self.get("/v1/client/notes").await
+    }
     pub async fn custom_subjects_list(
         &self,
         kind: Option<&str>,
@@ -1654,6 +1782,10 @@ impl Client {
     }
     pub async fn messages_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("messages", id).await
+    }
+    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {
+        self.get(&format!("/v1/client/message-bodies/{}", percent_encode(id)))
+            .await
     }
     pub async fn launches_list(
         &self,
@@ -2299,6 +2431,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn prompt_respond(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PromptRespondParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::prompt_respond(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn review_approve(
         &self,
         id: impl Into<String>,
@@ -2585,6 +2728,14 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    /// Local diagnostic acceptance; retry the identical disjoint intervals and report ID.
+    pub async fn observations_report(
+        &self,
+        report: &ObservationReport,
+    ) -> Result<ObservationResponse, ClientError> {
+        self.post("/v1/client/observations", report).await
+    }
+
     pub async fn pairing_begin(
         &self,
         request: &PairingBegin,
@@ -3249,6 +3400,7 @@ impl Client {
                         "x-st3-features",
                         "custom-subjects.v1, conversation-blocks.v1",
                     );
+                    request = propagation::inject_http(request);
                     if let Some(key) = key {
                         request = request.header("idempotency-key", key);
                     }
@@ -3424,6 +3576,9 @@ async fn unix_request(
     if body.is_some() {
         builder = builder.header("content-type", content_type);
     }
+    if let Some(headers) = builder.headers_mut() {
+        propagation::inject_headers(headers);
+    }
     let response = sender
         .send_request(
             builder
@@ -3480,6 +3635,7 @@ fn websocket_request(
     let mut request = url
         .into_client_request()
         .map_err(|error| ClientError::Protocol(error.to_string()))?;
+    propagation::inject_headers(request.headers_mut());
     request.headers_mut().insert(
         hyper::header::HeaderName::from_static("x-st3-features"),
         hyper::header::HeaderValue::from_static("custom-subjects.v1, conversation-blocks.v1"),
@@ -3881,6 +4037,29 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_long_message_reads_as_the_daemon_worded_it_with_its_limit() {
+        let text = "a message cannot be longer than 256 KiB; this one is 300 KiB.";
+        for code in [
+            ErrorCode::MessageTooLarge,
+            ErrorCode::MessageStoreFull,
+            ErrorCode::LongMessageSignatureUnsupported,
+        ] {
+            let error = api(code, text);
+            assert_eq!(error.plain(), text);
+            // A definite refusal: the person's text is kept and trying the same text again
+            // cannot succeed.
+            assert!(!error.is_transient());
+        }
+        // A daemon that predates the code answers `internal`, which the client does not
+        // reword into advice the person cannot follow.
+        assert!(
+            api(ErrorCode::Internal, "an inline message cannot exceed 4 KiB")
+                .plain()
+                .contains("4 KiB")
+        );
+    }
+
+    #[test]
     fn errors_read_as_sentences_and_say_whether_trying_again_may_help() {
         let stale = api(
             ErrorCode::StaleFence,
@@ -3962,8 +4141,6 @@ mod tests {
     }
 
     use super::*;
-    use futures_util::SinkExt as _;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[test]
     fn every_schema_error_code_is_typed_and_round_trips() {
@@ -4080,6 +4257,111 @@ mod tests {
         assert_eq!(body, b"12345678");
         assert!(append_bounded(&mut body, b"9", 8).is_err());
         assert_eq!(body, b"12345678");
+    }
+
+    /// A work-list error envelope with `reason` in its details.
+    fn work_list_error(reason: &str, retryable: bool) -> String {
+        format!(
+            r#"{{"api_version":"st3.client.v0","error_version":"st3.client.error.v0","request_id":"request/work","code":"internal","message":"{reason}","retryable":{retryable},"details":{{"reason":"{reason}"}}}}"#
+        )
+    }
+
+    /// Serve each scripted answer to one connection, after its delay, and return the request
+    /// lines in order. Unscripted connections get no answer.
+    fn scripted_server(
+        socket: &std::path::Path,
+        answers: Vec<(u64, u16, String)>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        tokio::spawn(async move {
+            let mut lines = Vec::new();
+            for (delay, status, body) in answers {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                lines.push(
+                    String::from_utf8_lossy(&request)
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+            lines
+        })
+    }
+
+    #[test]
+    fn a_fresh_work_list_retries_only_not_ready_and_not_fresh_within_one_daemon_wait() {
+        runtime().block_on(async {
+            let page = EMPTY_PAGE.replace("launch-children", "work").replace("resource-page", "page");
+            let directory = tempfile::tempdir().unwrap();
+            // Not ready, then not fresh, then rows: three requests, one answer.
+            let socket = directory.path().join("ready.sock");
+            let server = scripted_server(&socket, vec![
+                (0, 503, work_list_error("work-list-not-ready", true)),
+                (0, 503, work_list_error("work-list-not-fresh", true)),
+                (0, 200, page.clone()),
+            ]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(5), false);
+            client.work_list_fresh(Some("agent/garden/ash"), Some(5)).await.unwrap();
+            assert_eq!(server.await.unwrap(), vec!["GET /v1/client/work?fresh=true&limit=5&actor=agent/garden/ash HTTP/1.1"; 3]);
+            // A zero wait asks once and reports the refusal.
+            let socket = directory.path().join("zero.sock");
+            let server = scripted_server(&socket, vec![(0, 503, work_list_error("work-list-not-ready", true))]);
+            let error = Client::unix(&socket).work_list_fresh(None, None).await.unwrap_err();
+            assert!(matches!(&error, ClientError::Api(_, _, envelope) if envelope.details["reason"] == "work-list-not-ready"));
+            assert_eq!(server.await.unwrap().len(), 1);
+            // An ended list, or any other error, is never asked again.
+            for (status, body) in [(503, work_list_error("work-list-ended", false)), (500, work_list_error("other", true))] {
+                let socket = directory.path().join(format!("once-{status}.sock"));
+                let server = scripted_server(&socket, vec![(0, status, body)]);
+                let client = Client::unix(&socket).with_outage_wait(Duration::from_secs(5), false);
+                assert!(client.work_list_fresh(None, None).await.is_err());
+                assert_eq!(server.await.unwrap().len(), 1, "{status}");
+            }
+            // Never ready: the wait ends at its one deadline, pauses and attempts included.
+            let socket = directory.path().join("never.sock");
+            let server = scripted_server(&socket, vec![(150, 503, work_list_error("work-list-not-ready", true)); 40]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_millis(1_200), false);
+            let started = std::time::Instant::now();
+            let error = client.work_list_fresh(None, None).await.unwrap_err();
+            let waited = started.elapsed();
+            assert!(waited >= Duration::from_millis(1_100) && waited < Duration::from_millis(1_700), "{waited:?}");
+            assert!(matches!(&error, ClientError::Api(..) | ClientError::Transport(_)), "{error:?}");
+            server.abort();
+            // A slow answer is cut at the deadline, not at its own pace.
+            let socket = directory.path().join("slow.sock");
+            let server = scripted_server(&socket, vec![(5_000, 200, page.clone())]);
+            let client = Client::unix(&socket).with_outage_wait(Duration::from_millis(500), false);
+            let started = std::time::Instant::now();
+            let error = client.work_list_fresh(None, None).await.unwrap_err();
+            assert!(started.elapsed() < Duration::from_millis(1_000), "{:?}", started.elapsed());
+            assert!(matches!(&error, ClientError::Transport(message) if message.contains("daemon wait")), "{error:?}");
+            server.abort();
+            // An unreachable daemon is retried within the same wait, and says how long it waited.
+            let client = Client::unix(directory.path().join("absent.sock")).with_outage_wait(Duration::from_millis(400), false);
+            let started = std::time::Instant::now();
+            let error = client.work_list_fresh(None, None).await.unwrap_err();
+            assert!(started.elapsed() >= Duration::from_millis(350) && started.elapsed() < Duration::from_millis(900));
+            assert!(matches!(&error, ClientError::Unreachable(outage) if outage.waited.is_some()), "{error:?}");
+        });
     }
 
     #[test]

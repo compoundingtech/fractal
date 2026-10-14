@@ -112,6 +112,76 @@ impl Suspension {
     }
 }
 
+/// Describe a publication against its running launch, or its existing suspension lineage.
+/// Manual deferral is available only to owned-set publication; this introduces no policy.
+pub(crate) fn publication_action(
+    store: &Store,
+    next: &crate::model::DesiredSubject,
+    owned: bool,
+    previous: impl FnOnce() -> Result<Option<crate::model::MemberSpec>>,
+) -> Result<Option<crate::model::PlannedAction>> {
+    if !matches!(next.kind.as_str(), "agent" | "stop") {
+        return Ok(None);
+    }
+    let Some(hold) = current(store, &next.subject)?.filter(Suspension::holds_seat) else {
+        return store.publication_action(next);
+    };
+    let suspension = hold
+        .suspend_operation_id
+        .as_deref()
+        .unwrap_or(&hold.operation_id);
+    // A stop does not compare launches, including when the prior declaration is legacy.
+    if next.kind == "stop" {
+        return Ok(Some(crate::model::PlannedAction {
+            subject: next.subject.clone(),
+            action: "stop".into(),
+            reason: format!("suspension {suspension}: the explicit stop would discard the hold"),
+        }));
+    }
+    let pending = crate::rollout::pending_manual_launch(store, &next.subject)?;
+    // Only a held agent publication needs its previous launch. Do not impose full-member
+    // deserialization on ordinary previews of legacy declarations without a suspension.
+    let previous = if pending.is_none() { previous()? } else { None };
+    let previous_member = pending
+        .as_ref()
+        .map(|(_, member)| member)
+        .or(previous.as_ref());
+    let same_launch = previous_member
+        .zip(next.member.as_ref())
+        .is_some_and(|(previous, next)| next.launch_changes(previous).is_empty());
+    let manual = owned
+        && next.kind == "agent"
+        && crate::rollout::manual(next)
+        && store
+            .rollout(&next.subject)?
+            .is_none_or(|operation| operation.phase == "superseded");
+    let (action, reason) = if same_launch || manual {
+        (
+            "hold-kept",
+            format!(
+                "suspension {suspension}: hold kept; {}",
+                if manual && !same_launch {
+                    "launch change stays pending until explicit rollout after resume"
+                } else {
+                    "declared launch unchanged; environment edits take effect only on explicit resume"
+                }
+            ),
+        )
+    } else {
+        (
+            "start-suspended",
+            format!(
+                "suspension {suspension}: would start a suspended agent; the declared launch changed"
+            ),
+        )
+    };
+    Ok(Some(crate::model::PlannedAction {
+        subject: next.subject.clone(),
+        action: action.into(),
+        reason,
+    }))
+}
+
 fn field<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
     claim
         .body
@@ -195,8 +265,8 @@ fn suspend_state(store: &Store, request: &ClaimRecord) -> Result<Suspension> {
 }
 
 /// Where the seat's latest suspend or resume stands, or `None` when it has none that still
-/// applies. A suspension belongs to the launch it was taken under: a stop, or a declaration that
-/// changes how the seat launches, ends it, and the seat then starts by the usual rules.
+/// applies. A stop or an applied launch change ends it. A pending manual publication still
+/// selects the incumbent launch for suspension and resume.
 pub fn current(store: &Store, subject: &str) -> Result<Option<Suspension>> {
     let requests = requests(store, subject)?;
     let Some(request) = requests.last() else {
@@ -205,7 +275,7 @@ pub fn current(store: &Store, subject: &str) -> Result<Option<Suspension>> {
     if store.selected_desired_kind(subject)?.as_deref() != Some("agent") {
         return Ok(None);
     }
-    let lineage = store.launch_lineage(subject)?;
+    let lineage = store.suspension_lineage(subject)?;
     let mut moved = false;
     if action(request) == Some("resume") && field(request, "host").is_some() {
         for token in &lineage {
@@ -215,7 +285,17 @@ pub fn current(store: &Store, subject: &str) -> Result<Option<Suspension>> {
             }) { moved = true; break; }
         }
     }
-    if !moved && !evidence(request, 0).is_some_and(|token| lineage.iter().any(|item| item == token)) {
+    let mut applies = evidence(request, 0)
+        .is_some_and(|token| lineage.iter().any(|item| item == token));
+    if !applies
+        && let Some(token) = evidence(request, 0)
+        && let Some((incumbent, _)) = crate::rollout::pending_manual_launch(store, subject)?
+    {
+        let incumbent_lineage = store.suspension_lineage_from(&incumbent)?;
+        let request_lineage = store.suspension_lineage_from(token)?;
+        applies = request_lineage.iter().any(|token| incumbent_lineage.contains(token));
+    }
+    if !moved && !applies {
         return Ok(None);
     }
     if action(request) == Some("suspend") {
