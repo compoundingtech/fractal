@@ -10260,7 +10260,7 @@ impl Store {
                 return Err(St3Error::new("invalid-restart-policy", "deferred apply never interrupts a busy seat at its deadline"));
             }
             let mut checked_hosts = BTreeSet::<String>::new();
-            for desired in intent.subjects.values().filter(|d| d.kind == "agent") {
+            for desired in intent.subjects.values().filter(|d| d.kind == "agent" && d.owner_run.is_none()) {
                 let Some(member) = &desired.member else { continue };
                 let previous_host: Option<String> = self.readers.get().query_row(
                     "SELECT json_extract(member,'$.host') FROM desired WHERE subject=?1",
