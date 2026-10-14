@@ -102,8 +102,11 @@ fn status(store: &Store, gate: &DesiredSubject) -> String {
     actual_field(&actual, "status").unwrap().as_str().unwrap().to_owned()
 }
 
-fn diagnostic(store: &Store, gate: &DesiredSubject) -> bool {
-    store.member_reconcile_fault(&gate.subject, None).unwrap().is_some()
+fn reported_missing(store: &Store, gate: &DesiredSubject) -> bool {
+    // Upstream reports absence through runtime.observed; no extra member fault is required.
+    store.latest_actual_value(&gate.subject).unwrap().is_some_and(|actual| {
+        actual_field(&actual, "status").and_then(Value::as_str) == Some("vanished")
+    })
 }
 
 #[test]
@@ -115,13 +118,11 @@ fn a_missing_starting_round_gate_is_reported_after_daemon_restart_without_relaun
     );
     restarted.reconcile_once().unwrap();
     assert_ne!(status(&store, &gate), "starting", "a missing runtime must not remain silently starting");
-    assert!(diagnostic(&store, &gate));
+    assert!(reported_missing(&store, &gate));
     assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
-    let fault = store.member_reconcile_fault(&gate.subject, None).unwrap().unwrap();
-    assert!(!fault.is_empty());
     restarted.reconcile_once().unwrap();
     assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
-    assert_eq!(store.member_reconcile_fault(&gate.subject, None).unwrap().as_deref(), Some(fault.as_str()));
+    assert!(reported_missing(&store, &gate));
 }
 
 #[test]
@@ -140,7 +141,7 @@ fn a_live_starting_round_gate_is_adopted_after_daemon_restart() {
     );
     restarted.reconcile_once().unwrap();
     assert_eq!(status(&store, &gate), "running");
-    assert!(!diagnostic(&store, &gate));
+    assert!(!reported_missing(&store, &gate));
     assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
     assert!(runtime.stops.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
     assert!(runtime.kills.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
@@ -161,10 +162,12 @@ fn a_missing_starting_round_gate_uses_its_declared_restart_policy() {
 #[test]
 fn a_manual_stop_of_a_missing_starting_round_gate_survives_daemon_restart() {
     let (store, _, gate) = fixture("always");
-    let stop = crate::graph::parse_internal_intent(
-        &format!("version 2\nstop {:?}\n", gate.subject), "node",
+    let source = format!("version 2\nstop {:?}\n", gate.subject);
+    let stop = crate::graph::parse_internal_intent(&source, "node").unwrap();
+    let preview = store.mission(
+        &stop, crate::model::IntentInput { kdl: source, source_name: None },
     ).unwrap();
-    store.apply(&stop, &BTreeMap::new(), "gate-recovery-stop").unwrap();
+    store.apply(&stop, &preview.subject_tokens, "gate-recovery-stop").unwrap();
     let runtime = Arc::new(FakeRuntime::default());
     let restarted = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
@@ -172,7 +175,7 @@ fn a_manual_stop_of_a_missing_starting_round_gate_survives_daemon_restart() {
     for _ in 0..3 { restarted.reconcile_once().unwrap(); }
     assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
     assert!(matches!(status(&store, &gate).as_str(), "stopped" | "absent"));
-    assert!(!diagnostic(&store, &gate));
+    assert!(!reported_missing(&store, &gate));
 }
 
 struct UnverifiedRuntime(FakeRuntime, Option<Arc<std::sync::Barrier>>);
@@ -201,7 +204,7 @@ impl RuntimeControl for UnverifiedRuntime {
 }
 
 #[test]
-fn a_finished_unverified_round_gate_start_keeps_admission_and_reports_a_durable_fault() {
+fn a_finished_unverified_round_gate_start_keeps_admission_and_reports_an_unknown_launch() {
     let (store, _, gate) = fixture_with_state("never", true, false);
     let runtime = Arc::new(UnverifiedRuntime(FakeRuntime::default(), None));
     let reconciler = Reconciler::new(
@@ -212,10 +215,10 @@ fn a_finished_unverified_round_gate_start_keeps_admission_and_reports_a_durable_
     assert!(operation.finished);
     assert!(!operation.applied);
     reconciler.reconcile_once().unwrap();
-    let fault = store.member_reconcile_fault(&gate.subject, None).unwrap().unwrap();
-    assert!(fault.contains(&operation.id));
-    assert!(!fault.is_empty());
-    assert_eq!(status(&store, &gate), "starting");
+    let report = operation.result.as_ref().expect("a finished launch must have its durable report");
+    assert_eq!(report["verification"], "launch-accepted-unverified");
+    assert_eq!(report["phase"], "unknown");
+    assert_eq!(report["operation_id"], operation.id);
     // Restart reconciliation preserves the unresolved admission rather than duplicating it.
     let restarted = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
@@ -223,7 +226,7 @@ fn a_finished_unverified_round_gate_start_keeps_admission_and_reports_a_durable_
     restarted.reconcile_once().unwrap();
     assert_eq!(store.runtime_start_for(&gate.subject).unwrap().unwrap().id, operation.id);
     assert_eq!(runtime.0.starts.lock().unwrap_or_else(PoisonError::into_inner).len(), 1);
-    assert!(store.member_reconcile_fault(&gate.subject, None).unwrap().is_some());
+    assert!(!store.runtime_start_for(&gate.subject).unwrap().unwrap().applied);
 }
 
 #[test]
@@ -242,8 +245,8 @@ fn a_live_in_flight_round_gate_start_is_not_retired_or_duplicated() {
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
     );
     let result = restarted.reconcile_once();
-    let during_start = status(&store, &gate);
-    let reported_missing = diagnostic(&store, &gate);
+    let during_start = store.runtime_start_for(&gate.subject).unwrap();
+    let reported_missing = reported_missing(&store, &gate);
     let fault = store.member_reconcile_fault(&gate.subject, None).unwrap();
     barrier.wait();
     // Await the same worker completion path, never a sleep or a second launcher.
@@ -254,7 +257,7 @@ fn a_live_in_flight_round_gate_start_is_not_retired_or_duplicated() {
     }
     drop(live);
     result.unwrap();
-    assert_eq!(during_start, "starting");
+    assert!(during_start.is_some_and(|pending| pending.id == operation.id && !pending.finished));
     assert!(!reported_missing);
     assert!(fault.is_none());
     assert_eq!(runtime.0.starts.lock().unwrap_or_else(PoisonError::into_inner).len(), 1);
@@ -263,14 +266,14 @@ fn a_live_in_flight_round_gate_start_is_not_retired_or_duplicated() {
 }
 
 #[test]
-fn an_explicit_restart_recovers_a_missing_gate_once_and_clears_its_fault() {
+fn an_explicit_restart_recovers_a_reported_missing_gate_once() {
     let (store, _, gate) = fixture("never");
     let runtime = Arc::new(FakeRuntime::default());
     let reconciler = Reconciler::new(
         store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
     );
     reconciler.reconcile_once().unwrap();
-    assert!(store.member_reconcile_fault(&gate.subject, None).unwrap().is_some());
+    assert!(reported_missing(&store, &gate));
     let actual = store.latest_actual_value(&gate.subject).unwrap().unwrap();
     let incarnation = actual_field(&actual, "incarnation_id").cloned().unwrap();
     store.append_claim(&ClaimInput {
@@ -304,6 +307,7 @@ fn an_explicit_restart_recovers_a_missing_gate_once_and_clears_its_fault() {
     );
     for _ in 0..3 { restarted.reconcile_once().unwrap(); }
     assert_eq!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).len(), 1);
+    assert_eq!(status(&store, &gate), "running");
     assert!(store.member_reconcile_fault(&gate.subject, None).unwrap().is_none());
 }
 
@@ -329,9 +333,7 @@ fn a_starting_round_gate_without_launch_lineage_or_ready_work_reports_instead_of
     );
     for _ in 0..3 { restarted.reconcile_once().unwrap(); }
     assert_ne!(status(&store, &gate), "starting", "a missing runtime must not remain silently starting");
-    assert!(diagnostic(&store, &gate));
-    let fault = store.member_reconcile_fault(&gate.subject, None).unwrap().unwrap();
-    assert!(!fault.is_empty());
+    assert!(reported_missing(&store, &gate));
     assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
     // Ready work for the selected revision now permits the ordinary revision-change launch.
     let owner = store.mission_run(gate.owner_run.as_deref().unwrap()).unwrap().unwrap();
@@ -373,9 +375,8 @@ fn a_completed_round_terminalizes_its_missing_starting_gate_without_restarting_i
         "a completed owner must not leave an unstarted gate in the active roster",
     );
     assert!(
-        store.desired_subjects_named(std::slice::from_ref(&gate.subject)).unwrap()
-            .iter().all(|desired| desired.kind != "agent"),
-        "the completed round cannot retain a live gate declaration",
+        store.owned_desired_guard(&gate).is_err(),
+        "a completed owner must deny launch even if its declaration is retained as history",
     );
     assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
 }
