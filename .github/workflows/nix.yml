@@ -5,7 +5,7 @@ name: Nix
 
 on:
   push:
-    tags: ['**']
+    tags: ["**"]
   schedule:
     - cron: 17 1 * * *
   workflow_dispatch: {}
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: 'nix-${{ github.ref }}'
+  group: "nix-${{ github.ref }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -47,6 +47,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: nix-release-proof
-          path: '${{ runner.temp }}/nix-release-build.json'
+          path: "${{ runner.temp }}/nix-release-build.json"
           if-no-files-found: error
           retention-days: 7

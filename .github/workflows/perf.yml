@@ -122,17 +122,17 @@ jobs:
     runs-on:
       [
         nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
-        'namespace-features:github.run-id=${{ github.run_id }}',
+        "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 30
     defaults:
       run:
         shell: bash
     env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-      SCCACHE_IDLE_TIMEOUT: '0'
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_IDLE_TIMEOUT: "0"
       PERF_PR_NUMBER: ${{ github.event.pull_request.number }}
       PERF_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
     steps:
@@ -189,7 +189,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PERF_BUILD_SNAPSHOT }}
-          path: '${{ runner.temp }}/perf-snapshots/build.tar.zst'
+          path: "${{ runner.temp }}/perf-snapshots/build.tar.zst"
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
@@ -199,7 +199,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PERF_STORES_SNAPSHOT }}
-          path: '${{ runner.temp }}/perf-snapshots/stores.tar.zst'
+          path: "${{ runner.temp }}/perf-snapshots/stores.tar.zst"
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
@@ -209,7 +209,7 @@ jobs:
         if: always()
         with:
           name: perf-load-logs
-          path: '${{ runner.temp }}/perf/'
+          path: "${{ runner.temp }}/perf/"
           retention-days: 30
           if-no-files-found: ignore
           overwrite: true
