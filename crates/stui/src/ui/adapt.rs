@@ -22,6 +22,10 @@ pub struct Extras {
     pub bodies: BTreeMap<String, (String, Option<String>, String)>,
     pub live: bool,
     pub offline: Option<String>,
+    /// When st last stopped answering, kept until it answers again. A restart of st (a deploy,
+    /// an update) is a gap of seconds, so the screen says it is reconnecting for the first
+    /// `OFFLINE_GRACE` and calls the link offline only after that. Unset means long ago.
+    pub offline_since: Option<std::time::Instant>,
     /// Why the live stream to st is being replaced while st itself answers.
     pub degraded: Option<String>,
     /// Why a window has not loaded though st was asked (its source is not ready, or refused),
@@ -127,13 +131,19 @@ fn missions(model: &Model) -> Vec<Mission> {
     )
 }
 
+/// How long st may stay silent before the screen calls the link offline, not reconnecting.
+pub const OFFLINE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
-    let link = if extras.offline.is_some() {
+    let restarting = extras
+        .offline_since
+        .is_some_and(|since| since.elapsed() < OFFLINE_GRACE);
+    let link = if extras.offline.is_some() && !restarting {
         Link::Offline(match &model.last_connected {
             Some(at) => format!("Last connected at {at} · reconnecting · r retry now"),
             None => "No member reachable · reconnecting · r retry now".into(),
         })
-    } else if extras.live {
+    } else if extras.live && extras.offline.is_none() {
         Link::Live
     } else {
         Link::Connecting
@@ -1819,6 +1829,25 @@ mod tests {
         let shown = world(&model, "person/avery", &Extras::default());
         assert!(shown.behind.is_empty());
         assert_eq!(shown.diverged, vec!["harbor".to_owned()]);
+    }
+
+    #[test]
+    fn st_silent_for_seconds_is_reconnecting_and_offline_only_after_the_grace() {
+        let model = Model::default();
+        let silent = |ago: std::time::Duration| Extras {
+            offline: Some("st stopped answering".into()),
+            offline_since: Some(std::time::Instant::now() - ago),
+            ..Extras::default()
+        };
+        // A restart for an update: seconds, not offline.
+        assert!(matches!(
+            world(&model, "person/avery", &silent(std::time::Duration::from_secs(5))).link,
+            Link::Connecting
+        ));
+        assert!(matches!(
+            world(&model, "person/avery", &silent(OFFLINE_GRACE + std::time::Duration::from_secs(1))).link,
+            Link::Offline(_)
+        ));
     }
 
     #[test]
