@@ -24,20 +24,16 @@ use tokio::sync::{Notify, watch};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
 fn state(root: &Path, name: &str) -> AppState {
-    AppState {
-        store: Arc::new(Store::open_memory(name).unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: name.into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: st3::model::PlannerSpec::default(),
-    }
+    AppState { store: Arc::new(Store::open_memory(name).unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: name.into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: root.join("unused-pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+    planner_default: st3::model::PlannerSpec::default(), }
 }
 
 fn publish_terminal(state: &AppState, incarnation: &str) {

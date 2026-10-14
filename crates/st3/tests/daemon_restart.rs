@@ -31,6 +31,13 @@ struct Daemon {
 
 impl Daemon {
     fn new(root: &Path) -> Self {
+        // These APIs run in process. Subprocess daemon fixtures own their stdout log.
+        let log = std::fs::File::create(root.join("daemon.log")).unwrap();
+        let _ = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_env_filter("st3=debug")
+            .with_writer(std::sync::Mutex::new(log))
+            .try_init();
         Self {
             root: root.to_path_buf(),
             socket: root.join("st3.sock"),
@@ -410,7 +417,7 @@ async fn native_exit_stops_provider_and_driver_with_daemon_down() {
     }
     // Exercise both transient Unix-socket errors that previously retried forever.
     for missing_socket in [false, true] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -462,7 +469,7 @@ async fn native_exit_retries_past_stop_budget_without_signal_and_reports_on_reco
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -510,7 +517,7 @@ async fn native_exit_signal_after_provider_end_bounds_an_in_flight_request() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let mut driver = native_exit_driver(root, &mut daemon).await;
@@ -597,7 +604,7 @@ async fn a_quiet_idle_seat_ages_stale_and_recovers_new_evidence_after_daemon_res
     use sha2::{Digest as _, Sha256};
     use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
 
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/quiet-cedar";
     let incarnation = "quiet-cedar:one";
@@ -749,7 +756,7 @@ async fn title_fallback_converts_a_slash_seat_id_to_its_dot_pty_id() {
 async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/title-cedar";
     let mut daemon = Daemon::new(root);
@@ -835,7 +842,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-claude";
     let incarnation = "4242:2026-09-27T12:00:00.000Z";
@@ -963,7 +970,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-omp";
     let incarnation = "4343:2026-09-27T12:00:00.000Z";
@@ -1057,7 +1064,7 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/restart-todo";
     let mut daemon = Daemon::new(root);
@@ -1167,7 +1174,7 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
         return;
     }
     use sha2::Digest as _;
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/drain-accounts";
     let incarnation = "account-runtime";
@@ -1235,7 +1242,7 @@ async fn an_omp_ask_clears_without_poisoning_the_next_incarnation() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/human-omp";
     let incarnation = "human-1";
@@ -1323,7 +1330,7 @@ fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let socket = root.path().join("st3.sock");
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     let started = Instant::now();
@@ -1351,7 +1358,7 @@ async fn a_cli_command_waits_out_a_daemon_restart() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.start().await;
@@ -1390,7 +1397,7 @@ async fn a_cli_command_tries_a_bound_listener_before_refusing_startup() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     let startup = st3::startup::Startup::begin(&daemon.socket).unwrap();
@@ -1427,7 +1434,7 @@ async fn doctor_reports_starting_without_failing_an_answering_api() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     fn response(value: Value) -> axum::Json<st3::model::ApiResponse<Value>> {
@@ -1506,7 +1513,7 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
     }
     for driver in ["omp", "pi"] {
         for transport in ["poll", "push"] {
-            let root = tempfile::tempdir().unwrap();
+            let root = st3::test_support::evidence_tempdir();
             let root = root.path();
             let seat = "agent/receipt-worker";
             let graph = root.join("graph.db");
@@ -1666,7 +1673,7 @@ async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
     }
     for driver in ["omp", "pi"] {
         for transport in ["push", "poll"] {
-            let root = tempfile::tempdir().unwrap();
+            let root = st3::test_support::evidence_tempdir();
             let root = root.path();
             let seat = "agent/replay-worker";
             let mut daemon = Daemon::new(root);
@@ -1902,7 +1909,7 @@ impl ClaudeChannelFixture {
 /// Force a native activity publication to commit while the real channel's startup
 /// claim is in flight. This is a publisher/Store ordering control, not a hook eval.
 async fn delayed_channel_initialization_preserves_activity(activity: &str, legacy: bool) {
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2102,7 +2109,7 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
 async fn channel_readiness_without_start_hook(native_activity: Option<bool>, late: bool) {
     use sha2::{Digest as _, Sha256};
     use st_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/hookless-cedar";
     let incarnation = "hookless-cedar:one";
@@ -2292,7 +2299,7 @@ async fn initialized_claude_channel_preserves_legacy_readiness_key() {
 }
 
 async fn initialized_channel_still_rejects_a_foreign_binding(replace_token: bool) {
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2362,7 +2369,7 @@ async fn claude_mcp_rejects_resumed_incarnation_mismatch_before_binding() {
         return;
     }
     use std::sync::atomic::{AtomicBool, Ordering};
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2432,7 +2439,7 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2564,7 +2571,7 @@ async fn claude_mcp_answers_during_binding_retries_and_eof_cancels_attachment() 
         return;
     }
     use std::sync::atomic::{AtomicBool, Ordering};
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     declare_claude(&daemon, "agent/quartz");
@@ -2656,7 +2663,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
     // The second POST either succeeds, or remains pending until EOF cancels the child.
     // Exercise the actual channel loop, rather than manually calling the POST twice.
     for recover in [true, false] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         declare_claude(&daemon, "agent/quartz");
@@ -2789,7 +2796,7 @@ async fn claude_idle_staged_mail_recovers_startup_binding_and_both_native_receip
         return;
     }
     for mid_turn in [false, true] {
-        let root = tempfile::tempdir().unwrap();
+        let root = st3::test_support::evidence_tempdir();
         let root = root.path();
         let mut daemon = Daemon::new(root);
         daemon.observe_running("agent/quartz", "first");
@@ -2880,7 +2887,7 @@ async fn claude_staged_mail_receipted_after_restart_is_not_injected_on_second_re
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "first");
@@ -2951,7 +2958,7 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "previous");
@@ -3035,7 +3042,7 @@ async fn claude_delivered_unread_mail_from_an_old_ledger_is_held_in_a_fresh_sess
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let root = root.path();
     let mut daemon = Daemon::new(root);
     daemon.observe_running("agent/quartz", "replacement");

@@ -34,7 +34,7 @@ an immutable x86_64 Linux candidate archive with its expected SHA256. Copy the
 candidate bytes to hetz2 through an authorized transport or download its pinned
 URL; paths under another host's /var/tmp are not shared. Use the same archive
 for both releases. Native Ubuntu22 requires an archive built for its libc
-baseline; the host-linked Ubuntu24-only expert/cache proof archives do not
+baseline; the host-linked Ubuntu24-only assistant/cache proof archives do not
 establish that compatibility. Neither provider credentials nor a host Smalltalk
 store are needed for the setup/service/UI pass.
 

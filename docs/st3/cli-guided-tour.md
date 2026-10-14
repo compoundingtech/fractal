@@ -259,6 +259,8 @@ st agents new example --host HOST --print-kdl
 st agents suspend --help
 st agents resume --help
 st agents acknowledge-seed --help
+st agents handoff --help
+st agents handoff show AGENT
 st machines --help
 st machines
 ```
@@ -283,6 +285,10 @@ show`, and that `agents resume` reports the same session. `agents resume --host 
 or omp snapshot to another fleet host under the same seat identity. The target needs the same
 absolute workspace path, unoccupied; non-Git workspaces refuse suspend. Follow `suspension.phase`
 and the typed refusal reason in `agents show`.
+
+`agents handoff show AGENT` prints the document a seat left for its next session (see
+[seat continuity](seat-continuity.md)); it errors with `has written no handoff` for a seat that wrote
+none. `agents handoff write` is the seat's own mutation: run it only as that seat.
 
 `agents new --print-kdl` shows the seat declaration without applying it. Check that its workspace is
 a new directory below that host's home and that the harness defaults match the fleet's existing

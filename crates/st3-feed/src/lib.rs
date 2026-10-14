@@ -1456,21 +1456,17 @@ mod tests {
     }
 
     pub(super) fn test_state(root: &Path) -> st3::api::AppState {
-        st3::api::AppState {
-            // Socket reads overlap graph writes, as on a real WAL-backed member.
-            store: Arc::new(st3::store::Store::open(&root.join("graph.db"), "stui-feed").unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: "stui-feed".into(),
-            state_dir: root.to_path_buf(),
-            pty_root: root.join("pty"),
-            pty_binary: root.join("unused-pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: st3::model::PlannerSpec::default(),
-        }
+        st3::api::AppState { // Socket reads overlap graph writes, as on a real WAL-backed member.
+        store: Arc::new(st3::store::Store::open(&root.join("graph.db"), "stui-feed").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "stui-feed".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(), client_relay: None, harness_question_sink: None, native_session_home: None,
+        planner_default: st3::model::PlannerSpec::default(), }
     }
 
     pub(super) async fn next_window(updates: &mpsc::Receiver<Update>, wanted: Window) -> Vec<Resource> {

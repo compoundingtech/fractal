@@ -71,7 +71,7 @@ fn a_fixture_listener_ignores_the_callers_host_seat_ancestry() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     std::fs::create_dir(&home).unwrap();
     std::fs::write(home.join(".bash_profile"), format!("export PATH='{}'\n", std::env::var("PATH").unwrap())).unwrap();
@@ -108,7 +108,7 @@ fn client_without_runtime_dir_reaches_daemon_with_different_socket() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     // The service has no PATH; its login shell must provide one before socket discovery.
@@ -144,7 +144,7 @@ fn bare_service_environment_loads_shell_path_and_rechecks_credentials() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -220,7 +220,7 @@ fn doctor_reports_missing_build_tools_and_whether_a_small_crate_links() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -289,7 +289,7 @@ fn a_login_shell_too_slow_for_the_first_capture_still_lets_the_daemon_start() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("orchid-bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -347,7 +347,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
     if st3::test_support::supervise_test() { return; }
     use st3::sekrets::protocol::{self, CallerView, Reply, Request};
     use base64::Engine as _;
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -419,7 +419,7 @@ fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status()
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     for identity in [
         None,
         Some("ST_AGENT"),
@@ -476,7 +476,7 @@ fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
     if st3::test_support::supervise_test() {
         return;
     }
-    let root = tempfile::tempdir().unwrap();
+    let root = st3::test_support::evidence_tempdir();
     let home = root.path().join("home");
     let bin = home.join("studio-bin");
     std::fs::create_dir_all(&bin).unwrap();

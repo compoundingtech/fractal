@@ -641,3 +641,125 @@ fn summary_gate_does_not_reintroduce_an_out_of_grace_native_mission() {
         })
         .unwrap();
 }
+
+/// The machines the published summary counts are read again only when a claim can change them,
+/// and what it keeps always counts as a fresh read at the same cut does.
+#[test]
+fn published_machines_are_reused_until_a_claim_can_change_them() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let session = ClientSession::local(None).unwrap();
+    let peer = crate::store::Store::open_memory("owner-node").unwrap();
+    let claim = |store: &crate::store::Store, subject: &str, kind: &str, actor: Option<&str>, fields: Value| {
+        store
+            .append_claim(&crate::model::ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: actor.map(Into::into),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    };
+    let runtime = |store: &crate::store::Store, name: &str, status: &str| {
+        claim(
+            store,
+            &format!("agent/{name}"),
+            "runtime.observed",
+            None,
+            json!({"status":status,"runtime_id":name,"incarnation_id":"one"}),
+        );
+    };
+    let import = || {
+        state
+            .store
+            .import_replication("owner-node", &peer.export_replication(0).unwrap())
+            .unwrap();
+    };
+    // What the counts read of each machine.
+    let counted = |machines: &[Value]| {
+        machines
+            .iter()
+            .map(|machine| {
+                (machine["host_id"].clone(), machine["state"].clone(), machine["transports"].clone())
+            })
+            .collect::<Vec<_>>()
+    };
+    let read = |period: u128| {
+        let (generation, _) = state.store.summary_selections(u64::MAX, false);
+        state
+            .store
+            .read_snapshot(|index| {
+                let snapshot = client_snapshot_at(&state, index);
+                let machines = published_machines(&state, generation, &session, &snapshot, period)?;
+                let (fresh, runtimes) = machine_summary_resources_and_hosts(&state, &snapshot, &session)?;
+                assert_eq!(counted(&machines), counted(&fresh));
+                assert_eq!(*state.store.summary_machines().unwrap().runtimes, runtimes);
+                Ok((machines, runtimes))
+            })
+            .unwrap()
+    };
+    let hosts = |machines: &[Value]| machines.len();
+    runtime(&state.store, "alder", "running");
+    let (first, runtimes) = read(0);
+    assert_eq!(runtimes.keys().collect::<Vec<_>>(), ["agent/alder"]);
+
+    // A runtime's harness reports, its usage, the messages it is sent and its observations on the
+    // same host change no machine.
+    claim(
+        &state.store,
+        "agent/alder",
+        "harness.observed",
+        Some("agent/alder"),
+        json!({"state":"working","incarnation_id":"one","driver":"claude"}),
+    );
+    claim(
+        &state.store,
+        "agent/alder",
+        "harness.usage",
+        Some("agent/alder"),
+        json!({"driver":"codex","incarnation_id":"one","semantics":"response","total_tokens":7}),
+    );
+    claim(
+        &state.store,
+        "message/seed-note",
+        "message.sent",
+        Some("person/robin"),
+        json!({"from":"person/robin","to":"agent/alder","content":"A note","status":"sent"}),
+    );
+    assert!(Arc::ptr_eq(&first, &read(0).0));
+    runtime(&state.store, "alder", "working");
+    assert!(Arc::ptr_eq(&first, &read(0).0));
+
+    // Nor does a runtime that starts on a host that already runs one.
+    runtime(&state.store, "birch", "running");
+    let (second, runtimes) = read(0);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(runtimes.keys().collect::<Vec<_>>(), ["agent/alder", "agent/birch"]);
+
+    // A runtime on another host, a host's status and the clock are read again.
+    runtime(&peer, "cypress", "running");
+    import();
+    let (third, runtimes) = read(0);
+    assert!(!Arc::ptr_eq(&second, &third));
+    assert_eq!(hosts(&third), hosts(&second) + 1);
+    assert_eq!(runtimes.len(), 3);
+    claim(&state.store, "host/cedar", "transport.observed", None, json!({"status":"up"}));
+    let (fourth, _) = read(0);
+    assert!(!Arc::ptr_eq(&third, &fourth));
+    let (fifth, _) = read(1);
+    assert!(!Arc::ptr_eq(&fourth, &fifth));
+
+    // A runtime that stops is no longer current. Its host stays while it runs another.
+    runtime(&state.store, "birch", "stopped");
+    let (sixth, runtimes) = read(1);
+    assert!(Arc::ptr_eq(&fifth, &sixth));
+    assert!(!runtimes.contains_key("agent/birch"));
+    runtime(&peer, "cypress", "stopped");
+    import();
+    let (seventh, runtimes) = read(1);
+    assert!(!Arc::ptr_eq(&sixth, &seventh));
+    assert_eq!(runtimes.keys().collect::<Vec<_>>(), ["agent/alder"]);
+}
