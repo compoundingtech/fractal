@@ -74,6 +74,8 @@ mod message_bodies;
 mod client_adapters;
 pub mod client_presence;
 pub mod client_v0;
+#[cfg(feature = "push-registration")]
+pub mod client_push_registration;
 mod custom;
 use crate::delivery_presence;
 pub mod agent_harness;
@@ -489,6 +491,8 @@ pub fn fabric_router_with(state: AppState, families: &[RouteFamily]) -> Router {
 
 pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary, families: &[RouteFamily]) -> Router {
     crate::slo::install();
+    #[cfg(feature = "push-registration")]
+    client_push_registration::start_cleanup(state.clone());
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/harnesses", get(operations::available_harnesses))
@@ -810,6 +814,13 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(host_agent_workspace),
         );
     let app = families.iter().fold(app, |app, family| family(app));
+    #[cfg(feature = "push-registration")]
+    let app = app.route(
+        "/v1/client/push-registration",
+        axum::routing::put(client_push_registration::register)
+            .delete(client_push_registration::revoke)
+            .layer(DefaultBodyLimit::max(client_push_registration::MAX_BODY_BYTES)),
+    );
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
             (state.clone(), transport),
@@ -2264,6 +2275,20 @@ pub async fn client_capabilities(
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
     let capabilities = client_v0::capabilities(&state, &session);
+    #[cfg(feature = "push-registration")]
+    let capabilities = {
+        let mut capabilities = capabilities;
+        let state_for_push = state.clone();
+        let session_for_push = session.clone();
+        let available = tokio::task::spawn_blocking(move || {
+            client_push_registration::paired(&state_for_push, &session_for_push).is_ok()
+        })
+        .await
+        .unwrap_or(false);
+        capabilities.push(json!({"id":"push-registration", "version":1,
+            "state":if available {"granted"} else {"ungranted"}}));
+        capabilities
+    };
     // The longest message body this daemon takes, so a composer shows a limit only when told.
     let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({

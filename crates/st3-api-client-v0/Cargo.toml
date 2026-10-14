@@ -8,6 +8,7 @@ license = "MIT"
 [features]
 # Forwarded by st3-daemon's feature of the same name; never enabled by a production build.
 test-support = ["st3-api-core/test-support"]
+push-registration = ["st3-api-core/push-registration"]
 
 [dependencies]
 st3-api-core = { path = "../st3-api-core" }
