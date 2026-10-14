@@ -14,6 +14,7 @@ The client uses standard `fetch`, so callers can supply a fetch implementation a
 ## Browser credentials
 
 `IndexedDbCredentialStore`, exported from the client index, persists the native bearer returned by `completePairing`. Keys are scoped to the gateway's canonical origin and base path, ignoring trailing slashes. Separate gateway ports, schemes, or base paths do not share credentials. IndexedDB itself is scoped to the browser application's origin.
+The credential store also uses erasable TypeScript syntax, including its configurable database-name constructor.
 
 ```ts
 import { IndexedDbCredentialStore, St3Client } from './index.ts';

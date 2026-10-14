@@ -1,7 +1,11 @@
 /** Native paired-session bearers, scoped to a gateway base URL within this browser origin.
  * IndexedDB is persistence, not an XSS boundary: same-origin JavaScript can read these bearers. */
 export class IndexedDbCredentialStore {
-    constructor(private readonly databaseName = 'st3-client-credentials') {}
+    private readonly databaseName: string;
+
+    constructor(databaseName = 'st3-client-credentials') {
+        this.databaseName = databaseName;
+    }
 
     /** Suitable for `St3Client`'s asynchronous `credential` callback. */
     async get(gatewayUrl: string): Promise<string | undefined> {
