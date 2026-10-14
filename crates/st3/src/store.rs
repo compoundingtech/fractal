@@ -8084,11 +8084,21 @@ impl Store {
     /// are intentionally too expensive for the daemon's inner control loop.
     pub fn work_for_reconcile(&self, actor: &str) -> Result<Vec<StepRunView>> {
         let work = self.work_at_snapshot_internal(Some(actor), true, now_ms(), false)?;
-        // A step joins a seat's work when a generation creates it or another seat lets it go;
-        // after that its changes are written on the step and its run.
+        // A generation can add steps this seat has not read yet. Existing steps already
+        // register their own subjects below; their state changes must not invalidate every
+        // seat. Handoffs mark the new recipient's actor key in incremental::change_keys.
         smallclaims::touched::note_read(|| format!("actor:{actor}"));
         smallclaims::touched::note_read(|| "kind:run-generation.created".to_owned());
-        smallclaims::touched::note_read(|| "kind:step-run.state".to_owned());
+        // Proposals enter and leave revision-draining on the proposal subject,
+        // not the run subject. Approval and cancellation receipts do not carry
+        // the run, so retain these collection dependencies without another query.
+        for kind in [
+            "revision-proposal.created",
+            "revision-proposal.approved",
+            "revision-proposal.cancelled",
+        ] {
+            smallclaims::touched::note_read(|| format!("kind:{kind}"));
+        }
         for step in &work {
             smallclaims::touched::note_read(|| step.subject.clone());
             smallclaims::touched::note_read(|| step.run.clone());
@@ -8466,6 +8476,14 @@ impl Store {
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?;
         let mut visible = Vec::with_capacity(views.len());
         for mut view in views {
+            if actor.is_some() && !detailed {
+                // A pending available-to step or a draining run can become visible
+                // without joining a new generation. Record every candidate before
+                // filtering, so its own transition invalidates the seat's work.
+                smallclaims::touched::note_read(|| view.subject.clone());
+                smallclaims::touched::note_read(|| view.run.clone());
+                smallclaims::touched::note_read(|| view.generation.clone());
+            }
             if detailed {
                 enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
             } else {
