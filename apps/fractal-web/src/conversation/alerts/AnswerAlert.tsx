@@ -98,6 +98,20 @@ export const alertChoices = (alert: Native.Attention): readonly AlertChoice[] | 
   return null
 }
 
+/**
+ * A request's link, only when it is an absolute http(s) URL. The URL is the asking agent's, so
+ * any other scheme (javascript:, data:, …) or a relative path shows as plain text, never a link.
+ */
+export const webLink = (url: string | undefined): string | undefined => {
+  if (url === undefined) return undefined
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Who an alert is from: the agent that asked, else the seat it is about. */
 export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id'>): string =>
   (alert.requester_id ?? alert.source_id).replace(/^agent\//, '')
@@ -177,8 +191,8 @@ const Body = ({ alert }: { readonly alert: Native.Attention }): React.ReactNode 
           <ul {...stylex.props(styles.list)}>
             {request.subjects.map((subject, index) => (
               <li key={index}>
-                {subject.url ? <a href={subject.url} target="_blank" rel="noopener noreferrer">{subject.label}</a> : subject.label}
-                {subject.ref && !subject.url ? <span {...stylex.props(styles.soft)}> {subject.ref}</span> : null}
+                {webLink(subject.url) !== undefined ? <a href={webLink(subject.url)} target="_blank" rel="noopener noreferrer">{subject.label}</a> : subject.label}
+                {subject.ref && webLink(subject.url) === undefined ? <span {...stylex.props(styles.soft)}> {subject.ref}</span> : null}
               </li>
             ))}
           </ul>

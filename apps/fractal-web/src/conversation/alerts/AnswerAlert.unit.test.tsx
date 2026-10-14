@@ -15,7 +15,7 @@ vi.mock('@stylexjs/stylex', () => ({
 vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
 
 import { AgentAlerts, conversationAlerts } from './AgentAlerts.tsx'
-import { AnswerAlert, alertChoices } from './AnswerAlert.tsx'
+import { AnswerAlert, alertChoices, webLink } from './AnswerAlert.tsx'
 import { gatewayAlertActions } from './alert-action-port.ts'
 
 const seat = 'agent/example/atlas'
@@ -142,6 +142,25 @@ describe('AnswerAlert', () => {
     expect(html).toContain('Merge (recommended)')
     expect(html).toContain('It joins the merge queue.')
     expect(html).toContain('Why you: You own the release.')
+  })
+
+  it('links a request\'s subjects only to http(s) URLs; any other scheme or a relative path is text', () => {
+    expect(webLink('https://example.com/pull/1')).toBe('https://example.com/pull/1')
+    expect(webLink('http://example.com/a b')).toBe('http://example.com/a%20b')
+    for (const unsafe of ['javascript:alert(1)', 'JAVASCRIPT:alert(1)', 'data:text/html,<script>alert(1)</script>', 'vbscript:x', 'file:///etc/passwd', '/relative/path', 'doc/notes', '']) {
+      expect(webLink(unsafe)).toBeUndefined()
+    }
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ request: { ...decision, subjects: [
+      { kind: 'link', label: 'The pull request', url: 'https://example.com/pull/1' },
+      { kind: 'link', label: 'Run this', url: 'javascript:alert(1)' },
+      { kind: 'link', label: 'Inline page', url: 'data:text/html,<b>x</b>' },
+      { kind: 'document', label: 'Notes', url: '/relative/notes', ref: 'doc/notes' },
+    ] } })} onAct={async () => ({ _tag: 'Sent' })} now={now} />)
+    expect(html).toContain('<a href="https://example.com/pull/1" target="_blank" rel="noopener noreferrer">The pull request</a>')
+    expect(html).not.toMatch(/href="(javascript|data):/i)
+    expect(html).not.toContain('href="/relative/notes"')
+    expect(html).toContain('<li>Run this</li>')
+    expect(html).toContain('Notes<span> doc/notes</span>')
   })
 
   it('shows a JSON report as its telling fields', () => {
