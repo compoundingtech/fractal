@@ -83,9 +83,9 @@ pub(super) async fn create(
         let note = state.store.set_subject_note(&id, &actor, &input.target, Some(&input.text),
             &input.audience, scope.as_deref(), input.expires_at.as_deref())?;
         if input.audience == "agent" {
-        for agent in state.store.subject_note_agents(&input.target).map_err(|error| St3Error::new("internal", error.to_string()))? {
-            crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| St3Error::new("internal", error.to_string()))?;
-        }
+            for agent in state.store.subject_note_agents(&input.target).map_err(|error| St3Error::new("internal", error.to_string()))? {
+                crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| St3Error::new("internal", error.to_string()))?;
+            }
         }
         signal_changed(&state);
         Ok((id, note))
@@ -131,9 +131,9 @@ pub(super) async fn update(
         let text = fields.get("text").map_or_else(|| old.get("text").and_then(Value::as_str), Value::as_str);
         let note = state.store.set_subject_note(&id, &actor, target, text, audience, session, expiry)?;
         if audience == "agent" || old_audience == "agent" {
-        for agent in state.store.subject_note_agents(target).map_err(|error| St3Error::new("internal", error.to_string()))? {
-            crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| St3Error::new("internal", error.to_string()))?;
-        }
+            for agent in state.store.subject_note_agents(target).map_err(|error| St3Error::new("internal", error.to_string()))? {
+                crate::notes_digest::emit_changed(&state.store, &agent).map_err(|error| St3Error::new("internal", error.to_string()))?;
+            }
         }
         signal_changed(&state);
         Ok((id, note))

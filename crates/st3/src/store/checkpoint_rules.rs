@@ -886,7 +886,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
 }
 
 /// Tables projected from claims, children before the tables their foreign keys name.
-pub(crate) const PROJECTION_TABLES: [&str; 26] = [
+pub(crate) const PROJECTION_TABLES: [&str; 29] = [
     "operations",
     "arrangement_registers",
     "arrangements",
