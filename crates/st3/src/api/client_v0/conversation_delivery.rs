@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(native["delivers"], "message/linked");
         assert_eq!(page["session_id"], route);
 
-        let mut unmatched = vec![base.clone()];
+        let mut unmatched = [base.clone()];
         unmatched[0]["body"]["message_id"] = json!("native-without-receipt");
         annotate(
             &state,
@@ -205,7 +205,7 @@ mod tests {
         )
         .unwrap();
         assert!(unmatched[0].get("delivers").is_none());
-        let mut duplicated = vec![base.clone(), base.clone()];
+        let mut duplicated = [base.clone(), base.clone()];
         annotate(
             &state,
             &snapshot,
