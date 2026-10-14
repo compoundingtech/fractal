@@ -14,7 +14,7 @@
     "detail": "No checkpoint rules, digests or coordinated fleet-upgrade changes."
   },
   "compatibility": {
-    "status": "none",
+    "status": "changed",
     "detail": "A work_root that was accepted only because it reached a guarded folder through a link is now refused at startup with the existing error; every other config is unchanged."
   },
   "downtime": {
