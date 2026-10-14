@@ -51,6 +51,10 @@ struct Pending {
 }
 
 /// How long a message waits for st's answer before it says st has not confirmed it.
+/// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
+/// input) slower than that, is written to slow.log with what was on screen.
+const SLOW_DRAW: Duration = Duration::from_millis(120);
+const SLOW_TURN: Duration = Duration::from_millis(250);
 const UNANSWERED_AFTER: Duration = Duration::from_secs(30);
 
 /// A message request as sent: st keys its receipt on the whole request.
@@ -536,6 +540,11 @@ pub fn run(context: Context) -> Result<()> {
         && !stopping.load(std::sync::atomic::Ordering::Relaxed)
         && !crate::stdin_hung_up()
     {
+        let turn_started = Instant::now();
+        // A program written over on disk while it runs is told to the person at once, and noted.
+        if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
+            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+        }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
             .flash
@@ -1661,12 +1670,23 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
+        let draw_started = Instant::now();
         terminal.draw(|frame| {
             ui.render(frame);
             if hyperlinks {
                 links = ui.link_cells(frame.buffer_mut());
             }
         })?;
+        // A slow draw, or a whole turn that took long before it waited for input, is written
+        // down with what was on screen, so that "it was slow" can be explained afterwards.
+        let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
+        if drew >= SLOW_DRAW || turn >= SLOW_TURN {
+            super::lastrun::note_slow(
+                &format!("draw {} ms, turn {} ms", drew.as_millis(), turn.as_millis()),
+                &ui.slow_context(),
+                &crate::version::short(crate::version::now()),
+            );
+        }
         if hyperlinks && !links.is_empty() {
             super::hyperlinks::write_links(terminal.backend_mut(), &links)?;
         }
@@ -1831,6 +1851,13 @@ pub fn run(context: Context) -> Result<()> {
             },
         )?;
     }
+    super::lastrun::note_exit(if ui.quit {
+        "quit (Ctrl+Q)"
+    } else if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+        "signal (INT, TERM or HUP)"
+    } else {
+        "terminal closed (stdin hung up)"
+    });
     // Leave no attachment behind.
     if let Some(current) = attached.take() {
         let _ = runtime.block_on(feed::detach(
@@ -2979,9 +3006,9 @@ mod tests {
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
         for spaces in [false, true] {
             let mut world = super::super::demo::world();
-            let mut expert = world.agents.items()[0].clone();
-            expert.id = "agent/st/expert".into();
-            expert.name = "Expert".into();
+            let mut assistant = world.agents.items()[0].clone();
+            assistant.id = "agent/st/assistant".into();
+            assistant.name = "Smalltalk Assistant".into();
             let other = world.agents.items()[0].id.clone();
             let mut ui = Ui::new(world.clone());
             if spaces {
@@ -2990,14 +3017,14 @@ mod tests {
                 ui.open_home();
             }
             let before = ui.focus();
-            let mut requested = Some(expert.id.clone());
+            let mut requested = Some(assistant.id.clone());
             focus_initial_subject(&mut ui, &mut requested, false, true);
             assert_eq!(
                 ui.focus(), before,
                 "waiting inventory must not open another agent"
             );
             assert!(requested.is_some());
-            world.agents = Load::Ready(vec![world.agents.items()[0].clone(), expert.clone()]);
+            world.agents = Load::Ready(vec![world.agents.items()[0].clone(), assistant.clone()]);
             ui.set_world(world.clone());
             let before = ui.focus();
             focus_initial_subject(&mut ui, &mut requested, false, true);
@@ -3006,8 +3033,8 @@ mod tests {
                 "cached inventory must not consume the request"
             );
             focus_initial_subject(&mut ui, &mut requested, true, true);
-            assert_eq!(ui.focus(), (1, Some(expert.id.clone())));
-            assert_eq!(ui.live_conversations()[0], expert.id);
+            assert_eq!(ui.focus(), (1, Some(assistant.id.clone())));
+            assert_eq!(ui.live_conversations()[0], assistant.id);
             assert!(!ui.home_open());
             assert!(requested.is_none());
             ui.open(&other);
@@ -3023,7 +3050,7 @@ mod tests {
     #[test]
     fn initial_subject_is_cancelled_by_navigation_or_a_missing_live_agent() {
         let mut ui = Ui::new(super::super::demo::world());
-        let mut missing = Some("agent/st/expert".to_owned());
+        let mut missing = Some("agent/st/assistant".to_owned());
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut missing, true, true);
         assert!(missing.is_none());

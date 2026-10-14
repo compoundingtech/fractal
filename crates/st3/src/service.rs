@@ -1403,6 +1403,7 @@ mod tests {
             planner: crate::model::PlannerSpec::default(),
             observations: crate::config::ObservationsConfig::default(),
             github: crate::config::GithubConfig::default(),
+            changes: crate::changes::config::Config::default(),
             checkpoint: crate::config::CheckpointConfig::default(),
             limits: crate::config::LimitsConfig::default(),
             reconcile: crate::config::ReconcileConfig::default(),

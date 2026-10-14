@@ -766,18 +766,6 @@ WHERE (kind='harness.observed' AND (
     OR (kind='harness.diagnostic'
         AND json_extract(body, '$.fields.code')='provider-auth-expired');
 
--- Retained stops read their diagnostic family, not every harness diagnostic of a seat.
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_diagnostic_index
- ON claims(subject,length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC)
- WHERE kind='harness.diagnostic'
-   AND json_extract(body,'$.fields.code') IN ('stop-deferred','stop-deferral-cleared');
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_failure_index
- ON claims(subject,length(accepted_at_unix_ms) DESC,accepted_at_unix_ms DESC)
- WHERE kind='operational.failure' AND json_extract(body,'$.fields.condition')='stop-deferred';
-CREATE INDEX IF NOT EXISTS claims_stop_deferral_recovery_index
- ON claims(subject,json_extract(body,'$.fields.failure'))
- WHERE kind='operational.recovered';
-
 CREATE TABLE IF NOT EXISTS desired (
     subject TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -57240,6 +57228,79 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
         assert_eq!(
             store.native_prompt_state(seat, 1, 5).unwrap(),
+            NativePromptState::Answered {
+                answer: "deny".into()
+            }
+        );
+    }
+
+    /// A subagent asks while its parent's Task call is still open: the only call the seat's
+    /// conversation shows unanswered is the parent's, so an allow offered beside it would let
+    /// through a call the person never saw. st offers only deny for a subagent's prompt.
+    #[test]
+    fn a_subagents_prompt_is_answered_only_with_deny() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "subagent-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        // The seat's own Task call is open (its conversation shows it unanswered), and the
+        // subagent it started asks to run Bash.
+        let asked = append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"permission", "reason":"subagent:Bash",
+                "ownership_sequence":1, "transition_sequence":3}),
+        );
+        let shown = store
+            .attention_items(Some("person/avery"))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.kind == "harness-prompt")
+            .unwrap();
+        assert_eq!(shown.answers, vec!["deny".to_owned()]);
+        assert!(shown.detail.starts_with("A subagent of this seat asks to use Bash;"), "{}", shown.detail);
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &asked.id, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "invalid-answer"
+        );
+        store
+            .answer_native_prompt(seat, &asked.id, "deny", "person/avery")
+            .unwrap();
+        assert_eq!(
+            store.native_prompt_state(seat, 1, 3).unwrap(),
             NativePromptState::Answered {
                 answer: "deny".into()
             }
