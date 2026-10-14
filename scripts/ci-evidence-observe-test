@@ -83,6 +83,9 @@ sys.exit(0 if ok else 1)
     response_file = tmp / 'response.json'
     observer = tmp / 'observer'
     observer.write_text(f"""import os, sys
+if sys.argv[sys.argv.index('--run') + 1] == '8':
+    print('observer cannot read run 8', file=sys.stderr)
+    sys.exit(1)
 if os.environ.get('OBSERVER_EXIT'):
     print('missing or ambiguous CI job: linux-gate', file=sys.stderr)
     sys.exit(int(os.environ['OBSERVER_EXIT']))
@@ -91,7 +94,18 @@ print(open({str(response_file)!r}).read())
     bin_dir = tmp / 'bin'
     bin_dir.mkdir()
     gh = bin_dir / 'gh'
-    gh.write_text(f"#!{sys.executable}\nimport json, os, sys\nprint(json.dumps({{'conclusion': os.environ.get('GH_CONCLUSION', 'success')}}))\n")
+    gh.write_text(f"""#!{sys.executable}
+import json, os, sys
+args = sys.argv[1:]
+if args[0] == 'run':
+    print(os.environ.get('GH_RUNS', '[]'))
+elif args[1].endswith('/artifacts?per_page=100'):
+    print(json.dumps({{'artifacts': [{{'name': 'ci-evidence-source-1', 'id': 9, 'expired': False}}]}}))
+elif '/attempts/' in args[1]:
+    print(json.dumps({{'conclusion': os.environ.get('GH_CONCLUSION', 'success')}}))
+else:
+    print(json.dumps({{'run_attempt': 1}}))
+""")
     gh.chmod(0o755)
 
     def execute(response, ok='1', remote=None, scratch=None, keys=True, env=None):
@@ -187,3 +201,31 @@ print(open({str(response_file)!r}).read())
     done = subprocess.run([*base, '--scratch', str(tmp / 'nokeys-scratch')], cwd=empty, capture_output=True, env=dict(ENV, VERIFIER_OK='1'))
     assert done.returncode == 1 and 'no key list' in json.loads(done.stdout)['failures'][0]
     print('passed: the key list comes from the checkout; a missing list fails full records closed')
+
+    # Poll mode: what a timer runs. One state directory, runs observed once, failures capped.
+    state = tmp / 'state'
+    runs = json.dumps([{'databaseId': 7, 'attempt': 1, 'conclusion': 'success'},
+                       {'databaseId': 8, 'attempt': 1, 'conclusion': 'failure'},
+                       {'databaseId': 9, 'attempt': 1, 'conclusion': 'cancelled'}])
+    response_file.write_text(json.dumps(answer([(full, 'full')], pack(full))))
+
+    def timer():
+        done = subprocess.run([sys.executable, str(SCRIPT), '--poll', '--repository', 'example/repo',
+                               '--observer', json.dumps([sys.executable, str(observer)]), '--verifier', str(verifier),
+                               '--keys', str(signers), '--state-dir', str(state), '--remote', str(remote)],
+                              capture_output=True, env=dict(ENV, VERIFIER_OK='1', GH_RUNS=runs, PATH=f'{bin_dir}:{ENV["PATH"]}'))
+        return done, [json.loads(line) for line in done.stdout.decode().splitlines() if line.startswith('{"run"')]
+
+    done, lines = timer()
+    assert done.returncode == 1, done.stderr
+    assert {(l['run'], l['state']) for l in lines} == {(7, 'done'), (8, 'failed')}, lines
+    assert git(remote, 'for-each-ref', '--format=%(refname)', 'refs/notes/') == f'refs/notes/evidence/{full}'
+    done, lines = timer()
+    assert [(l['run'], l['state']) for l in lines] == [(8, 'failed')], 'a done run is never observed again, a cancelled one never'
+    done, lines = timer()
+    assert [(l['run'], l['state']) for l in lines] == [(8, 'gave_up')]
+    done, lines = timer()
+    assert lines == [] and done.returncode == 0, 'a run given up on stays given up, and the timer goes quiet'
+    ledger = [json.loads(l) for l in (state / 'observed.jsonl').read_text().splitlines()]
+    assert sum(1 for e in ledger if e['run'] == 8) == 3 and not any(e['run'] == 9 for e in ledger)
+    print('passed: poll observes each finished run once, skips cancelled ones, and gives up on a run after three failures')
