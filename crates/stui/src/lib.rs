@@ -1001,6 +1001,7 @@ pub fn run(mut options: Args) -> Result<()> {
         requests,
         playback: options.playback,
     })
+    .inspect_err(|error| ui::lastrun_note_exit(format!("error: {error:#}")))
 }
 
 #[cfg(test)]

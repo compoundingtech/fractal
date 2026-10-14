@@ -1496,23 +1496,24 @@ impl Store {
         episode: &str,
     ) -> Result<Option<(String, bool)>, St3Error> {
         let connection = self.readers.get();
-        let latest: Option<String> = connection
+        connection
             .prepare_cached(&canonical_sql(
-                "SELECT id FROM claims WHERE subject=?1 AND kind='operational.failure'
-             AND json_extract(body,'$.fields.episode')=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+                "SELECT id, NOT EXISTS(
+                    SELECT 1 FROM claims AS recovery INDEXED BY claims_subject_kind_index
+                    WHERE recovery.subject=claims.subject
+                    AND recovery.kind='operational.recovered'
+                    AND json_extract(recovery.body,'$.fields.failure')=claims.id)
+                 FROM claims INDEXED BY claims_subject_kind_accepted_index
+                 WHERE subject=?1 AND kind='operational.failure'
+                 AND json_extract(body,'$.fields.episode')=?2
+                 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             ))
             .map_err(internal)?
-            .query_row(params![fence.subject, episode], |row| row.get(0))
+            .query_row(params![fence.subject, episode], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .optional()
-            .map_err(internal)?;
-        let Some(failure) = latest else {
-            return Ok(None);
-        };
-        let recovered: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='operational.recovered'
-             AND json_extract(body,'$.fields.failure')=?2)", params![fence.subject, failure], |row| row.get(0),
-        ).map_err(internal)?;
-        Ok(Some((failure, !recovered)))
+            .map_err(internal)
     }
 
     /// The caller holds the provider ownership lock. Recheck physical/declaration and
@@ -1621,6 +1622,26 @@ impl Store {
                     .then_some(owner)
             }),
         )
+    }
+
+    /// Compare replay inputs without allocating another decoded lease. This is
+    /// not report admission: runtime, custody and binding checks still run there.
+    pub(crate) fn mailbox_replay_owner_matches(
+        &self,
+        fence: &Fence,
+        owner: &Authority,
+    ) -> Result<bool, St3Error> {
+        self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_mailbox_leases
+             WHERE subject=?1 AND component=?2 AND incarnation=?3
+             AND token=?4 AND epoch=?5 AND provider=?6 AND session=?7
+             AND sequence=?8 AND pid=?9 AND process_token=CAST(?10 AS TEXT)
+             AND revoked=0)",
+            params![fence.subject, fence.component, fence.incarnation, fence.token,
+                fence.epoch, owner.provider, owner.session, owner.sequence,
+                owner.pid, owner.process_token],
+            |row| row.get(0),
+        ).map_err(internal)
     }
 
     /// A transient physical query may retry only a still-current canonical capability.

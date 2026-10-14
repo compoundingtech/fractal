@@ -62,6 +62,7 @@ mod convergence;
 mod daemon_bench;
 mod daemon_cost;
 mod daemon_load;
+mod load_hog;
 mod daemon_environment;
 mod daemon_restart;
 mod driver_incarnation;
