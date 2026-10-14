@@ -2009,24 +2009,23 @@ mod tests {
     fn repaired_actual_claim_reselection_matches_message_body_routing() {
         let source = Store::open_memory("source").unwrap();
         let target = Store::open_memory("target").unwrap();
-        let send = |recipient: &str, key: &str| {
-            source.append_claim(&ClaimInput {
-                subject: "message/repair-actual-route".into(),
-                kind: "message.sent".into(),
-                actor: Some("agent/sender".into()),
-                fields: BTreeMap::from([
-                    ("from".into(), json!("agent/sender")),
-                    ("to".into(), json!(recipient)),
-                    ("content".into(), json!("repair actual routing")),
-                    ("status".into(), json!("sent")),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(key.into()),
-            }).unwrap().id
+        // Deliberately conflicting retained history bypasses the public Once
+        // append policy; replica repair must still fold its canonical records.
+        let send = |recipient: &str| {
+            let mut connection = source.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let claim = smallclaims::store::append_claim_record_tx(
+                &transaction, "source", "message/repair-actual-route", "message.sent",
+                Some("agent/sender"), &json!({"fields": {
+                    "from": "agent/sender", "to": recipient,
+                    "content": "repair actual routing", "status": "sent",
+                }}), &[], None,
+            ).unwrap();
+            transaction.commit().unwrap();
+            claim.id
         };
-        let replacement = send("agent/old", "initial-actual-route");
-        let repaired = send("agent/new", "changed-actual-route");
+        let replacement = send("agent/old");
+        let repaired = send("agent/new");
         let exchange = super::super::tests::exchange_from(&source, &target.replication_inventory().unwrap());
         super::super::tests::receive_and_project(&target, "source", &exchange);
         while target.maintain_client_message_selectors().unwrap() {}
