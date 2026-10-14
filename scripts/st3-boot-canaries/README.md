@@ -78,7 +78,12 @@ so races the real ones hide are hit every time.
 The evidence directory holds `result.json` (the verdict and the seat's last state), `daemon.log`,
 `terminal-*.txt` (the seat's screen), `trace-*.jsonl` (its claims), `receipts-*.jsonl` (what the
 stand-in saw and did), and `observation-outboxes.json` (pending event sequences and driver
-diagnostics). Predecessor adoption can also leave legacy harness records. Read the trace first: it shows which side
+diagnostics), and private `driver-*.log` files. Runtime roots are registered with the
+process guardian before startup. On interruption, the guardian reaps their writers, captures
+these files and records an interrupted verdict before removing the roots. A collection error
+is recorded in `capture-errors.json`; it cannot skip the other logs. Normal failure snapshots
+are captured before shutdown, with the final outbox state in `observation-outboxes-after-stop.json`.
+Predecessor adoption can also leave legacy harness records. Read the trace first: it shows which side
 wrote what, in what order. Fix the product on main; do not slow a stand-in to hide a race. The
 canaries found these when they were written: Codex ending its session before the daemon's first
 mailbox replay, Codex publishing its predecessor's `ended` record as the new incarnation's, and a

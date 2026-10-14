@@ -53,7 +53,7 @@ switch. The Rust XCFramework (device and simulator slices) builds from `modules/
 on the Apple host. The debug bundle grew 27.8 MiB with the carrier. Measured Release (dev-signed, not
 App Store thinned): 49,625,899 bytes with the bridge against 31,856,010 without, so the bridge adds
 17,769,889 bytes (about 16.9 MiB); zipped, it adds 5,145,126 bytes (about 4.9 MiB). The member-side fabric pin stays explicit
-(0.2.32+e31e53b today); a change to the direct wire needs the byte and daemon interoperability
+(0.2.41+84c3208 today); a change to the direct wire needs the byte and daemon interoperability
 checks again.
 
 ### 3. Members
