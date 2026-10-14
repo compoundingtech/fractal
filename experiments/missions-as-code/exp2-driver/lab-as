@@ -6,7 +6,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 spool="$(mktemp -d "${TMPDIR:-/var/tmp}/lab-as.XXXXXX")"
 printf '%q ' "$@" > "$spool/cmd"
-setsid -f env -i HOME="$HOME" USER="$USER" PATH="$PATH" bash -c \
+setsid -f env -i HOME="$HOME" USER="$USER" PATH="$PATH" LAB_INSTANCE="${LAB_INSTANCE:-maclab}" ${LAB_ST:+LAB_ST="$LAB_ST"} bash -c \
   "cd '$here' && ./lab-st $(cat "$spool/cmd") > '$spool/out' 2>&1; echo \$? > '$spool/status'"
 for _ in $(seq 1 600); do [ -f "$spool/status" ] && break; sleep 0.1; done
 cat "$spool/out"

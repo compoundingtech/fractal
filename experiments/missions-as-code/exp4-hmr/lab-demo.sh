@@ -6,7 +6,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 lab="$here/../exp2-driver"
 cd "$lab"
-logs="$HOME/.st-instance/maclab/state/st3/logs"
+logs="$HOME/.st-instance/${LAB_INSTANCE:-maclab}/state/st3/logs"
 mission=orchard/ship-change-hmr
 waitlog() { for _ in $(seq 1 600); do grep -q "$2" "$logs/exec.${1//\//.}.driver.log"* 2>/dev/null && return 0; sleep 0.5; done; echo "timed out waiting for: $2" >&2; return 1; }
 finish() {

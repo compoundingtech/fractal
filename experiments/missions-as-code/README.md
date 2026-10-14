@@ -5,6 +5,10 @@ instead of a KDL graph? These experiments build enough to answer that with runni
 measurements. All names in them are invented. Nothing here is wired into st; it sits beside it
 and talks to st only through its CLI.
 
+[FINDINGS.md](FINDINGS.md) is the write-up: the recommendation, code beside its KDL, the
+measurements and the open risks. [demo.sh](demo.sh) runs a program through a throwaway st
+instance, kills its driver mid-run, and shows it resume (about two minutes).
+
 **The short answer:**
 
 - **As an engine:** yes. A small SDK, a pure replay core and a driver that lives outside the

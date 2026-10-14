@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 run="$1"; marker="${2:-schedule timer review-deadline}"
-log="$HOME/.st-instance/maclab/state/st3/logs/exec.${run//\//.}.driver.log"
+log="$HOME/.st-instance/${LAB_INSTANCE:-maclab}/state/st3/logs/exec.${run//\//.}.driver.log"
 ./lab-as missions start "${MISSION:-orchard/ship-change}" --id "$run" --workspace "$PWD/lab" \
   --input 'program-input={"change":"orchard/feature-a","repo":"orchard/app"}' --as person/wren >/dev/null
 lab/answer.sh "$run" review-overdue reassign &
@@ -22,8 +22,8 @@ for _ in $(seq 1 600); do
 done
 wait
 echo "run $run: $state"
-echo "--- driver log"
-cat "$log"
+echo "--- driver log, before and after the kill"
+cat "$log".* "$log" 2>/dev/null || true
 echo "--- journal"
 ./lab-st subject history "custom/mac/journal/$run" --limit 500 --json | node -e '
   let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
@@ -35,5 +35,11 @@ echo "--- journal"
     console.log(`ops scheduled: ${scheduled.join(", ")}`)
     console.log(`ops scheduled twice: ${dupes.length ? dupes.join(", ") : "none"}`)
   })'
-echo "--- child runs"
-./lab-st missions ls --all --limit 200 2>/dev/null | grep -c "mission-run/$run/op/" || true
+echo "--- child runs: one st run per op; timers stay in the driver"
+./lab-st subject history "custom/mac/journal/$run" --limit 500 --json | node -e '
+  let s=""; process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const events = s.split("\n").filter(l=>l.startsWith("{")).map(l=>JSON.parse(l).body.fields).sort((a,b)=>a.seq-b.seq)
+    for (const e of events) if (e.event.type==="scheduled" && e.event.kind!=="timer") console.log(e.event.op)
+  })' | while read -r op; do
+  printf '  %-60s %s\n' "mission-run/$run/op/$op" "$(./lab-st missions show "mission-run/$run/op/$op" --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).status))')"
+done
