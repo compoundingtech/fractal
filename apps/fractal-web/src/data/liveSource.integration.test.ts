@@ -28,6 +28,13 @@ const snapshot: Snapshot = {
   store_index: 1,
 }
 
+/** st's action digest: the whole request but its fence, with object keys in a stable order. */
+const actionDigest = ({ fence: _fence, ...request }: { readonly fence?: unknown }): string =>
+  JSON.stringify(request, (_key, value: unknown) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+      : value)
+
 const agent: Agent = {
   id: 'agent/example',
   kind: 'agent',
@@ -70,8 +77,12 @@ class Gateway {
   rejectSend = false
   currentSnapshot: Snapshot | undefined = snapshot
   staleSendFence = false
+  /** Take the send, then answer st's 503 `message-send-unconfirmed` instead of its result. */
+  unconfirmSend = false
   capabilityReads = 0
   readonly messageActions: MessageSendAction[] = []
+  /** st's durable answer per idempotency key, with the digest of the request that earned it. */
+  private readonly sendReceipts = new Map<string, { readonly digest: string; readonly value: unknown }>()
   /** Resolves once the gateway has derived the send action's message identity. */
   readonly nextAction = (count = 1) =>
     this.readyActions.has(count)
@@ -165,6 +176,15 @@ class Gateway {
         }
         await this.sendGate
         if (this.transportFailure) throw new TypeError('Gateway disconnected')
+        // A repeated key gets its first durable answer only for the identical request.
+        const receipt = this.sendReceipts.get(action.idempotency_key)
+        if (receipt !== undefined && receipt.digest !== actionDigest(action)) return Response.json({
+          api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+          code: 'idempotency-conflict', message: 'the idempotency key was already used for a different action',
+          retryable: false, request_id: 'request/idempotency-conflict', details: {},
+        }, { status: 409 })
+        if (receipt !== undefined)
+          return Response.json({ api_version: 'st3.client.v0', snapshot: this.currentSnapshot, value: receipt.value })
         if (this.staleSendFence) return Response.json({
           api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
           code: 'stale-fence', message: 'The observed snapshot belongs to an old gateway store.',
@@ -200,6 +220,14 @@ class Gateway {
           affected_ids: [messageId],
           snapshot_id: snapshot.id,
         }
+        this.sendReceipts.set(action.idempotency_key, { digest: actionDigest(action), value })
+        // The send completes, but st could not confirm it within its deadline.
+        if (this.unconfirmSend) return Response.json({
+          api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+          code: 'message-send-unconfirmed', message: 'st could not confirm the send in time',
+          retryable: false, request_id: 'request/send-unconfirmed',
+          details: { applied: 'unknown', action_id: action.id, idempotency_key: action.idempotency_key },
+        }, { status: 503 })
       } else if (action.type === 'terminal.attach') {
         this.terminalActions.push(action)
         this.terminalRequests.push('attach')
@@ -1393,6 +1421,57 @@ describe('optimistic conversation sends', () => {
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Sent' } }] },
         })
+      }),
+    ),
+  )
+
+  it.live('keeps an unconfirmed send Unconfirmed and resends the identical action, not a rebuilt one', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.conversationInterest!(agent.id))
+        const conversation = live.source.conversation(agent.id)
+        live.registry.mount(conversation)
+        yield* settle
+        const blob = `blob/${'a'.repeat(64)}`
+        gateway.unconfirmSend = true
+        const unconfirmed = yield* Effect.promise(() => live.source.attachments!.send({
+          ...request, parameters: { ...request.parameters, attachments: [{ blob, media_type: 'image/png', name: null }] },
+        }))
+        expect(unconfirmed).toMatchObject({
+          _tag: 'Refused', reason: 'unconfirmed',
+          error: { code: 'message-send-unconfirmed', details: { applied: 'unknown' } },
+        })
+        const first = gateway.messageActions[0]!
+        expect(live.registry.get(conversation)).toMatchObject({
+          _tag: 'Observed', value: { items: [{
+            _tag: 'Text', id: `pending/${first.idempotency_key}`, text: 'hello',
+            sendState: { _tag: 'Unconfirmed', detail: 'st could not confirm the send in time' },
+          }] },
+        })
+        gateway.unconfirmSend = false
+        // A retry rebuilt from the row: a fresh action id, and the view model drops the null name.
+        const rebuilt = {
+          ...request, id: 'action/rebuilt-retry',
+          parameters: { ...request.parameters, attachments: [{ blob, media_type: 'image/png' as const }] },
+        }
+        const retried = yield* Effect.promise(() => live.source.attachments!.send({
+          ...rebuilt, _tag: 'Resend', idempotencyKey: first.idempotency_key,
+        }))
+        expect(retried).toMatchObject({ _tag: 'Success', value: { status: 'completed' } })
+        const second = gateway.messageActions[1]!
+        expect(second.id).toBe(first.id)
+        expect(second.idempotency_key).toBe(first.idempotency_key)
+        expect(second.parameters).toStrictEqual(first.parameters)
+        expect(live.registry.get(conversation)).toMatchObject({
+          _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Sent' } }] },
+        })
+        // st refuses the rebuilt request itself: the same key with a different action.
+        const conflict = yield* Effect.promise(() => gateway.fetch('http://gateway.example/v1/client/actions', {
+          method: 'POST',
+          body: JSON.stringify({ ...first, id: rebuilt.id, parameters: rebuilt.parameters }),
+        }))
+        expect(conflict.status).toBe(409)
+        expect(yield* Effect.promise(() => conflict.json())).toMatchObject({ code: 'idempotency-conflict' })
       }),
     ),
   )

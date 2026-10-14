@@ -2,8 +2,7 @@
 
 An agent whose current harness reports a missing or rejected credential exposes
 `harness_state: unauthenticated`, additive `harness_error_state: needs-login`, and
-`state: waiting` through client-v0. Existing clients retain their login rendering.
-The canonical state and CLI use `needs-login`. Ordinary
+`state: waiting` through client-v0. The canonical state and CLI use `needs-login`. Ordinary
 activity, channel initialization, and a disappearing screen prompt do not clear
 this condition. A successful native turn clears it on the same incarnation; a
 later refusal starts a new episode. Evidence from an old incarnation cannot
@@ -14,7 +13,7 @@ explicit refusal, `true` means a successful turn, and absent means unknown. The
 owning driver preserves this axis across activity updates. Its sequence advances
 on explicit credential edges; a replacement driver starts without its
 predecessor's evidence. Diagnostic recovery compares driver ownership before its
-credential sequence, so a restarted driver can recover with its first turn. Updated driver assets are required for native recovery.
+credential sequence, so a restarted driver can recover with its first turn.
 
 The recognized sources are:
 
@@ -40,5 +39,4 @@ a default operator. The item disappears when the condition clears.
 It does not create an independent mission lease or a historical repair request.
 
 The daemon does not enter credentials or restart a shared harness to test this
-behavior. The phone and stui can use the additive detail and attention kind; source
-validation alone does not establish deployed UI or real-login acceptance.
+behavior. The condition and attention kind are available to phone and terminal clients.

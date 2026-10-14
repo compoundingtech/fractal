@@ -11,7 +11,7 @@ use super::direct;
 use super::glass::GlassWrite;
 use super::view::{Load, MissionPreview};
 use super::{AgentControl, Effect, Guard, Ui};
-use crate::feed::{self, Command, TerminalUpdate, Window};
+use crate::feed::{self, Command, Inventories, Inventory, TerminalUpdate, Window};
 use crate::model::{self, Collection, Model};
 use anyhow::Result;
 use crossterm::{
@@ -51,6 +51,10 @@ struct Pending {
 }
 
 /// How long a message waits for st's answer before it says st has not confirmed it.
+/// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
+/// input) slower than that, is written to slow.log with what was on screen.
+const SLOW_DRAW: Duration = Duration::from_millis(120);
+const SLOW_TURN: Duration = Duration::from_millis(250);
 const UNANSWERED_AFTER: Duration = Duration::from_secs(30);
 
 /// A message request as sent: st keys its receipt on the whole request.
@@ -59,6 +63,9 @@ struct Sent {
     id: String,
     idempotency_key: String,
     snapshot_id: String,
+    /// What it said, as sent: rebuilt later, it could name the agent's newer session, and st
+    /// refuses a repeat that differs as a conflict.
+    parameters: MessageSendParameters,
 }
 
 /// Read evidence belongs to a presented frame, so navigation cannot cancel retries.
@@ -152,11 +159,40 @@ pub struct Context {
     pub person: String,
     pub cache_path: Option<std::path::PathBuf>,
     pub cached: Option<Model>,
-    /// `stui --glasses` / `--glass NAME`: open glasses instead of the sidebar layout, at the
+    /// `st ui --glasses` / `--glass NAME`: open glasses instead of the sidebar layout, at the
     /// named glass or the last one used on this device.
     pub glass: Option<Option<String>>,
     pub(crate) open_timing: Option<super::open_timing::Trace>,
     pub(crate) process_started: Instant,
+    pub initial_subject: Option<String>,
+}
+
+// Setup's initial destination waits for a live inventory, rather than cached agent data.
+// Consume it after the first ready inventory so later updates leave the person's focus alone.
+pub(super) fn focus_initial_subject(
+    ui: &mut Ui,
+    subject: &mut Option<String>,
+    agents_live: bool,
+    glasses_ready: bool,
+) {
+    if !agents_live || !glasses_ready || !matches!(ui.world.link, super::view::Link::Live) {
+        return;
+    }
+    let Some(id) = subject.take() else {
+        return;
+    };
+    if !ui.world.agents.items().iter().any(|agent| agent.id == id) {
+        return;
+    }
+    ui.open(&id);
+}
+
+fn cancel_initial_subject(subject: &mut Option<String>, input: &Event) {
+    if matches!(input, Event::Key(_) | Event::Paste(_))
+        || matches!(input, Event::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
+    {
+        *subject = None;
+    }
 }
 
 /// The terminal the feed follows for the open terminal view.
@@ -166,12 +202,74 @@ struct Following {
     incarnation: String,
 }
 
-/// How often usage on screen is read again.
-const USAGE_EVERY: Duration = Duration::from_secs(60);
-/// How often the connected clients are read again while the fleet shows.
-const CLIENTS_EVERY: Duration = Duration::from_secs(10);
 /// How long the missions window stays followed after a mission list or card leaves the screen.
 const MISSIONS_GRACE: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct InventoryGrace(BTreeMap<Inventory, Instant>);
+impl InventoryGrace {
+    fn followed(&mut self, visible: Inventories, now: Instant) -> Inventories {
+        // A changed period replaces the old usage slot immediately; leaving the screen keeps
+        // its last period through the same grace as the other windows.
+        if let Some(hours) = visible.usage_hours {
+            self.0.retain(|inventory, _| !matches!(inventory, Inventory::Usage(old) if *old != hours));
+        }
+        for inventory in visible.windows() { self.0.insert(inventory, now + MISSIONS_GRACE); }
+        self.0.retain(|_, until| *until > now);
+        let mut held = Inventories::default();
+        for inventory in self.0.keys() {
+            match inventory {
+                Inventory::Clients => held.clients = true, Inventory::Usage(hours) => held.usage_hours = Some(*hours),
+                Inventory::Machines => held.machines = true, Inventory::Devices => held.devices = true,
+                Inventory::Sessions => held.sessions = true, Inventory::Terminals => held.terminals = true,
+            }
+        }
+        held
+    }
+}
+
+enum InventoryRead {
+    Rows(Inventory, Result<Collection, String>),
+    Terminals(Result<(Vec<Resource>, bool), String>),
+    Clients(Result<st3_client::ClientConnections, String>),
+    Usage(u64, Result<st3_client::UsagePeriod, String>),
+}
+impl InventoryRead {
+    fn inventory(&self) -> Inventory {
+        match self { Self::Rows(inventory, _) => *inventory, Self::Terminals(_) => Inventory::Terminals,
+            Self::Clients(_) => Inventory::Clients, Self::Usage(hours, _) => Inventory::Usage(*hours) }
+    }
+}
+
+async fn legacy_inventory(client: &Client, inventory: Inventory) -> InventoryRead {
+    match inventory {
+        Inventory::Machines => InventoryRead::Rows(inventory, model::read_machines(client).await.map_err(|error| error.to_string())),
+        Inventory::Devices => InventoryRead::Rows(inventory, model::read_devices(client).await.map_err(|error| error.to_string())),
+        Inventory::Sessions => InventoryRead::Rows(inventory, model::read_native_sessions(client).await.map_err(|error| error.to_string())),
+        Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.plain())),
+        Inventory::Clients => InventoryRead::Clients(client.clients_list().await.map(|reply| reply.value).map_err(|error| match error {
+            ClientError::Api(st3_client::ErrorCode::NotFound, ..) => "this st does not list its clients yet: its daemon needs an update".into(),
+            error => error.plain(),
+        })),
+        Inventory::Usage(hours) => {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+            InventoryRead::Usage(hours, client.usage_period(Some(now.saturating_sub(hours.saturating_mul(3_600_000))), None).await.map(|reply| reply.value).map_err(|error| usage_error(&error)))
+        }
+    }
+}
+
+fn terminal_rows(items: Vec<Resource>) -> Vec<super::resource_sidebar::ResourceRow> {
+    items.into_iter().filter_map(|item| match item {
+        Resource::Runtime(runtime) => runtime.terminal_id.map(|terminal| super::resource_sidebar::ResourceRow {
+            id: runtime.header.id, kind: "Terminals".into(), title: runtime.owner_id, open: terminal, missing: false,
+        }),
+        _ => None,
+    }).collect()
+}
+
+fn window_label(window: Window) -> String {
+    match window { Window::Inventory(inventory) => inventory.collection().into(), _ => format!("{window:?}") }
+}
 
 /// Why usage could not be read, saying so plainly when the daemon predates the read.
 fn usage_error(error: &st3_client::ClientError) -> String {
@@ -222,29 +320,18 @@ enum Fetched {
     Notice(String),
     AlertOutcome(String, bool),
     /// Harness sessions st did not start, found on this machine.
-    Sessions(Collection),
     Session(String, Result<Box<st3_client::Session>, String>),
     /// The Fleet tab's machines and paired devices.
-    Machines(Collection),
-    Terminals(Vec<super::resource_sidebar::ResourceRow>, bool),
     Observations { generation: u64, outcome: Result<(Vec<st3_client::ResourceObservation>, bool), String> },
-    /// Token spend over a period of this many hours, or why st could not say.
-    Usage(u64, Result<st3_client::UsagePeriod, String>),
-    /// The clients connected to this member, or why they could not be read.
-    Clients(
-        Result<st3_client::ClientConnections, String>,
-        Option<String>,
-    ),
+    Inventory { generation: u64, result: InventoryRead },
     /// st's conversation search for the palette's query, or why st could not say.
     Said(String, Result<st3_client::ConversationSearch, String>),
-    Devices(Collection),
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
     /// answer is unknown.
     Sent(String, Result<Option<String>, (String, bool)>),
     /// st started an agent asked for here.
     /// st started a shell asked for here.
     TerminalStarted(String),
-    MachinesFailed(String),
     /// A direct stream to an agent's (or a shell's) PTY session.
     Native {
         agent: String,
@@ -328,9 +415,13 @@ pub fn run(context: Context) -> Result<()> {
         glass,
         mut open_timing,
         process_started,
+        mut initial_subject,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
     let mut model = cached.unwrap_or_default();
+    let mut agents_live = false;
+    // The feed announces a granted glasses window before sending any core window.
+    let mut glasses_ready = true;
     // The attention window is already this person's; nothing else names the actor.
     model.actor = person.clone();
     let mut extras = Extras::default();
@@ -375,7 +466,7 @@ pub fn run(context: Context) -> Result<()> {
     ui.show_focused();
     if ui.glasses.is_none() {
         ui.flash(
-            "The classic layout is going away: plain stui opens spaces, with Ctrl+S for this list",
+            "The classic layout is going away: plain st opens spaces, with Ctrl+S for this list",
         );
     } else if std::env::args().any(|arg| arg == "--old") {
         ui.flash("The old screens are gone: this is spaces, and ? shows its keys");
@@ -434,18 +525,11 @@ pub fn run(context: Context) -> Result<()> {
     let mut missions_sent = false;
     let mut missions_until: Option<Instant> = None;
     let mut content_reads = super::content::Reads::default();
-    // When usage was last asked for and over how many hours, and whether that read is out.
-    let mut usage_read: Option<(Instant, u64)> = None;
-    // When the connected clients were last read, while the fleet shows, and whether a read is out.
-    let mut clients_read: Option<Instant> = None;
-    let mut clients_reading = false;
-    let mut usage_reading = false;
-    // The machine list has no stream of its own, and a cached copy can be days old. It is read
-    // again when a connection goes live and whenever st's live summary counts a different number
-    // of machines, never on a timer.
-    let mut machines_stale = true;
-    let mut machines_reading = false;
-    let mut summary_machines: Option<u64> = None;
+    let mut inventory_grace = InventoryGrace::default();
+    let mut inventory_sent: Option<Inventories> = None;
+    let mut usage_wanted_hours = None;
+    let mut legacy_requested = BTreeSet::new();
+    let mut legacy_pending = BTreeSet::new();
     // The palette's conversation search: what st was last asked, and what is typed since when.
     let mut said_asked: Option<String> = None;
     let mut said_typed: Option<(String, Instant)> = None;
@@ -456,6 +540,11 @@ pub fn run(context: Context) -> Result<()> {
         && !stopping.load(std::sync::atomic::Ordering::Relaxed)
         && !crate::stdin_hung_up()
     {
+        let turn_started = Instant::now();
+        // A program written over on disk while it runs is told to the person at once, and noted.
+        if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
+            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+        }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
             .flash
@@ -478,19 +567,31 @@ pub fn run(context: Context) -> Result<()> {
         }
         while let Ok(update) = incoming.try_recv() {
             match update {
-                feed::Update::GlassesVersion(version) => super::set_glasses_version(version),
+                feed::Update::GlassesVersion(version) => {
+                    super::set_glasses_version(version);
+                    glasses_ready = ui.glasses.is_none();
+                }
                 feed::Update::Connected(member) => {
                     ui.quality.live(false);
+                    agents_live = false;
+                    glasses_ready = true;
                     client = member;
                     resources_generation += 1;
                     resources_stale = true;
-                    machines_stale = true;
+                    extras.inventory_supported = None;
+                    extras.inventory_partial.clear();
+                    inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
                     extras.live = false;
                     attached = None;
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
                     preview_requested.clear();
                     body_requested.clear();
+                    changed = true;
+                }
+                feed::Update::InventorySupport { granted, member_build } => {
+                    extras.inventory_supported = Some(granted);
+                    model.member_build = member_build;
                     changed = true;
                 }
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
@@ -511,6 +612,7 @@ pub fn run(context: Context) -> Result<()> {
                     items,
                     ..
                 } => {
+                    glasses_ready = true;
                     ui.glasses_from_graph(
                         items
                             .into_iter()
@@ -553,17 +655,12 @@ pub fn run(context: Context) -> Result<()> {
                             }
                         });
                     }
-                    extras.window_errors.remove(&format!("{window:?}"));
+                    extras.window_errors.remove(&window_label(window));
                     if window == Window::Summary {
                         extras.summary = items.iter().find_map(|item| match item {
                             Resource::Summary(summary) => Some(summary.clone()),
                             _ => None,
                         });
-                        let counted = extras.summary.as_ref().map(machines_counted);
-                        if counted != summary_machines {
-                            summary_machines = counted;
-                            machines_stale = true;
-                        }
                         changed = true;
                         continue;
                     }
@@ -572,6 +669,10 @@ pub fn run(context: Context) -> Result<()> {
                         for write in ui.unsent_glass_writes() {
                             save_glass(&runtime, &client, &fetched_tx, write);
                         }
+                    }
+                    if let Window::Inventory(inventory) = window {
+                        extras.inventory_partial.retain(|name| name != inventory.collection());
+                        if has_more { extras.inventory_partial.push(inventory.collection().into()); }
                     }
                     let collection = Collection {
                         items,
@@ -591,7 +692,20 @@ pub fn run(context: Context) -> Result<()> {
                         Window::Agents => {
                             model.agents = collection;
                             extras.agents_live = true;
+                            agents_live = true;
                         }
+                        Window::Inventory(inventory) => match inventory {
+                            Inventory::Machines => model.machines = collection,
+                            Inventory::Devices => model.devices = collection,
+                            Inventory::Sessions => model.sessions = collection,
+                            Inventory::Terminals => {
+                                ui.resource_sidebar.terminals = terminal_rows(collection.items);
+                                ui.resource_sidebar.terminals_has_more = collection.truncated;
+                            }
+                            Inventory::Clients => model.clients = Some(Ok(model::inventory_clients(collection.items, collection.snapshot.as_ref().unwrap().host_id.clone()))),
+                            Inventory::Usage(hours) if hours == ui.usage_hours => model.usage = Some(model::inventory_usage(collection.items)),
+                            Inventory::Usage(_) => {},
+                        },
                         Window::Glasses | Window::Summary | Window::Arrangements => {}
                     }
                     extras.live = true;
@@ -676,6 +790,11 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::WindowStopped(window) => {
+                    if let Window::Inventory(inventory) = window {
+                        extras.window_errors.remove(&window_label(window));
+                        extras.inventory_partial.retain(|name| name != inventory.collection());
+                        changed = true;
+                    }
                     // A window left on purpose (no Missions list on screen): what was held for it
                     // is out of date and not shown as current.
                     if window == Window::Missions {
@@ -685,8 +804,10 @@ pub fn run(context: Context) -> Result<()> {
                     }
                 }
                 feed::Update::WindowFailed(window, error) => {
-                    ui.flash(format!("Could not load {window:?}: {error}"));
-                    extras.window_errors.insert(format!("{window:?}"), error);
+                    if let Window::Inventory(Inventory::Clients) = window && model.clients.is_none() { model.clients = Some(Err(error.clone())); }
+                    if let Window::Inventory(Inventory::Usage(hours)) = window && hours == ui.usage_hours && model.usage.is_none() { model.usage = Some(Err(error.clone())); }
+                    ui.flash(format!("Could not load {}: {error}", window_label(window)));
+                    extras.window_errors.insert(window_label(window), error);
                     changed = true;
                 }
                 feed::Update::Degraded(reason) => {
@@ -821,9 +942,6 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                 }
-                Fetched::Sessions(native) => {
-                    model.sessions = native;
-                }
                 Fetched::Session(id, outcome) => match outcome {
                     Ok(session) => model.add_opened_session(*session),
                     Err(message) => {
@@ -838,25 +956,12 @@ pub fn run(context: Context) -> Result<()> {
                     ui.resource_sidebar.saved(&write, outcome.is_ok());
                     if let Err(error) = outcome { ui.flash(format!("Sidebar edit not done: {error}")); }
                 }
-                Fetched::Machines(machines) => {
-                    machines_reading = false;
-                    model.machines = machines;
-                }
-                Fetched::MachinesFailed(why) => {
-                    // Asked again when the connection or st's count changes, not at once.
-                    machines_reading = false;
-                    ui.flash(format!("Could not load machines: {why}"));
-                }
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
                     if generation == resources_generation { match outcome {
                     Ok((rows, has_more)) => { ui.resource_sidebar.observations = rows; ui.resource_sidebar.observations_has_more = has_more; ui.resource_sidebar.observations_issue = None; }
                     Err(error) => ui.resource_sidebar.observations_issue = Some(error),
                 }}},
-                Fetched::Terminals(rows, has_more) => {
-                    ui.resource_sidebar.terminals = rows;
-                    ui.resource_sidebar.terminals_has_more = has_more;
-                }
                 Fetched::Older {
                     target,
                     session_id,
@@ -883,27 +988,46 @@ pub fn run(context: Context) -> Result<()> {
                     ui.said = Some((query, outcome));
                     changed = true;
                 }
-                Fetched::Clients(outcome, member_build) => {
-                    clients_reading = false;
-                    model.clients = Some(outcome);
-                    if member_build.is_some() {
-                        model.member_build = member_build;
-                    }
-                }
-                Fetched::Usage(hours, outcome) => {
-                    usage_reading = false;
-                    if hours == ui.usage_hours {
-                        match outcome {
+                Fetched::Inventory { generation, result } => {
+                    if generation != resources_generation || extras.inventory_supported != Some(false) { continue; }
+                    legacy_pending.remove(&result.inventory());
+                    if matches!(&result, InventoryRead::Usage(hours, _) if *hours != ui.usage_hours) { continue; }
+                    let name = result.inventory().collection();
+                    let error = match &result {
+                        InventoryRead::Rows(_, outcome) => outcome.as_ref().err(),
+                        InventoryRead::Terminals(outcome) => outcome.as_ref().err(),
+                        InventoryRead::Clients(outcome) => outcome.as_ref().err(),
+                        InventoryRead::Usage(_, outcome) => outcome.as_ref().err(),
+                    };
+                    if let Some(error) = error { extras.window_errors.insert(name.into(), error.clone()); }
+                    else { extras.window_errors.remove(name); }
+                    match result {
+                        InventoryRead::Rows(inventory, outcome) => match outcome {
+                            Ok(rows) => match inventory {
+                                Inventory::Machines => model.machines = rows,
+                                Inventory::Devices => model.devices = rows,
+                                Inventory::Sessions => model.sessions = rows,
+                                _ => unreachable!(),
+                            },
+                            Err(error) => ui.flash(format!("Could not load {}: {error}", inventory.collection())),
+                        },
+                        InventoryRead::Terminals(outcome) => match outcome {
+                            Ok((rows, has_more)) => { ui.resource_sidebar.terminals = terminal_rows(rows); ui.resource_sidebar.terminals_has_more = has_more; },
+                            Err(error) => ui.flash(format!("Could not load terminals: {error}")),
+                        },
+                        InventoryRead::Clients(outcome) => match outcome {
+                            Ok(clients) => model.clients = Some(Ok(clients)),
+                            Err(error) if matches!(model.clients, Some(Ok(_))) => ui.flash(format!("Could not read clients again: {error}")),
+                            Err(error) => model.clients = Some(Err(error)),
+                        },
+                        InventoryRead::Usage(hours, outcome) if hours == ui.usage_hours => match outcome {
                             Ok(period) => model.usage = Some(Ok(period)),
-                            // Rows already shown stay; a passing failure is only mentioned.
-                            Err(why) if matches!(model.usage, Some(Ok(_))) => {
-                                ui.flash(format!("Could not read usage again: {why}"))
-                            }
-                            Err(why) => model.usage = Some(Err(why)),
-                        }
+                            Err(error) if matches!(model.usage, Some(Ok(_))) => ui.flash(format!("Could not read usage again: {error}")),
+                            Err(error) => model.usage = Some(Err(error)),
+                        },
+                        InventoryRead::Usage(_, _) => {},
                     }
                 }
-                Fetched::Devices(devices) => model.devices = devices,
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 Fetched::Native { agent, direct } => {
@@ -1009,68 +1133,25 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
             shown_tab = tab;
-            let terminal_client = client.clone();
-            let tx = fetched_tx.clone();
-            runtime.spawn(async move {
-                if let Ok(reply) = terminal_client.terminals_list(None, Some(200), false).await {
-                    let has_more = reply.value.page.has_more;
-                    let rows = reply.value.items.into_iter().filter_map(|item| match item {
-                        Resource::Runtime(runtime) => runtime.terminal_id.map(|terminal| super::resource_sidebar::ResourceRow {
-                            id: runtime.header.id, kind: "Terminals".into(), title: runtime.owner_id, open: terminal, missing: false,
-                        }),
-                        _ => None,
-                    }).collect();
-                    let _ = tx.send(Fetched::Terminals(rows, has_more));
-                }
-            });
-            if tab == 1 || model.sessions.snapshot.is_none() {
-                let client = client.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn(async move {
-                    match model::read_native_sessions(&client).await {
-                        Ok(native) => {
-                            let _ = tx.send(Fetched::Sessions(native));
-                        }
-                        Err(error) => {
-                            let _ = tx.send(Fetched::Notice(format!(
-                                "Could not look for other harness sessions: {error}"
-                            )));
-                        }
-                    }
-                });
-            }
-            // Glasses show the fleet in the status line and the palette, so they need the
-            // machines from the start rather than when a Fleet tab opens.
-            if tab == 3 || (ui.glasses.is_some() && model.machines.snapshot.is_none()) {
-                let client = client.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn(async move {
-                    let (machines, devices) =
-                        tokio::join!(model::read_machines(&client), model::read_devices(&client));
-                    for (result, what) in [(machines, "machines"), (devices, "devices")] {
-                        let _ = tx.send(match result {
-                            Ok(collection) if what == "machines" => Fetched::Machines(collection),
-                            Ok(collection) => Fetched::Devices(collection),
-                            Err(error) => {
-                                Fetched::Notice(format!("Could not load {what}: {error}"))
-                            }
-                        });
-                    }
-                });
-            }
         }
-        // The machines shown follow the live connection and st's own count of them.
-        if machines_stale && extras.live && !machines_reading {
-            machines_stale = false;
-            machines_reading = true;
-            let client = client.clone();
-            let tx = fetched_tx.clone();
-            runtime.spawn(async move {
-                let _ = tx.send(match model::read_machines(&client).await {
-                    Ok(collection) => Fetched::Machines(collection),
-                    Err(error) => Fetched::MachinesFailed(error.to_string()),
-                });
-            });
+        let visible = ui.inventories_wanted();
+        if let Some(hours) = visible.usage_hours && usage_wanted_hours != Some(hours) {
+            usage_wanted_hours = Some(hours); model.usage = None; changed = true;
+        }
+        if extras.inventory_supported == Some(true) {
+            let held = inventory_grace.followed(visible, Instant::now());
+            if inventory_sent != Some(held) {
+                inventory_sent = Some(held);
+                let _ = commands.send(Command::Inventories(held));
+            }
+        } else if extras.inventory_supported == Some(false) && extras.live {
+            let wanted = visible.windows().into_iter().collect::<BTreeSet<_>>();
+            for inventory in wanted.difference(&legacy_requested).copied() {
+                if !legacy_pending.insert(inventory) { continue; }
+                let client = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+                runtime.spawn(async move { let result = legacy_inventory(&client, inventory).await; let _ = tx.send(Fetched::Inventory { generation, result }); });
+            }
+            legacy_requested = wanted;
         }
         // Ctrl+K asks st's conversation search once what is typed has been still for a moment;
         // an answer to an earlier query is dropped where it lands (Ui::said_choices).
@@ -1098,66 +1179,6 @@ pub fn run(context: Context) -> Result<()> {
                 said_typed = None;
             }
             _ => {}
-        }
-        // Who is connected has no stream either: read while the fleet shows, every few seconds,
-        // since clients come and go.
-        if ui.clients_wanted() && extras.live {
-            let due = clients_read.is_none_or(|at| at.elapsed() >= CLIENTS_EVERY);
-            if due && !clients_reading {
-                clients_read = Some(Instant::now());
-                clients_reading = true;
-                let client = client.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn(async move {
-                    let member_build = client
-                        .capabilities()
-                        .await
-                        .ok()
-                        .and_then(|envelope| envelope.value.machine_version);
-                    let outcome = client
-                        .clients_list()
-                        .await
-                        .map(|envelope| envelope.value)
-                        .map_err(|error| match &error {
-                            ClientError::Api(st3_client::ErrorCode::NotFound, ..) => {
-                                "this st does not list its clients yet: its daemon needs an update"
-                                    .to_owned()
-                            }
-                            _ => error.plain(),
-                        });
-                    let _ = tx.send(Fetched::Clients(outcome, member_build));
-                });
-            }
-        } else {
-            clients_read = None;
-        }
-        // Usage has no stream: it is read while something shows it, again each minute, and at
-        // once over a new period.
-        if let Some(hours) = ui.usage_wanted() {
-            let new_period = usage_read.is_some_and(|(_, read)| read != hours);
-            if new_period {
-                model.usage = None;
-                changed = true;
-            }
-            let due = usage_read.is_none_or(|(at, _)| at.elapsed() >= USAGE_EVERY) || new_period;
-            if due && !usage_reading {
-                usage_read = Some((Instant::now(), hours));
-                usage_reading = true;
-                let client = client.clone();
-                let tx = fetched_tx.clone();
-                runtime.spawn(async move {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |since| since.as_millis() as u64);
-                    let since = now.saturating_sub(hours * 3_600_000);
-                    let outcome = client
-                        .usage_period(Some(since), None)
-                        .await
-                        .map(|envelope| envelope.value)
-                        .map_err(|error| usage_error(&error));
-                    let _ = tx.send(Fetched::Usage(hours, outcome));
-                });
-            }
         }
         // Every conversation on screen rides the feed's socket (the focused one first): st
         // pushes each change, so nothing here reads one again on a timer.
@@ -1623,6 +1644,7 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
             ui.set_world(adapt::world(&model, &person, &extras));
+            focus_initial_subject(&mut ui, &mut initial_subject, agents_live, glasses_ready);
             changed = false;
             if last_cache_save.elapsed() >= Duration::from_secs(60) {
                 save_cache(cache_path.as_deref(), &person, &model);
@@ -1648,12 +1670,23 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
+        let draw_started = Instant::now();
         terminal.draw(|frame| {
             ui.render(frame);
             if hyperlinks {
                 links = ui.link_cells(frame.buffer_mut());
             }
         })?;
+        // A slow draw, or a whole turn that took long before it waited for input, is written
+        // down with what was on screen, so that "it was slow" can be explained afterwards.
+        let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
+        if drew >= SLOW_DRAW || turn >= SLOW_TURN {
+            super::lastrun::note_slow(
+                &format!("draw {} ms, turn {} ms", drew.as_millis(), turn.as_millis()),
+                &ui.slow_context(),
+                &crate::version::short(crate::version::now()),
+            );
+        }
         if hyperlinks && !links.is_empty() {
             super::hyperlinks::write_links(terminal.backend_mut(), &links)?;
         }
@@ -1802,19 +1835,29 @@ pub fn run(context: Context) -> Result<()> {
         super::hover::poll_input(
             Duration::from_millis(if flowing { 16 } else { 80 }),
             &stopping,
-            |input| match input {
-                Event::Key(key)
-                    if !extras.live
-                        && key.code == crossterm::event::KeyCode::Char('r')
-                        && !ui.editing =>
-                {
-                    let _ = commands.send(Command::Reconnect);
-                    true
+            |input| {
+                cancel_initial_subject(&mut initial_subject, &input);
+                match input {
+                    Event::Key(key)
+                        if !extras.live
+                            && key.code == crossterm::event::KeyCode::Char('r')
+                            && !ui.editing =>
+                    {
+                        let _ = commands.send(Command::Reconnect);
+                        true
+                    }
+                    input => ui.input_event(input),
                 }
-                input => ui.input_event(input),
             },
         )?;
     }
+    super::lastrun::note_exit(if ui.quit {
+        "quit (Ctrl+Q)"
+    } else if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+        "signal (INT, TERM or HUP)"
+    } else {
+        "terminal closed (stdin hung up)"
+    });
     // Leave no attachment behind.
     if let Some(current) = attached.take() {
         let _ = runtime.block_on(feed::detach(
@@ -2644,13 +2687,13 @@ async fn send_message(
                 earlier.id,
                 earlier.idempotency_key,
                 fence,
-                parameters.clone(),
+                earlier.parameters,
             )
             .await
         {
             Ok(result) => return Ok(message_id(result)),
             // st checks a repeat before the fence: a stale fence means it never took it.
-            Err(error) if error.to_string().contains("StaleFence") => {}
+            Err(ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -2674,6 +2717,7 @@ async fn send_message(
                 id: id.clone(),
                 idempotency_key: idem.clone(),
                 snapshot_id: snapshot.clone(),
+                parameters: parameters.clone(),
             });
         }
         let fence = Fence {
@@ -2685,7 +2729,9 @@ async fn send_message(
             .await
         {
             Ok(result) => return Ok(message_id(result)),
-            Err(error) if error.to_string().contains("StaleFence") => last = Some(error),
+            Err(error @ ClientError::Api(st3_client::ErrorCode::StaleFence, ..)) => {
+                last = Some(error)
+            }
             Err(error) => return Err(error.into()),
         }
     }
@@ -2696,6 +2742,20 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hidden_inventory_windows_leave_after_grace_and_period_changes_replace_one_slot() {
+        let now = Instant::now();
+        let mut grace = InventoryGrace::default();
+        let visible = Inventories { clients: true, usage_hours: Some(24), ..Inventories::default() };
+        assert_eq!(grace.followed(visible, now), visible);
+        assert_eq!(grace.followed(Inventories::default(), now + Duration::from_secs(29)), visible);
+        assert_eq!(grace.followed(Inventories::default(), now + MISSIONS_GRACE), Inventories::default());
+        grace.followed(visible, now);
+        let week = grace.followed(Inventories { usage_hours: Some(168), ..Inventories::default() }, now + Duration::from_secs(1));
+        assert_eq!(week.windows(), vec![Inventory::Clients, Inventory::Usage(168)]);
+        assert_eq!(grace.followed(Inventories::default(), now + MISSIONS_GRACE).windows(), vec![Inventory::Usage(168)]);
+    }
+
     #[test]
     fn an_answer_landing_requires_action_confirmation_and_the_fresh_window_in_either_order() {
         let at = Instant::now();
@@ -2756,22 +2816,151 @@ mod tests {
             .outcome_unknown());
     }
 
-    #[test]
-    fn a_different_machine_count_in_the_live_summary_means_the_machine_list_is_out_of_date() {
-        let summary = |connected: u64, indirect: u64, offline: u64| -> st3_client::Summary {
-            serde_json::from_value(serde_json::json!({
-                "kind": "summary", "id": "summary/current", "revision": "r",
-                "updated_at": "2026-10-09T17:00:00Z",
-                "person_id": "person/ada", "needs_you": 0, "working_agents": 0, "active_missions": 0,
-                "machines": {"connected": connected, "indirect": indirect, "offline": offline},
-            }))
-            .unwrap()
+    /// st answers a send it could not confirm in time `message-send-unconfirmed`, `applied:
+    /// "unknown"`: it may still complete. Nothing here sends it again by itself, and the person's
+    /// resend repeats the exact request. st keys its receipt on the whole request but the fence,
+    /// so a repeat that differs in anything else (here, the agent moved to a new session in
+    /// between) would be refused as a conflict and the message could never be confirmed.
+    #[tokio::test]
+    async fn an_unconfirmed_send_waits_for_the_person_and_goes_again_unchanged() {
+        use axum::{body::Bytes, extract::State, http::StatusCode, routing};
+        #[derive(Default)]
+        struct Daemon {
+            posted: Vec<serde_json::Value>,
+            receipts: BTreeMap<String, serde_json::Value>,
+        }
+        type Shared = Arc<Mutex<Daemon>>;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("daemon.sock");
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/st3/client-v0/fixtures/capabilities.json"
+        ))
+        .unwrap();
+        let snapshot = capabilities["snapshot"].clone();
+        // The first request under a key is taken but not confirmed; the same request again gets
+        // its result; a different request under that key is a conflict, as st answers.
+        let action = move |State(daemon): State<Shared>, body: Bytes| {
+            let snapshot = snapshot.clone();
+            async move {
+                let action: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let mut daemon = daemon.lock().unwrap();
+                daemon.posted.push(action.clone());
+                let key = action["idempotency_key"].as_str().unwrap().to_owned();
+                let mut digest = action.clone();
+                digest.as_object_mut().unwrap().remove("fence");
+                let refusal = |code: &str, retryable: bool, details: serde_json::Value| {
+                    serde_json::json!({
+                        "api_version": "st3.client.v0", "error_version": "st3.client.error.v0",
+                        "request_id": "request/example", "code": code, "message": code,
+                        "retryable": retryable, "details": details,
+                    })
+                };
+                let (status, body) = match daemon.receipts.get(&key) {
+                    Some(seen) if *seen != digest => (
+                        StatusCode::CONFLICT,
+                        refusal("idempotency-conflict", false, serde_json::json!({})),
+                    ),
+                    Some(_) => (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "api_version": "st3.client.v0", "request_id": "request/example",
+                            "snapshot": snapshot,
+                            "value": {
+                                "kind": "action-result", "action_id": action["id"],
+                                "operation_id": "operation/example", "status": "completed",
+                                "affected_ids": ["message/example-tally"],
+                                "snapshot_id": snapshot["id"],
+                            },
+                        }),
+                    ),
+                    None => {
+                        daemon.receipts.insert(key.clone(), digest);
+                        (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            refusal(
+                                "message-send-unconfirmed",
+                                false,
+                                serde_json::json!({
+                                    "applied": "unknown", "action_id": action["id"],
+                                    "idempotency_key": key,
+                                }),
+                            ),
+                        )
+                    }
+                };
+                (status, axum::Json(body))
+            }
         };
-        // Four machines counted, whatever their reach; a machine list cached before the fifth joined
-        // (or before hetz2 did) holds fewer, and the next summary frame says so.
-        assert_eq!(machines_counted(&summary(3, 0, 1)), 4);
-        assert_eq!(machines_counted(&summary(2, 1, 1)), 4);
-        assert_ne!(machines_counted(&summary(3, 0, 0)), machines_counted(&summary(3, 0, 1)));
+        let daemon = Shared::default();
+        let router = axum::Router::new()
+            .route(
+                "/v1/client/capabilities",
+                routing::get(move || std::future::ready(axum::Json(capabilities.clone()))),
+            )
+            .route("/v1/client/actions", routing::post(action))
+            .with_state(daemon.clone());
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = Client::unix_as(&socket, "person/avery");
+        let in_session = |session: &str| {
+            let mut model = Model::default();
+            model.agents.items.push(
+                serde_json::from_value(serde_json::json!({
+                    "kind": "agent", "id": "agent/example/harbor/keeper", "revision": "a",
+                    "updated_at": "2026-10-03T08:28:00Z", "name": "Keeper", "state": "running",
+                    "reachability": "reachable", "current_session_id": session,
+                }))
+                .unwrap(),
+            );
+            model
+        };
+        let send = Effect::Send {
+            agent: "agent/example/harbor/keeper".into(),
+            text: "Count the harbor crates".into(),
+            in_reply_to: None,
+            tags: vec!["tally".into()],
+            images: Vec::new(),
+        };
+        // The live loop's own path: the same effect and the one `sent` slot for its pending copy.
+        let sent = Arc::new(Mutex::new(None));
+        let error = perform_steadily(
+            &client,
+            "person/avery",
+            &in_session("session/first"),
+            send.clone(),
+            Some(&*sent),
+        )
+        .await
+        .unwrap_err();
+        // What `Fetched::Sent` marks the pending copy with: unconfirmed, so it stays and offers
+        // a resend, not a plain failure.
+        assert!(error
+            .downcast_ref::<ClientError>()
+            .is_some_and(ClientError::outcome_unknown));
+        assert!(!not_applied(&error, &send));
+        assert_eq!(
+            super::plain(&error),
+            "st may have taken it and has not confirmed it yet; sending it again is safe"
+        );
+        assert_eq!(daemon.lock().unwrap().posted.len(), 1, "not sent again by itself");
+        // The agent moved to a new session before the person sent it again.
+        let (_, message) = perform_steadily(
+            &client,
+            "person/avery",
+            &in_session("session/second"),
+            send,
+            Some(&*sent),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.as_deref(), Some("message/example-tally"));
+        let posted = std::mem::take(&mut daemon.lock().unwrap().posted);
+        assert_eq!(posted.len(), 2);
+        for field in ["id", "type", "idempotency_key", "parameters"] {
+            assert_eq!(posted[1][field], posted[0][field], "{field} differs on the resend");
+        }
+        assert_eq!(posted[0]["parameters"]["session_id"], "session/first");
+        server.abort();
     }
 
     #[test]
@@ -2812,6 +3001,91 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
+        for spaces in [false, true] {
+            let mut world = super::super::demo::world();
+            let mut assistant = world.agents.items()[0].clone();
+            assistant.id = "agent/st/assistant".into();
+            assistant.name = "Smalltalk Assistant".into();
+            let other = world.agents.items()[0].id.clone();
+            let mut ui = Ui::new(world.clone());
+            if spaces {
+                ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+                ui.show_focused();
+                ui.open_home();
+            }
+            let before = ui.focus();
+            let mut requested = Some(assistant.id.clone());
+            focus_initial_subject(&mut ui, &mut requested, false, true);
+            assert_eq!(
+                ui.focus(), before,
+                "waiting inventory must not open another agent"
+            );
+            assert!(requested.is_some());
+            world.agents = Load::Ready(vec![world.agents.items()[0].clone(), assistant.clone()]);
+            ui.set_world(world.clone());
+            let before = ui.focus();
+            focus_initial_subject(&mut ui, &mut requested, false, true);
+            assert_eq!(
+                ui.focus(), before,
+                "cached inventory must not consume the request"
+            );
+            focus_initial_subject(&mut ui, &mut requested, true, true);
+            assert_eq!(ui.focus(), (1, Some(assistant.id.clone())));
+            assert_eq!(ui.live_conversations()[0], assistant.id);
+            assert!(!ui.home_open());
+            assert!(requested.is_none());
+            ui.open(&other);
+            ui.set_world(world);
+            focus_initial_subject(&mut ui, &mut requested, true, true);
+            assert_eq!(
+                ui.focus(), (1, Some(other)),
+                "later updates preserve navigation"
+            );
+        }
+    }
+
+    #[test]
+    fn initial_subject_is_cancelled_by_navigation_or_a_missing_live_agent() {
+        let mut ui = Ui::new(super::super::demo::world());
+        let mut missing = Some("agent/st/assistant".to_owned());
+        let before = ui.focus();
+        focus_initial_subject(&mut ui, &mut missing, true, true);
+        assert!(missing.is_none());
+        assert_eq!(ui.focus(), before);
+        let inputs = [
+            Event::Key(crossterm::event::KeyCode::Down.into()),
+            Event::Paste("hello".into()),
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 5, row: 5, modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+        ];
+        for input in inputs {
+            let mut subject = Some(ui.world.agents.items()[0].id.clone());
+            cancel_initial_subject(&mut subject, &Event::Resize(120, 32));
+            assert!(subject.is_some());
+            cancel_initial_subject(&mut subject, &input);
+            focus_initial_subject(&mut ui, &mut subject, true, true);
+            assert_eq!(ui.focus(), before);
+            assert!(subject.is_none());
+        }
+    }
+
+    #[test]
+    fn no_initial_subject_preserves_the_restored_space() {
+        let mut ui = Ui::new(super::super::demo::world());
+        ui.glasses = Some(super::super::glass::Glasses::open(None, None));
+        let agent = ui.world.agents.items()[0].id.clone();
+        ui.open(&agent);
+        ui.open_home();
+        let before = ui.focus();
+        focus_initial_subject(&mut ui, &mut None, true, true);
+        assert_eq!(ui.focus(), before);
+        assert!(ui.home_open());
+    }
 
     fn refusal(code: st3_client::ErrorCode, retryable: bool) -> anyhow::Error {
         anyhow::Error::new(st3_client::ClientError::Api(
@@ -3759,12 +4033,6 @@ mod tests {
         assert_eq!(plain(&lines[1]), "Finished");
         assert_eq!(plain(&lines[2]), "[redacted]");
     }
-}
-
-/// How many machines st's live summary counts. A different number than last time means the
-/// machine list stui holds, possibly a cached one days old, is out of date.
-fn machines_counted(summary: &st3_client::Summary) -> u64 {
-    summary.machines.connected + summary.machines.indirect + summary.machines.offline
 }
 
 /// A direct stream to a terminal's PTY session, and what it is.
