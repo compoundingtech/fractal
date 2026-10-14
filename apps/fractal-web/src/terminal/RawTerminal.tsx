@@ -363,7 +363,7 @@ const LoadedSurface = ({ handle, screen, palette, live, onTypingChange, layout }
           leaving.current = false
           return
         }
-        if (!live || pointerDown.current || event.target === field.current) return
+        if (!live || pointerDown.current) return
         if (event.target.getAttribute('aria-roledescription') === 'terminal') field.current?.focus({ preventScroll: true })
       }}
       onMouseDown={() => {
