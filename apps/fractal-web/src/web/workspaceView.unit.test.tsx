@@ -31,6 +31,12 @@ describe('workspace body', () => {
     const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: 'agent/fixture/one', rosterRefs: ['agent/fixture/one'], view: workspaceView({ ref: 'monitor/quota' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
     expect(html).toMatch(/View unavailable\./)
   })
+  it('opens the Missions screen from its tab', () => {
+    expect(workspaceView({ ref: 'missions' })).toEqual({ _tag: 'Missions' })
+    const html = renderToStaticMarkup(createElement(WorkspaceBody, { current: '', rosterRefs: [], view: workspaceView({ ref: 'missions' }), agentName: 'Fixture', onOpenTool: vi.fn() }))
+    expect(html).toMatch(/Loading missions…/)
+    expect(html).not.toMatch(/Choose an agent/)
+  })
   it('keeps the thread for the thread tab', () => {
     expect(workspaceView(undefined)).toEqual({ _tag: 'Thread' })
   })

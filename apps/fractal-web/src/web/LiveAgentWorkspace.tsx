@@ -2,7 +2,7 @@ import { sidebarRow } from './sidebarRow.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
-import { retainPane, workspaceView, workspaceViewNotice, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
+import { MISSIONS_REF, retainPane, workspaceView, workspaceViewNotice, type RetainedPane, type WorkspaceView } from './workspaceView.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -90,6 +90,7 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
 const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
 // The terminal grid, fonts and native key encoder load only when a terminal pane opens.
 const TerminalDetail = React.lazy(() => import('../terminal/TerminalDetail.tsx').then((module) => ({ default: module.TerminalDetail })))
+const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 
 const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.Number, defaultValue: 256 / 1440 })
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
@@ -248,6 +249,9 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                       <Aria.Button onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} aria-label="Toggle color scheme" {...stylex.props(styles.iconButton)}>
                         {scheme === 'dark' ? '☀' : '☾'}
                       </Aria.Button>
+                      <Aria.Button onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} {...stylex.props(styles.textButton)}>
+                        Missions
+                      </Aria.Button>
                       <Aria.Button onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} {...stylex.props(styles.textButton)}>
                         Usage
                       </Aria.Button>
@@ -301,7 +305,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} ux={ux} />, paneHost)}
+    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenAgent={select} ux={ux} />, paneHost)}
   </>)
 }
 
@@ -332,7 +336,7 @@ const GatewayConnectionStatus = () => {
  * evict their follows. Render-time history updates avoid a second committed selection.
  * Locking a pane costs O(its rows) in the browser, so the outgoing pane is only covered by the
  * opaque shown pane during the switch frame and locked after that frame paints. */
-export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly ux?: UxTelemetry }) {
+export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool, onOpenAgent, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenAgent?: (ref: string) => void; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
   const [viewportStore] = React.useState(() => new ViewportStore())
@@ -374,7 +378,12 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
           <ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} ux={ux} visible={shown} />
         </div>
       })}
-      {current === '' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
+      {view._tag === 'Missions' ? (
+        <React.Suspense fallback={<p role="status" {...stylex.props(styles.empty)}>Loading missions…</p>}>
+          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} />
+        </React.Suspense>
+      ) : null}
+      {current === '' && view._tag !== 'Missions' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
         : view._tag === 'ViewUnavailable' ? <p role="status" {...stylex.props(styles.empty)}>{workspaceViewNotice(view)}</p>
           : null}
     </div>
