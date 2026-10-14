@@ -1197,10 +1197,9 @@ impl Runner {
                 let words: Vec<&str> = text.split_inclusive(char::is_whitespace).collect();
                 let chunk = ((rate / 4.0).ceil() as usize).max(1);
                 let mut shown = String::new();
-                let mut revision = 1;
-                for (index, group) in words.chunks(chunk).enumerate() {
+                for (revision, group) in (1..).zip(words.chunks(chunk)) {
                     shown.extend(group.iter().copied());
-                    let last = (index + 1) * chunk >= words.len();
+                    let last = revision as usize * chunk >= words.len();
                     self.timeline(
                         agent,
                         &incarnation,
@@ -1212,7 +1211,6 @@ impl Runner {
                         body(if last { text } else { shown.trim_end() }),
                         now_ms(),
                     )?;
-                    revision += 1;
                     if !last {
                         pacing.sleep(Duration::from_secs_f64(group.len() as f64 / rate))?;
                     }
