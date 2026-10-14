@@ -4280,6 +4280,18 @@ mod tests {
     }
 
     #[test]
+    fn a_retired_reserved_sidebar_is_never_created_again() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        // st refused a create because the person retired their Sidebar, and none older exists.
+        ui.resource_sidebar.reserved_retired = true;
+        ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, "Builds");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))), "nothing creates a retired subject");
+        assert_eq!(ui.flash.as_ref().map(|(text, _)| text.as_str()), Some(resource_sidebar::SIDEBAR_RETIRED));
+    }
+
+    #[test]
     fn sidebar_folder_names_and_add_finder_use_the_existing_palette() {
         use resource_sidebar::PaletteMode as Mode;
         let mut ui = glass();
@@ -5237,7 +5249,7 @@ mod tests {
         ctrl(&mut ui, 'a');
         assert_eq!(ui.popover.as_deref(), Some("actions:agent/example/atlas/builder"));
         let shown = screen(&ui);
-        for action in ["Restart", "Suspend", "Retire", "Copy id", "ACTIONS · ESC CLOSES"] {
+        for action in ["Restart", "Suspend", "Stop", "Copy id", "ACTIONS · ESC CLOSES"] {
             assert!(shown.contains(action), "{action}: {shown}");
         }
         // Restart asks first; Esc would keep it, y restarts.
@@ -5259,6 +5271,14 @@ mod tests {
         press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE);
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ui.effects.is_empty());
+    }
+
+    #[test]
+    fn a_retired_identity_has_no_start_resume_or_runtime_actions() {
+        let agent = Agent { state: AgentState::Retired, terminal: false, ..glass().world.agents.items()[0].clone() };
+        let keys = screens::agent_actions(&agent).iter().map(|action| action.key).collect::<String>();
+        for key in ['s','u','r','x','p','t'] { assert!(!keys.contains(key), "{keys}"); }
+        assert_eq!(screens::agent_word(agent.state), "retired");
     }
 
     #[test]

@@ -6,7 +6,7 @@ import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
 import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
 import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
-import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
+import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
 import { REPAIR_WARNING, validatePairingTrust, verifyPairing } from './pairingProof';
@@ -29,7 +29,7 @@ import { normalizeGatewayUrl } from './gatewayUrl';
 import { tabOrder, type Tab } from './tabs';
 import type { SidebarResource } from './sidebarView';
 import { readSidebarResources } from './sidebarResources';
-import { sidebarArrangement, sidebarSubject } from './sidebarEdits';
+import { SIDEBAR_RETIRED, sidebarArrangement, sidebarRetired, sidebarSubject } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
 
@@ -83,7 +83,12 @@ async function signMessage<P extends { to: string; content: string; session_id?:
   const message: Unsigned = {
     subject: messageSubject(digest),
     signer: signing.person,
-    fields: { content: parameters.content, from: signing.person, in_reply_to: null, session_id: parameters.session_id ?? null, tags: parameters.tags ?? [], title: null, to: parameters.to },
+    // Past 8 KiB the claim keeps a preview, so the signature covers that with the text's hash and length.
+    fields: signedMessageFields(
+      { from: signing.person, in_reply_to: null, session_id: parameters.session_id ?? null, tags: parameters.tags ?? [], title: null, to: parameters.to },
+      parameters.content,
+      isLongMessage(parameters.content) ? await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, parameters.content, { encoding: Crypto.CryptoEncoding.HEX }) : undefined,
+    ),
     key: signing.key,
     chain: signing.chain,
     // A fresh one-time number for each new send; a retry of the same send reuses the request.
@@ -142,6 +147,7 @@ function useAppStore(proof?: FabricProfile) {
   const [sidebarResources, setSidebarResources] = useState<ResourceObservation[]>([]), [sidebarResourcesIssue, setSidebarResourcesIssue] = useState('');
   const sidebarResourcesRead = useRef<{ focused?: string; promise: Promise<void> } | null>(null);
   const sidebarCreation = useRef<{ subject: string; created: boolean } | null>(null);
+  const sidebarRemoved = useRef(false);
   const sidebarWriting = useRef(false);
   const sidebarSeen = useRef(new Map<string, SidebarResource>());
   const cachedActor = useRef(''), cacheSavedAt = useRef(0), cacheGeneration = useRef(0);
@@ -163,6 +169,7 @@ function useAppStore(proof?: FabricProfile) {
   useEffect(() => foreground.current.subscribe(active => { if (!active && !proofRef.current) void localDrafts.save(draftsOwner.current, draftCache.current); }), []);
   // Images messages carry, as data URIs, so a conversation scrolled back to does not read them again.
   const imageCache = useRef(new Map<string, Promise<string>>());
+  // The request of a send st never confirmed, so sending the same message again repeats it instead of making a second.
   // Attention the person acted on from here: st closing it is their doing, not a vanishing.
   const acted = useRef(new Set<string>());
   // Whether this connection has delivered its first attention window: what a stored copy held
@@ -356,7 +363,7 @@ function useAppStore(proof?: FabricProfile) {
   }, [proof?.url, proof?.credential]);
 
   function clearCaches() {
-    sidebarSeen.current.clear(); sidebarCreation.current = null;
+    sidebarSeen.current.clear(); sidebarCreation.current = null; sidebarRemoved.current = false;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
     draftsOwner.current = '';
@@ -780,6 +787,8 @@ function useAppStore(proof?: FabricProfile) {
     async editSidebar(operations: ArrangementOperation[]): Promise<boolean> {
       if (!client || status !== 'online' || !arrangementPerson || !arrangementsGranted || sidebarWriting.current) return false;
       const existing = sidebarArrangement(arrangements);
+      // A retired Sidebar is never created again.
+      if (!existing && sidebarRemoved.current) { setError(SIDEBAR_RETIRED); return false; }
       const draft = sidebarCreation.current ?? { subject: sidebarSubject(arrangementPerson), created: false };
       if (!existing) sidebarCreation.current = draft;
       const creating = !existing && !draft.created;
@@ -787,8 +796,11 @@ function useAppStore(proof?: FabricProfile) {
       const id = actionId();
       sidebarWriting.current = true;
       try {
-        const done = await runAction(async () => client.arrangementEdit({ id, idempotency_key: id, fence: await fence(), parameters }));
+        const done = await runAction(async () => {
+          try { return await client.arrangementEdit({ id, idempotency_key: id, fence: await fence(), parameters }); } catch (e) { if (creating && sidebarRetired(e)) sidebarRemoved.current = true; throw e; }
+        });
         if (done && creating) draft.created = true;
+        if (!done && sidebarRemoved.current) setError(SIDEBAR_RETIRED);
         return done;
       } finally { sidebarWriting.current = false; }
     },
@@ -852,6 +864,12 @@ function useAppStore(proof?: FabricProfile) {
       reading.catch(() => { if (imageCache.current.get(image.sha256) === reading) imageCache.current.delete(image.sha256); });
       rememberBounded(imageCache.current, image.sha256, reading, 24);
       return reading;
+    },
+    /** The whole text of a long message (a conversation shows only its start), read from the member that took it. */
+    async messageBody(message: string): Promise<{ text: string; complete?: boolean }> {
+      if (!client || status !== 'online') throw new Error(status === 'online' ? 'not connected' : 'offline');
+      const answer = (await client.messageBodyGet(message)).value;
+      return { text: answer.text, complete: answer.complete };
     },
     /** Send Small Talk to an agent, as stui does: fenced to a fresh snapshot, once more if it moved. */
     async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
