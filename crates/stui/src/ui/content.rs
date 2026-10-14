@@ -1466,6 +1466,15 @@ mod tests {
     }
 
     fn render(content: &Content, entries: &[super::super::view::Entry], open: bool) -> Doc {
+        render_as(content, entries, open, st3_conversation_ui::Density::Full)
+    }
+
+    fn render_as(
+        content: &Content,
+        entries: &[super::super::view::Entry],
+        open: bool,
+        density: st3_conversation_ui::Density,
+    ) -> Doc {
         let expanded = if open {
             entries.iter().map(|entry| entry.id.clone()).collect()
         } else {
@@ -1476,7 +1485,7 @@ mod tests {
             120,
             &expanded,
             "*",
-            st3_conversation_ui::Density::Full,
+            density,
         );
         content.decorate(&mut doc, "agent/example", &expanded, 120);
         doc
@@ -2379,6 +2388,35 @@ mod tests {
         // An image no open ask carries leaves memory.
         content.index_requests(Vec::new());
         assert!(content.loaded.is_empty());
+    }
+
+    #[test]
+    fn a_persons_pasted_image_shows_once() {
+        // As st serves a Claude turn with text and an image: the message, whose internal source
+        // record names the image, then the image as content of its own.
+        let items = serde_json::from_value(serde_json::json!([
+            {"id":"turn","sequence":1,"revision":1,"timestamp":"2026-10-13T10:00:00Z","role":"user","type":"message","final":true,
+             "body":{"message_id":"u1","reply_to":null,"blocks":[{"id":"turn/source","kind":"source_record","source_type":"claude","visibility":"internal",
+                "payload":{"raw":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"what is growing here?"},
+                    {"type":"image","content":{"ref":"lawn-ref","media_type":"image/png","reason":"on-demand","size":71968}}]}}}}]}},
+            {"id":"picture","sequence":2,"revision":1,"timestamp":"2026-10-13T10:00:00Z","role":"user","type":"content","final":true,
+             "body":{"media_type":"text/plain","text":"[image · load from owner]","blocks":[{"id":"picture/0","kind":"image","source_type":"image","payload":{},
+                "continuation":{"ref":"lawn-ref","media_type":"image/png","size":71968,"reason":"on-demand"}}]}}
+        ]))
+        .unwrap();
+        let timelines = BTreeMap::from([(
+            "agent/example".to_owned(),
+            st3_conversation_ui::Timeline { items, session_id: Some("session/example".into()), ..Default::default() },
+        )]);
+        let mut content = Content::default();
+        content.index(&timelines);
+        let entries = super::super::adapt::conversation(&timelines["agent/example"].items, &BTreeMap::new());
+        for density in [st3_conversation_ui::Density::Full, st3_conversation_ui::Density::Simple] {
+            for open in [false, true] {
+                let text = whole(&render_as(&content, &entries, open, density));
+                assert_eq!(text.matches("[image image/png, 71 KB]").count(), 1, "{text}");
+            }
+        }
     }
 
     #[test]

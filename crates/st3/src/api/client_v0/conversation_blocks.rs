@@ -396,6 +396,15 @@ fn image_facts(value: &Value) -> (&'static str, Option<usize>) {
     let Some(source) = image_source(value) else {
         return unknown;
     };
+    // A preview keeps the head of a long value and names the whole value's length; the head
+    // still shows the format, and the length gives the size to within the two padding bytes.
+    let (source, clipped) = match source.split_once("\n[st truncated this native timeline value: size limit; ") {
+        Some((head, marker)) => match marker.split_once(' ').and_then(|(bytes, _)| bytes.parse::<usize>().ok()) {
+            Some(bytes) => (head, Some(bytes)),
+            None => return unknown,
+        },
+        None => (source, None),
+    };
     let data = match source.strip_prefix("data:") {
         Some(url) => match url.split_once(";base64,") {
             Some((_, data)) => data,
@@ -403,6 +412,7 @@ fn image_facts(value: &Value) -> (&'static str, Option<usize>) {
         },
         None => source,
     };
+    let prefix = source.len() - data.len();
     let data = data.trim_end();
     if data.len() < 16 || data.bytes().any(|byte| byte.is_ascii_whitespace()) {
         return unknown;
@@ -413,8 +423,14 @@ fn image_facts(value: &Value) -> (&'static str, Option<usize>) {
     let Some(media) = crate::blobs::sniff_media_type(&head) else {
         return unknown;
     };
-    let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
-    (media, Some(data.len() / 4 * 3 - padding.min(2)))
+    let size = match clipped {
+        Some(bytes) => bytes.saturating_sub(prefix) / 4 * 3,
+        None => {
+            let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
+            data.len() / 4 * 3 - padding.min(2)
+        }
+    };
+    (media, Some(size))
 }
 
 fn external_image(value: &Value) -> bool {
@@ -1163,7 +1179,15 @@ mod tests {
             // The label says jpeg or gif; the bytes say png, and the bytes win.
             assert_eq!(image_facts(&value), ("image/png", Some(png.len())), "{value}");
         }
+        // A preview's head and the whole value's length, as the fold clips a long image.
+        let long = STANDARD.encode([&png[..], &[0u8; 3002][..]].concat());
+        let clipped = format!("{}\n[st truncated this native timeline value: size limit; {} bytes]", &long[..64], long.len());
+        assert_eq!(image_facts(&json!({"type":"image","source":{"type":"base64","data":clipped}})), ("image/png", Some(png.len() + 3002)));
+        let url = format!("data:image/png;base64,{long}");
+        let clipped = format!("{}\n[st truncated this native timeline value: size limit; {} bytes]", &url[..80], url.len());
+        assert_eq!(image_facts(&json!({"type":"input_image","image_url":clipped})), ("image/png", Some(png.len() + 3002)));
         for value in [
+            json!({"type":"image","data":format!("{}\n[st truncated this native timeline value: size limit; many bytes]", &long[..64])}),
             json!({"type":"image","data":STANDARD.encode(b"<svg><script>alert(1)</script></svg>")}),
             json!({"type":"image","data":"file:///etc/passwd"}),
             json!({"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}),
