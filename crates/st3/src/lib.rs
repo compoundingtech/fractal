@@ -10,6 +10,7 @@ mod ci_test_paths;
 pub mod accounts;
 pub mod api;
 pub mod archive;
+pub mod attach_image;
 pub mod backup;
 pub mod blobs;
 pub mod boot;
@@ -44,6 +45,7 @@ pub mod gate_kinds;
 pub mod gate_report;
 pub mod github_watch;
 pub mod graph;
+pub mod handoff;
 pub(crate) mod graph_watch_ivm;
 pub mod harness_events;
 /// The lifecycle hook set st3 publishes beneath its own state directory.
@@ -64,6 +66,7 @@ pub mod native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub mod native_seed;
 pub mod node_identity;
+pub mod objectives;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge

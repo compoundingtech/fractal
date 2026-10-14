@@ -73,6 +73,7 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
         AgentState::Compacting => ("◐", theme::SAPPHIRE),
         AgentState::Idle => ("●", theme::IDLE),
         AgentState::Starting => ("◌", theme::WAITING),
+        AgentState::Down => ("⊘", theme::FAULT),
         AgentState::Stopped => ("○", theme::QUIET),
         AgentState::Unknown => ("?", theme::QUIET),
     }
@@ -87,6 +88,7 @@ pub fn agent_word(state: AgentState) -> &'static str {
         AgentState::Compacting => "compacting",
         AgentState::Idle => "idle",
         AgentState::Starting => "starting",
+        AgentState::Down => "down",
         AgentState::Stopped => "stopped",
         AgentState::Unknown => "not managed",
     }
@@ -1484,7 +1486,7 @@ fn agent_group(agent: &Agent) -> &'static str {
     match agent.state {
         AgentState::NeedsYou => "waiting on you",
         AgentState::NeedsLogin => "needs login",
-        AgentState::Fault => "broken",
+        AgentState::Fault | AgentState::Down => "broken",
         AgentState::Working | AgentState::Compacting => "working",
         AgentState::Idle | AgentState::Starting => "idle",
         AgentState::Stopped | AgentState::Unknown => "stopped",

@@ -57,10 +57,12 @@ pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
+pub mod checkpoint_staging;
 mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
+mod document_pages;
 pub mod heal;
 pub mod principals;
 pub mod projection_digest;
@@ -5349,52 +5351,7 @@ impl Store {
         after: Option<(&str, u64)>,
         limit: usize,
     ) -> Result<Vec<DocumentVersion>> {
-        let connection = self.readers.get();
-        let query = "SELECT d.name, d.hash, b.size, d.created_index,
-                     d.hash=(SELECT n.hash FROM documents n
-                 WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1)
-                     ,d.binding_claim_id, c.accepted_at_unix_ms, c.actor, c.origin
-                     FROM documents d JOIN blobs b ON b.hash=d.hash
-                     JOIN claims c ON c.id=d.binding_claim_id
-                     WHERE (?1 IS NULL OR d.name=?1)
-                       AND (?2 OR d.hash=(SELECT n.hash FROM documents n
-                 WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1))
-                       AND (?3 IS NULL OR substr(d.name,1,length(?3))=?3)
-                       AND (?4 IS NULL OR d.name>?4 OR (d.name=?4 AND EXISTS (
-                           SELECT 1 FROM documents cursor_document
-                           WHERE cursor_document.name=?4 AND cursor_document.created_index=?5
-                             AND cursor_document.binding_key>d.binding_key)))
-                     ORDER BY d.name, d.binding_key DESC LIMIT ?6";
-        let mut statement = connection.prepare(query)?;
-        let rows = statement.query_map(
-            params![
-                name,
-                history,
-                prefix,
-                after.map(|v| v.0),
-                after.map(|v| v.1),
-                limit
-            ],
-            |row| {
-                Ok(DocumentVersion {
-                    name: row.get(0)?,
-                    hash: row.get(1)?,
-                    size: row.get(2)?,
-                    created_index: row.get(3)?,
-                    latest: row.get::<_, i64>(4)? != 0,
-                    binding_claim_id: row.get(5)?,
-                    created_at_unix_ms: row.get::<_, String>(6)?.parse().map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                    owner: row.get::<_, Option<String>>(7)?.or(row.get(8)?),
-                })
-            },
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        document_pages::read(self, name, prefix, history, after, limit)
     }
 
     pub fn claim_by_id(&self, id: &str) -> Result<Option<ClaimRecord>> {
@@ -5656,6 +5613,13 @@ impl Store {
     /// writer, and only when there are such batches.
     pub fn seal_local_batches(&self) -> Result<()> {
         self.recover_sealing_frontier()?;
+        self.seal_local_batches_after_frontier()
+    }
+
+    /// Seal the batches written after the sealing frontier, without the once-per-process search
+    /// for batches skipped behind it. That search walks every batch; whoever seals for a
+    /// snapshot runs it, and lowering the frontier then seals what it found.
+    fn seal_local_batches_after_frontier(&self) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
         while self.seal_local_batch_chunk(target)? {}
@@ -6440,7 +6404,10 @@ impl Store {
 
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
-        self.replication_snapshot()?;
+        // Admission needs no replication snapshot: building one in a fresh process reads every
+        // envelope, and the daemon runs this before it serves. The first export builds it.
+        self.seal_local_batches_after_frontier()?;
+        self.judge_claims(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self

@@ -478,6 +478,20 @@ impl Runtime for SmalltalkRuntime {
         checkpoint_rules::plan_drops(sealed)
     }
 
+    fn checkpoint_claim_facts(
+        &self,
+        claim: &ClaimRecord,
+    ) -> smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
+        checkpoint_rules::claim_facts(claim)
+    }
+
+    fn plan_staged_checkpoint_drops(
+        &self,
+        planner: &smallclaims::store::checkpoint_staging::StagedPlanner<'_>,
+    ) -> Result<()> {
+        checkpoint_rules::plan_staged(planner)
+    }
+
     fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
         checkpoint_rules::clear_projections(transaction)
     }

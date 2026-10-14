@@ -1,4 +1,4 @@
-//! Bake a LocalStamp for `st2 --version` on a plain `cargo build`, per the shared
+//! Bake a LocalStamp for a plain `cargo build`, per the shared
 //! build-versioning contract. Emitted as `ST_BUILD_STAMP_LOCAL` — a private var
 //! distinct from the fleet's `CLI_BUILD_STAMP`, so the flake's authoritative
 //! NixStamp can never be overridden by this (see src/version.rs). A hermetic Nix

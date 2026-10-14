@@ -38,6 +38,17 @@ pub trait Backend: Clone + Send + Sync + 'static {
         signature_requests: &[ReplicaEnvelopeId],
     ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send;
 
+    /// The recent-inbound guard still requests the complete, unchanged summary.
+    /// A process boundary may mark this local request for count/wall accounting.
+    fn guard_summary(
+        &self,
+        fleet_id: &str,
+    ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send {
+        async move {
+            self.export(fleet_id, &ReplicationInventory::default(), true, &[]).await
+        }
+    }
+
     /// Store a peer's exchange, then admit and project what it carried. `round_trip` is how
     /// long this worker's request that returned it took, when the exchange is a response.
     fn receive(

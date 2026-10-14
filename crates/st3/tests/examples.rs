@@ -722,7 +722,7 @@ fn seat_queue_moves_one_run_and_gates_the_head_without_priming_the_seat() {
 
     let controller = fs::read_to_string(root.join("controller.sh")).unwrap();
     assert!(controller.contains(".value.harness_state"));
-    for required in ["missions start", "agents queue move", "attention approve"] {
+    for required in ["missions start", "agents queue move", "alerts approve"] {
         assert!(
             controller.contains(required),
             "missing `{required}` scenario"

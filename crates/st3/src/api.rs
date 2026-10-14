@@ -81,6 +81,7 @@ mod mailbox;
 mod mail_backlog;
 pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
+mod response_body;
 mod owned_sets;
 mod published_attention;
 pub use published_attention::start_attention_list;
@@ -745,6 +746,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         )
         .route("/v1/claims", get(list_claims).post(post_claim))
         .route("/v1/usage", get(get_usage))
+        .route("/v1/slo", get(get_slo))
         .route("/v1/usage/messages", get(get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(get_claim))
         .route("/v1/reviews", get(list_reviews))
@@ -1129,6 +1131,15 @@ async fn response_envelope_unbounded(
     if let Some(snapshot) = &client_snapshot {
         request.extensions_mut().insert(snapshot.clone());
     }
+    let envelope_context = response_body::Context {
+        state: state.clone(),
+        client_request,
+        observation_report,
+        request_id: request_id.clone(),
+        client_snapshot,
+        server: otel.clone(),
+        roster: request_route == "/v1/client/agents",
+    };
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
@@ -1212,6 +1223,10 @@ async fn response_envelope_unbounded(
             let handler_enqueued = Instant::now();
             let server_trace = otel.clone();
             let forwarded_handler = request_path == crate::peer::CLIENT_READ_FORWARD_PATH;
+            let handler_envelope = envelope_context.clone();
+            // The awaiting request owns body collection. Dropping it closes this
+            // channel even when its already-started handler worker is detached.
+            let (_body_owner, body_cancelled) = tokio::sync::oneshot::channel::<()>();
             let remote = served_remote.clone();
             let roster_trace = (request_route == "/v1/client/agents").then(|| server_trace.clone()).flatten();
             match crate::api::read_deadline::spawn_handler(
@@ -1231,7 +1246,7 @@ async fn response_envelope_unbounded(
                 }
                 let _entered = crate::profile::enter(handler_profile.as_ref());
                 let handler_started = Instant::now();
-                let response =
+                let (response, handler_elapsed) =
                     crate::performance::with_cpu(Some(&cpu_kind), Some(&cpu_client), || {
                     let mut diagnostic_handler =
                         crate::relay_trace::span(crate::relay_trace::Phase::Handler);
@@ -1258,13 +1273,19 @@ async fn response_envelope_unbounded(
                     } else {
                         crate::relay_trace::Outcome::Failed
                     });
-                    response
+                    // The handler has returned its poll-scoped reader. Collect and frame
+                    // JSON on this same blocking worker, under its existing read budget;
+                    // a large response never runs a JSON codec on the async acceptor.
+                    let handler_elapsed = handler_started.elapsed();
+                    let response = runtime.block_on(handler_envelope.wrap_owned(response, body_cancelled))
+                        .unwrap_or_else(IntoResponse::into_response);
+                    (response, handler_elapsed)
                 });
                 if let Some(server) = server_trace.as_ref() {
                     server.record("st.handler.queue_ms", queue_ms);
                     server.record(
                         "st.handler.duration_ms",
-                        handler_started.elapsed().as_millis() as i64,
+                        handler_elapsed.as_millis() as i64,
                     );
                     if let Some(writer_wait) = writer_wait.as_ref() {
                         crate::otel::record_writer_wait(server, writer_wait.totals());
@@ -1279,131 +1300,17 @@ async fn response_envelope_unbounded(
             }
         }
     };
-    if response.status() == StatusCode::SWITCHING_PROTOCOLS
-        || !response
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("application/json"))
+    // Authentication errors and the small health/observation bypasses have no handler
+    // worker. Ordinary handlers already framed their response on that worker.
+    let mut response = if response.extensions().get::<response_body::Metrics>().is_some()
+        || !response_body::is_json(&response)
     {
-        record_request_latency(
-            &request_method,
-            &request_route,
-            &request_path,
-            request_query.as_deref(),
-            &caller,
-            started,
-            Served {
-                long_poll,
-                remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
-            },
-        );
-        if let Some(profile) = profile {
-            profile.finish();
-        }
-        crate::otel::record_http_request_duration(
-            request_method.as_str(),
-            &request_route,
-            client_class,
-            response.status(),
-            started.elapsed(),
-        );
-        // A 101 upgrade ends the server span here; the WebSocket stream never holds it.
-        finish_request_trace(otel, response.status());
-        return response;
-    }
-    let enveloping = Instant::now();
-    let mut diagnostic_envelope = crate::relay_trace::span(crate::relay_trace::Phase::Envelope);
-    let status = response.status();
-    let (mut parts, body) = response.into_parts();
-    // A page read inside one SQLite snapshot names that snapshot, which can be newer than the
-    // one this request was admitted at.
-    let client_snapshot = parts
-        .extensions
-        .remove::<ClientSnapshot>()
-        .or(client_snapshot);
-    let bytes = to_bytes(body, usize::MAX).await;
-    let serialize = || {
-        let raw = match bytes {
-            Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|error| {
-                json!({
-                    "code": "invalid-server-json",
-                    "message": error.to_string(),
-                })
-            }),
-            Err(error) => json!({
-                "code": "response-read-failed",
-                "message": error.to_string(),
-            }),
-        };
-        let store_index = if client_request {
-            client_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.store_index)
-                .unwrap_or_default()
-        } else {
-            // index() is an atomic load. Health must not queue behind blocking
-            // handlers just to decorate its response.
-            state.store.index().unwrap_or_default()
-        };
-        let envelope = if observation_report && status.is_success() {
-            // Local diagnostic acceptance, never a graph snapshot fence or action receipt.
-            json!({"api_version": CLIENT_API_VERSION, "request_id": request_id, "value": raw})
-        } else if client_request && status.is_success() {
-            json!({
-                "api_version": CLIENT_API_VERSION,
-                "request_id": request_id,
-                "snapshot": client_snapshot.expect("a successful client request has a snapshot"),
-                "value": raw,
-            })
-        } else if client_request {
-            client_error_envelope(status, &raw, &request_id)
-        } else if status.is_success() {
-            json!({
-                "api_version": "st3.v1",
-                "request_id": request_id,
-                "snapshot_host": state.node,
-                "store_index": store_index,
-                "value": raw,
-            })
-        } else {
-            json!({
-                "api_version": "st3.v1",
-                "request_id": request_id,
-                "snapshot_host": state.node,
-                "store_index": store_index,
-                "code": raw.get("code").and_then(Value::as_str).unwrap_or("request-failed"),
-                "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
-                "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
-            })
-        };
-        let body = serde_json::to_vec(&envelope).unwrap_or_else(|_| b"{}".to_vec());
-        (envelope, body)
-    };
-    // The agents roster's response parse, envelope and encoding are its serialization phase,
-    // attributed to the request's existing server span.
-    let (envelope, body) = match otel.as_ref().filter(|_| request_route == "/v1/client/agents") {
-        Some(server) => {
-            let _server = server.enter();
-            crate::otel::roster_scope(|| crate::otel::roster_phase("serialization", serialize))
-        }
-        None => serialize(),
-    };
-    if let Some(trace) = crate::relay_trace::current() {
-        trace.response(&request_id);
-    }
-    diagnostic_envelope.finish(if status.is_success() {
-        crate::relay_trace::Outcome::Completed
+        response
     } else {
-        crate::relay_trace::Outcome::Failed
-    });
-    if let Some(server) = otel.as_ref()
-        && let Some(items) = envelope["value"]["items"].as_array()
-    {
-        server.record("st.page.rows", items.len() as i64);
-        server.record("st.page.bytes", body.len() as i64);
-    }
-    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        envelope_context.wrap(response).await.unwrap_or_else(IntoResponse::into_response)
+    };
+    let metrics = response.extensions_mut().remove::<response_body::Metrics>();
+    let status = response.status();
     record_request_latency(
         &request_method,
         &request_route,
@@ -1425,10 +1332,12 @@ async fn response_envelope_unbounded(
     );
     finish_request_trace(otel, status);
     if let Some(profile) = profile {
-        profile.enveloped(enveloping.elapsed(), body.len());
+        if let Some(metrics) = metrics {
+            profile.enveloped(metrics.elapsed, metrics.bytes);
+        }
         profile.finish();
     }
-    Response::from_parts(parts, Body::from(body))
+    response
 }
 
 static REQUEST_LATENCY: OnceLock<Mutex<request_latency::Meter>> = OnceLock::new();
@@ -1740,6 +1649,11 @@ fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
     if code == Some(published_lists::WORK_LIST_ENDED) {
         return false;
     }
+    // An unconfirmed mutation needs the exact original request, not a generic
+    // transient retry that might replace its identity or its signed bytes.
+    if code == Some("message-send-unconfirmed") {
+        return false;
+    }
     if matches!(code, Some(
         "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired"
         | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle"
@@ -1819,6 +1733,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "blob-expired"
         | "database-busy"
         | "database-locked"
+        | "message-send-unconfirmed"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" => "validation-failed".into(),
         "launch-review-not-authorized"
@@ -3188,6 +3103,7 @@ fn client_agent_cards_presented(
     } else {
         BTreeMap::new()
     };
+    let stop_deferral_faults = store.stop_deferral_faults_for(&agent_subjects, snapshot_index)?;
     // Harnesses, activity, and who can have a suspension or rollout, for many agents at once.
     // Each status names the actual-state claim it selected, the newest runtime observation
     // whenever the agent has one.
@@ -3220,7 +3136,8 @@ fn client_agent_cards_presented(
             subject.harness = card_reads.take_harness(store, &subject.subject)?;
             let member_fault = member_faults.get(&subject.subject);
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
-            let fault = member_fault.or(mailbox_fault);
+            let fault = member_fault.or(mailbox_fault)
+                .or_else(|| stop_deferral_faults.get(&subject.subject));
             let fields = subject
                 .actual
                 .as_ref()
@@ -3440,7 +3357,7 @@ fn client_agent_cards_presented(
                     None
                 },
             });
-            if mailbox_faults.is_none() && member_fault.is_none() {
+            if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
             }
@@ -8999,13 +8916,14 @@ async fn checkpoint_plan(
         Some(day) => crate::store::checkpoint_cut(day).map_err(ApiError::bad)?,
         None => crate::store::newest_due_cut(client_now_ms()),
     };
-    let capture = state.store.clone();
-    let sealed = blocking_store(move || capture.checkpoint_sealed_set_through(cut, None)).await?;
-    let store = state.store.clone();
     let scratch = state.state_dir.join("checkpoint");
+    let capture_dir = scratch.join("plan");
+    let capture = state.store.clone();
+    let staged = blocking_store(move || capture.checkpoint_staged_set(cut, None, &capture_dir)).await?;
+    let store = state.store.clone();
     // The capture may seal/register the live writer. Planning and proof on the
     // scratch copy do not borrow it and must not occupy its worker capacity.
-    blocking_external(move || store.checkpoint_plan_view_from_sealed(cut, sealed, &scratch))
+    blocking_external(move || store.checkpoint_plan_view_from_staged(cut, staged, &scratch))
         .await?.map(Json).map_err(ApiError::internal)
 }
 
@@ -9093,6 +9011,25 @@ async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiErr
         .into_response())
 }
 
+/// Count completed summary store calls, including errors, without charging nested CPU.
+/// These wall times overlap the export route. JSON serialization, worker decode and CPU
+/// are outside this measurement; do not add these durations to the enclosing route.
+fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T) -> T {
+    let label = if authority_guard {
+        "replication/authority-guard"
+    } else {
+        "replication/summary"
+    };
+    let started = Instant::now();
+    let result = work();
+    crate::performance::record_request(label, None, started.elapsed());
+    result
+}
+
+#[cfg(test)]
+#[path = "api/replication_guard_tests.rs"]
+mod replication_guard_tests;
+
 async fn replication_export(
     State(state): State<AppState>,
     Json(request): Json<ReplicationExportRequest>,
@@ -9107,7 +9044,9 @@ async fn replication_export(
     let store = state.store.clone();
     blocking_store(move || {
         let exchange = if request.summary_only {
-            store.export_replication_summary(&request.fleet_id)?
+            record_replication_summary(request.authority_guard, || {
+                store.export_replication_summary(&request.fleet_id)
+            })?
         } else {
             store.export_replication_exchange_answering(
                 &request.fleet_id,
@@ -9458,6 +9397,11 @@ pub struct FleetStatus {
     pub node: String,
     pub fleet_id: Option<String>,
     pub member_key: Option<String>,
+    /// Configured local transports, including when no endpoint is currently up.
+    #[serde(default)]
+    pub transports: Vec<String>,
+    #[serde(default)]
+    pub fabric_protocol: Option<String>,
     pub view: crate::fleet::FleetView,
     pub peers: Vec<crate::model::ReplicationPeerStatus>,
     pub invites: Vec<crate::store::FleetInviteView>,
@@ -9484,12 +9428,25 @@ async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetStatus>
     let fleet_id = state.fleet_id.clone();
     let state_dir = state.state_dir.clone();
     blocking_store(move || {
+        let file = crate::config::FleetFile::load(&state_dir)?;
         let replication =
             store.replication_status_sealed(fleet_id.is_some(), fleet_id.as_deref(), &peers)?;
         Ok(FleetStatus {
             node,
             fleet_id,
             member_key: store.member_public_key(),
+            transports: file
+                .as_ref()
+                .map(|file| file.transports.clone())
+                .unwrap_or_default(),
+            fabric_protocol: file
+                .as_ref()
+                .filter(|file| file.transports.iter().any(|name| name == "fabric"))
+                .map(|file| {
+                    file.fabric_protocol.clone().unwrap_or_else(|| {
+                        crate::fleet::transport::default_fabric_protocol(&file.fleet_id)
+                    })
+                }),
             view: store.fleet_view_sealed()?,
             peers: replication.peers,
             invites: store.fleet_invites(false)?,
@@ -12233,6 +12190,17 @@ async fn put_document(
     bound: Option<axum::Extension<BoundAgent>>,
     Json(request): Json<DocumentPutRequest>,
 ) -> Result<Json<DocumentVersion>, ApiError> {
+    if let Some(bound) = bound.as_ref()
+        && !crate::handoff::may_write(&bound.0.0, &request.name)
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "document-not-yours",
+            format!(
+                "`{}` belongs to another seat; a seat writes only doc/agents/… for itself",
+                request.name
+            ),
+        )));
+    }
     let response = state
         .store
         .put_document_as(
@@ -12673,6 +12641,27 @@ async fn get_usage(
         });
     }
     Ok(Json(report))
+}
+
+/// Every objective and budget as one list: see `objectives`.
+async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let limits = blocking_store(move || store.account_limits()).await?;
+    let fresh_ms = tokio::task::spawn_blocking(crate::config::reload_daemon_limits)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|reloaded| reloaded.ok())
+        .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
+        .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
+    let report = tokio::task::spawn_blocking(request_latency_target_windows)
+        .await
+        .map_err(|error| ApiError::bad(St3Error::new("slo-unavailable", error.to_string())))?;
+    let now = client_now_ms() as u64;
+    Ok(Json(json!({
+        "as_of_unix_ms": now,
+        "rows": crate::objectives::rows(&report, &limits, now, fresh_ms),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -20215,6 +20204,59 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
     }
 
     #[tokio::test]
+    async fn a_seat_writes_only_its_own_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let write = |writer: Option<&'static str>, name: &str, key: &str| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/documents")
+                .header("content-type", "application/json");
+            if let Some(writer) = writer {
+                request = request.extension(BoundAgent(writer.into()));
+            }
+            let body = serde_json::json!({
+                "name": name,
+                "bytes": b"Waiting on PR 12.".to_vec(),
+                "expected_document": null,
+                "idempotency_key": key,
+            });
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(request.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                (status, serde_json::from_slice::<Value>(&body).unwrap())
+            }
+        };
+        let (status, written) =
+            write(Some("agent/garden/ash"), "doc/agents/garden/ash/handoff", "own").await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+
+        // Not even its own other names are open to it under doc/agents/.
+        let (status, refused) =
+            write(Some("agent/garden/ash"), "doc/agents/garden/ash/other", "own-other").await;
+        assert_ne!(status, StatusCode::OK, "{refused}");
+        assert_eq!(refused["code"], "document-not-yours");
+
+        let (status, refused) =
+            write(Some("agent/garden/birch"), "doc/agents/garden/ash/handoff", "other").await;
+        assert_ne!(status, StatusCode::OK, "{refused}");
+        assert_eq!(refused["code"], "document-not-yours");
+
+        // A seat's other documents and a person's writes are unaffected.
+        let (status, ordinary) = write(Some("agent/garden/birch"), "doc/garden/notes", "notes").await;
+        assert_eq!(status, StatusCode::OK, "{ordinary}");
+        let (status, person) =
+            write(None, "doc/agents/garden/ash/handoff", "person").await;
+        assert_eq!(status, StatusCode::OK, "{person}");
+    }
+
+    #[tokio::test]
     async fn an_event_waiter_cannot_consume_the_reconciler_signal() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
@@ -20383,6 +20425,148 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             timeout_ms: None,
             limit: Some(limit),
         }
+    }
+
+    #[tokio::test]
+    async fn event_page_owner_filter_preserves_populated_membership_and_scanned_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let subject_a = "agent/node.event-page-a";
+        let subject_b = "agent/node.event-page-b";
+        let mut intent = crate::graph::parse_test_intent(
+            &format!(
+                "version 2\n\
+                 agent \"event-page-a\" {{ command \"true\" }}\n\
+                 agent \"event-page-b\" {{ command \"true\" }}\n\
+                 mission \"event-page-owner-a\" state=\"ready\" {{\n\
+                   goal \"Own the first invented agent.\"\n\
+                   step \"work\" {{ assigned-to \"{subject_a}\" }}\n\
+                 }}\n\
+                 mission \"event-page-owner-b\" state=\"ready\" {{\n\
+                   goal \"Own the second invented agent.\"\n\
+                   step \"work\" {{ assigned-to \"{subject_b}\" }}\n\
+                 }}\n"
+            ),
+            "node",
+        )
+        .unwrap();
+        roster_fixture_apply(&state.store, &intent, "event-page-owners-initial");
+        let runs = ["event-page-owner-a", "event-page-owner-b"]
+            .into_iter()
+            .map(|mission| {
+                state
+                    .store
+                    .create_mission_run(&MissionRunRequest {
+                        mission: mission.into(),
+                        revision: None,
+                        workspace: root.path().display().to_string(),
+                        requester: Some("person/test".into()),
+                        mode: Some("run".into()),
+                        inputs: BTreeMap::new(),
+                        idempotency_key: format!("event-page-run-{mission}"),
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for (subject, run) in [(subject_a, &runs[0]), (subject_b, &runs[1])] {
+            let desired = intent.subjects.get_mut(subject).unwrap();
+            desired.owner_run = Some(run.subject.clone());
+            desired.owner_generation = Some(run.generation.clone());
+            desired.owner_step = Some(run.steps[0].subject.clone());
+        }
+        roster_fixture_apply(&state.store, &intent, "event-page-owners-set");
+        let owned_a = state
+            .store
+            .desired_subjects_for_owner_run(&runs[0].subject)
+            .unwrap();
+        let owned_b = state
+            .store
+            .desired_subjects_for_owner_run(&runs[1].subject)
+            .unwrap();
+        assert!(owned_a.iter().any(|desired| desired.subject == subject_a));
+        assert!(!owned_a.iter().any(|desired| desired.subject == subject_b));
+        assert!(owned_b.iter().any(|desired| desired.subject == subject_b));
+        assert!(!owned_b.iter().any(|desired| desired.subject == subject_a));
+        let (_, setup_cursor) = state.store.event_bounds().unwrap();
+
+        let accepted = [subject_b, subject_b, subject_a, subject_a, subject_b]
+            .into_iter()
+            .enumerate()
+            .map(|(number, subject)| {
+                state
+                    .store
+                    .append_claim(&ClaimInput {
+                        subject: subject.into(),
+                        kind: "agent.presence".into(),
+                        actor: Some(subject.into()),
+                        fields: serde_json::from_value(json!({
+                            "presence": "available",
+                            "reason": format!("invented event {number}"),
+                        }))
+                        .unwrap(),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: Some(format!("event-page-presence-{number}")),
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for subject in [subject_a, subject_b] {
+            let admitted = state.store.claims_for(subject, Some("agent.presence")).unwrap();
+            let expected_ids = accepted
+                .iter()
+                .filter(|claim| claim.subject == subject)
+                .map(|claim| &claim.id)
+                .collect::<Vec<_>>();
+            assert_eq!(admitted.iter().map(|claim| &claim.id).collect::<Vec<_>>(), expected_ids);
+        }
+
+        let app = router(state);
+        let path = |after| {
+            format!(
+                "/v1/events/page?after={after}&owner_run={}&limit=2&wait=false",
+                runs[0].subject.replace('/', "%2F")
+            )
+        };
+        let (status, first) = get_request(app.clone(), &path(setup_cursor)).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let first = first.get("value").unwrap_or(&first);
+        assert_eq!(first["items"], json!([]));
+        assert_eq!(first["next_after"], json!(accepted[1].store_index));
+        assert_eq!(first["has_more"], json!(true));
+
+        let (status, second) = get_request(app.clone(), &path(accepted[1].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        let second = second.get("value").unwrap_or(&second);
+        let expected_a = accepted[2..4]
+            .iter()
+            .map(|claim| {
+                json!({
+                    "store_index": claim.store_index,
+                    "kind": &claim.kind,
+                    "subject": &claim.subject,
+                    "body": &claim.body,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(second["items"], json!(expected_a));
+        assert_eq!(second["next_after"], json!(accepted[3].store_index));
+        assert_eq!(second["has_more"], json!(true));
+
+        let (status, third) = get_request(app.clone(), &path(accepted[3].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{third}");
+        let third = third.get("value").unwrap_or(&third);
+        assert_eq!(third["items"], json!([]));
+        assert_eq!(third["next_after"], json!(accepted[4].store_index));
+        assert_eq!(third["has_more"], json!(false));
+        assert!(third["frontier"].as_u64().unwrap() >= accepted[4].store_index);
+
+        let (status, done) = get_request(app, &path(accepted[4].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{done}");
+        let done = done.get("value").unwrap_or(&done);
+        assert_eq!(done["items"], json!([]));
+        assert_eq!(done["next_after"], Value::Null);
+        assert_eq!(done["has_more"], json!(false));
     }
 
     #[tokio::test]

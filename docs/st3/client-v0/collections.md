@@ -188,7 +188,8 @@ when the cut, the roster or the 30-second clock period changes. Each selection c
 its alerts from the published attention rows, the same rows its
 attention window shows. The row carries the shared counts' cut. A window that opens a
 new selection is served at once. Before the first publication, the window gets a
-retryable `summary-not-ready` resync.
+retryable `summary-not-ready` resync. The shared counts read the complete agents roster,
+so as a daemon starts they are published as soon as that roster is.
 Equal count membership produces no upsert, including agent progress/usage
 updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts

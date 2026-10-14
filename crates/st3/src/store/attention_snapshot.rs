@@ -1166,6 +1166,15 @@ impl Store {
                 {
                     continue;
                 }
+            } else if claim.body["fields"]["condition"] == "stop-deferred" {
+                // A retained stop belongs to a terminal run, so declaration_live deliberately
+                // excludes it. Its own revision, incarnation and runtime fences decide instead.
+                if !self
+                    .stop_deferral_faults_for(std::slice::from_ref(source), self.index()?)?
+                    .contains_key(source)
+                {
+                    continue;
+                }
             } else if !source.starts_with("daemon/")
                 && !person_work::declaration_live(&connection, source)?
             {
@@ -1245,6 +1254,12 @@ impl Store {
                 "inspect source",
                 &["st", "subject", source],
             )];
+            if f["condition"] == "stop-deferred" {
+                item.actions = vec![attention_action(
+                    "inspect retained seat",
+                    &["st", "agents", "show", source, "--all"],
+                )];
+            }
             if let Some((step, diagnostic)) = wake {
                 item.step = Some(step.subject.clone());
                 item.mission_run = Some(step.run);
