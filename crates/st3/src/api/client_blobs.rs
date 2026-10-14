@@ -697,6 +697,10 @@ agent "example/bridge" {
             size: image.len() as u64,
             origin: client_host_id(&state.node),
         }]);
+        // The person's card names each image by its blob reference, as a message's does.
+        let cards = crate::api::client_attention_resources_at(&state.store, Some("person/ada"), false, super::client_now_ms()).unwrap();
+        let card = cards.iter().find(|card| card["source_id"] == step.as_str()).expect("the ask's card");
+        assert_eq!(card["request"]["attachments"][0]["blob"], format!("blob/{hash}"));
         // The person it asks reads the image by the ask's step, whole or in chunks.
         let (status, _, bytes) = call(&app, "GET", &format!("/v1/client/blobs/{hash}?message={step}"), "person/ada", None, Vec::new()).await;
         assert_eq!(status, StatusCode::OK);

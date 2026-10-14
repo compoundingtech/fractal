@@ -312,7 +312,7 @@ impl AnswerTiming {
 enum Fetched {
     Content(super::content::Key, Result<super::content::Fetched, String>),
     /// An image's terminal encoding, built on a worker for the size a draw asked.
-    Protocol(super::content::Key, u16, u16, ratatui_image::protocol::Protocol),
+    Protocol(super::content::Key, u16, u16, super::content::Encoding),
     Read(String, ReceiptOutcome),
     /// A page before the oldest entry of a conversation's session: its entries, whether st
     /// holds more before them, and the cursor for that next page; or why it could not be read.
@@ -1749,17 +1749,6 @@ pub fn run(context: Context) -> Result<()> {
 
         if changed {
             ui.content.index(&timelines);
-            if let Load::Ready(items) = &ui.world.attention {
-                ui.content.index_requests(
-                    items
-                        .iter()
-                        .flat_map(|item| match &item.kind {
-                            super::view::AttentionKind::Request { images, .. } => images.clone(),
-                            _ => Vec::new(),
-                        })
-                        .collect(),
-                );
-            }
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
             for entry in &pending {
                 if let Some(Load::Ready(entries)) = extras.conversations.get_mut(&entry.agent) {
@@ -1775,6 +1764,18 @@ pub fn run(context: Context) -> Result<()> {
                 }
             }
             ui.set_world(adapt::world(&model, &person, &extras));
+            // An ask's images, from the attention just adapted (not the previous world's).
+            if let Load::Ready(items) = &ui.world.attention {
+                ui.content.index_requests(
+                    items
+                        .iter()
+                        .flat_map(|item| match &item.kind {
+                            super::view::AttentionKind::Request { images, .. } => images.clone(),
+                            _ => Vec::new(),
+                        })
+                        .collect(),
+                );
+            }
             focus_initial_subject(&mut ui, &mut initial_subject, agents_live, glasses_ready);
             changed = false;
             if last_cache_save.elapsed() >= Duration::from_secs(60) {
@@ -1836,11 +1837,7 @@ pub fn run(context: Context) -> Result<()> {
                 let picker = picker.clone();
                 let tx = fetched_tx.clone();
                 runtime.spawn_blocking(move || {
-                    if let Ok(protocol) = picker.new_protocol(
-                        (*image).clone(),
-                        ratatui::layout::Size::new(width, height),
-                        ratatui_image::Resize::Fit(None),
-                    ) {
+                    if let Some(protocol) = super::content::encode(&picker, &image, width, height) {
                         let _ = tx.send(Fetched::Protocol(key, width, height, protocol));
                     }
                 });

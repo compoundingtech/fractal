@@ -21,6 +21,26 @@ use std::{
     sync::Arc,
 };
 
+/// An image encoded for the terminal at the size it is drawn, sliced by rows so an image the
+/// viewport cuts draws its visible part.
+pub type Encoding = ratatui_image::sliced::SlicedProtocol;
+
+/// Encode `image` for `width` x `height` cells: on a worker, never on the draw path.
+pub fn encode(
+    picker: &ratatui_image::picker::Picker,
+    image: &image::DynamicImage,
+    width: u16,
+    height: u16,
+) -> Option<Encoding> {
+    Encoding::new_with_resize(
+        picker,
+        image.clone(),
+        ratatui::layout::Size::new(width, height),
+        ratatui_image::Resize::Fit(None),
+    )
+    .ok()
+}
+
 /// The longest side an image is kept at. A terminal pane is rarely wider than this in pixels,
 /// and a 6000×4000 photo would otherwise hold 72 MB.
 pub const MAX_EDGE: u32 = 1600;
@@ -303,7 +323,7 @@ pub struct Content {
     shown: BTreeSet<Key>,
     /// Explicit hiding survives redraws and scrolling, but not timeline eviction.
     hidden: BTreeSet<Key>,
-    protocols: RefCell<BTreeMap<Key, (u16, u16, ratatui_image::protocol::Protocol)>>,
+    protocols: RefCell<BTreeMap<Key, (u16, u16, Encoding)>>,
     /// Encodings a draw found missing, by the size it wanted; built off the draw path.
     wanted: RefCell<BTreeMap<Key, (u16, u16)>>,
     facts: BTreeMap<Key, Facts>,
@@ -1185,24 +1205,13 @@ impl Content {
             self.wanted.borrow_mut().insert(key.clone(), (width, rows));
             return;
         };
+        // Only the rows on screen: an image cut by the top or bottom edge draws its visible part
+        // in every protocol (kitty's placeholders name their row, sixel drops bands, iTerm2 is
+        // encoded row by row), never a blank where it was.
         use ratatui::widgets::Widget as _;
-        if hidden_above == 0 && visible.height == rows {
-            ratatui_image::Image::new(protocol).render(Rect { width, ..visible }, buf);
-        } else if matches!(protocol, ratatui_image::protocol::Protocol::Halfblocks(_)) {
-            let whole = Rect::new(0, 0, width, rows);
-            let mut scratch = Buffer::empty(whole);
-            ratatui_image::Image::new(protocol).render(whole, &mut scratch);
-            for row in 0..visible.height {
-                for column in 0..width.min(visible.width) {
-                    if let (Some(from), Some(to)) = (
-                        scratch.cell((column, row + hidden_above)),
-                        buf.cell_mut((visible.x + column, visible.y + row)),
-                    ) {
-                        *to = from.clone();
-                    }
-                }
-            }
-        }
+        let position = ratatui_image::sliced::SignedPosition::from((0, -(hidden_above as i16)));
+        ratatui_image::sliced::SlicedImage::new(protocol, position)
+            .render(Rect { width: width.min(visible.width), ..visible }, buf);
     }
 
     /// The encodings draws asked for, with the image each is built from: built on a worker,
@@ -1226,11 +1235,7 @@ impl Content {
     #[cfg(test)]
     pub fn build_wanted(&mut self, picker: &ratatui_image::picker::Picker) {
         for (key, width, height, image) in self.protocol_jobs() {
-            if let Ok(protocol) = picker.new_protocol(
-                (*image).clone(),
-                ratatui::layout::Size::new(width, height),
-                ratatui_image::Resize::Fit(None),
-            ) {
+            if let Some(protocol) = encode(picker, &image, width, height) {
                 self.install_protocol(key, width, height, protocol);
             }
         }
@@ -1242,7 +1247,7 @@ impl Content {
         key: Key,
         width: u16,
         height: u16,
-        protocol: ratatui_image::protocol::Protocol,
+        protocol: Encoding,
     ) {
         if self.shown.contains(&key) && matches!(self.loaded.get(&key), Some(Loaded::Image { .. }))
         {
@@ -2201,6 +2206,34 @@ mod tests {
         content.build_wanted(&ratatui_image::picker::Picker::halfblocks());
         content.draw_image(&key, 32, 0, area, &mut buffer);
         assert!(buffer.content.iter().any(|cell| cell.symbol() != " "));
+    }
+
+    #[test]
+    fn an_image_the_viewport_cuts_draws_its_visible_rows_in_every_protocol() {
+        let timelines = mail_timeline("person/ada", "agent/example", 71);
+        let mut content = Content::default();
+        content.index(&timelines);
+        let key = content.mail.keys().next().unwrap().clone();
+        assert!(content.toggle_image(&key));
+        content.complete(key.clone(), Ok((String::new(), drawn_png(320, 200))));
+        let mut kitty = ratatui_image::picker::Picker::halfblocks();
+        kitty.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        for picker in [ratatui_image::picker::Picker::halfblocks(), kitty] {
+            // The top five rows scrolled away: the rest fill the four rows still on screen.
+            let area = Rect::new(0, 0, 32, 4);
+            content.protocols.get_mut().clear();
+            content.draw_image(&key, 32, 5, area, &mut Buffer::empty(area));
+            content.build_wanted(&picker);
+            let mut buffer = Buffer::empty(area);
+            content.draw_image(&key, 32, 5, area, &mut buffer);
+            for row in 0..4 {
+                assert!(
+                    (0..32).any(|column| buffer[(column, row)].symbol() != " "),
+                    "{:?} row {row} is blank",
+                    picker.protocol_type()
+                );
+            }
+        }
     }
 
     #[test]

@@ -3845,7 +3845,7 @@ pub(crate) fn client_attention_resources_at(
                     resource["action_parameters"]["work.done"]["answer"] = json!({"id": "read"});
                     resource["update"] = update;
                 }
-                Some(request) => resource["request"] = request,
+                Some(request) => resource["request"] = crate::person_request::client_view(&request),
                 None => {}
             }
         }

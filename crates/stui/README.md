@@ -108,10 +108,11 @@ blocks. stui asks the terminal itself, once at start, and asks only a terminal t
 a status report, so one that answers nothing gets half blocks and no stray bytes.
 
 An image is read, decoded and scaled to at most 1600 pixels on a worker; its terminal
-encoding is built off the draw path, and its pixels leave memory once it is more than a screen
-away. An owner that cannot be reached says so on the image's line, with the way to try again.
-`open` shows the image in this machine's viewer, or saves it under its name to
-`ST3_DOWNLOADS`, else the XDG download directory, else `~/Downloads`.
+encoding is built off the draw path, an image the edge of the pane cuts draws the rows still
+on screen, and its pixels leave memory once it is more than a screen away. An owner that
+cannot be reached says so on the image's line, with the way to try again. `open` shows the
+image in this machine's viewer, or saves it under its name to `ST3_DOWNLOADS`, else the XDG
+download directory, else `~/Downloads`.
 
 ## Resource sidebar
 

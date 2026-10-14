@@ -2536,7 +2536,10 @@ impl Ui {
                         .and_then(|id| self.mission_decision(id))
                         .map(|decision| {
                             let drafts = self.drafts_for(&decision, width);
-                            screens::home_detail(&self.world, Some(&decision), width, &drafts)
+                            let mut doc =
+                                screens::home_detail(&self.world, Some(&decision), width, &drafts);
+                            self.content.expand_requests(&mut doc, width);
+                            doc
                         });
                 screens::mission_detail(
                     &self.world,
