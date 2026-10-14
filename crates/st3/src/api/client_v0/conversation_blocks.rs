@@ -1733,7 +1733,7 @@ mod tests {
 
         fn assert_bounded_outcomes(items: &[Value], negotiated: bool) -> Vec<&Value> {
             let mut outcomes = Vec::new();
-            for entry_type in ["content", "status"] {
+            for entry_type in ["content", "status", "error"] {
                 let item = items
                     .iter()
                     .find(|item| {
@@ -1764,6 +1764,14 @@ mod tests {
                         );
                         assert_eq!(view["native"]["errorStatus"], 429);
                     }
+                } else if entry_type == "error" {
+                    assert_eq!(body["code"], "native_session_exit_fatal");
+                    assert_eq!(body["retryable"], false);
+                    assert!(
+                        serde_json::to_string(&body["details"])
+                            .unwrap()
+                            .contains("[st truncated")
+                    );
                 } else {
                     assert_eq!(body["status"], "cancelled");
                     let detail = &body["detail"];
@@ -1780,7 +1788,7 @@ mod tests {
                                 == if entry_type == "content" {
                                     "error"
                                 } else {
-                                    "status"
+                                    entry_type
                                 }
                         })
                         .unwrap();
@@ -1800,6 +1808,12 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(status.status, st3_client::TimelineStatus::Cancelled);
+            assert_eq!(items.iter().filter(|item| item["type"] == "error").count(), 1);
+            assert_eq!(
+                items.iter().filter(|item| item["type"] == "content" && item["role"] == "assistant").count(),
+                1,
+                "one assistant error block, not a second error entry for the turn"
+            );
             outcomes
         }
 
@@ -1818,10 +1832,18 @@ mod tests {
                 "args":{"command":"x".repeat(16 * 1024)},"intent":"native intent",
             }],
         });
+        let fatal_exit = json!({
+            "kind":"fatal","reason":"uncaught_exception","future":{"native":true},
+            "pendingToolCalls":[{
+                "toolCallId":"fatal-pending","toolName":"shell",
+                "args":{"command":"f".repeat(16 * 1024)},"intent":"fatal native intent",
+            }],
+        });
         let records = [
             json!({"type":"session","id":"native-test","cwd":"/work/example","timestamp":"2026-10-06T12:00:00Z"}),
             json!({"type":"message","id":"provider","timestamp":"2026-10-06T12:00:01Z","message":provider_message}),
             json!({"type":"custom","id":"signal","timestamp":"2026-10-06T12:00:02Z","customType":"session_exit","data":exit}),
+            json!({"type":"custom","id":"fatal","timestamp":"2026-10-06T12:00:03Z","customType":"session_exit","data":fatal_exit}),
         ];
         std::fs::write(
             &native.transcript,
@@ -1867,7 +1889,7 @@ mod tests {
                                 == if item["type"] == "content" {
                                     "error"
                                 } else {
-                                    "status"
+                                    item["type"].as_str().unwrap()
                                 }
                         })
                         .unwrap();
@@ -1903,10 +1925,15 @@ mod tests {
                                 provider_message["retryRecovery"]
                             );
                         }
-                        _ => {
+                        1 => {
                             let detail: Value =
                                 serde_json::from_str(full["detail"].as_str().unwrap()).unwrap();
                             assert_eq!(detail, exit);
+                        }
+                        _ => {
+                            assert_eq!(full["details"], fatal_exit);
+                            assert_eq!(full["code"], "native_session_exit_fatal");
+                            assert_eq!(full["retryable"], false);
                         }
                     }
                 }

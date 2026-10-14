@@ -5944,6 +5944,18 @@ mod tests {
                 .filter(|block| block["source_type"] == "omp/assistant_error")
                 .collect::<Vec<_>>();
             assert_eq!(errors.len(), 1, "{stop}");
+            assert!(
+                items.iter().all(|entry| entry["type"] != "error"),
+                "assistant stop {stop} must not also produce a system error entry"
+            );
+            assert_eq!(
+                items.iter()
+                    .flat_map(|entry| entry["body"]["blocks"].as_array().into_iter().flatten())
+                    .filter(|block| block["kind"] == "error")
+                    .count(),
+                1,
+                "exactly one error block for assistant stop {stop}"
+            );
             let error = errors[0];
             let view = &error["view"];
             assert_eq!(view["type"], "assistant_error");
@@ -6357,6 +6369,18 @@ mod tests {
             }
             let mut items = Vec::new();
             normalize_omp(ExternalDriver::Omp, &record, 0, "", &mut items);
+            assert!(
+                items.iter().all(|entry| entry["type"] != "error"),
+                "no separate system error entry for {fields}"
+            );
+            assert_eq!(
+                items.iter()
+                    .flat_map(|entry| entry["body"]["blocks"].as_array().into_iter().flatten())
+                    .filter(|block| block["kind"] == "error")
+                    .count(),
+                usize::from(expected.is_some()),
+                "silent aborts and user interrupts emit no error block: {fields}"
+            );
             match expected {
                 None => assert_eq!(items.len(), 1, "no error block for {fields}"),
                 Some(label) => {
