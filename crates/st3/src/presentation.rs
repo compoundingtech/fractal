@@ -842,11 +842,26 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
         let active = step
             .execution_started_at_unix_ms
             .map(|started| format!(" · active {}", relative_time(started, now_unix_ms)))
+            .or_else(|| {
+                step.execution_paused_until_unix_ms.map(|until| {
+                    format!(" · clock stopped for a wait until {}", relative_time(until, now_unix_ms))
+                })
+            })
             .unwrap_or_default();
         let _ = writeln!(
             output,
             "  Execution    {}ms / {timeout_ms}ms{active}",
             step.execution_elapsed_ms
+        );
+    }
+    if step.execution_waited_ms > 0 || step.execution_paused_until_unix_ms.is_some() {
+        let budget = u128::from(st3::store::MAX_STEP_WAIT_MS);
+        let _ = writeln!(
+            output,
+            "  Wait budget  {} used of {} · {} left",
+            st3::store::format_wait_span(step.execution_waited_ms),
+            st3::store::format_wait_span(budget),
+            st3::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
         );
     }
     if let Some(wake) = &step.wake {
@@ -1333,6 +1348,10 @@ fn render_work_list_item(output: &mut String, step: &StepRunView, style: OutputS
             step.execution_elapsed_ms,
             step.execution_started_at_unix_ms
                 .map(|started| format!(" · active since {started}"))
+                .or_else(|| {
+                    step.execution_paused_until_unix_ms
+                        .map(|until| format!(" · clock stopped for a wait until {until}"))
+                })
                 .unwrap_or_default()
         );
     }
@@ -1469,6 +1488,8 @@ mod tests {
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,

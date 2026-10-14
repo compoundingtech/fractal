@@ -2,16 +2,28 @@
 # Install an extracted Smalltalk release without restarting any service.
 set -Eeuo pipefail
 source_dir=$(cd "$(dirname "$0")" && pwd)/bin
-bin_dir="${ST_MACOS_BIN_DIR:-$HOME/.local/bin}"
+bin_dir=""
+instance="${ST_INSTANCE:-}"
 quiet=false
 while (($#)); do
   case $1 in
     --bin-dir) bin_dir=${2:?--bin-dir needs a directory}; shift 2 ;;
+    --instance) instance=${2:?--instance needs a name}; shift 2 ;;
     --quiet) quiet=true; shift ;;
-    -h | --help) echo 'Usage: ./install.sh [--bin-dir DIRECTORY] [--quiet]'; exit 0 ;;
+    -h | --help) echo 'Usage: ./install.sh [--bin-dir DIRECTORY] [--instance NAME] [--quiet]'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+if [[ -n $instance ]]; then
+  [[ ${#instance} -le 24 && $instance =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || {
+    echo "install: an instance name is lowercase letters, digits and single hyphens, at most 24 characters" >&2
+    exit 2
+  }
+  export ST_INSTANCE=$instance
+  # A named instance installs below its own directory unless told otherwise.
+  [[ -n $bin_dir ]] || bin_dir=${ST_MACOS_BIN_DIR:-$HOME/.st-instance/$instance/bin}
+fi
+bin_dir=${bin_dir:-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}
 binaries=(st3 pty)
 for binary in "${binaries[@]}"; do
   [[ -f $source_dir/$binary && -x $source_dir/$binary ]] || {
@@ -73,12 +85,23 @@ cleanup() {
   fi
   exit "$status"
 }
+# An install killed hard leaves its lock behind; say which lock it is and how to clear it.
+take_lock() {
+  if mkdir "$1" 2>/dev/null; then
+    return 0
+  fi
+  if [[ -d $1 ]]; then
+    echo "st install: the lock $1 exists. Another install may be running. If none is, an earlier one was killed: remove the lock with rmdir '$1' and run the installer again." >&2
+    exit 1
+  fi
+  mkdir "$1"
+}
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # Serialize command-file transactions as well as the helper's existing app lock.
-mkdir "$bin_dir/.smalltalk-install.lock"
+take_lock "$bin_dir/.smalltalk-install.lock"
 locked=true
 stage=$(mktemp -d "$bin_dir/.smalltalk-install.XXXXXX")
 mkdir "$stage/previous"
@@ -108,7 +131,7 @@ PY
   mkdir -p "$(dirname "$macos_app")"
   # Different bin directories can still install the same app. This is separate
   # from the helper's flock, so invoking the helper cannot deadlock on its own lock.
-  mkdir "$macos_lock"
+  take_lock "$macos_lock"
   macos_locked=true
   macos_state="$macos_home/.local/state/st3/macos-installs"
   mkdir -p "$macos_state"

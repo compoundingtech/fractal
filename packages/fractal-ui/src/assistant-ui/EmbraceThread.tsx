@@ -17,7 +17,7 @@ import { EmbraceToolCall, EmbraceToolRegistrations, EmbraceToolRun, EmbraceToolV
 import { EmbraceScrollViewport } from './EmbraceScrollViewport'
 import { Markdown, MarkdownImagePolicy, type MarkdownImageOpener, type MarkdownImageResolver } from './composition/Markdown'
 import { ThinkingEntry } from './composition/ThinkingEntry'
-import { SendFailure, TranscriptEmptyContent, type TranscriptEmptyState } from './composition/TranscriptFeedback'
+import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEmptyState } from './composition/TranscriptFeedback'
 
 export type EmbraceLevel = 'E1' | 'E2' | 'E3' | 'E4'
 export type SenderVariant = 'S1' | 'S2' | 'S3'
@@ -78,7 +78,7 @@ export function EmbraceMessage() {
       {options.senders === 'S1' ? null : <span aria-hidden="true" data-testid="sender-avatar" {...stylex.props(styles.avatar)}>{label.slice(0, 2).toUpperCase()}</span>}
       <strong {...stylex.props(styles.senderName)}>{label}</strong>
     </header> : null}
-    {editing ? <ComposerPrimitive.Root {...stylex.props(styles.edit)}><ComposerPrimitive.Input aria-label="Edit message" {...stylex.props(styles.input)} /><ComposerPrimitive.Send {...stylex.props(styles.button)}>Save edit</ComposerPrimitive.Send><ComposerPrimitive.Cancel {...stylex.props(styles.button)}>Cancel edit</ComposerPrimitive.Cancel></ComposerPrimitive.Root> : <><MessagePrimitive.Parts components={{ Text: TextPart, Reasoning: ReasoningPart, tools: { Fallback: EmbraceToolCall } }} />{item?._tag === 'Text' && item.role === 'user' && item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}</>}
+    {editing ? <ComposerPrimitive.Root {...stylex.props(styles.edit)}><ComposerPrimitive.Input aria-label="Edit message" {...stylex.props(styles.input)} /><ComposerPrimitive.Send {...stylex.props(styles.button)}>Save edit</ComposerPrimitive.Send><ComposerPrimitive.Cancel {...stylex.props(styles.button)}>Cancel edit</ComposerPrimitive.Cancel></ComposerPrimitive.Root> : <><MessagePrimitive.Parts components={{ Text: TextPart, Reasoning: ReasoningPart, tools: { Fallback: EmbraceToolCall } }} />{item?._tag === 'Text' && item.role === 'user' && item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}{item?._tag === 'Text' && item.role === 'user' && item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}</>}
     {options.embrace !== 'E1' ? <>
       <MessagePrimitive.Attachments components={{ Attachment }} />
       <MessagePrimitive.Error><ErrorPrimitive.Root {...stylex.props(styles.error)}><ErrorPrimitive.Message /></ErrorPrimitive.Root></MessagePrimitive.Error>

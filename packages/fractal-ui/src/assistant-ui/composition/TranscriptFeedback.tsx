@@ -27,6 +27,17 @@ export function SendFailure({ state, onRetry }: { readonly state: Extract<SendSt
   </div>
 }
 
+/** Unconfirmed send: a neutral status, not a failure; st may already have it, so Send again repeats it. */
+export function SendUnconfirmed({ state, onRetry }: { readonly state: Extract<SendState, { _tag: 'Unconfirmed' }>; readonly onRetry?: () => void }) {
+  const [open, setOpen] = React.useState(false)
+  const detailId = React.useId()
+  return <div role="status" data-testid="send-unconfirmed" {...stylex.props(styles.sendFailure)}>
+    <Button aria-expanded={open} aria-controls={state.detail === undefined ? undefined : detailId} onPress={() => setOpen(value => !value)} {...stylex.props(styles.sendFailureLine, styles.sendUnconfirmedLine)}>Not confirmed yet{state.detail !== undefined && <Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} />}</Button>
+    {open && state.detail !== undefined ? <div id={detailId} {...stylex.props(styles.sendFailureDetail)}>{state.detail}</div> : null}
+    {onRetry !== undefined && <Button onPress={onRetry} {...stylex.props(styles.sendFailureLine, styles.sendUnconfirmedLine)}>Send again</Button>}
+  </div>
+}
+
 /** Host-supplied empty copy; the default stays neutral for read-only and fresh conversations. */
 export function TranscriptEmptyContent({ emptyState }: { readonly emptyState?: React.ReactNode | TranscriptEmptyState }) {
   if (typeof emptyState === 'object' && emptyState !== null && 'title' in emptyState) return <><p {...stylex.props(styles.emptyTitle)}>{emptyState.title}</p>{emptyState.body !== undefined && <p {...stylex.props(styles.emptyDetail)}>{emptyState.body}</p>}</>
@@ -38,5 +49,6 @@ const styles = stylex.create({
   emptyDetail: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   sendFailure: { display: 'flex', flexDirection: 'column', gap: s.xs2, marginTop: s.xs2 },
   sendFailureLine: { display: 'inline-flex', alignItems: 'center', gap: s.xs, alignSelf: 'flex-start', minHeight: g.controlSm, padding: 0, borderWidth: 0, backgroundColor: surface.transparent, color: status.dangerFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  sendUnconfirmedLine: { color: ink.fgMuted },
   sendFailureDetail: { color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
 })

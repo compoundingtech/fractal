@@ -1246,9 +1246,6 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     {
         // A forwarded client read is bounded by the relay's own per-hop timeouts.
         deadlines.bulk
-    } else if path.starts_with("/v1/internal/replication/heal/") {
-        // A heal can replay the graph from nothing, 41 seconds on a 2 GB store.
-        Duration::from_secs(10 * 60)
     } else if path.starts_with("/v1/checkpoint/plan") || path.starts_with("/v1/checkpoint/status")
     {
         // A dry run copies the store and replays it twice; status reads what is sealed.
@@ -1260,6 +1257,13 @@ fn request_deadline(path: &str, deadlines: ClientDeadlines) -> Duration {
     } else {
         deadlines.request
     }
+}
+
+/// How long a seat's driver waits before it reconnects to the daemon or retries a call the daemon
+/// could not take. Every driver loses the daemon in the same instant when it stops, so without a
+/// random share they would all retry together and reach it in the instant it starts to listen.
+pub fn driver_retry_pause() -> Duration {
+    jittered(Duration::from_secs(1))
 }
 
 /// Half to one and a half times `pause`. Every seat and command waiting out one daemon restart
@@ -2009,6 +2013,17 @@ mod tests {
                 .len()
                 > 8
         );
+    }
+
+    /// Drivers that lost one daemon reconnect at different times, within half to one and a half
+    /// seconds of losing it.
+    #[test]
+    fn driver_retries_are_spread_around_one_second() {
+        let pauses = (0..64).map(|_| driver_retry_pause()).collect::<Vec<_>>();
+        assert!(pauses.iter().all(|pause| {
+            (Duration::from_millis(500)..=Duration::from_millis(1500)).contains(pause)
+        }));
+        assert!(pauses.iter().collect::<std::collections::BTreeSet<_>>().len() > 8);
     }
 
     #[tokio::test]

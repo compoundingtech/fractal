@@ -23,6 +23,7 @@ mod client_only;
 mod client_v0_cli;
 mod client_v0_contract;
 mod cli_inventory_process;
+mod cli_output;
 
 // Invoked only by cli_inventory_process's bounded-capture test. Keeping this
 // outside that module preserves its five selected fixture names.
@@ -60,6 +61,7 @@ mod convergence;
 mod daemon_bench;
 mod daemon_cost;
 mod daemon_load;
+mod load_hog;
 mod daemon_environment;
 mod daemon_restart;
 mod driver_incarnation;
