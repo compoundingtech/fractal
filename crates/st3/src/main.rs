@@ -6827,7 +6827,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"subject_notes":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == st_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
@@ -17808,6 +17808,31 @@ async fn message_page_reporting(
     client.get(&path).await
 }
 
+/// A held page may outlive the notes it originally contained. Resolve currency again
+/// before combining it with the waking page, including notes already in `pending`.
+async fn refresh_paged_notes(
+    client: &Client,
+    recipient: &str,
+    items: &mut Vec<MessageView>,
+    pending: &mut Vec<MessageView>,
+) -> Result<()> {
+    if !items.iter().chain(pending.iter()).any(st3::silent::is_notes_digest) {
+        return Ok(());
+    }
+    #[derive(serde::Deserialize)]
+    struct CurrentNotes {
+        notes: Vec<st3::store::subject_notes::SubjectNote>,
+    }
+    let response: CurrentNotes = client.get(&format!(
+        "/v1/client/subject-notes?recipient={}", urlencoding::encode(recipient),
+    )).await?;
+    let rendered = st3::notes_digest::render(&response.notes)?;
+    pending.append(items);
+    std::mem::swap(items, pending);
+    st3::silent::refresh_notes_rendered(items, recipient, rendered.as_deref());
+    Ok(())
+}
+
 async fn for_each_message(
     client: &Client,
     recipient: Option<&str>,
@@ -22274,6 +22299,10 @@ async fn run_pi_channel(
                     // A prior incarnation's handoff is not proof that the model consumed mail.
                     // The incarnation-local set survives channel reexec and prevents repeats here.
                     let mut items = page.items;
+                    if let Err(error) = refresh_paged_notes(client, subject, &mut items, &mut pending_silent).await {
+                        warn_pi_channel(subject, &error, &mut last_warning);
+                        break;
+                    }
                     st3::silent::release_page(&mut items, &mut pending_silent);
                     for message in items.into_iter().filter(|message| matches!(message.status.as_str(), "sent" | "staged" | "delivered")) {
                     if state.retry_after_ms.get(&message.subject).is_some_and(|after|
@@ -25248,6 +25277,7 @@ async fn forward_projected_messages_reporting(
         .await?;
         let mut items = page.items;
         // Held mail goes to the seat only beside a message that wakes it.
+        refresh_paged_notes(client, subject, &mut items, &mut pending_silent).await?;
         st3::silent::release_page(&mut items, &mut pending_silent);
         for message in items {
             active_subjects.insert(message.subject.clone());
