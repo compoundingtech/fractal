@@ -766,6 +766,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: evidence-signing
     timeout-minutes: 120
     defaults:
       run:
@@ -874,6 +875,55 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: tests
+          STAGE_JOB: linux-tests
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB"   --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT"   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA"   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]'   --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed stage note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-tests
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -885,6 +935,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_secondary) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: evidence-signing
     timeout-minutes: 120
     defaults:
       run:
@@ -990,6 +1041,55 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: tests
+          STAGE_JOB: linux-tests-shard-2
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB"   --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT"   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA"   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]'   --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed stage note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-tests-shard-2
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1001,6 +1101,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
+    environment: evidence-signing
     timeout-minutes: 120
     defaults:
       run:
@@ -1106,6 +1207,55 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: tests
+          STAGE_JOB: linux-tests-shard-3
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB"   --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT"   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA"   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]'   --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed stage note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-tests-shard-3
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1117,6 +1267,7 @@ jobs:
     needs: [pick-runner, linux-test-build]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && github.event_name == 'merge_group') }}
     runs-on: ${{ fromJSON(needs.pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.pick-runner.outputs.ci1 || '["ci1-merge"]') }}
+    environment: evidence-signing
     timeout-minutes: 120
     defaults:
       run:
@@ -1222,6 +1373,55 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: tests
+          STAGE_JOB: linux-tests-shard-4
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB"   --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT"   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA"   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]'   --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed stage note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-tests-shard-4
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1233,6 +1433,7 @@ jobs:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: evidence-signing
     timeout-minutes: 120
     defaults:
       run:
@@ -1357,6 +1558,55 @@ jobs:
             ${{ runner.temp }}/ci-logs/
 
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: clippy
+          STAGE_JOB: linux-clippy
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB"   --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT"   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA"   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]'   --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed stage note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-clippy
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1368,6 +1618,7 @@ jobs:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: evidence-signing
     timeout-minutes: 120
     defaults:
       run:
@@ -1491,6 +1742,55 @@ jobs:
             ${{ runner.temp }}/ci-logs/
 
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: fleet-compat
+          STAGE_JOB: linux-fleet-compat
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB"   --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT"   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA"   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]'   --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed stage note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-linux-fleet-compat
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1500,6 +1800,7 @@ jobs:
   mail-redelivery-canaries:
     name: mail-redelivery-canaries
     runs-on: ${{ fromJSON(github.event_name == 'merge_group' && (needs.pick-runner.outputs.ci1 || '["ci1-priority"]') || (github.event_name != 'merge_group' && needs.pick-runner.outputs.ci1_mail) || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('["nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority={1}","namespace-features:github.run-id={0}"]', github.run_id, github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3)) }}
+    environment: evidence-signing
     timeout-minutes: 120
     defaults:
       run:
@@ -1645,6 +1946,55 @@ jobs:
             target/messaging-faults/
             target/boot-canaries/
           if-no-files-found: ignore
+      - if: always()
+        continue-on-error: true
+        name: Take the evidence signer from the base commit
+        id: evidence-base
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+          git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+      - if: ${{ always() && steps.evidence-base.outcome == 'success' }}
+        continue-on-error: true
+        name: May this job use the signing key?
+        id: evidence-guard
+        env:
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" guard
+      - if: ${{ always() && steps.evidence-guard.outcome == 'success' }}
+        continue-on-error: true
+        name: Write the signer configuration and key
+        id: evidence-configure
+        env:
+          EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
+      - if: ${{ always() && steps.evidence-configure.outcome == 'success' }}
+        continue-on-error: true
+        name: Sign this stage result
+        env:
+          STAGE: mail-redelivery-canaries
+          STAGE_JOB: mail-redelivery-canaries
+        run: |
+          helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
+          python3 "$helper" once "$STAGE_JOB"
+          python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+          home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB"   --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT"   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA"   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]'   --out "$RUNNER_TEMP/evidence-notes"
+      - if: always()
+        continue-on-error: true
+        name: Remove the key
+        run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup
+      - if: always()
+        continue-on-error: true
+        name: Retain the signed stage note
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-note-mail-redelivery-canaries
+          path: "${{ runner.temp }}/evidence-notes/"
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -1749,7 +2099,8 @@ jobs:
         env:
           EVIDENCE_SIGNING_KEY: ${{ secrets.EVIDENCE_SIGNING_KEY }}
         run: python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"
-      - name: Sign and publish the linux-gate note
+      - name: Sign the linux-gate note
+        id: sign
         if: ${{ steps.configure.outcome == 'success' }}
         continue-on-error: true
         run: |
@@ -1757,7 +2108,27 @@ jobs:
           python3 "$helper" once linux-gate
           python3 "$helper" aggregate "$RUNNER_TEMP/gate-facts.json"
           home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate   --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT"   --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)"   --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --push origin
+          HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \
+            --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
+            --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"
+      - name: Collect the stage notes
+        if: ${{ steps.sign.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: evidence-note-*
+          path: "${{ runner.temp }}/evidence-notes/stages"
+          merge-multiple: true
+      - name: Publish the notes that verify
+        if: ${{ steps.sign.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+        run: |
+          git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+          python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
+            --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,mail-redelivery-canaries" --remote origin
       - name: Remove the key
         if: always()
         continue-on-error: true

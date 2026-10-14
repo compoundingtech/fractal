@@ -279,6 +279,73 @@ export const testArchiveConsumerSetup = [
 /** Everything a job that runs the workspace tests needs. */
 export const workspacePreparationSteps = [...commonSetupSteps, ...testBuildSteps]
 
+/**
+ * The stage jobs of `linux-gate` sign their own result. Every step is fail-soft and runs after the
+ * stage's logs are retained, so signing can never change a stage's outcome. The signer scripts come
+ * from the BASE commit of the change, never the tree under test. The note is written as a pack and
+ * uploaded; the aggregate note job (shallow checkouts cannot push) publishes it.
+ */
+export const evidenceStageNames = [
+  'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
+  'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries',
+] as const
+const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
+export const evidenceStageJob = (name: string) =>
+  (evidenceStageNames as readonly string[]).includes(name) ? { environment: 'evidence-signing' } : {}
+export const evidenceStageSteps = (name: string, stage: string): unknown[] => {
+  if (!(evidenceStageNames as readonly string[]).includes(name)) return []
+  const soft = { if: 'always()', 'continue-on-error': true } as const
+  return [
+    {
+      ...soft,
+      name: 'Take the evidence signer from the base commit',
+      id: 'evidence-base',
+      env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+      run: `rm -rf "$RUNNER_TEMP/evidence-base" && mkdir "$RUNNER_TEMP/evidence-base"
+git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --quiet --depth=1 origin "$BASE_SHA"
+git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
+    },
+    {
+      ...soft,
+      name: 'May this job use the signing key?',
+      id: 'evidence-guard',
+      if: "${{ always() && steps.evidence-base.outcome == 'success' }}",
+      env: { PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}' },
+      run: `python3 ${evidenceHelper} guard`,
+    },
+    {
+      ...soft,
+      name: 'Write the signer configuration and key',
+      id: 'evidence-configure',
+      if: "${{ always() && steps.evidence-guard.outcome == 'success' }}",
+      env: { EVIDENCE_SIGNING_KEY: '${{ secrets.EVIDENCE_SIGNING_KEY }}' },
+      run: `python3 ${evidenceHelper} configure | tee "$RUNNER_TEMP/evidence-signer-home"`,
+    },
+    {
+      ...soft,
+      name: 'Sign this stage result',
+      if: "${{ always() && steps.evidence-configure.outcome == 'success' }}",
+      env: { STAGE: stage, STAGE_JOB: name },
+      run: `helper=${evidenceHelper}
+python3 "$helper" once "$STAGE_JOB"
+python3 "$helper" stage-facts "$RUNNER_TEMP/stage-facts.json"
+home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check "$STAGE_JOB" \
+  --aggregate "$RUNNER_TEMP/stage-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" \
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' \
+  --out "$RUNNER_TEMP/evidence-notes"`,
+    },
+    { ...soft, name: 'Remove the key', run: `python3 ${evidenceHelper} cleanup` },
+    {
+      ...soft,
+      name: 'Retain the signed stage note',
+      uses: 'actions/upload-artifact@v4',
+      with: { name: `evidence-note-${name}`, path: '${{ runner.temp }}/evidence-notes/', 'if-no-files-found': 'ignore', 'retention-days': 7 },
+    },
+  ]
+}
+
 // One Linux stage: its own runner and caches, the common setup, then scripts/ci-linux (or the
 // command given), with steps before and after it.
 export const linuxStageJob = ({
@@ -311,6 +378,7 @@ export const linuxStageJob = ({
   name,
   ...(condition ? { if: condition } : {}),
   'runs-on': runsOn,
+  ...evidenceStageJob(name),
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, ...env, CI_CACHE_DEV_SHELL: 'default' },
@@ -340,6 +408,7 @@ export const linuxStageJob = ({
         'if-no-files-found': 'ignore',
       },
     },
+    ...evidenceStageSteps(name, stage),
   ],
 })
 

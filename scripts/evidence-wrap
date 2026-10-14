@@ -21,6 +21,12 @@ output digest is the sha256 of the canonical JSON of "output" (sorted keys, no s
 extra inputs are recorded next to the environment fingerprint. The note then says only what that
 job knows, and the command names it as an aggregate.
 
+With --out DIR the note is not imported or pushed: DIR/<record>.pack (the git objects) and
+DIR/<record>.json (record, check, tree, commit, tier, exit code) are written for a later job to
+publish. A job on a shallow checkout uses this, because the server refuses a push from one.
+In --aggregate mode a dirty workspace does not stop the signature (the job has already run its
+tests); it is recorded as the input workspace_clean instead.
+
 With EVIDENCE_PUSH_TOKEN set, --push uses it as an HTTP authorization header (never printed).
 
 Take this script from the accepted base (main), not from the change under test.
@@ -92,6 +98,7 @@ def main(argv):
     parser.add_argument('--verifier', default=str(HERE / 'evidence-verify'))
     parser.add_argument('--push', metavar='REMOTE')
     parser.add_argument('--aggregate', metavar='FILE', help='record the facts in FILE instead of running a command')
+    parser.add_argument('--out', metavar='DIR', help='write the pack and a summary here instead of importing and pushing')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
@@ -101,7 +108,8 @@ def main(argv):
     try:
         top = git('rev-parse', '--show-toplevel').stdout.decode().strip()
         os.chdir(top)
-        if dirty():
+        clean = not dirty()
+        if not clean and not args.aggregate:
             raise Failure('the checkout is not clean: commit or remove changes first, the note is for the committed tree')
         commit = git('rev-parse', 'HEAD').stdout.decode().strip()
         tree = git('rev-parse', 'HEAD^{tree}').stdout.decode().strip()
@@ -116,14 +124,17 @@ def main(argv):
         }
         if args.aggregate:
             facts = json.loads(Path(args.aggregate).read_text())
-            if set(facts) - {'command', 'exit_code', 'output', 'inputs'} or not {'command', 'exit_code', 'output'} <= set(facts):
-                raise Failure('--aggregate FILE must hold command, exit_code, output and optionally inputs')
+            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs'}
+            if set(facts) - known or not {'command', 'exit_code'} <= set(facts) or ('output' in facts) == ('output_sha256' in facts):
+                raise Failure('--aggregate FILE must hold command, exit_code, exactly one of output or output_sha256, and optionally inputs')
             command, exit_code = facts['command'], facts['exit_code']
-            output_sha256 = hashlib.sha256(json.dumps(facts['output'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            output_sha256 = facts.get('output_sha256') or hashlib.sha256(
+                json.dumps(facts['output'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
             inputs.update(facts.get('inputs', {}))
+            inputs['workspace_clean'] = 'true' if clean else 'false'
         else:
             exit_code, output_sha256 = run_command(command)
-        if git('rev-parse', 'HEAD').stdout.decode().strip() != commit or dirty():
+        if git('rev-parse', 'HEAD').stdout.decode().strip() != commit or (dirty() and not args.aggregate):
             raise Failure('the checkout changed while the command ran; nothing was signed')
         request = {'commit': commit, 'check': args.check, 'command': command, 'exit_code': exit_code,
                    'output_sha256': output_sha256, 'change_id': args.change_id or f'local:{commit}', 'inputs': inputs}
@@ -135,6 +146,14 @@ def main(argv):
         record = answer['record']
         if answer.get('commit') != commit or answer.get('tree') != tree or answer.get('tier') != 'full':
             raise Failure('the signer answered for a different commit, tree or tier')
+        if args.out:
+            out = Path(args.out)
+            out.mkdir(parents=True, exist_ok=True)
+            (out / f'{record}.pack').write_bytes(base64.b64decode(answer['object_pack_base64'], validate=True))
+            summary = {'record': record, 'check': args.check, 'tree': tree, 'commit': commit, 'tier': answer['tier'], 'exit_code': exit_code}
+            (out / f'{record}.json').write_text(json.dumps(summary))
+            print(json.dumps(summary, indent=2), file=sys.stderr)
+            return 0 if exit_code == 0 else exit_code
         git('index-pack', '--stdin', stdin=base64.b64decode(answer['object_pack_base64'], validate=True))
         ref = f'refs/notes/evidence/{record}'
         if not git('for-each-ref', '--format=%(objectname)', ref).stdout.strip():

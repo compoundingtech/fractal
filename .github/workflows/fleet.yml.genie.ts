@@ -16,6 +16,9 @@ import {
   nixCacheStep,
   linuxRunner,
   linuxStageJob as namespaceStageJob,
+  evidenceStageJob,
+  evidenceStageNames,
+  evidenceStageSteps,
   linuxStageRunner,
   linuxStageRunsOn,
   perfStoresCache,
@@ -74,6 +77,7 @@ const linuxStageJob = ({
   name,
   ...afterPickRunner,
   'runs-on': runsOn,
+  ...evidenceStageJob(name),
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, ...env, CI_CACHE_DEV_SHELL: 'default' },
@@ -101,6 +105,7 @@ const linuxStageJob = ({
         'if-no-files-found': 'ignore',
       },
     },
+    ...evidenceStageSteps(name, stage),
   ],
 })
 
@@ -453,17 +458,35 @@ git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
           run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" configure | tee "$RUNNER_TEMP/evidence-signer-home"',
         },
         {
-          name: 'Sign and publish the linux-gate note',
+          name: 'Sign the linux-gate note',
+          id: 'sign',
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `helper="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"
 python3 "$helper" once linux-gate
 python3 "$helper" aggregate "$RUNNER_TEMP/gate-facts.json"
 home=$(tail -n 1 "$RUNNER_TEMP/evidence-signer-home")
-HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \
-  --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \
-  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \
-  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --push origin`,
+HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check linux-gate \\
+  --aggregate "$RUNNER_TEMP/gate-facts.json" --attempt "$GITHUB_RUN_ATTEMPT" \\
+  --change-id "github:$GITHUB_REPOSITORY@$GITHUB_SHA" --toolchain-sha256 "$(printf 'github-hosted|%s' "\${ImageVersion:-unknown}" | sha256sum | cut -d' ' -f1)" \\
+  --signer '["python3","'"$RUNNER_TEMP"'/evidence-base/scripts/evidence-sign"]' --out "$RUNNER_TEMP/evidence-notes/gate"`,
+        },
+        // The stage jobs' signed notes, written as packs by each stage's own signing steps.
+        {
+          name: 'Collect the stage notes',
+          if: "${{ steps.sign.outcome == 'success' }}",
+          'continue-on-error': true,
+          uses: 'actions/download-artifact@v4',
+          with: { pattern: 'evidence-note-*', path: '${{ runner.temp }}/evidence-notes/stages', 'merge-multiple': true },
+        },
+        {
+          name: 'Publish the notes that verify',
+          if: "${{ steps.sign.outcome == 'success' }}",
+          'continue-on-error': true,
+          env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
+          run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
+  --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${evidenceStageNames.join(',')}" --remote origin`,
         },
         { name: 'Remove the key', if: 'always()', 'continue-on-error': true, run: 'python3 "$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing" cleanup' },
       ],

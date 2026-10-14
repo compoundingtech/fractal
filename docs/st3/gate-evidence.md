@@ -356,6 +356,21 @@ notes signed by the stage jobs. The signer accepts extra named string inputs nex
 environment fingerprint, so a check's note can carry more over time; the repository policy decides
 which inputs a check must carry.
 
+### Stage notes and publishing
+
+Each `linux-gate` stage job (the test shards, clippy, fleet-compat and the mail canaries) signs its
+own result in fail-soft steps after its logs are retained, so signing cannot change the stage's
+outcome. `ci-evidence-signing stage-facts` reads what `scripts/ci-linux` wrote: the exit status and
+seconds (`STAGE.time`) and the digest of the exact log (`STAGE.log`); a missing or unreadable timing
+file is recorded as a failure, never as success. `evidence-wrap --aggregate FILE --out DIR` signs
+those facts (and records `workspace_clean` rather than refusing a workspace the tests dirtied) and
+writes the note as a pack for upload. A stage job's checkout is shallow and the server refuses a push
+from one, so the aggregate note job collects the packs and `scripts/evidence-publish` publishes them:
+it accepts a note only if its signature verifies against `.st/evidence-keys` from the base commit for
+the principal it claims, it is a full-tier single-note commit about this commit and tree, its check
+is one of the allowed stage names, and the commit is its only parent. It never replaces a ref and
+accepts at most 40 notes in one run; failures and refusals appear in the job summary by record id.
+
 ## Fresh CI re-attestation
 
 The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors

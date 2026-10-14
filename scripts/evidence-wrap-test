@@ -104,10 +104,30 @@ def main(argv):
         assert gate_check['command'] == ['linux-gate', 'aggregate', 'a', 'b'] and gate_check['exit_code'] == 0
         assert gate_check['output_sha256'] == hashlib.sha256(canonical.encode()).hexdigest()
         assert gate['predicate']['observed']['inputs']['run_id'] == '42' and 'flake_lock_sha256' in gate['predicate']['observed']['inputs']
+        # A stage that already ran: its log digest is the output, a dirty workspace is recorded, packs go to --out.
+        (repo / 'untracked-build-output').write_text('x')
+        stage_facts = tmp / 'stage.json'
+        stage_facts.write_text(json.dumps({'command': ['bash', 'scripts/ci-linux', 'tests'], 'exit_code': 0,
+                                           'output_sha256': hashlib.sha256(b'the log').hexdigest(), 'inputs': {'stage': 'tests'}}))
+        out_dir = tmp / 'notes-out'
+        staged = run([sys.executable, str(WRAP), '--check', 'linux-tests', '--toolchain-sha256', toolchain, '--signer', signer,
+                      '--aggregate', str(stage_facts), '--out', str(out_dir)], repo, home)
+        assert staged.returncode == 0, staged.stderr.decode()
+        written = sorted(out_dir.iterdir())
+        assert [w.suffix for w in written] == ['.json', '.pack'], written
+        summary = json.loads(written[0].read_text())
+        assert summary['check'] == 'linux-tests' and summary['tree'] == git(repo, 'rev-parse', 'HEAD^{tree}')
+        inputs = json.loads(git(tmp / 'scratch.git', 'cat-file', 'blob', git(tmp / 'scratch.git', 'ls-tree', '-r', summary['record']).split()[2]))['predicate']['observed']['inputs']
+        assert inputs['workspace_clean'] == 'false' and inputs['stage'] == 'tests'
+        assert git(repo, 'for-each-ref', f'refs/notes/evidence/{summary["record"]}') == '', '--out must not create a ref in the checkout'
+        (repo / 'untracked-build-output').unlink()
+        facts.write_text(json.dumps({'command': ['x'], 'exit_code': 0, 'output': 1, 'output_sha256': 'a' * 64}))
+        assert run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
+                    '--signer', signer, '--aggregate', str(facts)], repo, home).returncode == 1, 'output and output_sha256 are exclusive'
         facts.write_text(json.dumps({'command': ['x'], 'exit_code': 0, 'output': 1, 'tier': 'full'}))
         assert run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
                     '--signer', signer, '--aggregate', str(facts)], repo, home).returncode == 1
-        print('passed: an aggregate gate records its verdict, canonical output digest and extra run inputs, and refuses unknown keys')
+        print('passed: an aggregate gate records its verdict, canonical output digest and extra run inputs, stage facts go to --out with workspace_clean, and unknown keys are refused')
 
         (repo / 'a').write_text('dirty\n')
         assert wrap(['true']).returncode == 1

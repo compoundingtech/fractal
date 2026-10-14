@@ -129,6 +129,30 @@ with tempfile.TemporaryDirectory() as directory:
     assert missing.returncode == 1 and 'no verdict' in missing.stdout
     print('passed: the aggregate note records the needed jobs and the gate job\'s own verdict, and refuses to invent one')
 
+    # --- stage-facts: the log digest and status of a stage that already ran
+    logs = tmp / 'stage-runner/ci-logs'
+    logs.mkdir(parents=True)
+    (logs / 'tests.log').write_bytes(b'ok test a\nok test b\n')
+    (logs / 'tests.time').write_text('412 0\n')
+    (logs / 'clippy.log').write_bytes(b'warning: x\n')
+    (logs / 'clippy.time').write_text('55 101\n')
+    (logs / 'fleet-compat.time').write_text('garbage')
+    stage_env = dict(RUNNER_TEMP=str(tmp / 'stage-runner'), STAGE_JOB='linux-tests-shard-2', CI_TEST_PARTITION='hash:2/4',
+                     GITHUB_RUN_ID='7', RUNNER_NAME='ci1-3', RUNNER_OS='Linux')
+    helper('stage-facts', str(out), env=dict(stage_env, STAGE='tests'))
+    got = json.loads(out.read_text())
+    assert got['exit_code'] == 0 and got['output_sha256'] == hashlib.sha256(b'ok test a\nok test b\n').hexdigest()
+    assert got['command'] == ['bash', 'scripts/ci-linux', 'tests'] and got['inputs']['partition'] == 'hash:2/4' and got['inputs']['elapsed_seconds'] == '412'
+    helper('stage-facts', str(out), env=dict(stage_env, STAGE='clippy'))
+    assert json.loads(out.read_text())['exit_code'] == 101, 'the stage exit status is recorded as it was'
+    helper('stage-facts', str(out), env=dict(stage_env, STAGE='fleet-compat'))
+    unfinished = json.loads(out.read_text())
+    assert unfinished['exit_code'] == 1 and unfinished['inputs']['log_present'] == 'false', 'an unreadable timing file is a failure, never a success'
+    helper('stage-facts', str(out), env=dict(stage_env, STAGE='canaries'))
+    assert json.loads(out.read_text())['exit_code'] == 1
+    assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='../x')).returncode == 1
+    print('passed: a stage note carries the stage command, its real exit status and the digest of its exact log; a missing or garbled timing is a failure')
+
     # --- cleanup: key overwritten and removed
     alias = tmp / 'alias'
     os.link(home / 'signing-key', alias)
