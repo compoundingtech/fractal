@@ -16,7 +16,7 @@ A second top-level agent, `agent/eval/seat-queue/chief`, is model-free and holds
 [free mode](../../../docs/st3/kdl-lifecycle.md#free-mode) any agent moves any seat's queue. The
 controller acts as the chief, as the free mode eval acts as its planner. While the seat holds
 alpha's first step, the chief moves charlie
-before bravo with `st3 agents queue move --as agent/eval/seat-queue/chief`. Alpha then waits on
+before bravo with `st agents queue move --as agent/eval/seat-queue/chief`. Alpha then waits on
 its sign-off gate as the head run. The controller approves the gate only after the seat has taken
 charlie's work, while the seat still holds that work.
 

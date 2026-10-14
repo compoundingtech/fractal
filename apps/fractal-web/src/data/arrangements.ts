@@ -10,7 +10,7 @@
  * A complete read is finite: it stops at fixed page and item budgets, and closing or refreshing
  * the follow aborts it between pages and cancels its in-flight request.
  */
-import { St3Client } from '@smalltalk/st3-client'
+import { SIDEBAR_ARRANGEMENT_UUID, St3Client } from '@smalltalk/st3-client'
 import type { Arrangement, ArrangementPage, CollectionSocketFactory, CollectionStream, EnvelopeOf, PageOptions, Snapshot } from '@smalltalk/st3-client'
 import { ArrangementId as ArrangementIdSchema, ArrangementPage as ArrangementPageSchema } from '@smalltalk/st3-client/schema'
 import { Schema } from 'effect'
@@ -88,9 +88,7 @@ export interface InventoryFollow {
 const subscriptionId = 'arrangements-inventory'
 const asError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)))
 
-// TODO(#2043): use the exported client-v0 constant once it lands
-const sidebarUuid = '00000000-0000-7000-8000-000000000001'
-export const reservedSidebarSubject = (owner: string): string => `arrangement/${owner}/${sidebarUuid}`
+export const reservedSidebarSubject = (owner: string): string => `arrangement/${owner}/${SIDEBAR_ARRANGEMENT_UUID}`
 
 /** Exact-name legacy candidates are live, person-owned and ordered by lowercase UUIDv7. */
 export const sidebarCandidates = (items: readonly Arrangement[], owner: string | undefined = items[0]?.owner): readonly Arrangement[] =>

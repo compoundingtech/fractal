@@ -11,7 +11,7 @@ Every client's tests check against that file.
 - Each device makes a P-256 key pair and keeps the private half on the device:
   - iOS: in the Secure Enclave, with a software key in the Keychain on the simulator.
   - Browser: as a non-extractable WebCrypto key.
-  - CLI or stui: in a key file.
+  - CLI or terminal UI: in a key file.
 - A device's public key is written `p256:` followed by the base64url (no padding) of the
   uncompressed SEC1 point (65 bytes). CryptoKit's `x963Representation` gives those bytes.
 - A signature is ECDSA over SHA-256, as the fixed 64-byte `r || s`, in base64url without padding.
@@ -49,7 +49,7 @@ Every client's tests check against that file.
    Anything that key signs after the revocation is invalid on every member. What it signed
    before stays verified.
 
-## CLI and stui pairing
+## CLI and terminal client pairing
 
 On the trusted machine, begin a pairing as the person:
 
@@ -69,7 +69,7 @@ Tailscale's `100.64.0.0/10` range. Hostnames must resolve entirely to those addr
 **An HTTP address must already be an encrypted path**, such as Tailscale/WireGuard or an SSH
 tunnel: the pairing code and bearer credentials cross it. Both commands print this notice when
 using HTTP. Other HTTP addresses are refused by default. On an already encrypted path, use
-`--allow-public-http` with `st devices complete` or `stui pair` to override that restriction.
+`--allow-public-http` with `st devices complete` to override that restriction.
 The override is saved as `allow_public_http: true` on that device in the private profile;
 existing profiles can set that field explicitly. The override also permits ambient HTTP proxies;
 ensure that the proxy path is encrypted and trusted too. HTTPS requires no override.
@@ -96,8 +96,7 @@ If a connection fails before an answer arrives, inspect the trusted device list 
 client cannot know whether the member consumed the code.
 Neither ordinary output nor `--json` prints the bearer or private key.
 
-`stui pair https://member.example pairing/PAIRING_ID --fingerprint sha256:FINGERPRINT` uses the same key generation and
-persistence, and paired stui messages are signed using the saved key and chain. Existing legacy
+Paired terminal UI messages are signed using the saved key and chain. Existing legacy
 profiles remain readable. A pairing without `control.messages`, including `--read-only`,
 enrolls no signing key and persists no private signing material.
 
@@ -193,11 +192,32 @@ escaped, non-ASCII not escaped. The values are the ones the daemon stores:
 - A missing `title`, `in_reply_to` or `session_id` is `null`.
 - `tags` is the array in the client's order, and `[]` when there are none.
 
+### A message longer than 8 KiB
+
+Past 8,192 bytes of UTF-8 the daemon keeps only a preview in the claim
+([long messages](long-messages.md)), so the device signs the preview, with the hash and length of
+the whole text. Two fields are added, and the names are sorted as always:
+
+```json
+"signed_fields": ["body_bytes", "body_sha256", "content", "from", "in_reply_to", "session_id", "tags", "title", "to"]
+```
+
+- `content` is the preview: the first 1,024 bytes of the text, cut at a character boundary,
+  trailing whitespace removed, then `…` (U+2026).
+- `body_sha256` is the lowercase hex SHA-256 of the whole text's UTF-8 bytes, a JSON string.
+- `body_bytes` is the whole text's length in UTF-8 bytes, a JSON number with no fraction.
+
+`content` in the `message.send` request is still the whole text. The `long` case in the shared
+vectors builds its text from a unit and a count and signs it this way. A device that signs the
+whole text of a message past 8 KiB is refused with `long-message-signature-unsupported` and
+nothing is written; a device whose signer cannot do this must refuse the send in words and keep
+the person's text.
+
 ## What the daemon checks before it writes the message
 
 | Refusal | When |
 | --- | --- |
-| `device-signature-format` | The format is not `fields-v1`, or the signed fields differ from the list above. |
+| `device-signature-format` | The format is not `fields-v1`, or the signed fields differ from the list above (or, past 8 KiB, from the long list). |
 | `device-signature-signer` | The signer is not the paired person, or the signature names someone it acts on behalf of. |
 | `device-signature-noncanonical` | `to` is not a canonical subject. |
 | `device-signature-stale` | `signed_at_unix_ms` is more than 15 minutes from the accepting daemon's clock. |
@@ -212,5 +232,5 @@ in.
 
 ## Scope of version 1
 
-Only paired clients sign. A local stui or CLI on the Unix socket acts as the configured person,
+Only paired clients sign. A local terminal UI or CLI on the Unix socket acts as the configured person,
 and the daemon signs for it with that person's key for the machine.

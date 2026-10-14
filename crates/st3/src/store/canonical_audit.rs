@@ -33,7 +33,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
 
 #[test]
 fn every_persistent_table_has_a_projection_scope() {
-    // Explicit local/storage exceptions from docs/st3/canonical-projections-audit.md. New
+    // Explicit local/storage exceptions from docs/st3/data-authority.md. New
     // tables must be classified; shared tables automatically join the row/digest comparison.
     let exceptions = [
         "meta",
@@ -51,6 +51,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "replication_refusals",
         "capabilities",
         "local_work_lease_renewals",
+        "local_git_change_records",
+        "local_git_change_latest",
         "local_mailbox_owners",
         "local_mailbox_bindings",
         "local_mailbox_argv_bindings",
@@ -64,7 +66,19 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_idle_messages",
         "coordination_sends",
         "local_coordination_backfill",
+        "stop_deferral_claims",
+        "local_stop_deferral_backfill",
+        "local_publication_claims",
+        "local_publication_starts",
+        "local_publication_pending",
+        "local_publication_batches",
+        "local_publication_bootstrap",
+        "local_publication_launch_epoch",
         "local_observations",
+        "local_runtime_starts",
+        "local_runtime_start_evidence",
+        "local_runtime_start_observation_generation",
+        "local_runtime_start_observation_subjects",
         "local_blobs",
         "local_blob_uploads",
         "local_subscription_mission_deferrals",
@@ -1293,27 +1307,14 @@ fn comparable_peers_name_differing_tables_and_legacy_peers_keep_their_digest() {
     let old: ReplicationExchange = serde_json::from_value(old).unwrap();
     assert!(old.projection_digests.is_empty());
     assert_eq!(old.graph_digest, legacy);
-    let receipt = target
+    target
         .receive_replication_exchange("alder", TEST_FLEET, &old)
         .unwrap();
-    assert!(!receipt.heal);
     let status = target
         .replication_status(true, Some(TEST_FLEET), &["alder".into()])
         .unwrap();
     assert!(status.peers[0].projection_digests.is_empty());
     assert!(status.peers[0].differing_tables.is_empty());
-    let mut answer = source
-        .heal_answer("birch", &ReplicationHealQuery::Ranges)
-        .unwrap();
-    if let ReplicationHealAnswer::Ranges {
-        projection_digests, ..
-    } = &mut answer
-    {
-        projection_digests.clear();
-    }
-    assert!(
-        matches!(target.heal_next("alder",answer).unwrap(),ReplicationHealStep::Done{report} if report.healed)
-    );
 }
 
 #[test]

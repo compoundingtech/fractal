@@ -1,3 +1,4 @@
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { readFileSync } from 'node:fs'
 import { buildEnv, linuxRunner, linuxStageRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
@@ -10,12 +11,12 @@ const irrelevantLabel = "github.event_name == 'pull_request' && (github.event.ac
 const relevantEvent = `!(${irrelevantLabel})`
 // Performance always stays on Namespace. Main's successful runs seed durable snapshots and
 // real baseline reports. Each PR can also reuse its own snapshots, outside the dependency-cache pool.
-export default githubWorkflow({
+export default githubWorkflow(readyPRJobs({
   name: 'Performance',
   on: {
     push: { branches: ['main'] },
     schedule: [{ cron: '23 2 * * *' }],
-    pull_request: { types: ['opened', 'synchronize', 'reopened', 'labeled', 'unlabeled', 'ready_for_review'] },
+    pull_request: { types: [...readyPullRequestTypes, 'labeled', 'unlabeled'] },
     workflow_dispatch: {},
   },
   permissions: { contents: 'read', actions: 'read', 'pull-requests': 'read' },
@@ -119,4 +120,4 @@ python3 scripts/ci-perf-cache pack`,
       ],
     },
   },
-})
+}))

@@ -5,9 +5,8 @@ Sekrets runs any command line tool with a credential the caller never reads. A s
 command with that profile, runs it with the profile's home and environment, and hands back only
 the command's output and exit status.
 
-Sekrets is opt-in and Linux-first. A host without a gateway behaves exactly as before: `st
-sekrets` says sekrets is not set up, and nothing else changes. The design is section 10 of the
-resource graph plan; this document describes what is built.
+Sekrets is opt-in and Linux-first. On a host without a gateway, `st sekrets profiles` reports
+that sekrets is not set up. This document describes the installed gateway and its commands.
 
 ## Model
 
@@ -77,12 +76,11 @@ session.
 While seats run as their person's Unix user, the line between seats of the same person is only as
 strong as that user's files: a seat that reads its daemon's node key, or moves itself into another
 seat's cgroup, can pass for another seat of the same person. It can never pass for the person, for
-another person, or for another person's seat, and it can never read the store. Seats under their
-own Unix user (plan phase 8) close that. The same holds for a seat that logs in to its own host
+another person, or for another person's seat, and it can never read the store. Running seats under their own Unix user would close that; this is not implemented. The same holds for a seat that logs in to its own host
 over ssh with a key it added to its person's `authorized_keys`: it then runs in a login session.
 Until seats run as another user, keep a person's own profile on a policy that leaves out the
 commands that print credentials (`no-credential-printing`), and remove credentials from the
-person's home (`st sekrets adopt`, the next step).
+person's home.
 
 ## Authorized requests
 

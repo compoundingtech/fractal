@@ -243,6 +243,7 @@ fn live_claude_label(env: &dyn HookEnv, identity: &str) -> Result<String> {
         let desired = serde_json::json!({"display_name": display_name});
         Ok(crate::mailbox::seat_label(
             &crate::model::DesiredSubject {
+                accountable: None,
                 subject,
                 kind: "agent".into(),
                 desired,
@@ -345,34 +346,19 @@ const PROMPT_ANSWER_POLL: std::time::Duration = std::time::Duration::from_secs(1
 
 /// Let a person answer a Claude permission prompt from a client. The hook waits while Claude
 /// shows its dialog; if the person answers in st first, the hook returns that decision, which
-/// closes the dialog (measured on Claude Code 2.1.296). A question prompt is answered in the
-/// terminal only.
+/// closes the dialog (measured on Claude Code 2.1.296, for the seat's own prompts and its
+/// subagents', and for `AskUserQuestion`, whose answer carries the person's choices).
 fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path, raw: &str) {
     let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
-    if payload.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion") {
-        return;
-    }
-    // A subagent's prompt never moves the seat's state, so no alert names it: answer it in the
-    // terminal. The seat's own prompts come one at a time: Claude serializes tool execution
-    // around an open permission prompt, even for a parallel batch (see
-    // `claude_session::observe_hook_event`), so one waiting hook stands for one prompt.
-    if payload
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .is_some_and(|id| !id.is_empty())
+    // This hook's own prompt, as the seat's open prompts name it: it is answered only once the
+    // seat shows it, by an answer to exactly the observation that shows it, never one to an
+    // earlier or a parallel prompt (see `st_drivers::claude_prompts`).
+    let prompt = st_drivers::claude_prompts::prompt_id(raw);
+    if st_drivers::claude_prompts::waiting(agent_dir, &prompt)
+        == st_drivers::claude_prompts::Waiting::Gone
     {
         return;
     }
-    // This hook's own observation, as its state record names it: only an answer to that exact
-    // prompt is this hook's, never one to an earlier prompt or a parallel hook's.
-    let Some((ownership, transition)) = st_drivers::harness_state::read(
-        &st_drivers::harness_state::harness_state_path(agent_dir),
-        None,
-    )
-    .filter(|observed| observed.blocked_on == st_drivers::harness_state::BlockedOn::Human)
-    .and_then(|observed| observed.ownership_sequence.zip(observed.transition_sequence)) else {
-        return;
-    };
     let endpoint = match env.var("ST3_ENDPOINT") {
         Some(endpoint) => crate::client::Endpoint::parse(endpoint),
         None => match crate::config::Config::load_unvalidated(None) {
@@ -391,26 +377,37 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
         return;
     };
     let client = crate::client::Client::new(endpoint);
-    let path = format!(
-        "/v1/harness-prompts/state?agent={}&ownership={ownership}&transition={transition}",
-        urlencoding::encode(&subject)
-    );
     let answer = wait_for_prompt_answer(
-        || {
-            runtime.block_on(async {
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    client.get::<crate::store::NativePromptState>(&path),
-                )
-                .await
-                .ok()
-                .and_then(Result::ok)
-            })
+        || match st_drivers::claude_prompts::waiting(agent_dir, &prompt) {
+            st_drivers::claude_prompts::Waiting::Gone => {
+                Some(crate::store::NativePromptState::Gone)
+            }
+            st_drivers::claude_prompts::Waiting::Queued => {
+                Some(crate::store::NativePromptState::Open)
+            }
+            st_drivers::claude_prompts::Waiting::Shown(ownership, transition) => {
+                let path = format!(
+                    "/v1/harness-prompts/state?agent={}&ownership={ownership}&transition={transition}",
+                    urlencoding::encode(&subject)
+                );
+                runtime.block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        client.get::<crate::store::NativePromptState>(&path),
+                    )
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                })
+            }
         },
         PROMPT_ANSWER_WAIT,
         PROMPT_ANSWER_POLL,
     );
-    if let Some(output) = answer.as_deref().and_then(permission_decision) {
+    if let Some(output) = answer
+        .as_deref()
+        .and_then(|answer| permission_decision(answer, &payload))
+    {
         println!("{output}");
     }
 }
@@ -435,11 +432,54 @@ fn wait_for_prompt_answer(
     }
 }
 
-/// Claude's `PermissionRequest` hook output for a person's answer.
-fn permission_decision(answer: &str) -> Option<String> {
+/// A question's answers as Claude takes them, from the positions the person chose: each question's
+/// text to its chosen labels, several joined with a comma for a multi-select. The questions and
+/// labels come from the call this hook holds, so only positions ever leave the seat's host.
+/// `None` when a position names no question or option of this call, or a question of the call
+/// has no answer: Claude is never handed a partial answer, and the dialog stays.
+fn question_labels(
+    input: &Value,
+    choices: &serde_json::Map<String, Value>,
+) -> Option<serde_json::Map<String, Value>> {
+    let questions = input.get("questions")?.as_array()?;
+    if choices.len() != questions.len() {
+        return None;
+    }
+    let mut answers = serde_json::Map::new();
+    for (position, options) in choices {
+        let question = questions.get(position.parse::<usize>().ok()?)?;
+        let labels = options
+            .as_array()?
+            .iter()
+            .map(|option| {
+                let option = usize::try_from(option.as_u64()?).ok()?;
+                question.get("options")?.as_array()?.get(option)?.get("label")?.as_str()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        answers.insert(question.get("question")?.as_str()?.to_owned(), labels.join(", ").into());
+    }
+    Some(answers)
+}
+
+/// Claude's `PermissionRequest` hook output for a person's answer to the prompt `payload` opened.
+/// A question's answer is its choices, which Claude takes as the tool's `answers` beside the
+/// questions it asked; a question refused is declined.
+fn permission_decision(answer: &str, payload: &Value) -> Option<String> {
+    let question = payload.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion");
     let decision = match answer {
-        "allow" => serde_json::json!({"behavior": "allow"}),
+        "deny" if question => serde_json::json!({
+            "behavior": "deny", "message": "The person declined to answer this from st."}),
         "deny" => serde_json::json!({"behavior": "deny", "message": "The person denied this from st."}),
+        "allow" if !question => serde_json::json!({"behavior": "allow"}),
+        choices if question => {
+            let Ok(Value::Object(choices)) = serde_json::from_str::<Value>(choices) else {
+                return None;
+            };
+            let mut input = payload.get("tool_input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let answers = question_labels(&input, &choices)?;
+            input.as_object_mut()?.insert("answers".into(), Value::Object(answers));
+            serde_json::json!({"behavior": "allow", "updatedInput": input})
+        }
         _ => return None,
     };
     Some(
@@ -855,14 +895,50 @@ mod tests {
             ),
             None
         );
-        let allow: Value = serde_json::from_str(&super::permission_decision("allow").unwrap())
-            .unwrap();
+        let bash = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "make"}});
+        let allow: Value =
+            serde_json::from_str(&super::permission_decision("allow", &bash).unwrap()).unwrap();
         assert_eq!(allow["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
         assert_eq!(allow["hookSpecificOutput"]["decision"]["behavior"], "allow");
         let deny: Value =
-            serde_json::from_str(&super::permission_decision("deny").unwrap()).unwrap();
+            serde_json::from_str(&super::permission_decision("deny", &bash).unwrap()).unwrap();
         assert_eq!(deny["hookSpecificOutput"]["decision"]["behavior"], "deny");
-        assert!(super::permission_decision("maybe").is_none());
+        assert!(super::permission_decision("maybe", &bash).is_none());
+        assert!(super::permission_decision(r#"{"Which?":"Red"}"#, &bash).is_none());
+    }
+
+    /// A question's answer is its choices: Claude takes them as the tool's `answers`, beside the
+    /// questions it asked, and shows them as the person's (measured on Claude Code 2.1.296 with a
+    /// single-select and a multi-select question in one call).
+    #[test]
+    fn a_questions_answer_returns_its_choices_as_the_tools_answers() {
+        let asked = serde_json::json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": [
+            {"question": "Which color?", "header": "Color", "multiSelect": false,
+             "options": [{"label": "Red", "description": "Red"}, {"label": "Blue", "description": "Blue"}]},
+            {"question": "Which pets?", "header": "Pets", "multiSelect": true,
+             "options": [{"label": "Cat", "description": "Cat"}, {"label": "Dog", "description": "Dog"}]},
+        ]}});
+        let answered: Value = serde_json::from_str(
+            &super::permission_decision(r#"{"0":[1],"1":[0,1]}"#, &asked)
+                .unwrap(),
+        )
+        .unwrap();
+        let decision = &answered["hookSpecificOutput"]["decision"];
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(decision["updatedInput"]["questions"], asked["tool_input"]["questions"]);
+        assert_eq!(
+            decision["updatedInput"]["answers"],
+            serde_json::json!({"Which color?": "Blue", "Which pets?": "Cat, Dog"})
+        );
+        let declined: Value =
+            serde_json::from_str(&super::permission_decision("deny", &asked).unwrap()).unwrap();
+        assert_eq!(declined["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        // A question is never answered with a bare allow, nor with positions it does not have.
+        assert!(super::permission_decision("allow", &asked).is_none());
+        assert!(super::permission_decision(r#"{"0":[5]}"#, &asked).is_none());
+        assert!(super::permission_decision(r#"{"2":[0]}"#, &asked).is_none());
+        // Every question of the call is answered, or none is: never a partial answer.
+        assert!(super::permission_decision(r#"{"0":[1]}"#, &asked).is_none());
     }
 
     #[test]

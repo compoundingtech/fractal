@@ -314,6 +314,7 @@ mod tests {
             })
             .unwrap();
         let request = |key: &str, incarnation: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some(incarnation.into()),
             summary: None,
