@@ -291,16 +291,20 @@ mod tests {
     async fn pinned_daemon_grants_flow_control_and_half_close() -> Result<()> {
         let binary = std::env::var("FABRIC_BIN").context("set FABRIC_BIN")?;
         let version = Command::new(&binary).arg("--version").output()?;
+        // Inbound-only grants need fabric 0.2.41 or later.
         let expected_version =
-            std::env::var("FABRIC_EXPECTED_VERSION").unwrap_or_else(|_| "0.2.30+8bd9017".into());
+            std::env::var("FABRIC_EXPECTED_VERSION").unwrap_or_else(|_| "0.2.41+84c3208".into());
         assert_eq!(String::from_utf8(version.stdout)?.trim(), expected_version);
         let home = tempfile::Builder::new()
             .prefix("fabric-proof-")
             .tempdir_in("/tmp")?;
-        let command = |arguments: &[&str]| -> Result<String> {
+        let control_home = tempfile::Builder::new()
+            .prefix("fabric-proof-control-")
+            .tempdir_in("/tmp")?;
+        let fabric = |home: &std::path::Path, arguments: &[&str]| -> Result<String> {
             let output = Command::new(&binary)
                 .arg("--home")
-                .arg(home.path())
+                .arg(home)
                 .args(arguments)
                 .output()?;
             if !output.status.success() {
@@ -311,24 +315,39 @@ mod tests {
             }
             Ok(String::from_utf8(output.stdout)?)
         };
+        let command = |arguments: &[&str]| fabric(home.path(), arguments);
         let member: EndpointId = command(&["id"])?.trim().parse()?;
         let phone = SecretKey::generate();
         command(&[
             "add",
             &phone.public().to_string(),
             "demo-phone",
+            "--inbound-only",
             "--allow",
             "demo-client/0",
         ])?;
-        let _daemon = Daemon(
-            Command::new(&binary)
-                .arg("--home")
-                .arg(home.path())
-                .args(["up", "--foreground"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?,
-        );
+        // An ordinarily granted peer that answers the member's echo probes, so the
+        // member's probe loop is seen running while it leaves the phone alone.
+        let control = fabric(control_home.path(), &["id"])?.trim().to_string();
+        fabric(
+            control_home.path(),
+            &["add", &member.to_string(), "demo-member", "--allow", "echo"],
+        )?;
+        command(&["add", &control, "demo-control", "--allow", "demo-client/0"])?;
+        let spawn = |home: &std::path::Path, probe_secs: &str| -> Result<Daemon> {
+            Ok(Daemon(
+                Command::new(&binary)
+                    .arg("--home")
+                    .arg(home)
+                    .args(["up", "--foreground"])
+                    .env("FABRIC_PEER_HEALTH_SECS", probe_secs)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?,
+            ))
+        };
+        let _control_daemon = spawn(control_home.path(), "0")?;
+        let _daemon = spawn(home.path(), "1")?;
         let mut addr = None;
         for _ in 0..100 {
             if let Ok(value) = command(&["addr"]) {
@@ -369,14 +388,21 @@ mod tests {
             let _ = tokio::time::timeout(Duration::from_secs(8), local.read_to_end(&mut response))
                 .await?;
             assert!(response.is_empty());
-            assert_eq!(
-                diagnostics::snapshot()["attempts"]
+            // The local socket closes as the tunnel fails, just before its result is recorded.
+            let mut result = serde_json::Value::Null;
+            for _ in 0..50 {
+                result = diagnostics::snapshot()["attempts"]
                     .as_array()
                     .unwrap()
                     .last()
-                    .unwrap()["result"],
-                "refused"
-            );
+                    .unwrap()["result"]
+                    .clone();
+                if result != "connected" && result != "connecting" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(result, "refused");
             assert!(
                 tokio::time::timeout(Duration::from_millis(100), target.accept())
                     .await
@@ -416,6 +442,60 @@ mod tests {
         // Let the final Acks reach the member before stopping the whole endpoint.
         tokio::time::sleep(Duration::from_millis(100)).await;
         bridge.stop().await;
+
+        // The member probed the ordinary peer and never the inbound-only phone.
+        // A probe logs one of these events, naming the peer.
+        let probe_events = [
+            "event=\"peer_health_probe\"",
+            "event=\"peer_health_probe_skipped\"",
+            "event=\"peer_offline\"",
+            "event=\"peer_online\"",
+        ];
+        let mut probes = Vec::new();
+        for _ in 0..60 {
+            probes.clear();
+            for entry in std::fs::read_dir(home.path().join("logs"))? {
+                let log = std::fs::read_to_string(entry?.path())?;
+                probes.extend(
+                    log.lines()
+                        .filter(|line| probe_events.iter().any(|event| line.contains(event)))
+                        .map(str::to_owned),
+                );
+            }
+            let control_probes = probes
+                .iter()
+                .filter(|line| line.contains("peer=demo-control"))
+                .count();
+            if control_probes >= 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let control_probes = probes
+            .iter()
+            .filter(|line| line.contains("peer=demo-control"))
+            .count();
+        assert!(
+            control_probes >= 3,
+            "the member probed its ordinary peer {control_probes} times: {probes:?}"
+        );
+        assert!(
+            !probes.iter().any(|line| line.contains("demo-phone")),
+            "the member probed the inbound-only phone: {probes:?}"
+        );
+        let status: serde_json::Value = serde_json::from_str(&command(&["status", "--json"])?)?;
+        let phone_status = status["peers"]
+            .as_array()
+            .context("status has no peers")?
+            .iter()
+            .find(|peer| peer["name"] == "demo-phone")
+            .context("status has no demo-phone")?;
+        assert_eq!(phone_status["inbound_only"], true);
+        assert!(phone_status["round_trip_micros"].is_null());
+        assert!(phone_status["error"].is_null());
+        eprintln!(
+            "member probe events: {control_probes} of demo-control, 0 of demo-phone; demo-phone status: {phone_status}"
+        );
 
         // Relay-only mode must use a measured relay path even when local IP hints exist.
         let mut relay_addr = None;

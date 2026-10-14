@@ -131,11 +131,13 @@ runs in, then asks `Start the built-in Smalltalk Assistant now?` (default yes). 
 `--assistant false` declines; a decline prints `Not started. Run st setup --onboarding when you
 want it.` On yes, setup creates `agent/st/assistant` and starts `mission/st/onboarding`, and says
 what it created and how to stop it. When setup publishes the Assistant during a plain `st`
-launch, the interface opens that conversation. You can also find it under Agents.
+launch, the interface opens that conversation. You can also open its conversation from the sidebar or **Ctrl+K**.
 Follow its guidance for your first mission; the Assistant stays available afterward.
+The follow-on [mission guide](missions-in-practice.md) explains how to declare
+the `garden/worker` seat used in its examples.
 
-Home shows questions, decisions and failures that need you. Agents shows conversations
-and transcripts; Missions shows work and results. **Ctrl+K** opens the palette and
+**Now** shows questions, decisions and failures that need you. Open an agent
+conversation or a mission from the sidebar or **Ctrl+K**; **Ctrl+H** returns to Now.
 **Ctrl+Q** quits the interface while agents keep working.
 
 After quitting, make the installed commands available in this shell and reopen st:

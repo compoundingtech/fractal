@@ -128,9 +128,8 @@ systemd guests sequentially, with the ordinary 2 CPU/3 GiB/no-host-mount limits.
 The guarded loader accepts only a user-owned mode0600 regular file without following
 symlinks. It pipes the key into a disposable guest memory broker; Claude receives it
 only through its private `apiKeyHelper` socket. No key is supplied to the daemon,
-container arguments, environment, image, settings file or report. This route differs
-from the original suggestion to use the host omp wrapper, which has no native-Claude
-bridge. Use it only under authorization for the guarded helper route.
+container arguments, environment, image, settings file or report. Use it only under
+authorization for the guarded helper route.
 
 The fixture completes native welcome/theme/account and Bypass Permissions consent before any model prompt;
 it observes preferences written by Claude and never fabricates onboarding markers.
@@ -141,12 +140,10 @@ before each paid message. The first authentication or rate-limit error blocks al
 later upstream calls and stops the pair; no third attempt or silent retry is allowed.
 The HTTPS proxy uses a temporary guest certificate and `NODE_EXTRA_CA_CERTS`, only
 for the provider process, while retaining Claude's normal Anthropic endpoint.
-The retained native loopback `ANTHROPIC_BASE_URL` trial reported unavailable
-channels; the later final corrected trial also reported this under the normal
-endpoint/proxy route. The admission cause remains unresolved. The proxy forwards real provider responses; it supplies no model stand-in.
+The proxy forwards real provider responses; it supplies no model stand-in.
 Other native metadata endpoints pass through without being recorded as model calls.
 
-Ada answers only actual current Home questions for this run and attempt, reads the
+Ada answers only actual current Now questions for this run and attempt, reads the
 actual sample document before its human approval, chooses the private project
 directory and accepts its proposed seat. The second run asks for tour help and
 declines the first garden plan before accepting fresh requests. Optional phone,
@@ -168,27 +165,8 @@ scripts/onboarding-content-eval --archive /tmp/content-candidate.tar.gz \
   --authorization message/AUTHORIZATION --out /var/tmp/content-native
 ```
 
-The first two authorized paid attempts on content500 each made one successful
-native model request, then failed the fixture's next token-count preflight with
-HTTP400. Their usage-derived total was $0.070646. All semantic gates remain
-untested; neither run reached a person question. The failed receipts, cleanup and exact offline source/script hashes are retained in the [native evaluation evidence](../scripts/onboarding-evidence/2026-10-08/content-native-claude.json).
-The offline correction follows the [official beta `countTokens` implementation](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/resources/beta/messages/messages.ts) endpoint/header
-and preserves native tool-result/context fields. Its sanitized native-shape and
-HTTPS first-error guard tests pass, but the correction has not been rerun against
-the provider. Both paid attempts are exhausted: obtain a separate, specific rerun
-authorization before using this runner again for that evaluation.
-
-The owner later authorized one final corrected pair. Controls were pinned before
-launch and thirty offline guard tests passed. Its first fresh guest completed native
-welcome and consent, then the managed Claude seat explicitly reported unavailable
-channels. It made zero model/count requests and 25 successful metadata requests,
-with zero new usage cost. The pair stopped at that mechanical failure; variant2 was
-not run, and no repair, restart or provider diagnostic followed. The ordinary cleanup
-stopped the assistant and cancelled the run, both exit0, checked credential privacy and
-removed the guest. [Final corrected evidence](../scripts/onboarding-evidence/2026-10-08/content-final-corrected.json)
-pins the new raw receipt bundle alongside both original failed outcomes. All gates
-remain untested, the count fix has no provider retest, and another attempt needs new
-owner authorization. The combined paid usage cost remains $0.070646.
+Paid runs need explicit authorization for each attempt. Retained receipts are in
+[the onboarding evidence](../scripts/onboarding-evidence/2026-10-08/README.md).
 
 Each scenario writes `result.json` and `report.md` under OUT/RELEASE-SCENARIO, with
 exact commands, exit codes, separate stdout/stderr and elapsed seconds. Output

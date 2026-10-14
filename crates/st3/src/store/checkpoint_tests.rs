@@ -2264,6 +2264,7 @@ fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
             }),
             profile: None,
             wait: None,
+            holder: smallclaims::windows::holds::Holder::current(),
             enqueued: std::time::Instant::now(),
             done: done.clone(),
         },

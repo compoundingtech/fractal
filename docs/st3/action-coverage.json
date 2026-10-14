@@ -1019,6 +1019,24 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st fleet transports add",
+      "description": "Enable Fabric on this existing fleet member without rejoining",
+      "tests": [
+        "crates/st3/tests/fleet.rs::an_existing_member_adds_and_removes_fabric_without_rejoining",
+        "crates/st3/tests/fleet.rs::fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged"
+      ],
+      "verification": "real CLI over isolated Unix daemons and workers with a Fabric shim; graph sync, restart restoration and refused exposure"
+    },
+    {
+      "command": "st fleet transports remove",
+      "description": "Withdraw Fabric from this fleet member while keeping a usable carrier",
+      "tests": [
+        "crates/st3/tests/fleet.rs::an_existing_member_adds_and_removes_fabric_without_rejoining",
+        "crates/st3/tests/fleet.rs::fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged"
+      ],
+      "verification": "real CLI over isolated Unix daemons and workers with a Fabric shim; withdrawal before unexpose, remaining-carrier sync, guards and rollback without Fabric"
+    },
+    {
       "command": "st fleet wait",
       "description": "Wait for this node's first sync to end, then check that it projects the same graph as the peer it synced from. Fails when the graphs differ after a heal",
       "tests": [
@@ -1871,6 +1889,30 @@
       "verification": "real CLI over isolated disk-backed Unix daemons; source fences, partition/heal and retirement confirmation"
     },
     {
+      "command": "st slo",
+      "description": "List every objective and budget: target, current value, window and what is left; `explain` says one in plain words",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo explain",
+      "description": "Explain one objective or budget in plain words",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo ls",
+      "description": "List every objective and budget: target, current value, window and what is left",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st setup",
       "description": "Configure this machine and start st, with flags for unattended setup",
       "tests": [
@@ -1965,9 +2007,10 @@
       "command": "st terminals expose-fabric",
       "description": "Let fleet peers attach this host's terminals PTY to PTY over Fabric.",
       "tests": [
+        "crates/st3/tests/terminal_attach.rs::expose_fabric_points_fabric_at_the_daemons_terminal_socket",
         "crates/st3/tests/terminal_attach.rs::a_terminal_another_host_owns_attaches_pty_to_pty_over_fabric"
       ],
-      "verification": "existing CLI integration"
+      "verification": "real CLI with a recording fabric; attach through the daemon's terminal socket"
     },
     {
       "command": "st terminals input-client",

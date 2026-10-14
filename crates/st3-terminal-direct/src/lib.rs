@@ -2,8 +2,9 @@
 //!
 //! A terminal on this host is its PTY session socket, proven against the incarnation st selected.
 //! A terminal another fleet host owns is the same session protocol over a Fabric tunnel to that
-//! host, which `st terminals expose-fabric` serves. The daemon only says where a terminal lives
-//! and which incarnation is running; nothing here calls one.
+//! host, which `st terminals expose-fabric` has Fabric forward to the owner daemon's terminal
+//! socket. The local daemon only says where a terminal lives and which incarnation is running;
+//! nothing here calls it.
 
 mod local;
 mod route;

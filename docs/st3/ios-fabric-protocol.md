@@ -84,9 +84,22 @@ phone grant after the proof:
 fabric expose demo-client/0 --socket /path/to/private/st3-client.sock --ephemeral
 fabric peers
 # Choose an unused peer name before adding the phone.
-fabric add PHONE_NODE_ID demo-phone --allow demo-client/0
+fabric add PHONE_NODE_ID demo-phone --inbound-only --allow demo-client/0
 fabric reload-peers
 ```
+
+Grant the phone **inbound-only**, which needs fabric 0.2.41 or later (read at tag
+[`v0.2.41`](https://github.com/compoundingtech/fabric/tree/v0.2.41), commit
+`84c3208b3d1c82e4a036640aed330473a74cf105`: `fabric add --inbound-only`,
+`PeerBook::add_inbound_only` and `PeerBook::dialable_peers` in `src/config.rs`, and
+`DaemonState::dialable_peers` and `check_peer_reachability` in `src/daemon.rs`).
+An inbound-only peer is served under its `allow` list when it connects, exactly
+like any other peer, and the member never dials, probes or announces to it: the
+liveness loop, the start-up announcement and the network-change checks skip it.
+`fabric status` and `fabric doctor` show it as `inbound-only`, connected or not
+connected, never offline. `fabric ping`, `exec`, `shell`, `dial` and sync for it are
+refused. The flag cannot be combined with `--dial-only`. `fabric add` runs
+`reload-peers` itself; run it again and check its result.
 
 For a new phone entry, the equivalent authoritative `peers.toml` content is:
 
@@ -97,17 +110,22 @@ format = 2
 id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 name = "demo-phone"
 allow = ["demo-client/0"]
+inbound_only = true
 ```
 
 The example ID is a placeholder. Inspect the resulting entry, particularly if
 updating an existing peer: `PeerBook::add_with_allow` preserves existing grants
 when the allow argument is omitted. It also replaces any other peer with the same
-name: choose an unused alias after inspecting `fabric peers`. A new entry has
-`roaming = false`; `fabric add` has no roaming flag. If the isolated experiment
-needs `roaming = true`, edit that field explicitly and reload. Do not silently
-widen a phone’s grant. The member-side scope is one exposure and this phone’s exact grant only; broader
+name: choose an unused alias after inspecting `fabric peers`, which lists the
+phone as `inbound-only,demo-client/0`. Re-adding an existing phone with
+`--inbound-only` marks it inbound-only and keeps it so on later re-adds; only
+removing the peer undoes it. A new entry has `roaming = false`, which does not
+matter for a peer that is never probed. Do not silently widen a phone’s grant.
+The member-side scope is one exposure and this phone’s exact grant only; broader
 changes go through operations. `--ephemeral` avoids persisting the exposure;
 peer grants still persist and require deliberate cleanup after the proof.
+A member below 0.2.41 refuses `--inbound-only`; an ordinary grant there still
+admits the phone, at the probe cost described under the direct connection.
 
 There are two fabric checks before the target socket is opened:
 
@@ -177,14 +195,17 @@ HTTP/WebSocket client level; it need not implement daemon generation arbitration
 Each new local TCP connection costs a QUIC handshake and a member `tunnel_accept`
 log entry, so preserve HTTP keep-alive instead of reconnecting per request.
 
-A trusted phone still receives the daemon’s ordinary peer behavior at this pin:
-health probes every 20 seconds while online, backoff while away, and announcements
-on peer reload/network change. An outbound-only phone speaking neither
-`fabric/mux/2` nor `fabric/echo/0` cannot answer, so it is marked unreachable and
-probed on backoff even while its gateway tunnels work. This bounded cost is
-accepted for the proof, but measure it. The fabric owner proposes an inbound-only
-peer kind, without probing/announcements, before this becomes a lasting client
-surface; it does not exist in v0.2.30.
+A phone granted inbound-only gets none of the daemon’s ordinary peer behavior:
+no health probes, no announcements on start-up or peer reload, and no
+network-change checks. Its status is whether it is connected now. The
+[bridge’s pinned-daemon test](../../apps/ios/modules/st-fabric/README.md#checks)
+proves it: with probes every second, the member probes an ordinarily granted
+peer and never the inbound-only phone, while the phone’s attaches succeed. An
+ordinary grant, the only kind before fabric 0.2.41, has the member probe the
+phone every 20 seconds while online and on backoff while away, and announce to
+it on peer reload and network change. A phone speaking neither `fabric/mux/2`
+nor `fabric/echo/0` cannot answer, so the member marks it unreachable and keeps
+probing on backoff even while its gateway tunnels work.
 
 ## Mux wire reference: daemon-to-daemon routing
 
@@ -419,6 +440,6 @@ refusal for an ungranted exposure; exact gateway admission; st refusal without a
 paired credential; pairing/capabilities and collections over the carrier; uploads
 and WebSocket/terminal capability forwarding; half-close and concurrent requests;
 network loss/foreground recovery without replaying actions; abandoned session
-limits/reaping and final-Ack teardown; member probe cost; a recorded
+limits/reaping and final-Ack teardown; no member probes of an inbound-only phone; a recorded
 relay/direct path; and Tailscale working after disabling the development setting.
 Keep these results separate from this source-derived protocol document.

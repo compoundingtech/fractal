@@ -109,6 +109,8 @@ type SeatRetention = (u128, Option<String>, BTreeSet<String>);
 // stop go ahead. Each check is a pass: at 10 s, held seats were the most frequent wake on a busy
 // member. A held seat stops at most a minute after its last reason goes.
 const SEAT_RETENTION_CHECK_MS: u128 = 60_000;
+// Report a retained stop after this age; this is never a termination deadline.
+const STOP_DEFERRAL_FAULT_MS: u128 = 15 * 60 * 1000;
 // Run cleanup ends this long after it began even if an owned runtime never reports stopped.
 const CLEANUP_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const DECLARED_CHECKOUT_LIMIT: usize = 4096;
@@ -960,6 +962,8 @@ pub struct Reconciler<R = NativeRuntime> {
     background_dispatch_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     background_entry_hook: Option<BackgroundEntryHook>,
+    #[cfg(test)]
+    background_wake_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
@@ -1134,6 +1138,8 @@ impl Reconciler<NativeRuntime> {
             background_dispatch_hook: Default::default(),
             #[cfg(test)]
             background_entry_hook: None,
+            #[cfg(test)]
+            background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
@@ -1233,6 +1239,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             background_dispatch_hook: Default::default(),
             #[cfg(test)]
             background_entry_hook: None,
+            #[cfg(test)]
+            background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
@@ -1514,7 +1522,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         if !admitted { return None; }
                         let started = now_ms();
-                        let before = this.store.index().ok();
+                        // Continue for this pass's own effects: a completed step can release
+                        // its successor or cleanup work. Other writers notify independently;
+                        // unrelated replication traffic must not keep this wake alive.
+                        let before = smallclaims::touched::writes();
                         let failed = match crate::profile::task("task reconcile-pass", || {
                             let _trigger_span = crate::profile::span(pass_trigger);
                             this.reconcile_once_with_cause(cause)
@@ -1542,7 +1553,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
-                        Some((before != this.store.index().ok(), failed, started))
+                        Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
                 };
@@ -1550,14 +1561,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.event_notify
                     .send_modify(|generation| *generation = generation.saturating_add(1));
                 quiet_pass_started = (!changed).then_some(started);
-                if !changed {
+                if !changed || pass == 63 {
+                    crate::reconcile_telemetry::record_wake_passes(pass + 1, wake_cause);
+                    #[cfg(test)]
+                    if let Some(hook) = &self.background_wake_hook {
+                        hook(pass + 1);
+                    }
+                    if changed {
+                        self.notify.notify_one();
+                    }
                     break;
                 }
-                if pass == 63 {
-                    self.notify.notify_one();
-                } else {
-                    tokio::task::yield_now().await;
-                }
+                tokio::task::yield_now().await;
             }
         }
     }
@@ -5347,18 +5362,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             && let Some(run) = subject.owner_run.as_deref()
             && let Some(reason) = self.seat_retention(&subject.subject, run)?
         {
-            self.record_once(
-                &subject.subject,
-                "harness.diagnostic",
-                BTreeMap::from([
-                    ("severity".into(), Value::String("warning".into())),
-                    ("status".into(), Value::String("waiting".into())),
-                    ("code".into(), Value::String("stop-deferred".into())),
-                    ("reason".into(), Value::String(reason)),
-                ]),
-            )?;
+            self.report_stop_deferral(subject, &reason, observation.as_ref())?;
             return Ok(());
         }
+        self.clear_stop_deferral(&subject.subject)?;
         let local_actual = self.store.runtime_observations_at(&subject.subject, u64::MAX)?
             .remove(&self.host);
         let incarnation = observation.as_ref().and_then(|o| o.incarnation_id.as_deref())
@@ -5373,6 +5380,145 @@ impl<R: RuntimeControl> Reconciler<R> {
             timeout,
             observation.as_ref(),
         )?;
+        Ok(())
+    }
+
+    /// Keep the deferral's age across unrelated diagnostics and daemon restarts. The desired
+    /// revision and incarnation fence each episode; an old stop cannot age a new process.
+    fn report_stop_deferral(
+        &self,
+        subject: &DesiredSubject,
+        reason: &str,
+        observation: Option<&RuntimeObservation>,
+    ) -> Result<()> {
+        let token = self.store.selected_desired_token(&subject.subject)?;
+        let incarnation = observation.and_then(|item| item.incarnation_id.as_deref());
+        let previous = self.store.latest_stop_deferral(&subject.subject)?;
+        let evidence = token.iter().cloned().collect::<Vec<_>>();
+        let since = previous
+            .as_ref()
+            .filter(|claim| {
+                claim.body["fields"]["code"] == "stop-deferred"
+                    && claim.body["fields"]["incarnation_id"].as_str() == incarnation
+                    && claim.body["evidence"] == serde_json::json!(evidence)
+            })
+            .map_or_else(now_ms, |claim| {
+                claim.body["fields"]["observed_since_ms"]
+                    .as_u64()
+                    .map(u128::from)
+                    .unwrap_or(claim.accepted_at_unix_ms)
+            });
+        let mut fields = BTreeMap::from([
+            ("severity".into(), Value::String("warning".into())),
+            ("status".into(), Value::String("waiting".into())),
+            ("code".into(), Value::String("stop-deferred".into())),
+            ("reason".into(), Value::String(reason.into())),
+            ("observed_since_ms".into(), serde_json::json!(since as u64)),
+        ]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
+        }
+        // Compare this diagnostic family, not the newest unrelated harness diagnostic.
+        if !previous.as_ref().is_some_and(|claim| {
+            claim.body["fields"] == serde_json::json!(fields)
+                && claim.body["evidence"] == serde_json::json!(evidence)
+        }) {
+            if let Some(previous) = previous.as_ref() {
+                self.recover_stop_deferral(previous)?;
+            }
+            self.record_once_with_evidence(
+                &subject.subject,
+                "harness.diagnostic",
+                fields,
+                evidence,
+            )?;
+        }
+        // A final step may defer before its run is terminal. Only terminal owners need this
+        // fault; ordinary running missions keep their existing behavior.
+        let Some(run) = subject
+            .owner_run
+            .as_deref()
+            .map(|run| self.store.mission_run(run))
+            .transpose()?
+            .flatten()
+            .filter(|run| {
+                run.phase == "terminal"
+                    || matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
+            })
+        else {
+            return Ok(());
+        };
+        let deadline = since.saturating_add(STOP_DEFERRAL_FAULT_MS);
+        if now_ms() < deadline {
+            self.arm_restart(&format!("stop-deferral:{}", subject.subject), deadline);
+            return Ok(());
+        }
+        let diagnostic = self
+            .store
+            .latest_stop_deferral(&subject.subject)?
+            .context("the retained stop has no deferral diagnostic")?;
+        if self
+            .store
+            .pending_stop_deferral_failure(&diagnostic)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let episode = format!("stop-deferred:{}", diagnostic.id);
+        let detail = format!(
+            "`{}` still runs after `{}` became terminal: {reason}. Its stop has been deferred for at least 15 minutes. Read or archive the retained mail, or complete or hand off the other run's work, to let the pending stop proceed. To end the seat explicitly, run `st agents stop {} --as ACTOR`; that ends its driver and children even if mail or work remains. This fault clears when retention ends or the runtime stops.",
+            subject.subject, run.subject, subject.subject,
+        );
+        self.store.record_runtime_failure(
+            &episode,
+            &AttentionRequest {
+                reviewer: "person/operator".into(),
+                title: "A terminal run's seat is still retained".into(),
+                reason: detail,
+                severity: "warning".into(),
+                targets: vec![subject.subject.clone()],
+                actor: RECONCILER_ACTOR.into(),
+                idempotency_key: episode.clone(),
+            },
+            "stop-deferred",
+        )?;
+        self.signal_changed();
+        Ok(())
+    }
+
+    fn clear_stop_deferral(&self, seat: &str) -> Result<()> {
+        let Some(diagnostic) = self
+            .store
+            .latest_stop_deferral(seat)?
+            .filter(|claim| claim.body["fields"]["code"] == "stop-deferred")
+        else {
+            return Ok(());
+        };
+        self.record_once(
+            seat,
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("severity".into(), Value::String("warning".into())),
+                ("status".into(), Value::String("resolved".into())),
+                ("code".into(), Value::String("stop-deferral-cleared".into())),
+                (
+                    "reason".into(),
+                    Value::String("the stop is no longer deferred".into()),
+                ),
+            ]),
+        )?;
+        self.recover_stop_deferral(&diagnostic)
+    }
+
+    fn recover_stop_deferral(&self, diagnostic: &crate::model::ClaimRecord) -> Result<()> {
+        if let Some(failure) = self.store.pending_stop_deferral_failure(diagnostic)? {
+            self.store.recover_operational_failure(
+                &format!("stop-deferred:{}", diagnostic.id),
+                "the deferral ended or its retention reason changed",
+                &format!("stop-deferral-recovered:{}", failure.id),
+            )?;
+            self.signal_changed();
+        }
         Ok(())
     }
 
@@ -5995,8 +6141,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// A person can spend one explicit retry despite an automatic failed-start hold. The
-    /// ordinary launch path, native-session selection and provider admission remain shared.
+    /// An authorized person or agent can spend one explicit restart retry despite an
+    /// automatic failed-start hold. Admission, native-session selection and guards stay shared.
     fn perform_start_for_request(
         &self,
         subject: &DesiredSubject,
@@ -6026,11 +6172,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             "a bound terminal seat cannot be spawned"
         );
         self.store.owned_desired_guard(subject)?;
-        let explicit_person = request.is_some_and(|request| {
-            request
-                .actor
-                .as_deref()
-                .is_some_and(|actor| actor.starts_with("person/"))
+        let explicit_retry = request.is_some_and(|request| {
+            request.body["fields"]["action"] == "restart"
+                && request.actor.as_deref().is_some_and(|actor| {
+                    actor.starts_with("person/") || actor.starts_with("agent/")
+                })
         });
         let placement_evidence = if subject.kind == "agent" {
             let Some(evidence) = self.placement_start_evidence(&subject.subject)? else {
@@ -6042,14 +6188,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         // A member whose start keeps failing waits between attempts and then parks with one
         // attention request, instead of spawning again on every pass. A gate runner fails its gate.
-        if !explicit_person
+        if !explicit_retry
             && matches!(subject.kind.as_str(), "agent" | "exec" | "pty")
             && member.driver.as_deref() != Some("codex")
             && self.defer_or_park_failed_start(subject)?
         {
             return Ok(false);
         }
-        if !explicit_person && member.driver.as_deref() == Some("codex") {
+        if !explicit_retry && member.driver.as_deref() == Some("codex") {
             let token = self.launch_token(&subject.subject)?;
             if self.codex_crash_loop_raised(&subject.subject, &token)? {
                 self.raise_codex_crash_loop(
@@ -8567,6 +8713,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .blocked_reason
                             .as_deref()
                             .is_some_and(|reason| reason.starts_with("step baseline `"));
+                    // A blocked step that names no blocker, holds no claim and waits on no ask
+                    // is a lost reason, for example a revision that carried it without one.
+                    // Nothing else will move it, so recompute it like a pending step.
+                    let unexplained_blocked = view.status == "blocked"
+                        && view.blocked_reason.is_none()
+                        && view.blockers.is_empty()
+                        && view.claimant.is_none();
                     let ready_missing_agent = view.status == "ready"
                         && !view.agentless
                         && view.claimant.is_none()
@@ -8575,6 +8728,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .as_deref()
                             .is_some_and(|a| a.starts_with("person/"))
                         && self.ready_step_binding_missing(run, view)?;
+                    if unexplained_blocked {
+                        // Waiting on a dependency is pending. The pending pass then makes it
+                        // ready, or blocks it again with the reason it names.
+                        changed |= self.store.set_step_state(&view.subject, "pending", None)?;
+                        return Ok(changed);
+                    }
                     if view.status == "pending"
                         || assignment_blocked
                         || baseline_blocked
@@ -30491,6 +30650,14 @@ version 2
             "the seat still holds work for another run"
         );
 
+        let seat = format!("agent/{run_id}/worker");
+        age_stop_deferral(&store, &seat);
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        let faults = store.fault_items(None).unwrap();
+        assert_eq!(faults.len(), 1);
+        assert!(faults[0].detail.contains("the seat holds work for another run"));
+
         // The other run's work ends, and the stop goes ahead.
         let elsewhere = store
             .seat_work_in_other_runs(&format!("agent/{run_id}/worker"), &run_id)
@@ -30502,6 +30669,7 @@ version 2
         reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
+        assert!(store.fault_items(None).unwrap().is_empty());
     }
 
     /// A run whose final step stops a seat that holds an unread message, with the seat live.
@@ -30589,6 +30757,14 @@ mission "held-stop" state="ready" {
             .unwrap();
         assert_eq!(stop.status, "completed", "{:?}", stop.blocked_reason);
         assert_eq!(run.status, "completed");
+        let seat = format!("agent/{run_id}/worker");
+        let desired = store.desired_subjects_named(std::slice::from_ref(&seat)).unwrap().remove(0);
+        assert_eq!(desired.kind, "stop");
+        assert_eq!(desired.owner_step.as_deref(), Some(stop.subject.as_str()));
+        assert!(reconciler.runtime.stops.lock().unwrap().is_empty());
+        let diagnostic = store.latest_claim(&seat, Some("harness.diagnostic")).unwrap().unwrap();
+        assert_eq!(diagnostic.body["fields"]["code"], "stop-deferred");
+        assert_eq!(diagnostic.body["fields"]["reason"], "the seat holds a message nobody has read");
         assert!(
             !store
                 .claims_for(&format!("agent/{run_id}/worker"), Some("runtime.reconcile-decision"))
@@ -30597,6 +30773,344 @@ mission "held-stop" state="ready" {
                 .any(|claim| claim.body.to_string().contains("invalid-claim-field")),
             "the deferral diagnostic is a valid claim"
         );
+    }
+
+    fn age_stop_deferral(store: &Store, seat: &str) -> u64 {
+        let diagnostic = store.latest_stop_deferral(seat).unwrap().unwrap();
+        let mut fields: BTreeMap<String, Value> =
+            serde_json::from_value(diagnostic.body["fields"].clone()).unwrap();
+        fields.insert(
+            "observed_since_ms".into(),
+            serde_json::json!((now_ms() - STOP_DEFERRAL_FAULT_MS - 1) as u64),
+        );
+        let aged = store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "harness.diagnostic".into(),
+                actor: None,
+                fields,
+                evidence: serde_json::from_value(diagnostic.body["evidence"].clone()).unwrap(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        aged.store_index
+    }
+
+    #[test]
+    fn an_aged_stop_deferral_is_visible_without_stopping_the_seat() {
+        let (store, reconciler, run_id) = run_with_a_final_stop_of_a_held_seat();
+        for _ in 0..20 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let seat = format!("agent/{run_id}/worker");
+        assert!(store.fault_items(None).unwrap().is_empty());
+        let before = age_stop_deferral(&store, &seat);
+        // Restarting the daemon preserves the age from the diagnostic, rather than starting
+        // another fifteen-minute reporting window.
+        let runtime = reconciler.runtime.clone();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        .skipping_unneeded(true);
+        let events = reconciler.event_notify.subscribe();
+        let stop = store
+            .desired_subjects_named(std::slice::from_ref(&seat))
+            .unwrap()
+            .remove(0);
+        let observation = runtime.ptys.lock().unwrap()[0].clone();
+        reconciler
+            .report_stop_deferral(
+                &stop,
+                "the seat holds a message nobody has read",
+                Some(&observation),
+            )
+            .unwrap();
+        assert!(
+            events.has_changed().unwrap(),
+            "the reporting deadline publishes the new fault to subscribers"
+        );
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert!(runtime.kills.lock().unwrap().is_empty());
+        let faults = store.fault_items(None).unwrap();
+        assert_eq!(faults.len(), 1);
+        assert_eq!(faults[0].subject, seat);
+        assert!(
+            faults[0]
+                .detail
+                .contains("the seat holds a message nobody has read")
+        );
+        assert!(faults[0].detail.contains("15 minutes"));
+        assert!(
+            faults[0]
+                .detail
+                .contains(&format!("st agents stop {seat} --as ACTOR"))
+        );
+        assert!(
+            store
+                .stop_deferral_faults_for(std::slice::from_ref(&seat), before)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .stop_deferral_faults_for(std::slice::from_ref(&seat), store.index().unwrap())
+                .unwrap()[&seat],
+            faults[0].detail
+        );
+        let failure_count = store
+            .claims_for(&seat, Some("operational.failure"))
+            .unwrap()
+            .len();
+        let diagnostic_id = store.latest_stop_deferral(&seat).unwrap().unwrap().id;
+        // Other diagnostics do not reset the age or raise a second fault.
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.clone(),
+                kind: "harness.diagnostic".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("severity".into(), Value::String("warning".into())),
+                    ("code".into(), Value::String("fixture-unrelated".into())),
+                    (
+                        "reason".into(),
+                        Value::String("an unrelated diagnostic".into()),
+                    ),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(
+            store.latest_stop_deferral(&seat).unwrap().unwrap().id,
+            diagnostic_id
+        );
+        assert_eq!(
+            store
+                .claims_for(&seat, Some("operational.failure"))
+                .unwrap()
+                .len(),
+            failure_count
+        );
+        assert_eq!(store.fault_items(None).unwrap().len(), 1);
+        // Existing mail handling releases the stop. The reporting threshold never did.
+        for (kind, status) in [
+            ("message.staged", "staged"),
+            ("message.delivered", "delivered"),
+            ("message.read", "read"),
+        ] {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "message/held".into(),
+                    kind: kind.into(),
+                    actor: Some(seat.clone()),
+                    fields: BTreeMap::from([("status".into(), Value::String(status.into()))]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        reconciler.seat_retention.lock().unwrap().clear();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.stops.lock().unwrap().len(), 1);
+        assert!(store.fault_items(None).unwrap().is_empty());
+        assert!(
+            store
+                .stop_deferral_faults_for(&[seat], store.index().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .claims_for(&faults[0].subject, Some("operational.recovered"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn stop_deferral_reports_each_of_seventeen_retained_seats() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let agents = (0..17).map(|i| format!("  agent \"worker-{i}\" {{ workspace \"/tmp\"; command \"true\"; restart \"never\" }}\n")).collect::<String>();
+        let stops = (0..17)
+            .map(|i| format!("    stop \"agent/${{ST_MISSION_RUN}}/worker-{i}\"\n"))
+            .collect::<String>();
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nmission \"orchid\" state=\"ready\" {{\n goal \"Retain seventeen seats.\"\n{agents} step \"work\" {{ assigned-to \"person/test\" }}\n finally {{ step \"stop-workers\" {{ agentless\n{stops} }} }}\n}}\n"
+            ),
+            "publish-seventeen",
+        );
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "orchid".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-seventeen".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let seats = store.desired_subjects_for_owner_run(&run.subject).unwrap();
+        assert_eq!(seats.len(), 17);
+        for (i, seat) in seats.iter().enumerate() {
+            let member = seat.member.as_ref().unwrap();
+            let incarnation = format!("held-{i}");
+            runtime.ptys.lock().unwrap().push(RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation.clone()),
+            });
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.subject.clone(),
+                    kind: "runtime.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        (
+                            "runtime_id".into(),
+                            Value::String(member.runtime_id.clone()),
+                        ),
+                        ("host".into(), Value::String("node".into())),
+                        ("incarnation_id".into(), Value::String(incarnation)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("message/held-{i}"),
+                    kind: "message.sent".into(),
+                    actor: Some("person/test".into()),
+                    fields: BTreeMap::from([
+                        ("from".into(), Value::String("person/test".into())),
+                        ("to".into(), Value::String(seat.subject.clone())),
+                        ("content".into(), Value::String("read me".into())),
+                        ("status".into(), Value::String("sent".into())),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        let work = run.steps.iter().find(|step| step.step == "work").unwrap();
+        store
+            .set_step_state(&work.subject, "completed", None)
+            .unwrap();
+        for _ in 0..20 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(
+            store.mission_run(&run.id).unwrap().unwrap().phase,
+            "terminal"
+        );
+        for seat in &seats {
+            age_stop_deferral(&store, &seat.subject);
+        }
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert_eq!(store.fault_items(None).unwrap().len(), 17);
+        assert_eq!(
+            store
+                .stop_deferral_faults_for(
+                    &seats
+                        .iter()
+                        .map(|seat| seat.subject.clone())
+                        .collect::<Vec<_>>(),
+                    store.index().unwrap()
+                )
+                .unwrap()
+                .len(),
+            17
+        );
+    }
+
+    #[test]
+    fn stopped_and_replaced_runtimes_hide_their_aged_deferral_before_reconciliation() {
+        for transition in ["stopped", "new-incarnation", "new-declaration"] {
+            let (store, reconciler, run_id) = run_with_a_final_stop_of_a_held_seat();
+            for _ in 0..20 {
+                reconciler.reconcile_once().unwrap();
+            }
+            let seat = format!("agent/{run_id}/worker");
+            age_stop_deferral(&store, &seat);
+            reconciler.reconcile_once().unwrap();
+            assert_eq!(store.fault_items(None).unwrap().len(), 1);
+            let before = store.index().unwrap();
+            if transition == "new-declaration" {
+                apply_source(
+                    &store,
+                    &format!("version 2\nstop {seat:?}\n"),
+                    "explicit-stop",
+                );
+            } else {
+                // Folded actual state includes fault fields; copy only the runtime receipt.
+                let actual = store
+                    .latest_claim(&seat, Some("runtime.observed"))
+                    .unwrap()
+                    .unwrap();
+                let mut fields: BTreeMap<String, Value> =
+                    serde_json::from_value(actual.body["fields"].clone()).unwrap();
+                if transition == "stopped" {
+                    fields.insert("status".into(), Value::String("stopped".into()));
+                } else {
+                    fields.insert(
+                        "incarnation_id".into(),
+                        Value::String("replacement-incarnation".into()),
+                    );
+                }
+                store
+                    .append_claim(&ClaimInput {
+                        subject: seat.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: None,
+                        fields,
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    store
+                        .stop_deferral_faults_for(std::slice::from_ref(&seat), before)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            assert!(
+                store
+                    .stop_deferral_faults_for(&[seat], store.index().unwrap())
+                    .unwrap()
+                    .is_empty(),
+                "{transition}"
+            );
+            assert!(store.fault_items(None).unwrap().is_empty(), "{transition}");
+        }
     }
 
     #[test]
@@ -31703,7 +32217,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].title, "st cannot reconcile daemon/node");
         assert!(first[0].detail.contains("the disk is full"));
-        assert!(first[0].detail.contains("`st subject daemon/node`"));
+        assert!(first[0].detail.contains("`st subject show daemon/node`"));
 
         // A new cause replaces the item.
         fail("the database is locked");
@@ -38272,6 +38786,310 @@ mission "wake" state="ready" {
                 idempotency_key: Some("closed-wake-evidence".into()),
             })
             .unwrap();
+    }
+
+    /// A revision once carried a blocked step without its reason. Nothing recomputes a blocked
+    /// step that names no blocker, so it stayed blocked behind a finished predecessor. It is now
+    /// recomputed, and the seat is told when it becomes ready.
+    #[tokio::test]
+    async fn a_blocked_step_that_names_no_blocker_is_recomputed_and_its_seat_woken() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "pair" state="ready" {
+  goal "Do the work, then prove it."
+  step "worker" { assigned-to "agent/node.worker" }
+  step "proof" {
+    assigned-to "agent/node.worker"
+    depends-on { step "worker" completed }
+  }
+}
+"#,
+            "unnamed-blocker-source",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "pair".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "unnamed-blocker-run".into(),
+            })
+            .unwrap();
+        let desired = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: desired.member.as_ref().unwrap().runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("worker-one".into()),
+        });
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime,
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let step = |path: &str| {
+            run.steps
+                .iter()
+                .find(|step| step.step == path)
+                .unwrap()
+                .subject
+                .clone()
+        };
+        let (first, second) = (step("worker"), step("proof"));
+        store.set_step_state(&first, "completed", None).unwrap();
+        store.set_step_state(&second, "blocked", None).unwrap();
+        assert_eq!(store.step_run(&second).unwrap().unwrap().status, "blocked");
+        reconciler.reconcile_once().unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "harness.observed".into(),
+                actor: Some(desired.subject.clone()),
+                fields: BTreeMap::from([
+                    ("state".into(), Value::String("ready".into())),
+                    ("driver".into(), Value::String("codex".into())),
+                    ("incarnation_id".into(), Value::String("worker-one".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("unnamed-blocker-ready".into()),
+            })
+            .unwrap();
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let proof = store.step_run(&second).unwrap().unwrap();
+        assert_eq!(proof.status, "ready", "{proof:?}");
+        assert!(proof.blocked_reason.is_none(), "{proof:?}");
+        let wakes = store.messages(Some(&desired.subject), true).unwrap();
+        assert!(
+            wakes
+                .iter()
+                .any(|message| message.tags.iter().any(|tag| tag.contains(&second))),
+            "{wakes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revision_never_leaves_a_blocked_step_without_its_reason() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = |goal: &str| {
+            format!(
+                r#"version 2
+mission "carry" state="ready" {{
+  goal "Carry a blocked step."
+  step "work" {{ assigned-to "agent/node.ghost"; goal "Do the work." }}
+  step "other" {{ goal "{goal}" }}
+}}
+"#
+            )
+        };
+        apply_source(&store, &source("Use the first goal."), "carry-blocked-one");
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "carry".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "carry-blocked-run".into(),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let work = |run: &str| {
+            let run = store.mission_run(run).unwrap().unwrap();
+            run.steps.into_iter().find(|step| step.step == "work").unwrap()
+        };
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let before = work(&run.id);
+        assert_eq!(before.status, "blocked", "{before:?}");
+        assert!(before.blocked_reason.is_some(), "{before:?}");
+
+        let second = source("Use the second goal.");
+        apply_source(&store, &second, "carry-blocked-two");
+        let intent = parse_intent(&second, "node").unwrap();
+        store
+            .adopt_mission_revision(
+                &run.id,
+                intent.missions.values().next().unwrap(),
+                "person/test",
+                "revise the other step",
+                "carry-blocked-revision",
+            )
+            .unwrap();
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let after = work(&run.id);
+        assert_ne!(after.subject, before.subject, "{after:?}");
+        assert_eq!(after.status, "blocked", "{after:?}");
+        assert!(after.blocked_reason.is_some(), "{after:?}");
+    }
+
+    /// One seat holds both steps of a run. Whatever ends the seat's claim on the first step,
+    /// the second must be recomputed and its seat told within one pass, never left `blocked`
+    /// with no reason.
+    async fn second_step_of_one_seat_after(ending: &str) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "pair" state="ready" {
+  goal "Do the work, then prove it."
+  step "worker" { assigned-to "agent/node.worker" }
+  step "proof" {
+    assigned-to "agent/node.worker"
+    depends-on { step "worker" terminal }
+  }
+}
+"#,
+            &format!("pair-source-{ending}"),
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "pair".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: format!("pair-run-{ending}"),
+            })
+            .unwrap();
+        let desired = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: desired.member.as_ref().unwrap().runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("worker-one".into()),
+        });
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime,
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let observe = |state: &str, key: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: desired.subject.clone(),
+                    kind: "harness.observed".into(),
+                    actor: Some(desired.subject.clone()),
+                    fields: BTreeMap::from([
+                        ("state".into(), Value::String(state.into())),
+                        ("driver".into(), Value::String("codex".into())),
+                        ("incarnation_id".into(), Value::String("worker-one".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("{key}-{ending}")),
+                })
+                .unwrap();
+        };
+        reconciler.reconcile_once().unwrap();
+        observe("ready", "pair-ready");
+        reconciler.reconcile_once().unwrap();
+        let step = |path: &str| {
+            run.steps
+                .iter()
+                .find(|step| step.step == path)
+                .unwrap()
+                .subject
+                .clone()
+        };
+        let (first, second) = (step("worker"), step("proof"));
+        let first_wake = store.messages(Some(&desired.subject), true).unwrap();
+        assert_eq!(first_wake.len(), 1, "{first_wake:?}");
+        let request = |key: &str| crate::model::WorkRequest {
+            actor: Some(desired.subject.clone()),
+            incarnation: Some("worker-one".into()),
+            summary: None,
+            reason: Some("handing it back".into()),
+            evidence: Vec::new(),
+            wait_ms: None,
+            idempotency_key: format!("{key}-{ending}"),
+        };
+        observe("working", "pair-working");
+        store.work_action(&first, "claim", &request("claim")).unwrap();
+        store.work_action(&first, ending, &request("end")).unwrap();
+        observe("ready", "pair-idle");
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let first_view = store.step_run(&first).unwrap().unwrap();
+        let second_view = store.step_run(&second).unwrap().unwrap();
+        let wakes = store.messages(Some(&desired.subject), true).unwrap();
+        let tagged = |step: &str| {
+            wakes
+                .iter()
+                .filter(|message| message.tags.iter().any(|tag| tag.contains(step)))
+                .count()
+        };
+        // A released step is ready again and the seat is told about it; a step that ended is
+        // followed by the second step. Either way a blocked step names what blocks it.
+        for view in [&first_view, &second_view] {
+            assert!(
+                view.status != "blocked" || view.blocked_reason.is_some() || !view.blockers.is_empty(),
+                "{} is blocked with no reason: {view:?}",
+                view.subject
+            );
+        }
+        if ending == "release" {
+            assert_eq!(first_view.status, "ready", "{first_view:?}");
+            assert_eq!(second_view.status, "pending", "{second_view:?}");
+            assert_eq!(tagged(&first), 2, "{wakes:?}");
+        } else if ending == "fail" {
+            // A failed step fails the run, and the step behind it says why it will not run.
+            assert_eq!(second_view.status, "cancelled", "{second_view:?}");
+            assert_eq!(second_view.blocked_reason.as_deref(), Some("another step failed"));
+        } else {
+            assert_eq!(second_view.status, "ready", "{second_view:?}");
+            assert_eq!(tagged(&second), 1, "{wakes:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_seats_second_step_is_ready_and_woken_once_the_first_completes() {
+        second_step_of_one_seat_after("complete").await;
+    }
+
+    #[tokio::test]
+    async fn a_seats_second_step_says_why_it_will_not_run_once_the_first_fails() {
+        second_step_of_one_seat_after("fail").await;
+    }
+
+    #[tokio::test]
+    async fn a_released_step_is_woken_again_and_its_successor_stays_pending() {
+        second_step_of_one_seat_after("release").await;
     }
 
     /// One wake message whose close fails does not hold back the agent's next wake.

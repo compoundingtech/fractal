@@ -560,7 +560,18 @@ def suspend_and_resume(node, seats, harness):
                             env=node.env, capture_output=True, text=True, timeout=seats.bound + 30)
     if result.returncode == 0:
         fail("a resume without its transcript succeeded")
-    shown = node.json("agents", "show", subject)["value"]
+    # The refusal is recorded before the seat settles back to suspended, so the state read right after
+    # the command can still be `waiting` (a merge-group run caught exactly that); wait for it to settle.
+    settled = {}
+
+    def suspended_again():
+        settled["shown"] = node.json("agents", "show", subject)["value"]
+        return settled["shown"] if settled["shown"].get("state") == "suspended" else None
+    try:
+        until(suspended_again, min(seats.bound, 30), "the seat never settled back to suspended")
+    except Failure:
+        pass
+    shown = settled["shown"]
     code = (shown.get("suspension") or {}).get("code")
     if shown.get("state") != "suspended" or code not in (
             "transcript-missing", "harness-refused", "native-resume-unavailable"):

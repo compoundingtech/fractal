@@ -57,10 +57,12 @@ pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
+pub mod checkpoint_staging;
 mod checkpoint_completion;
 pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
+mod document_pages;
 pub mod heal;
 pub mod principals;
 pub mod projection_digest;
@@ -5130,9 +5132,7 @@ impl Store {
                 Some(connection) => Rc::new(connection),
                 None => guard.pinned.take().expect("a request loan holds its connection"),
             }),
-            transaction: Some(crate::windows::Timer::start(
-                crate::windows::StoreWork::ReadTransaction,
-            )),
+            transaction: Some(crate::windows::holds::ReadHold::start()),
         };
         drop(guard);
         let connection = pinned
@@ -5351,52 +5351,7 @@ impl Store {
         after: Option<(&str, u64)>,
         limit: usize,
     ) -> Result<Vec<DocumentVersion>> {
-        let connection = self.readers.get();
-        let query = "SELECT d.name, d.hash, b.size, d.created_index,
-                     d.hash=(SELECT n.hash FROM documents n
-                 WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1)
-                     ,d.binding_claim_id, c.accepted_at_unix_ms, c.actor, c.origin
-                     FROM documents d JOIN blobs b ON b.hash=d.hash
-                     JOIN claims c ON c.id=d.binding_claim_id
-                     WHERE (?1 IS NULL OR d.name=?1)
-                       AND (?2 OR d.hash=(SELECT n.hash FROM documents n
-                 WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1))
-                       AND (?3 IS NULL OR substr(d.name,1,length(?3))=?3)
-                       AND (?4 IS NULL OR d.name>?4 OR (d.name=?4 AND EXISTS (
-                           SELECT 1 FROM documents cursor_document
-                           WHERE cursor_document.name=?4 AND cursor_document.created_index=?5
-                             AND cursor_document.binding_key>d.binding_key)))
-                     ORDER BY d.name, d.binding_key DESC LIMIT ?6";
-        let mut statement = connection.prepare(query)?;
-        let rows = statement.query_map(
-            params![
-                name,
-                history,
-                prefix,
-                after.map(|v| v.0),
-                after.map(|v| v.1),
-                limit
-            ],
-            |row| {
-                Ok(DocumentVersion {
-                    name: row.get(0)?,
-                    hash: row.get(1)?,
-                    size: row.get(2)?,
-                    created_index: row.get(3)?,
-                    latest: row.get::<_, i64>(4)? != 0,
-                    binding_claim_id: row.get(5)?,
-                    created_at_unix_ms: row.get::<_, String>(6)?.parse().map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
-                    owner: row.get::<_, Option<String>>(7)?.or(row.get(8)?),
-                })
-            },
-        )?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        document_pages::read(self, name, prefix, history, after, limit)
     }
 
     pub fn claim_by_id(&self, id: &str) -> Result<Option<ClaimRecord>> {
@@ -5658,6 +5613,13 @@ impl Store {
     /// writer, and only when there are such batches.
     pub fn seal_local_batches(&self) -> Result<()> {
         self.recover_sealing_frontier()?;
+        self.seal_local_batches_after_frontier()
+    }
+
+    /// Seal the batches written after the sealing frontier, without the once-per-process search
+    /// for batches skipped behind it. That search walks every batch; whoever seals for a
+    /// snapshot runs it, and lowering the frontier then seals what it found.
+    fn seal_local_batches_after_frontier(&self) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
         while self.seal_local_batch_chunk(target)? {}
@@ -6442,7 +6404,10 @@ impl Store {
 
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
-        self.replication_snapshot()?;
+        // Admission needs no replication snapshot: building one in a fresh process reads every
+        // envelope, and the daemon runs this before it serves. The first export builds it.
+        self.seal_local_batches_after_frontier()?;
+        self.judge_claims(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self
@@ -6684,20 +6649,38 @@ impl Store {
     pub fn replay_replication_graph(&self) -> Result<()> {
         crate::profile::note("projection: full replay for a heal");
         let _replay = crate::profile::span("projection/heal-replay");
+        let started = std::time::Instant::now();
+        let started_unix_ms = now_ms();
         let mut connection = self.connection.write();
+        let acquired = std::time::Instant::now();
+        let writer_wait_ms = started.elapsed().as_millis();
         let _timing = time_stage(&self.replication_timers.projection);
-        let transaction = connection.transaction()?;
-        self.runtime.replay_from_nothing(&transaction)?;
-        self.runtime.after_projection(&transaction)?;
-        transaction.execute(
-            "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+        let result = (|| {
+            let transaction = connection.transaction()?;
+            self.runtime.replay_from_nothing(&transaction)?;
+            self.runtime.after_projection(&transaction)?;
+            transaction.execute(
+                "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, ?2)
              ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
                 error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
-            params![current_index_tx(&transaction)?, now_ms().to_string()],
-        )?;
-        transaction.commit()?;
+                params![current_index_tx(&transaction)?, now_ms().to_string()],
+            )?;
+            transaction.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })();
         drop(connection);
+        let writer_hold_ms = acquired.elapsed().as_millis();
+        eprintln!(
+            "st: projection heal-replay started_at_unix_ms={started_unix_ms} ended_at_unix_ms={} writer_wait_ms={writer_wait_ms} writer_hold_ms={writer_hold_ms} outcome={}",
+            now_ms(),
+            if result.is_ok() {
+                "committed"
+            } else {
+                "failed"
+            }
+        );
+        result?;
         self.runtime.forget_views();
         Ok(())
     }

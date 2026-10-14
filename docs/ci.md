@@ -28,6 +28,16 @@ existing PR concurrency group and cancels obsolete ready-head work while skippin
 Keep a PR draft while iterating and testing locally, then mark its final head ready for Intake.
 A later push to a ready PR still validates the replacement head and cancels its superseded run;
 this policy reduces iteration demand, rather than enforcing a lifetime one-run limit.
+A stacked PR can retain workflow files from an older base that lacks these job guards.
+`Draft CI admission` therefore observes requested PR workflows using main's `workflow_run`
+code. It reads the target run and current PR metadata, rechecks readiness before requesting
+cancellation, and never checks out PR code or downloads its artifacts. Ready PRs and
+merge-group/main/manual runs are preserved. Its token has only Actions write and PR read.
+Cancellation is asynchronous: the request summary is not terminal cancellation proof,
+and scheduling can start a legacy job before the observer runs. The one-day observation
+records actual build/test job starts as well as accepted requests and final cancellations.
+GitHub does not emit the requested activity for reruns; do not rerun drafts.
+
 GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run is the
 final safety gate and runs every required stage regardless of PR draft payload. Do not arm
 auto-merge before the fresh ready-head checks register. Re-running an old draft run retains its
@@ -53,8 +63,8 @@ tested source rather than a later `origin/main` fetch;
 unrelated unreleased main changes do not block a new PR's check. It does not download dependencies
 or compile. Manual dispatch runs the safety tests without inventing a PR delta.
 
-The Linux gate runs two test partitions plus Clippy and fleet compatibility on separate runners.
-`linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, the four stage jobs and the named mail redelivery
+The Linux gate runs four test partitions for merge groups and two for other events, plus Clippy and fleet compatibility on separate runners. The extra merge partitions use the common merge role on either host, including ci2-merge-1, or the same Namespace overflow choice. Each uses the one exact-source producer archive. Before shard 1 executes, actual nextest lists must prove the selected inventory is a disjoint, complete union of all four (or both) shards. The unchanged linux-gate requires genuine success from every applicable shard; skipped merge shards fail it. No test filter, retry cap, timeout or required context is changed.
+`linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, all applicable stage jobs and the named mail redelivery
 check, and passes only when every one succeeded (a skipped or cancelled stage fails it). The stage jobs use the shape label
 `nscloud-ubuntu-24.04-amd64-8x16-with-features`; `isolation-vm` uses
 `namespace-profile-linux-x86-64` when it overflows. `genie-freshness` and `typescript-client`
@@ -63,10 +73,10 @@ use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build
 until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
 limit of about five runners at once.
 
-Required merge-group Rust, test, canary and VM jobs use `ci1-priority` on either physical host.
+By default, required merge-group producers, the first two test shards, supporting Rust jobs, canaries and VM jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common `ci1-merge` role. An overflowed group uses its one selected Namespace profile for all these jobs.
 A GitHub-hosted picker reads the common group3 role census; unavailable metadata retains the
 existing priority role. GitHub chooses the physical host. The PR opt-in variable never disables merge picking.
-They wait for owned capacity and never overflow to Namespace.
+With `CI_MERGE_OVERFLOW` unset or off, they wait for owned capacity. Overflow uses the existing Namespace profile only when that switch is on and the qualified census is below its admission minimum.
 Main, tag and manual Linux releases use the same owned priority lane; release PR validation
 uses Namespace priority 2, preserving the self-hosted fork boundary. Native Mac releases and
 installer checks use standard GitHub-hosted `macos-15` (ARM64); Linux installer/assembly/publish
@@ -553,12 +563,22 @@ the profile has no capacity, jobs queue with no matching runner. A queued requir
 a pass. Apart from the ci1 choice below, which is made once per run before any job starts, do not
 fall back to hosted or fleet runners.
 
-### ci1 and ci2: owned pools, with PR overflow to Namespace
+### ci1 and ci2: owned pool and Namespace admission
 
-All required merge-group stages share the picker’s `ci1-priority` on either physical host selection,
-independent of `CI1_RUNNERS`. This is the standing merge-first lane. Existing running work is not preempted;
+All required merge-group stages share the picker's pool selection, independent
+of `CI1_RUNNERS`; by default this is `ci1-priority` on either physical host.
+Existing running work is not preempted;
 the host controller must retain its release/merge-first classification and bounded reservations.
 `CI_MERGE_CI1` and `CI_MERGE_NAMESPACE_PROFILE` no longer redirect required merge jobs.
+`CI_MERGE_OVERFLOW=on` lets a merge group use the existing Linux Namespace
+profile when a valid group-3 census has fewer than `CI_MERGE_MIN_IDLE` idle
+priority runners (default three, for the initial producer, Clippy and fleet
+compatibility jobs). All required jobs follow the same picker output, with
+Namespace priority 1 and affinity to that run. An unset switch keeps the owned
+priority lane. Invalid metadata, an invalid minimum or run ID, and missing
+credentials retain that lane; they do not establish saturation. Priority PRs
+and releases keep their reservations. This changes admission capacity, not
+tests, required contexts, timeouts, cache provenance or resource caps.
 Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
 The declared ci1 pool is five general workers (including one reserved priority worker) and one
 merge worker, with dynamic label lending. The current source run used `ci1-5` with
@@ -658,6 +678,13 @@ Two jobs check the daemon's rules that reads are instant, writes are short, and 
 grows with the whole store. Neither is part of `linux-gate`; making one required is a decision
 for the repository's owner. Both run `scripts/ci-perf`, and `.config/nextest.toml` keeps their
 tests out of `linux-tests`.
+
+The isolated `link_minutes` case writes its preserved daemon, link-event, trace and
+replication evidence under `RUNNER_TEMP/perf/link-minutes-evidence`. Its supervised
+child inherits the explicit evidence parent, including when `CI_RUN_ID` is absent.
+The existing `perf-cost-logs` upload runs on failure and includes this visible tree;
+its oracle, one-attempt policy and exit status are unchanged. Interrupted runs may
+leave partial evidence; an uploaded directory is not a completed-test verdict.
 
 `perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every pull request and
 `main` push, on the stages' runner. It skips
