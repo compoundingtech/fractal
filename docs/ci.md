@@ -336,6 +336,12 @@ requires both the daemon and a double-forked child in a new session to disappear
 five seconds, and separately injects an evidence-collection error to prove `node.stop()`
 still runs. Existing canary assertions, phase bounds and zero retries remain unchanged.
 
+`boot_canaries::interrupted_tests_keep_logs_and_pending_observations` kills an isolated
+fixture controller and checks the guardian keeps daemon/driver logs, pending outbox sequences,
+and an interrupted verdict. `daemon_restart` and `daemon_environment` also register their
+short socket/runtime roots with that guardian; failures keep diagnostics in
+`target/boot-canaries/` before the roots are removed. Capture errors are explicit artifacts.
+
 The Codex stand-in's schema files are generated from the protocol gate's own fixture; when the
 required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p st-drivers
 the_boot_canary_codex_stub_schemas` rewrites them.
