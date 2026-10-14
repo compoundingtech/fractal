@@ -1,5 +1,5 @@
 import { Component, createRef, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
@@ -11,6 +11,7 @@ import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConv
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
+import { quality } from '../qualityNative';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
 import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
@@ -20,7 +21,7 @@ import { ConversationImageViewport, VisibleConversationImage, type VisibleImageS
 import { dictationAvailable, startDictation } from '../modules/st-dictation';
 import type { RootScreen } from '../navigation';
 import { openSubagentConversation } from '../conversationNavigation';
-import { useStore } from '../store';
+import { useStore, type MessageRequest, type Sent } from '../store';
 import { fonts, theme } from '../theme';
 import { Button, Field, LINE, Markdown, T } from '../ui';
 import { AlertsStrip } from './Alerts';
@@ -30,7 +31,8 @@ const RULES: ConversationRules = rules;
 const c = tokenColor;
 
 const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, older: { paged: false, start: false, loading: false } };
-type Pending = { id: string; text: string; at: string; failed?: string; images?: number };
+// `unconfirmed` is the exact request st may have taken and has not confirmed, to send again unchanged.
+type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
 
 function nowClock() {
@@ -42,7 +44,7 @@ function nowClock() {
 // above the composer, unless the person has scrolled back to read.
 export function ConversationScreen({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
-  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, actions, simpleOn } = useStore();
+  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
   // A running session st manages belongs to its agent: name it, and send to it, as the agent.
   const agent = data.agents.find(candidate => candidate.id === target)
@@ -91,6 +93,13 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   const [find, setFind] = useState(route.params.find ?? '');
   const [findOpen, setFinding] = useState(!!route.params.find);
   const [draft, setDraft] = useState(() => draftCache.current.get(target) ?? '');
+  const draftTouched = useRef(false);
+  useEffect(() => {
+    if (draftTouched.current) { if (!draft) draftCache.current.delete(target); return; }
+    const restored = draftCache.current.get(target);
+    if (restored) setDraft(restored);
+  }, [draftsReady, target]);
+  useEffect(() => { saveDrafts(); }, [draft, draftsReady]);
   const [away, setAway] = useState(false);
   // Scrolled a little way up from the newest entry: new entries must then not move what is read.
   const [reading, setReading] = useState(false);
@@ -105,7 +114,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   const box = useRef<TextInput>(null);
   /** Empty the message box. Clearing it natively too lets it shrink back to one line; with the
    * value alone it kept the height of what was sent (Nathan, 2026-10-02). */
-  const emptyBox = () => { setDraft(''); draftCache.current.delete(target); box.current?.clear(); };
+  const emptyBox = () => { draftTouched.current = true; setDraft(''); draftCache.current.delete(target); box.current?.clear(); };
   // Leaving the conversation while listening stops it, so the microphone and other audio are freed.
   useEffect(() => () => { const stop = stopListening.current; stopListening.current = null; void stop?.(); }, []);
   const canDictate = useMemo(() => dictationAvailable(), []);
@@ -155,6 +164,18 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   useEffect(() => {
     if (currentSession && timeline.sessionId && timeline.sessionId !== currentSession && followed !== currentSession) setFollowed(currentSession);
   }, [currentSession, timeline.sessionId, followed]);
+  const qualityOpen = useRef(0);
+  useFocusEffect(useCallback(() => {
+    qualityOpen.current = quality.beginConversation();
+    if (unresolved) quality.conversationError(qualityOpen.current, 'transcript-not-bound');
+    return () => quality.endConversation(qualityOpen.current);
+  }, [target, unresolved, attempt]));
+  const visibleEntries = useRef((info: { viewableItems: ViewToken<Row>[] }) => {
+    for (const item of info.viewableItems) {
+      const kind = item.item.kind;
+      if (item.isViewable && (kind === 'entry' || kind === 'call' || kind === 'bundle')) { quality.conversationVisible(qualityOpen.current); break; }
+    }
+  });
   // The socket sends the newest page, then each change; it never polls. Only while visible.
   useFocusEffect(useCallback(() => {
     if (!feed || unresolved) return;
@@ -171,6 +192,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         return next;
       }),
       onIssue: (text, refused = false) => { setIssue(text); setStopped(refused); },
+      onQualityError: code => quality.conversationError(qualityOpen.current, code),
     });
     return () => follow.close();
   }, [feed, target, unresolved, conversationCache, followed, attempt]));
@@ -185,6 +207,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   }, [data.agents, caps?.session_actor]);
   // Half a conversation is worse than none: when st could not read the transcript, say why.
   const unreadable = useMemo(() => unreadableTranscript(timeline.entries), [timeline.entries]);
+  useEffect(() => { if (unreadable) quality.conversationError(qualityOpen.current, 'transcript-not-bound'); }, [unreadable]);
   // An entry that did not change keeps its object, so its row is not drawn and measured again:
   // redrawing every row on each frame made the list jump.
   const stable = useRef(new Map<string, { key: string; entry: ConversationEntry }>());
@@ -247,11 +270,22 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     list.current?.scrollToOffset({ offset: 0, animated: offset.current < 1200 });
     const tags = dictated || spoken !== undefined ? ['dictated'] : undefined;
     setDictated(false);
-    const failed = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
+    const sent = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
     // Images that did not go stay ready to send again.
-    if (failed && sending.length) setImages(previous => addImages(sending, previous).images);
-    if (failed) setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, failed } : candidate));
-    else setTimeout(() => setPending(previous => previous.filter(candidate => candidate.id !== item.id)), 60_000);
+    if (sent.how === 'failed' && sending.length) setImages(previous => addImages(sending, previous).images);
+    settle(item.id, sent);
+  }
+  // An unconfirmed message goes again as the same request, so st keeps at most one of it.
+  async function sendAgain(item: Pending) {
+    if (!item.unconfirmed || item.resending) return;
+    setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
+    settle(item.id, await actions.resend(item.unconfirmed));
+  }
+  // A sent message waits to show up in the conversation; one st has not confirmed keeps its request.
+  function settle(id: string, sent: Sent) {
+    setPending(previous => previous.map(candidate => candidate.id !== id ? candidate
+      : { ...candidate, resending: false, failed: sent.how === 'failed' ? sent.error : undefined, unconfirmed: sent.how === 'unconfirmed' ? sent.request : undefined }));
+    if (sent.how === 'sent') setTimeout(() => setPending(previous => previous.filter(candidate => candidate.id !== id)), 60_000);
   }
   // An image from the photo library or the clipboard, for the next message.
   function attach() {
@@ -340,13 +374,14 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     <View ref={imageViewportBox} collapsable={false} style={{ flex: 1 }} onLayout={measureImageViewport}>
     <FlatList
       ref={list}
+      onViewableItemsChanged={visibleEntries.current}
       inverted
       data={rows}
       extraData={selecting}
       keyExtractor={row => row.kind === 'entry' ? row.entry.id : row.kind === 'call' ? `call:${row.entry.id}` : row.kind === 'bundle' ? row.id : row.kind === 'pending' ? row.pending.id : 'older'}
       renderItem={({ item: row }) => row.kind === 'older'
         ? <Pressable accessibilityRole="button" onPress={() => { dragged.current = true; loadOlder(); }} style={styles.entry}><T dim>{olderNote(timeline)}</T></Pressable>
-        : row.kind === 'pending' ? <PendingView pending={row.pending} />
+        : row.kind === 'pending' ? <PendingView pending={row.pending} canSend={canSend} onSendAgain={sendAgain} />
         : row.kind === 'bundle' ? <BundleView row={row} onToggle={toggle} />
         : row.kind === 'call' && !open.has(row.entry.id) ? <CallView entry={row.entry} tool={row.tool} onToggle={toggle} />
         // A long press turns the entry into selectable text where it is, with the handles and menu of
@@ -400,7 +435,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         <Field
           ref={box}
           value={draft}
-          onChangeText={text => { setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
+          onChangeText={text => { draftTouched.current = true; setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
           placeholder={`Message ${title}`}
           multiline
           style={[styles.input, canDictate ? { paddingRight: 36 } : null]}
@@ -435,11 +470,16 @@ function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof
   </View>;
 }
 
-const PendingView = memo(function PendingView({ pending }: { pending: Pending }) {
+const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }: { pending: Pending; canSend: boolean; onSendAgain: (pending: Pending) => void }) {
   const rule = RULES.pending;
-  return <View style={[styles.entry, styles.barred, { borderLeftColor: c(pending.failed ? rule.failed : rule.sending_edge) }]}>
-    <T color={c(pending.failed ? rule.failed : rule.sending.color)}>{pending.failed ? `you · not sent: ${pending.failed}` : rule.sending.text}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
+  const tone = pending.failed ? rule.failed : pending.unconfirmed ? rule.unconfirmed : null;
+  const label = pending.failed ? `you · not sent: ${pending.failed}`
+    : pending.unconfirmed ? (pending.resending ? 'you · sending again…' : 'you · st may have taken it and has not confirmed yet')
+    : rule.sending.text;
+  return <View style={[styles.entry, styles.barred, { borderLeftColor: c(tone ?? rule.sending_edge) }]}>
+    <T color={c(tone ?? rule.sending.color)}>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
     <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
+    {pending.unconfirmed ? <Button label="Send again" color={c(rule.unconfirmed)} disabled={!canSend || pending.resending} onPress={() => onSendAgain(pending)} /> : null}
   </View>;
 });
 

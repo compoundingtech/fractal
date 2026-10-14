@@ -459,15 +459,24 @@ as does an unknown source. These exported labels do not replace the existing
 in-memory wake labels used by `/v1/performance` and `doctor`; request/detail
 attribution also remains unchanged.
 
+`st.reconcile.passes_per_wake` records the number of completed passes when an
+outer wake rests or reaches its 64-pass continuation cap. It includes the
+quiet confirmation pass, uses the outer wake's cause (not `continuation`),
+and has count boundaries `1, 2, 4, 8, 16, 32, 64`. A wake rests when its
+pass makes no writes of its own; unrelated concurrent store writes do not
+request continuation. Writes completed on helper threads use their existing
+notifications to request another outer wake.
+
 | Instrument | Type | Unit | Complete attribute set |
 | --- | --- | --- | --- |
 | `st.reconcile.pass.duration` | Histogram | `s` | `task=pass` or `task=deadline` |
 | `st.reconcile.wakes` | Counter | `{wake}` | `cause` from the 17-value wake registry |
+| `st.reconcile.passes_per_wake` | Histogram | `{pass}` | `cause` from the 17-value wake registry |
 | `st.fifo.depth` | Observable u64 gauge | `{item}` | `queue=writer`, `conversation`, or `terminal_emulation` |
 | `st.fifo.oldest_age` | Observable f64 gauge | `s` | `queue=writer`, `conversation`, or `terminal_emulation` |
 
 Every metric attribute is a constant closed value, never an identity.
-These instruments contribute at most `17 + 2 + 3 + 3 = 25` attribute series;
+These instruments contribute at most `17 + 17 + 2 + 3 + 3 = 42` attribute series;
 histogram bucket count is separate. Duration uses the seconds buckets above,
 and metrics are independent of trace sampling.
 

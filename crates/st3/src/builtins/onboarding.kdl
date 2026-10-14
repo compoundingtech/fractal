@@ -1,13 +1,13 @@
 version 2
 mission "st/onboarding" state="ready" {
   goal "Learn to see agents, give them work, and answer their questions from Home."
-  assigned-to "agent/st/expert"
+  assigned-to "agent/st/assistant"
   baseline "the bundled guide is available" {
     document "@GUIDE@"
   }
   constraint "Read @GUIDE@ before guiding the person. Read the configured person, machines and doctor results from the graph; do not assume installation facts."
   constraint "Never ask for or type a password. Offer exact commands for the person to run when their decision or system privileges are needed."
-  constraint "Keep sample work inside the scratch workspace and graph. Use invented names. Do not publish outside this machine or require GitHub. Optional steps may be skipped."
+  constraint "Keep sample work inside your seat folder, which is inside the work folder that setup created, and in the graph. Never list, search or open the home folder, Documents, Desktop or Downloads. Use invented names. Do not publish outside this machine or require GitHub. Optional steps may be skipped."
   step "hello" {
     goal "Greet the configured person and check st doctor and machines. Explain seats, missions and Home in five sentences; store the checked results as evidence."
   }
@@ -21,7 +21,7 @@ mission "st/onboarding" state="ready" {
   }
   step "your-project" {
     depends-on { step "first-mission" completed }
-    goal "Ask which directory and harness the person wants, create their seat through st agents new, send a first message, and check its incarnation and read receipt."
+    goal "Ask which harness the person wants and which folder the work is about (the work folder if they name none), create their seat through st agents new, send a first message, and check its incarnation and read receipt."
   }
   step "keep-running" {
     depends-on { step "your-project" completed }
@@ -41,6 +41,6 @@ mission "st/onboarding" state="ready" {
   }
   step "wrap-up" {
     depends-on { step "github" completed }
-    goal "List the checked work and objects that now exist, explain messaging agent/st/expert again, and point to @GUIDE@ and st --help. Finish the run and remain available for future messages."
+    goal "List the checked work and objects that now exist, explain messaging agent/st/assistant again, and point to @GUIDE@ and st --help. Finish the run and remain available for future messages."
   }
 }

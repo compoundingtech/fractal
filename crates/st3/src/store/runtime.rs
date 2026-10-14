@@ -8,6 +8,10 @@ use super::*;
 /// the graph for the caches its reads use.
 #[derive(Default)]
 pub struct SmalltalkRuntime {
+    /// Committed launch-source invalidation, independent of append frontiers.
+    pub(crate) publication_cache_epoch: Mutex<Option<(i64, bool)>>,
+    pub(crate) publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
+    pub(crate) git_change_registry: std::sync::OnceLock<Arc<crate::changes::service::Registry>>,
     /// One registry per graph. Registration alone does not certify source coverage.
     pub(crate) ivm_views: Option<Arc<smallclaims::ivm::Views>>,
     /// Receipt waits and collection sockets share this one commit observer. Publisher
@@ -43,6 +47,10 @@ pub struct SmalltalkRuntime {
     /// When the oldest refresh request no refresh has answered yet was made, in Unix ms; 0
     /// when none waits. A refresh clears it only once it publishes.
     pub(crate) agent_roster_requested_at: std::sync::atomic::AtomicU64,
+    /// Bit 0: a refresh is in flight. Bit 1: the last attempt failed.
+    pub(crate) agent_roster_attempt: std::sync::atomic::AtomicU8,
+    /// Fault retries due in this fold, and deadlines deferred to the next refresh.
+    pub(crate) agent_roster_fault_retries: Mutex<AgentRosterFaultRetries>,
     /// When an agents list read last asked for the roster, in Unix ms; 0 before the first.
     pub(crate) agent_roster_read_at: std::sync::atomic::AtomicU64,
     /// Whether the current overdue refresh request was already reported.
@@ -89,6 +97,12 @@ pub struct SmalltalkRuntime {
     pub(crate) last_seats_read: std::sync::Mutex<BTreeSet<String>>,
 }
 
+#[derive(Default)]
+pub(crate) struct AgentRosterFaultRetries {
+    pub(crate) due: [BTreeSet<String>; 2],
+    pub(crate) pending: [BTreeSet<String>; 2],
+}
+
 #[derive(Clone)]
 pub(crate) struct AgentResourcesEntry {
     pub(crate) index: u64,
@@ -105,6 +119,7 @@ pub(crate) struct AgentResourcesEntry {
 
 impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
+        runtime_starts::create_schema(connection)?;
         connection.execute_batch(git_changes::SCHEMA)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
@@ -123,6 +138,8 @@ impl SmalltalkRuntime {
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
+        stop_deferral::create_schema(connection)?;
+        publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
@@ -267,6 +284,7 @@ impl Runtime for SmalltalkRuntime {
             views.initialize_empty(transaction, cut)?;
             smallclaims::ivm::events::install(transaction, 4096)?;
         }
+        publication_facts::initialize(transaction)?;
         custom::open(transaction)?;
         resources::open(transaction)?;
         glass_heads::open(transaction)?;
@@ -460,6 +478,20 @@ impl Runtime for SmalltalkRuntime {
 
     fn plan_checkpoint_drops(&self, sealed: &SealedSet) -> DropPlan {
         checkpoint_rules::plan_drops(sealed)
+    }
+
+    fn checkpoint_claim_facts(
+        &self,
+        claim: &ClaimRecord,
+    ) -> smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
+        checkpoint_rules::claim_facts(claim)
+    }
+
+    fn plan_staged_checkpoint_drops(
+        &self,
+        planner: &smallclaims::store::checkpoint_staging::StagedPlanner<'_>,
+    ) -> Result<()> {
+        checkpoint_rules::plan_staged(planner)
     }
 
     fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
@@ -843,7 +875,7 @@ mod schema_install_tests {
                 reader
                     .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                     .unwrap(),
-                18
+                st3_schema::STORAGE_VERSION
             );
             assert_eq!(
                 recovered

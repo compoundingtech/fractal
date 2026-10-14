@@ -243,7 +243,8 @@ const PUBLISHED_PERIOD_MS: u128 = 30_000;
 /// person changes are computed once for all of them, in one short snapshot, and again only when
 /// their inputs (cut, roster, clock period) change; each selection then counts what needs its
 /// person from the newest attention publication, in memory. As the daemon starts the shared
-/// counts are computed once with no selection, so the first window is served at once. If they
+/// counts are computed with no selection until they first succeed (the complete roster they
+/// count agents from may come later), so the first window is served at once. If they
 /// cannot be computed the previous ones stay published; with none, every selection is not
 /// published and its windows read for themselves. With `waiting_only`, only the selections a
 /// window waits for, and the shared counts only if there are none yet. Returns whether any
@@ -255,7 +256,7 @@ pub(in crate::api) fn refresh_published(
 ) -> anyhow::Result<bool> {
     let store = &state.store;
     let (generation, selections) = store.summary_selections(idle_ms, waiting_only);
-    let starting = store.start_summary_shared();
+    let starting = store.summary_shared_starting();
     if selections.is_empty() && !starting {
         return Ok(false);
     }
@@ -287,10 +288,16 @@ pub(in crate::api) fn refresh_published(
         Ok(Some((shared, inputs))) => {
             let shared = Arc::new(shared);
             store.publish_summary_shared(generation, shared.clone(), inputs);
+            store.start_summary_shared();
+            store.note_summary_shared_failed(false);
             Some(shared)
         }
         Err(error) => {
-            eprintln!("st3: the summary's shared counts failed: {error:#}");
+            // Retried every pass (as the daemon starts, until the complete roster is published):
+            // said once until they are computed again.
+            if store.note_summary_shared_failed(true) {
+                eprintln!("st3: the summary's shared counts failed: {error:#}");
+            }
             before.map(|(shared, _)| shared)
         }
     };
