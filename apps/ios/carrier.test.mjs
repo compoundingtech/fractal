@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { DIAL_BUDGET_MS, FabricCarrier, REDIAL_WAITS_MS, REMEMBER_FAILURE_MS, routeLabel, selectRoute } from './carrier.ts';
+import { DIAL_BUDGET_MS, FabricCarrier, REDIAL_WAITS_MS, RETRY_WAITS_MS, REMEMBER_FAILURE_MS, routeLabel, selectRoute } from './carrier.ts';
 
 const node = 'ab'.repeat(32);
 const target = { node, service: 'st3-client/demo' };
@@ -156,4 +156,45 @@ assert.equal(routeLabel({ kind: 'none', fellBack: false, why: '' }), 'Not connec
   const again = carrier.feedFailed(); await flush();
   assert.equal(carrier.snapshot.phase, 'dialing');
   state.waits.at(-1).resolve(); await again;
+}
+
+// ---- A failed fabric is tried again by itself, so a phone that fell back to a saved route it cannot reach
+// ---- does not stay there until it is killed (Nathan, 2026-10-13: "reconnecting over and over ... killed it, it connected").
+{
+  const { carrier, state, flush } = harness();
+  const seen = [];
+  carrier.foreground(true);
+  carrier.configure(true, target);
+  await flush();
+  state.waits.at(-1).resolve(); // the dial budget runs out
+  await flush();
+  assert.equal(carrier.snapshot.phase, 'failed');
+  const retryWait = state.waits.at(-1);
+  assert.equal(retryWait.ms, RETRY_WAITS_MS[0], 'the first try again is after the memory of a failure');
+  state.clock += RETRY_WAITS_MS[0];
+  retryWait.resolve(); await flush();
+  assert.equal(state.dials.length, 2, 'fabric is dialed again with no foreground change and no tap');
+  state.dials[1].reject(new Error('peer unreachable')); await flush();
+  assert.equal(carrier.snapshot.phase, 'failed');
+  assert.equal(state.waits.at(-1).ms, RETRY_WAITS_MS[1], 'each failure waits longer');
+  state.clock += RETRY_WAITS_MS[1];
+  state.waits.at(-1).resolve(); await flush();
+  assert.equal(state.dials.length, 3);
+  state.dials[2].resolve({ url: 'http://127.0.0.1:50300' }); await flush();
+  assert.equal(carrier.snapshot.phase, 'ready', 'and when it answers the route is fabric again');
+  void seen;
+}
+{
+  // Leaving the foreground, or turning fabric off, cancels the pending try.
+  const { carrier, state, flush } = harness();
+  carrier.foreground(true);
+  carrier.configure(true, target);
+  await flush();
+  state.waits.at(-1).resolve(); await flush();
+  const retryWait = state.waits.at(-1);
+  carrier.configure(false, target); await flush();
+  state.clock += RETRY_WAITS_MS[0];
+  retryWait.resolve(); await flush();
+  assert.equal(state.dials.length, 1, 'a cancelled try dials nothing');
+  assert.equal(carrier.snapshot.phase, 'off');
 }

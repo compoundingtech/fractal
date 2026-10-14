@@ -3,6 +3,7 @@ import { FlatList, SectionList, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import SegmentedControl from '@react-native-segmented-control/segmented-control';
+import { quality } from '../qualityNative';
 import { saidRows, type SaidRow } from '../conversationSearch';
 import { AGENT_LEGEND, agentGlyph, agentRows, agentSections, agentTreeLines, filterAgentRows, harnessColor, UNMANAGED_GROUP, type AgentRowView, type TreeLine } from '../agentsView';
 import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
@@ -37,7 +38,7 @@ export function AgentsScreen() {
         placeholder: 'Filter agents',
         hideWhenScrolling: true,
         autoCapitalize: 'none',
-        onChangeText: event => setFilter(event.nativeEvent.text),
+        onChangeText: event => { quality.key(); setFilter(event.nativeEvent.text); },
         onCancelButtonPress: () => setFilter(''),
       },
     });

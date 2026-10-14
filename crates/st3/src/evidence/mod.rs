@@ -12,6 +12,7 @@ use std::{
 };
 
 pub mod cli;
+mod ci_reattest;
 mod ci_transport;
 pub mod observers;
 #[cfg(test)]

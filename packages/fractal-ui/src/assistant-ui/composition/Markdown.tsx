@@ -160,11 +160,12 @@ const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: stri
     }
   }
   const copiedCurrentCode = copy.tag === 'copied' && copy.code === code
+  const copyLabel = copy.tag === 'copying' ? 'Copying…' : copiedCurrentCode ? 'Copied' : 'Copy'
   return <div data-testid="markdown-code-block" data-language={language || 'text'} data-wrap={wrap} data-copy-state={copy.tag} {...stylex.props(styles.codeBlock)}>
     <div {...stylex.props(styles.codeToolbar)}>
       <span data-testid="markdown-code-language" {...stylex.props(styles.codeLanguage)}>{language || 'text'}</span>
       <Button aria-label="Wrap code" aria-pressed={wrap} onPress={() => setWrap(value => !value)} {...stylex.props(styles.codeButton, wrap && styles.codeButtonSelected)}>Wrap</Button>
-      <Button aria-label="Copy code" isDisabled={copy.tag === 'copying'} onPress={copyCode} {...stylex.props(styles.codeButton)}>{copy.tag === 'copying' ? 'Copying…' : copiedCurrentCode ? 'Copied' : 'Copy'}</Button>
+      <Button aria-label={`${copyLabel} code`} isDisabled={copy.tag === 'copying'} onPress={copyCode} {...stylex.props(styles.codeButton)}>{copyLabel}</Button>
     </div>
     <pre data-testid="markdown-code" role="group" aria-label={`Code, ${language || 'text'}`} tabIndex={0} {...stylex.props(styles.codePre, wrap && styles.codeWrapped)}><code {...stylex.props(styles.codeText)}><HighlightedSource code={code} language={language} /></code></pre>
     <span role="status" {...stylex.props(copy.tag === 'failed' && styles.copyStatus)}>{copy.tag === 'failed' ? 'Could not copy code. Check clipboard permissions and try again.' : <VisuallyHidden><span>{copiedCurrentCode ? 'Code copied.' : copy.tag === 'copied' ? 'Code has changed since the last copy.' : ''}</span></VisuallyHidden>}</span>

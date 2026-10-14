@@ -660,13 +660,27 @@ class Bridge:
         return queued
 
 
+def default_socket():
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    if runtime is not None:
+        return Path(runtime) / 'st3.sock'
+    state = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'st3'
+    endpoint = state / 'run/st3.sock'
+    # The daemon publishes its endpoint here for clients without its runtime directory.
+    if endpoint.is_symlink():
+        target = endpoint.readlink()
+        if target.is_absolute():
+            return target
+    return endpoint
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('run', 'status', 'resolve'))
     parser.add_argument('--agent', required=True, help='The one allowlisted st agent subject.')
     parser.add_argument('--route', type=Path, default=ROOT / 'discord-probe/trial.json')
     parser.add_argument('--state', type=Path)
-    parser.add_argument('--socket', type=Path, default=ROOT / 'st3.sock')
+    parser.add_argument('--socket', type=Path, default=default_socket())
     parser.add_argument('--token-file', type=Path, help='Private dotenv file with one DISCORD_BOT_TOKEN entry; never evaluated as shell code.')
     parser.add_argument('--legacy-text', action='store_true', help='Keep provisional sender identities and text-only delivery on the current native daemon.')
     parser.add_argument('--allow-user', action='append', default=[], help='Enroll another numeric Discord account; native mode also requires matching program-seat source enrollment.')
