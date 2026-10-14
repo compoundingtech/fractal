@@ -90,7 +90,8 @@ impl ContainerStatus {
     }
 }
 
-/// Suspend destroys volatile state. Resume starts a new native session, not a transcript resume.
+/// Suspend commits a private handover then destroys volatile state. Resume starts a fresh native
+/// session that reads that handover first, not a transcript resume. Handover bytes never cross RPC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContainerOperation {
@@ -168,8 +169,11 @@ pub enum ContainerBridgeRole {
 /// The host adapter is a capability boundary, not a generic command runner.
 ///
 /// Calls are serialized by the listener. Implementations must reserve generations before start,
-/// verify native readiness, fence dispatch before quiescence, and acknowledge stop/suspend only
-/// after the whole unit is empty and its volatile state erased. Errors must use closed codes.
+/// verify native readiness, and fence dispatch before quiescence. Suspend must commit working
+/// context, open tasks and next steps in private persistent storage before teardown. Resume must
+/// gate readiness on the fresh session's first read of that committed handover. Stop/suspend
+/// acknowledge only after the whole unit is empty and its volatile state erased. Handover bytes
+/// must never enter this interface. Errors must use closed codes.
 /// A failed mutation must remain observable through `status`, never masquerade as success.
 pub trait ContainerControl {
     fn status(&mut self) -> std::result::Result<ContainerStatus, ContainerError>;
