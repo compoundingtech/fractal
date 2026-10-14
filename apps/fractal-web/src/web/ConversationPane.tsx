@@ -85,11 +85,12 @@ export const ConversationPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} feed={feed} state={state} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} feed={feed} state={state} ux={ux} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, feed, state }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, feed, state, ux }: {
+  readonly ux?: UxTelemetry
   readonly agentRef: string
   readonly agentName: string
   readonly onOpenTool: (call: WorkLogCall) => void
@@ -136,7 +137,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />
     </div>
-    <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} />
+    <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, paddingBottom: spaceVars.lg }}>
