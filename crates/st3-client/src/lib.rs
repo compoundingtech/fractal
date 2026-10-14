@@ -1365,6 +1365,7 @@ impl Client {
                 None,
                 None,
                 "application/json",
+                None,
             );
             let outcome = if self.outage_wait.is_zero() {
                 attempt.await
