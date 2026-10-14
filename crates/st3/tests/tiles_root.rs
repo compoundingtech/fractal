@@ -381,7 +381,10 @@ fn processes_of(uid: u32) -> Vec<u32> {
 }
 
 const IDENTITY_PROBE: &str = r#"
-import ctypes, json, os, socket
+import os
+# Before any other import: a library may open files of its own (libffi opens its .so).
+fds = sorted(os.listdir("/proc/self/fd"))
+import json, socket
 status = dict(line.split(":\t", 1) for line in open("/proc/self/status").read().splitlines() if ":\t" in line)
 def exists(path):
     return os.path.lexists(path)
@@ -389,7 +392,7 @@ print(json.dumps({
   "uid": os.getuid(), "gid": os.getgid(), "groups": os.getgroups(),
   "pid": os.getpid(), "root": sorted(os.listdir("/")),
   "pids": sorted(int(p) for p in os.listdir("/proc") if p.isdigit()),
-  "fds": sorted(os.listdir("/proc/self/fd")),
+  "fds": fds,
   "cgroup": open("/proc/self/cgroup").read().strip(),
   "caps": [status[k].strip() for k in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")],
   "no_new_privs": status["NoNewPrivs"].strip(), "seccomp": status["Seccomp"].strip(),
