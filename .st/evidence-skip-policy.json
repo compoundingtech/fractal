@@ -5,6 +5,7 @@
       "trust_levels": [
         "fleet"
       ],
+      "enforce": false,
       "kinds": {
         "observed": {
           "command": [
@@ -50,6 +51,7 @@
       "trust_levels": [
         "fleet"
       ],
+      "enforce": false,
       "kinds": {
         "observed": {
           "command": [
@@ -85,6 +87,7 @@
       "trust_levels": [
         "fleet"
       ],
+      "enforce": false,
       "kinds": {
         "observed": {
           "command": [
@@ -122,6 +125,7 @@
       "trust_levels": [
         "fleet"
       ],
+      "enforce": false,
       "kinds": {
         "observed": {
           "command": [
@@ -157,6 +161,7 @@
       "trust_levels": [
         "fleet"
       ],
+      "enforce": false,
       "kinds": {
         "observed": {
           "command": [
