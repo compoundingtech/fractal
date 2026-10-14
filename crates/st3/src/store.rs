@@ -26897,10 +26897,16 @@ mod fleet_admission_tests {
         upgraded
             .receive_replication_exchange_asking("current", FLEET, &exchange, true)
             .unwrap();
+        // The first sync settled on the equal log; matching builds do not reopen it to compare
+        // projections.
         let first_sync = upgraded.first_sync().unwrap().unwrap();
         assert_eq!(first_sync.state, "verified");
-        assert!(first_sync.authority_digest.is_none());
-        assert_eq!(first_sync.graph_digest, first_sync.peer_graph_digest);
+        assert_eq!(
+            first_sync.authority_digest.as_deref(),
+            Some(before.authority_digest.as_str())
+        );
+        assert!(first_sync.graph_digest.is_none());
+        assert!(first_sync.message.is_none());
         assert!(
             upgraded.replication_peer_sync(&["current".into()])["current"]
                 .graph_compared_at_unix_ms

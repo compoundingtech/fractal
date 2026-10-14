@@ -27,8 +27,8 @@ impl Store {
         )
     }
 
-    /// End a mixed-build first sync at a verified equal wire log. Projection equality is
-    /// deliberately left unasserted until both members have the same registry.
+    /// End a mixed-build first sync at a verified equal wire log. Like any first sync it settles
+    /// on claims; the log digest records what it verified.
     pub fn observe_first_sync_log(
         &self,
         peer: &str,
@@ -47,7 +47,7 @@ impl Store {
             first.graph_digest = None;
             first.peer_graph_digest = None;
             first.authority_digest = Some(authority_digest.to_owned());
-            first.message = Some("projection comparison waits for matching builds".into());
+            first.message = None;
             save_first_sync(&connection, &first)?;
         }
         Ok(())
