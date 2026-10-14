@@ -358,12 +358,16 @@ accepted base, never from the change under test. A signer's trust level is the p
 its principal before the first slash (`machine/ci1` is level `machine`); it is never
 read from the record. Removing a line revokes every note that key signed.
 
-`kind` is the record's `runner`, and only `nix`, `wrapper` (the existing CI job wrapped so it signs its result) and `sekrets` are accepted. The latest
+`kind` comes from the record's `runner`: `nix`, `wrapper` (a command run once and signed by the wrapper) and `sekrets` name themselves, and a runner that starts with `github:` is kind
+`observed`, the central observer's record of a finished GitHub job (`st evidence observe-ci`).
+Anything else is `unsupported_kind`. An unsigned record at tier `degraded` is never evidence
+and is reported as `degraded`, not as a signature fault, because it is what the observer writes
+when its signer is unreachable. The latest
 trusted record for the tree and check decides, so a newer failure supersedes an older
 pass. Reasons: `no_record`, `stale_tree` (records exist only for other trees),
 `wrong_check`, `bad_signature` (forged or unsigned), `untrusted_signer` (a valid
 signature from a key not on the list, or a principal that differs from the record's
-signer), `untrusted_tier`, `unsupported_kind`, `check_failed`, `wrong_command`, `wrong_input` and
+signer), `untrusted_tier`, `degraded`, `unsupported_kind`, `check_failed`, `wrong_command`, `wrong_input` and
 `error` (unreadable input: no decision was made, count it separately). Notes are found
 by the tree they name with one `git cat-file --batch-check`, so the cost grows with the
 number of evidence refs; pack refs, or add a per-tree index, before they reach the

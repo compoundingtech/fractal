@@ -177,6 +177,26 @@ class Verifier(unittest.TestCase):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', exit_code=1, seconds=2, naive=True)
         self.assertEqual(self.f.verify(self.tree)[0], 0)
 
+    def test_the_central_observers_record_of_a_ci_job_is_the_observed_kind(self):
+        runner = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
+        command = ('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit')
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner=runner, command=command)
+        code, result = self.f.verify(self.tree, command=list(command), kinds=('observed',))
+        self.assertEqual((code, result['kind'], result['command']), (0, 'observed', list(command)))
+        code, result = self.f.verify(self.tree, kinds=('wrapper',))
+        self.assertEqual((code, result['reason']), (1, 'unsupported_kind'))
+        # A different workflow or job named in the command is not the recorded one.
+        self.assertEqual(self.reason(self.tree, command=['github-actions', 'org/other', 'x.yml', 'unit']),
+                         'wrong_command')
+
+    def test_an_unsigned_degraded_record_is_reported_as_degraded_not_as_a_signature_fault(self):
+        self.f.note(self.commit, self.tree, self.ci, None, tier='degraded', sign=False)
+        code, result = self.f.verify(self.tree)
+        self.assertEqual((code, result['reason'], result['attempts']), (1, 'degraded', 1))
+        # It never counts as evidence, and a later full record satisfies the check.
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', seconds=1)
+        self.assertEqual(self.f.verify(self.tree)[0], 0)
+
     def test_a_check_names_the_kinds_it_accepts(self):
         self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner='wrapper')
         self.assertEqual(self.f.verify(self.tree, kinds=('nix', 'wrapper'))[0], 0)
