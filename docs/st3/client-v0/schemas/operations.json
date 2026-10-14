@@ -12,6 +12,8 @@
   ],
   "reads": [
     {"id": "notes.list", "method": "GET", "path": "/v1/client/notes", "response": "DirectiveNotes", "scope": "read.projections", "query": {"actor": "optional exact authenticated person or agent; cannot select another actor"}},
+    {"id": "subject-notes.list", "method": "GET", "path": "/v1/client/subject-notes", "response": "SubjectNotes", "scope": "read.projections", "query": {"target": "optional exact target subject"}},
+    {"id": "subject-notes.mine", "method": "GET", "path": "/v1/client/subject-notes", "response": "SubjectNotes", "scope": "read.projections", "query": {"author": "exact authenticated authority actor"}},
     {"id": "custom-subjects.list", "method": "GET", "path": "/v1/client/custom-subjects", "response": "Page", "scope": "read.projections"},
     {"id": "custom-subjects.get", "method": "GET", "path": "/v1/client/custom-subjects/{id}", "response": "Resource", "scope": "read.projections"},
     { "id": "host.repositories", "method": "GET", "path": "/v1/client/hosts/{id}/repositories", "response": "HostRepositories", "scope": "read.projections" },
@@ -75,6 +77,8 @@
     {"id": "glasses.get", "method": "GET", "path": "/v1/client/glasses/{id}", "response": "Glass", "scope": "read.glasses"}
   ],
   "commands": [
+    {"id": "subject-notes.create", "method": "POST", "path": "/v1/subject-notes", "request": "SubjectNoteCreate", "response": "SubjectNoteResult", "scope": "control.notes"},
+    {"id": "subject-notes.update", "method": "PUT", "path": "/v1/subject-notes/{id}", "request": "SubjectNoteUpdate", "response": "SubjectNoteResult", "scope": "control.notes"},
     {"id": "observations.report", "method": "POST", "path": "/v1/client/observations", "request": "ObservationReport", "response": "ObservationResponse", "authentication": "paired-session", "max_request_bytes": 65536, "durable_receipt": false, "replicated": false, "snapshot_fence": false},
     { "id": "action.submit", "method": "POST", "path": "/v1/client/actions", "request": "ActionRequest", "response": "ActionResult" },
     { "id": "pairing.begin", "method": "POST", "path": "/v1/client/pairings", "request": "PairingBegin", "response": "PairingChallenge", "local_only": true },

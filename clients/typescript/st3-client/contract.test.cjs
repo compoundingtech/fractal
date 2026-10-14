@@ -42,6 +42,46 @@ test('notesList reads the typed advisory current notes endpoint', async () => {
     assert.equal(calls[1][1].headers.Authorization, 'Bearer test-credential');
 });
 
+test('subject notes reads encode target and author and writes preserve omitted versus null fields', async () => {
+    const wire = require('../../../docs/st3/client-v0/fixtures/subject-notes.json');
+    const archived = require('../../../docs/st3/client-v0/fixtures/subject-note-archive.json');
+    const calls = [];
+    const client = new St3Client({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            if (String(url).endsWith('/capabilities')) return response(capabilityFixture);
+            return response(init.method === 'PUT' ? archived : wire);
+        },
+    });
+    assert.deepEqual(await client.subjectNotesList('agent/example/reviewer'), wire);
+    assert.deepEqual(await client.subjectNotesMine('person/ada'), wire);
+    await client.subjectNotesCreate({ target: 'mission/example', text: 'Inform, never assign.' });
+    assert.deepEqual(await client.subjectNotesUpdate(wire.value.notes[0].id, { text: null, session: null }), archived);
+    const reads = calls.filter(([, init]) => init.method === 'GET');
+    assert.equal(reads[1][0], 'https://example.test/v1/client/subject-notes?target=agent%2Fexample%2Freviewer');
+    assert.equal(reads[2][0], 'https://example.test/v1/client/subject-notes?author=person%2Fada');
+    const writes = calls.filter(([, init]) => init.method !== 'GET');
+    assert.equal(writes[0][0], 'https://example.test/v1/subject-notes');
+    assert.deepEqual(JSON.parse(writes[0][1].body), { target: 'mission/example', text: 'Inform, never assign.' });
+    assert.equal(writes[1][0], 'https://example.test/v1/subject-notes/' + encodeURIComponent(wire.value.notes[0].id));
+    assert.equal(writes[1][1].method, 'PUT');
+    assert.deepEqual(JSON.parse(writes[1][1].body), { text: null, session: null });
+});
+
+test('notes collection applies typed resources and archive removals without modifying agent rows', () => {
+    const wire = require('../../../docs/st3/client-v0/fixtures/subject-notes.json');
+    const note = { kind: 'note', ...wire.value.notes[0] };
+    const initial = applyWindow(undefined, { kind: 'snapshot', id: 'notes', collection: 'notes', snapshot, items: [note], order: [note.id], has_more: false });
+    assert.equal(initial.items[0].audience, 'self');
+    const changed = { ...note, text: 'Updated context.', revision: 'claim/updated' };
+    const updated = applyWindow(initial, { kind: 'changes', id: 'notes', collection: 'notes', snapshot, upserts: [changed], removes: [], order: [note.id], has_more: false });
+    assert.equal(updated.items[0].text, changed.text);
+    const removed = applyWindow(updated, { kind: 'changes', id: 'notes', collection: 'notes', snapshot, upserts: [], removes: [note.id], order: [], has_more: false });
+    assert.deepEqual(removed.items, []);
+});
+
 const validTraceparent = '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01';
 const traceCases = [
     ['absent callback', undefined, undefined],

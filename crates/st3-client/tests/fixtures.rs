@@ -32,6 +32,53 @@ fn directive_notes_preserve_author_time_expiry_and_clear_as_empty() {
 }
 
 #[test]
+fn subject_note_create_retains_scope_and_can_omit_default_audience() {
+    let request: SubjectNoteCreate = decode("subject-note-create.json");
+    assert_eq!(request.audience, Some(NoteAudience::SelfOnly));
+    assert_eq!(request.session.as_deref(), Some("incarnation/example"));
+    assert_eq!(request.expires_at.as_deref(), Some("2026-10-15T09:00:00Z"));
+    let defaults: SubjectNoteCreate = serde_json::from_value(serde_json::json!({"target":"mission/example","text":"Context"})).unwrap();
+    assert!(defaults.audience.is_none());
+    assert_eq!(serde_json::to_value(defaults).unwrap(), serde_json::json!({"target":"mission/example","text":"Context"}));
+}
+
+#[test]
+fn subject_notes_keep_identity_scope_and_open_audiences() {
+    let wire: Envelope<SubjectNotes> = decode("subject-notes.json");
+    let note = &wire.value.notes[0];
+    assert_eq!(note.id, "note/person/ada/019a0000-0000-7000-8000-000000000001");
+    assert_eq!(note.target, "agent/example/reviewer");
+    assert_eq!(note.author, "person/ada");
+    assert_eq!(note.audience, NoteAudience::SelfOnly);
+    assert_eq!(note.session.as_deref(), Some("incarnation/example"));
+    assert_eq!(note.created_at, "2026-10-14T09:00:00Z");
+    assert_eq!(note.updated_at, "2026-10-14T09:01:00Z");
+    assert_eq!(note.expires_at.as_deref(), Some("2026-10-15T09:00:00Z"));
+    let future = &wire.value.notes[1].audience;
+    assert_eq!(future.as_str(), "mission-crew");
+    assert_eq!(serde_json::to_value(future).unwrap(), "mission-crew");
+    let mut row = serde_json::to_value(note).unwrap();
+    row["kind"] = serde_json::json!("note");
+    let resource: Resource = serde_json::from_value(row).unwrap();
+    assert_eq!(resource.header().id, note.id);
+    let Resource::Note(row) = resource else { panic!("expected typed note") };
+    assert_eq!(SubjectNote::from(row), *note);
+}
+
+#[test]
+fn subject_note_updates_preserve_omitted_fields_and_send_explicit_nulls() {
+    let patch: SubjectNoteUpdate = serde_json::from_value(serde_json::json!({"text":null,"session":null})).unwrap();
+    assert_eq!(patch.text, Some(None));
+    assert_eq!(patch.session, Some(None));
+    assert_eq!(patch.expires_at, None);
+    assert_eq!(serde_json::to_value(patch).unwrap(), serde_json::json!({"text":null,"session":null}));
+    let archived: SubjectNoteResult = serde_json::from_value(serde_json::json!({"note":null})).unwrap();
+    assert!(archived.note.is_none());
+    let empty: SubjectNotes = serde_json::from_value(serde_json::json!({"notes":[]})).unwrap();
+    assert!(empty.notes.is_empty());
+}
+
+#[test]
 fn agent_lifecycle_future_value_keeps_the_roster_row() {
     let row = serde_json::json!({
         "kind": "agent", "id": "agent/example", "revision": "r1",

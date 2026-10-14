@@ -2,7 +2,7 @@
 import { API_VERSION } from './Models.generated.ts';
 import type {
     ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, MessageBody, EnvelopeOf,
-    ResourcesFilter, ResourcesPage, DirectiveNotes,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, SubjectNotes, SubjectNoteResult, SubjectNoteCreate, SubjectNoteUpdate,
     Arrangement, ArrangementId, ArrangementPage,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
@@ -418,6 +418,8 @@ export class St3Client {
     listGlasses(options: PageOptions = {}): Promise<EnvelopeOf<Page>> { return this.get(`/v1/client/glasses${query(options)}`); }
     getGlass(id: string): Promise<EnvelopeOf<Glass>> { return this.get(`/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`); }
     putGlass(id: string, request: GlassPut, idempotencyKey: string): Promise<EnvelopeOf<Glass>> { return this.request('PUT', `/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, request, idempotencyKey); }
+    subjectNotesCreate(note: SubjectNoteCreate): Promise<EnvelopeOf<SubjectNoteResult>> { return this.request('POST', '/v1/subject-notes', note); }
+    subjectNotesUpdate(id: string, note: SubjectNoteUpdate): Promise<EnvelopeOf<SubjectNoteResult>> { return this.request('PUT', `/v1/subject-notes/${encodeURIComponent(id)}`, note); }
     deleteGlass(id: string, request: GlassDelete, idempotencyKey: string): Promise<EnvelopeOf<Glass>> { return this.request('DELETE', `/v1/client/glasses/${encodeURIComponent(id.split('/').pop()!)}`, request, idempotencyKey); }
     /** Exact server-side filters; refuses older servers that ignore them. */
     async terminalsListFiltered(options: TerminalListOptions = {}): Promise<EnvelopeOf<Page>> {

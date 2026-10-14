@@ -1503,6 +1503,13 @@ impl Client {
     ) -> Result<Envelope<ActionResult>, ClientError> {
         self.post("/v1/client/actions", request).await
     }
+    pub async fn subject_notes_create(&self, note: &SubjectNoteCreate) -> Result<Envelope<SubjectNoteResult>, ClientError> {
+        self.post("/v1/subject-notes", note).await
+    }
+    pub async fn subject_notes_update(&self, id: &str, note: &SubjectNoteUpdate) -> Result<Envelope<SubjectNoteResult>, ClientError> {
+        let body = serde_json::to_vec(note).map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.request_with_key(Method::PUT, &format!("/v1/subject-notes/{}", percent_encode(id)), Some(body), None).await
+    }
     pub async fn list_glasses(&self, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<Page>, ClientError> { self.list_internal("glasses", cursor, limit, false).await }
     pub async fn get_glass(&self, id: &str) -> Result<Envelope<Glass>, ClientError> { self.get(&format!("/v1/client/glasses/{}", percent_encode(id.rsplit('/').next().unwrap_or(id)))).await }
     pub async fn put_glass(&self, id: &str, request: &GlassPut, idempotency_key: &str) -> Result<Envelope<Glass>, ClientError> { self.glass_write(id, request, Method::PUT, idempotency_key).await }
