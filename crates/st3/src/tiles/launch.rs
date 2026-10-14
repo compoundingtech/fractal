@@ -117,6 +117,16 @@ pub fn run(registry_path: &Path, name: &str, terminal: bool, command: &[OsString
     Ok(status.code().unwrap_or(1))
 }
 
+/// `st tiles prepare`: make the tile's directories without starting it, so its supervisor can
+/// serve the endpoint before the first launch.
+pub fn prepare(registry_path: &Path, name: &str) -> Result<()> {
+    require_root("st tiles prepare")?;
+    let registry = Registry::load(registry_path)?;
+    let tile = registry.tile(name)?;
+    check_account(name, tile)?;
+    prepare_directories(&registry, name, tile).map(|_| ())
+}
+
 /// `st tiles stop`: end every process of the tile's tools unit.
 pub fn stop(name: &str) -> Result<()> {
     require_root("st tiles stop")?;
