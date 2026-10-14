@@ -1827,20 +1827,18 @@ mod program_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn program_checkout_directory_retains_verified_inode_after_path_replacement() {
-        // /tmp is the existing root-controlled parent; /usr is only a read-only anchor
-        // for path validation here. This test never mounts or changes either directory.
-        let fixture = tempfile::tempdir_in("/tmp").unwrap();
+        // Exercise the descriptor walk and inode match without assuming a root-owned
+        // temporary parent: Nix sandboxes can own /tmp as the build uid. The VM controls
+        // exercise program_checkout_directory's root-controlled configuration and mount.
+        let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path();
         let uid = fs::metadata(root).unwrap().uid();
         fs::create_dir(root.join("repo")).unwrap();
         fs::write(root.join("repo/marker"), "verified").unwrap();
         let caller = open_checkout_beneath(root, Path::new("repo"), uid).unwrap();
-        let checkout = ProgramCheckout {
-            backing_root: root.into(),
-            mount_root: "/usr".into(),
-        };
-        let bound = program_checkout_directory(&caller, uid, &checkout).unwrap();
-        assert_eq!(bound.path, Path::new("/usr/repo"));
+        let opened = open_checkout_beneath(root, Path::new("repo"), uid).unwrap();
+        let bound = verified_program_directory(&caller, opened, "/w/repo".into()).unwrap();
+        assert_eq!(bound.path, Path::new("/w/repo"));
         assert_ne!(bound.fd.as_raw_fd(), caller.as_raw_fd());
         fs::rename(root.join("repo"), root.join("verified-original")).unwrap();
         fs::create_dir(root.join("repo")).unwrap();

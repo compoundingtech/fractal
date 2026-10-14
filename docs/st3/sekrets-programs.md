@@ -167,3 +167,10 @@ Existing people/agent/host callers keep their behavior. Upgrade the gateway befo
 adding `[programs]`: older gateways reject the unknown config and caller kind.
 Rollback removes program enrollment/grants first; never convert a program into a
 person mapping. No st graph/schema/replay or gateway DB migration is introduced.
+
+The inode-retention Rust control exercises the descriptor-relative walk and exact
+directory match directly, then replaces the path and checks the retained original
+inode. It does not assume the test runner owns a root-controlled temporary parent:
+the Nix sandbox can own `/tmp` as its build UID. The isolation VM separately tests
+the root-controlled configuration, private `/w` mount, read-only bind, swap barrier
+and wrong-inode refusal before bubblewrap. A passing helper control is not VM proof.
