@@ -46,8 +46,19 @@ fn oracle(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
 }
 
 fn parity(store: &Store, actor: &str, at: u128) -> Vec<StepRunView> {
-    let old = oracle(store, actor, at).unwrap();
-    let new = read(store, actor, at).unwrap();
+    let (old, old_keys) = smallclaims::touched::record(|| oracle(store, actor, at).unwrap());
+    let (new, new_keys) = smallclaims::touched::record(|| read(store, actor, at).unwrap());
+    assert!(
+        old_keys.is_subset(&new_keys),
+        "batched read dropped registered dependencies: {:?}",
+        old_keys.difference(&new_keys).collect::<Vec<_>>()
+    );
+    println!(
+        "registered work context keys: old={} new={} added={:?}",
+        old_keys.len(),
+        new_keys.len(),
+        new_keys.difference(&old_keys).collect::<Vec<_>>()
+    );
     assert_eq!(
         serde_json::to_value(&new).unwrap(),
         serde_json::to_value(&old).unwrap()
@@ -1087,5 +1098,118 @@ fn batched_work_definition_index_preserves_nested_display_order_and_first_match(
     assert!(
         error.to_string().contains("missing-definition-step"),
         "{error}"
+    );
+}
+
+#[test]
+fn batched_work_metadata_registers_candidates_before_visibility_filtering() {
+    let store = fixture(129);
+    let at = now_ms();
+    let candidates = parity(&store, ACTOR, at);
+    assert_eq!(candidates.len(), 129);
+    store
+        .connection
+        .write()
+        .execute("UPDATE mission_runs SET phase='revision-draining'", [])
+        .unwrap();
+    let (old, old_keys) = smallclaims::touched::record(|| oracle(&store, ACTOR, at).unwrap());
+    let (new, new_keys) = smallclaims::touched::record(|| read(&store, ACTOR, at).unwrap());
+    assert!(old.is_empty());
+    assert!(new.is_empty());
+    assert_eq!(
+        new_keys, old_keys,
+        "filtered candidates retain the same dependencies"
+    );
+    for candidate in &candidates {
+        for key in [&candidate.subject, &candidate.run, &candidate.generation] {
+            assert!(new_keys.contains(key), "filtered candidate lost {key}");
+        }
+    }
+}
+
+#[test]
+fn batched_work_metadata_origin_ask_after_a_pass_invalidates_its_seat() {
+    use crate::incremental::{Incremental, change_keys};
+    const OTHER: &str = "agent/alder.unrelated";
+    let (store, origin, input) = person_work::tests::fixture();
+    let feed = Incremental::default();
+    let ask_only = Incremental::default();
+    feed.observe(&store).unwrap();
+    for incremental in [&feed, &ask_only] {
+        for actor in [&input.actor[..], OTHER] {
+            let (_, keys) =
+                smallclaims::touched::record(|| store.work_for_reconcile(actor).unwrap());
+            incremental.evaluated(actor, keys, None);
+            assert!(!incremental.needs(actor, 0));
+        }
+    }
+    // Record key parity before an ask exists, while the batched support proof skips
+    // the empty response reader. The writer below is the real claimant/ask path.
+    parity(&store, &input.actor, now_ms());
+    let ask = store.ask_person(&input).unwrap();
+    assert_ne!(ask.subject, origin.subject);
+    let request = store
+        .latest_claim(&ask.subject, Some("work.person-asked"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.body["fields"]["origin_step"], origin.subject);
+    let change = Change {
+        subject: request.subject.clone(),
+        kind: request.kind.clone(),
+        actor: request.actor.clone(),
+        body: serde_json::to_string(&request.body).unwrap(),
+    };
+    // Isolate the ask claim's own keys: do not rely on its companion origin
+    // step-run.state receipt to make this assertion pass. The claimant actor key
+    // already belongs to this seat's public work read.
+    let keys = change_keys(&change);
+    assert!(keys.contains(&format!("actor:{}", input.actor)));
+    for key in keys {
+        ask_only.touch(&key);
+    }
+    assert!(ask_only.needs(&input.actor, 0));
+    assert!(!ask_only.needs(OTHER, 0));
+    feed.observe(&store).unwrap();
+    assert!(
+        feed.needs(&input.actor, 0),
+        "the actual change feed must dirty the settled seat"
+    );
+    assert!(!feed.needs(OTHER, 0));
+    let waiting = parity(&store, &input.actor, now_ms());
+    assert!(
+        waiting
+            .iter()
+            .any(|view| view.subject == origin.subject && view.status == "waiting-person")
+    );
+    let (_, keys) =
+        smallclaims::touched::record(|| store.work_for_reconcile(&input.actor).unwrap());
+    feed.evaluated(&input.actor, keys, None);
+    assert!(!feed.needs(&input.actor, 0));
+    store
+        .finish_person_step(
+            &crate::model::PersonStepResponse {
+                delegation: None,
+                subject: ask.subject,
+                actor: input.person.clone(),
+                summary: "Friday".into(),
+                evidence: Vec::new(),
+                episode: None,
+                answer: None,
+                idempotency_key: "dependency-person-done".into(),
+            },
+            false,
+        )
+        .unwrap();
+    feed.observe(&store).unwrap();
+    assert!(
+        feed.needs(&input.actor, 0),
+        "the real answer path must dirty the waiting seat"
+    );
+    assert!(!feed.needs(OTHER, 0));
+    let answered = parity(&store, &input.actor, now_ms());
+    assert!(
+        answered
+            .iter()
+            .any(|view| view.subject == origin.subject && !view.person_answers.is_empty())
     );
 }
