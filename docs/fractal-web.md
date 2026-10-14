@@ -75,6 +75,22 @@ remote site. With CSP enforced the route is never reached and `img-src` reports
 the violation. Browser sessions, listeners and temporary build files are closed
 and removed on exit. There is no production CSP-disable switch.
 
+## Fractal web resizable separators
+
+Resizable separators keep their one-pixel layout track and seven-pixel pointer target.
+The target stacks above retained conversation/composer layers. Fixed chrome and the
+crossing sidebar own their pixels: the actual separator role covers the unoccluded
+span while the visible track stays full length. Escape rolls a held-pointer drag
+back to its starting size and prevents later mouseup from committing it; native
+cancellation remains a rollback. A zero, reversed or nonfinite range keeps only the
+layout rule, without a focusable separator, resize cursor or expanded hit affordance.
+Keyboard sizing (Arrow ±8, Shift+Arrow ±32, Home/End, Enter collapses) and pointer
+dragging move the same edge in the same direction, including reversed splits.
+
+Below the drawer breakpoint the agent sidebar becomes a modal navigation drawer
+(`aria-modal`, focus contained, Escape or the scrim closes it and focus returns to the
+opener); at and above it the sidebar is a non-modal docked region with its split.
+
 ## Fractal web transcript switch paint
 
 The conversation pane reports `ux.transcriptCommitted(ref)` only after its scoped DOM
