@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A seat shown as down says since when it last reported, not since it launched days earlier",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes; the card is computed from existing claims at read time."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites; no client contract change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Behavior change on the status contract only: down_since is later than before for a seat that reported after its launch. The field and its type are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal binary restart; no additional startup work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions, client re-pairing or configuration changes required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes or new swap-back restrictions."
+  }
+}
