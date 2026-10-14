@@ -449,10 +449,8 @@ continues from the last completed step:
    writes anything. Checkpoint `started`.
 7. **Sync.** Wait for the first sync to end, and print progress (`first sync: 12,480 envelopes
    so far; sponsor has 3,120 this node lacks`). It ends at the first exchange at which this
-   machine holds the same envelopes as a peer. That exchange also checks that both project the
-   same graph, and a difference heals at once (see
-   [Fleet replication](st3/replication.md#first-sync)). A first sync that still differs after
-   the heal fails `join` with both graph digests and the reason. The wait lasts up to 30 minutes;
+   machine holds the same envelopes as a peer and has admitted them all (see
+   [Fleet replication](st3/replication.md#first-sync)). The wait lasts up to 30 minutes;
    if it runs out, `join` says the machine is a member and still syncing, and exits 0.
    `--no-wait` returns once the services start. `st fleet wait [--timeout 30m]` waits for the
    first sync later and fails if it failed. It then also waits until this machine has caught up:
