@@ -37,8 +37,15 @@ const explained = (error: unknown): AgentControlResult =>
 export const gatewayAgentControls = (client: St3Client): AgentControlPort => ({
   control: async (agent, control) => {
     const steps: readonly Exclude<AgentControl, 'restart'>[] = control === 'restart' ? ['retire', 'start'] : [control]
+    // A restart whose stop landed and whose start did not leaves the seat stopped: say so.
+    const after = (index: number, result: AgentControlResult): AgentControlResult =>
+      control === 'restart' && index > 0 && result._tag === 'Refused'
+        ? refused(`Stopped, but starting it again failed: ${result.detail} Start it from this menu.`)
+        : result
+    let index = 0
     try {
-      for (const step of steps) {
+      for (const [at, step] of steps.entries()) {
+        index = at
         const definition = await client.subjectDefinition(agent)
         const fence = { snapshot_id: definition.snapshot.id, subject_revisions: {}, runtime_desired_revision: definition.value.desired_token }
         const id = `action/${crypto.randomUUID()}`
@@ -47,8 +54,8 @@ export const gatewayAgentControls = (client: St3Client): AgentControlPort => ({
         if (step === 'suspend') {
           // A suspension is fenced on the running incarnation too.
           const runtime = await liveRuntime(client, agent)
-          if (typeof runtime === 'string') return refused(runtime)
-          if (runtime.incarnation === undefined) return refused('st does not say which process is running, so it cannot be suspended now.')
+          if (typeof runtime === 'string') return after(at, refused(runtime))
+          if (runtime.incarnation === undefined) return after(at, refused('st does not say which process is running, so it cannot be suspended now.'))
           response = await client.agentSuspend({ ...action, fence: { ...fence, runtime_incarnation: runtime.incarnation }, parameters: { agent, reason: REASON } })
         } else {
           response =
@@ -56,11 +63,11 @@ export const gatewayAgentControls = (client: St3Client): AgentControlPort => ({
               : step === 'start' ? await client.agentStart({ ...action, parameters: { agent } })
                 : await client.agentResume({ ...action, parameters: { agent } })
         }
-        if ((response.value as { status?: unknown }).status === 'rejected') return refused('st did not take this.')
+        if ((response.value as { status?: unknown }).status === 'rejected') return after(at, refused('st did not take this.'))
       }
       return { _tag: 'Sent' }
     } catch (error) {
-      return explained(error)
+      return after(index, explained(error))
     }
   },
   interrupt: async (agent) => {

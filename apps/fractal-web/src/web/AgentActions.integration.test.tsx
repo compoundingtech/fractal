@@ -48,7 +48,7 @@ describe('gatewayAgentControls', () => {
       terminalScreen: vi.fn(async () => envelope({ runtime_incarnation: 'incarnation/7', next_sequence: 42 }, 'snapshot/screen')),
       agentStop: record('agent.stop'), agentStart: record('agent.start'), agentSuspend: record('agent.suspend'), agentResume: record('agent.resume'), terminalInput: record('terminal.input'),
     }
-    return { calls, port: gatewayAgentControls(client as unknown as St3Client) }
+    return { calls, client, port: gatewayAgentControls(client as unknown as St3Client) }
   }
 
   it('restarts as a stop and then a start, each fenced on the declaration st selects then', async () => {
@@ -58,6 +58,22 @@ describe('gatewayAgentControls', () => {
       ['agent.stop', { snapshot_id: 'snapshot/1', subject_revisions: {}, runtime_desired_revision: 'desired-1' }, { agent: 'agent/example/atlas', reason: "from the web app's agent actions" }],
       ['agent.start', { snapshot_id: 'snapshot/2', subject_revisions: {}, runtime_desired_revision: 'desired-2' }, { agent: 'agent/example/atlas' }],
     ])
+  })
+
+  it('says the seat was left stopped when a restart\'s start fails after its stop', async () => {
+    const { calls, port, client } = fake()
+    client.agentStart.mockRejectedValueOnce(new TypeError('network down'))
+    expect(await port.control('agent/example/atlas', 'restart')).toEqual({
+      _tag: 'Refused',
+      detail: 'Stopped, but starting it again failed: st did not confirm it; check the agent before trying again. It was not sent again. Start it from this menu.',
+    })
+    expect(calls.map(([name]) => name)).toEqual(['agent.stop'])
+    // A refused stop leaves it running, and says only why.
+    const second = fake()
+    second.client.agentStop.mockRejectedValueOnce(new TypeError('network down'))
+    expect(await second.port.control('agent/example/atlas', 'restart')).toEqual({
+      _tag: 'Refused', detail: 'st did not confirm it; check the agent before trying again. It was not sent again.',
+    })
   })
 
   it('fences a suspension on the running incarnation too', async () => {
