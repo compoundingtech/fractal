@@ -82,11 +82,52 @@ pub(super) fn initialize(transaction: &Transaction<'_>) -> Result<()> {
             )?;
         }
         Some((ceiling, complete)) if ceiling < maximum => {
-            // Old binaries do not populate this cache. Recheck the uncovered tail on
-            // every reopen, without rebuilding or dropping existing count metadata.
+            // Old binaries do not populate this cache or raise the ceiling. Recheck the
+            // uncovered tail on every reopen, without rebuilding or dropping existing count
+            // metadata. Sends this binary synced live are already under the ceiling.
             transaction.execute("UPDATE local_coordination_backfill SET cursor=CASE WHEN ?4 THEN ?1 ELSE cursor END,ceiling=?2,complete=0,progress_ms=?3 WHERE singleton=1", params![ceiling,maximum,now,complete])?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// The live projection syncs each send in the transaction that writes it. When the sends after
+/// a complete bootstrap's ceiling are all ones it just synced, the ceiling covers them too, so a
+/// reopen rechecks only sends an older binary wrote rather than every send since the last
+/// start. It reads at most one more send than it synced and otherwise leaves the ceiling alone.
+pub(super) fn cover_synced_sends(
+    transaction: &Transaction<'_>,
+    synced: &BTreeSet<String>,
+) -> Result<()> {
+    if synced.is_empty() {
+        return Ok(());
+    }
+    let (ceiling, complete): (u64, bool) = transaction.query_row(
+        "SELECT ceiling,complete FROM local_coordination_backfill WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if !complete {
+        return Ok(());
+    }
+    let after = transaction
+        .prepare_cached(
+            "SELECT store_index,subject FROM claims INDEXED BY claims_kind_index
+             WHERE kind='message.sent' AND store_index>?1 ORDER BY store_index LIMIT ?2",
+        )?
+        .query_map(params![ceiling, synced.len() + 1], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if after.len() > synced.len() || !after.iter().all(|(_, subject)| synced.contains(subject)) {
+        return Ok(());
+    }
+    if let Some((latest, _)) = after.last() {
+        transaction.execute(
+            "UPDATE local_coordination_backfill SET ceiling=?1 WHERE singleton=1",
+            [latest],
+        )?;
     }
     Ok(())
 }
@@ -631,5 +672,71 @@ mod tests {
         let plan:String=store.readers.get().query_row(
             "EXPLAIN QUERY PLAN SELECT SUM(silent) FROM coordination_sends INDEXED BY coordination_sends_time WHERE sent_ms>=1 AND sent_ms<2", [], |row| row.get(3)).unwrap();
         assert!(plan.contains("COVERING INDEX"), "{plan}");
+    }
+
+    /// A restart used to recheck every send since the previous start, one bounded writer page
+    /// per eight, while every seat reconnected. Sends this binary synced need no recheck.
+    #[test]
+    fn a_reopen_rechecks_only_sends_this_binary_did_not_sync() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        let send = |store: &Store, subject: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "message.sent".into(),
+                    actor: Some("agent/example/writer".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("sent")),
+                        ("from".into(), json!("agent/example/writer")),
+                        ("to".into(), json!("agent/example/reader")),
+                        ("content".into(), json!("ceiling fixture")),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+                .store_index
+        };
+        let latest = {
+            let store = Store::open(&path, "node").unwrap();
+            for n in 0..20 {
+                send(&store, &format!("message/before-restart-{n}"));
+            }
+            send(&store, "message/last-before-restart")
+        };
+        let store = Store::open(&path, "node").unwrap();
+        let (_, ceiling, complete, _) = store.coordination_backfill_status().unwrap();
+        assert!(complete, "nothing to recheck after a restart of the same binary");
+        assert_eq!(ceiling, latest);
+
+        // An older binary writes a send without maintaining the counts or the ceiling.
+        let older = send(&store, "message/from-an-older-binary");
+        store
+            .connection
+            .batched(|tx| {
+                tx.execute(
+                    "DELETE FROM coordination_sends WHERE subject='message/from-an-older-binary'",
+                    [],
+                )?;
+                tx.execute(
+                    "UPDATE local_coordination_backfill SET ceiling=?1",
+                    [latest],
+                )?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .unwrap()
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path, "node").unwrap();
+        while !store.advance_coordination_counts().unwrap() {}
+        let (_, ceiling, complete, _) = store.coordination_backfill_status().unwrap();
+        assert!(complete);
+        assert_eq!(ceiling, older);
+        assert_eq!(
+            store.coordination_counts(0, u64::MAX / 2).unwrap()["agent_to_agent"],
+            22
+        );
     }
 }

@@ -65,7 +65,7 @@ impl Targets {
             }
         };
         let description = json!({"handle": handle, "url": next.url, "node": next.node,
-            "fabricVersion": "0.2.30+8bd9017", "irohVersion": "1.0.2"});
+            "fabricVersion": "0.2.41+84c3208", "irohVersion": "1.0.2"});
         self.bridges.insert(handle, (mode, next));
         self.identity = Some(identity);
         Ok(description)

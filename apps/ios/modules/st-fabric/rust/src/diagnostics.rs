@@ -10,6 +10,8 @@ struct Attempt {
     elapsed_ms: Option<u64>,
     path: &'static str,
     result: &'static str,
+    /// The member's fabric error code (`wire::error_code`), when it sent one.
+    code: Option<String>,
     connection: Option<WeakConnectionHandle>,
 }
 static ATTEMPTS: Mutex<Vec<Attempt>> = Mutex::new(Vec::new());
@@ -32,6 +34,7 @@ pub fn started(target: &str) -> u64 {
         elapsed_ms: None,
         path: "unknown",
         result: "connecting",
+        code: None,
         connection: None,
     });
     id
@@ -67,7 +70,7 @@ pub fn connected(id: u64, elapsed_ms: u64, connection: &Connection) {
     }
 }
 
-pub fn ended(id: u64, result: &'static str) {
+pub fn ended(id: u64, result: &'static str, code: Option<String>) {
     if let Some(a) = ATTEMPTS
         .lock()
         .expect("measurements")
@@ -83,6 +86,7 @@ pub fn ended(id: u64, result: &'static str) {
         }
         a.connection = None;
         a.result = result;
+        a.code = code;
     }
 }
 
@@ -100,7 +104,7 @@ pub fn snapshot_for(target: Option<&str>) -> Value {
             let paths = c.paths();
             rtt_ms = paths.iter().find(|p| p.is_selected()).and_then(|p| c.rtt(p.id())).map(|r| r.as_secs_f64() * 1000.0);
         }
-        json!({"id": a.id, "handshakeMs": a.elapsed_ms, "selectedPath": a.path, "result": a.result, "quicRttMs": rtt_ms})
+        json!({"id": a.id, "handshakeMs": a.elapsed_ms, "selectedPath": a.path, "result": a.result, "code": a.code, "quicRttMs": rtt_ms})
     }).collect();
     json!({"elapsedMs": ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64, "attempts": entries})
 }
