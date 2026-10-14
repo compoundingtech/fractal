@@ -5,6 +5,14 @@ use std::path::Path;
 use st3::client::{OutagePhase, daemon_unreachable};
 use st3::model::DoctorCheck;
 
+pub(super) fn client_config_check(unknown: &[String]) -> Option<DoctorCheck> {
+    (!unknown.is_empty()).then(|| DoctorCheck {
+        name: "client-config".into(),
+        status: "warn".into(),
+        message: st3::config::Config::unknown_client_keys_message(unknown),
+    })
+}
+
 pub(super) fn developer_tools(environment: &BTreeMap<String, String>) -> DoctorCheck {
     let mut tools = vec!["cargo", "rustc", "sccache", "git", "nix"];
     if cfg!(target_os = "linux") {

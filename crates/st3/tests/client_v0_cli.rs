@@ -4712,3 +4712,50 @@ mission "orchid-actor" state="ready" {
     }
     server.abort();
 }
+
+#[test]
+fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting_json() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let config_root = root.path().join("config");
+    std::fs::create_dir_all(config_root.join("st3")).unwrap();
+    std::fs::write(config_root.join("st3/config.toml"),
+        "node = 'fixture'\nseat_priority = 'normal'\nfuture_root = 'never-print-this'\n[github]\nfuture_nested = 'also-private'\n").unwrap();
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
+        .env_remove("ST_AGENT")
+        .env_remove("ST_MISSION_RUN")
+        .env("HOME", root.path())
+        .env("XDG_CONFIG_HOME", &config_root)
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .args(["--json", "doctor", "--developer"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let checks = json["checks"].as_array().unwrap();
+    let check = checks
+        .iter()
+        .find(|row| row["name"] == "client-config")
+        .unwrap();
+    let message = check["message"].as_str().unwrap();
+    assert!(message.contains("[\"future_root\"]"));
+    assert!(message.contains("[\"github\"][\"future_nested\"]"));
+    assert_eq!(json["status"], "warn");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("ignoring unknown client config keys:")
+            .count(),
+        1
+    );
+    for text in [stderr.as_ref(), message] {
+        assert!(!text.contains("never-print-this"));
+        assert!(!text.contains("also-private"));
+    }
+}

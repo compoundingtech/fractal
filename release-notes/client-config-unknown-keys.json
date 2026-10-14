@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Keep command clients usable when config gains unknown keys while daemon parsing stays strict",
+  "replay": {
+    "status": "none",
+    "detail": "No graph, projection, claim replay or startup readiness change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database or config-version change; the shared strict Config schema is retained."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No replicated rule, checkpoint, authority, lease or lifecycle change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "New command clients ignore unknown top-level and nested config keys with one escaped key-name-only stderr warning; known typed fields and existing semantic validation remain strict. Daemon startup, server and policy reloads remain deny-unknown strict; doctor reports the names. This does not repair already-deployed strict clients or promise mixed daemon compatibility."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "The parser change adds no daemon restart, migration or recovery work."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "After an install adds config keys, replace stale clients on session PATHs and coordinate restarting affected sessions so they use the installed build. Old deployed strict clients can fail for one more key-adding upgrade cycle; verify the session client and daemon source versions. No live session restart is performed by this change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No native mailbox recovery or production acceptance is qualified. Setup raw-TOML merge preserves unknown values; installed old clients must be upgraded rather than dropping newer keys to make parsing succeed."
+  }
+}

@@ -995,6 +995,33 @@ mod tests {
     }
 
     #[test]
+    fn setup_merge_preserves_unknown_client_top_and_nested_settings() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("config.toml");
+        fs::write(
+            &path,
+            "future_setting = { token = 'private-fixture' }\n[github]\nfuture_nested = ['one', 'two']\n",
+        )?;
+        let before: toml::Table = toml::from_str(&fs::read_to_string(&path)?)?;
+        let (mut config, unknown) = Config::load_client_unvalidated(Some(&path))?;
+        assert_eq!(unknown.len(), 2);
+        config.person = Some("person/fixture".into());
+        config.node = "fixture".into();
+        merge_config(&path, &config)?;
+        let after: toml::Table = toml::from_str(&fs::read_to_string(&path)?)?;
+        assert_eq!(after["future_setting"], before["future_setting"]);
+        assert_eq!(
+            after["github"]["future_nested"],
+            before["github"]["future_nested"]
+        );
+        assert_eq!(after["person"].as_str(), Some("person/fixture"));
+        let bytes = fs::read(&path)?;
+        merge_config(&path, &config)?;
+        assert_eq!(fs::read(&path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
     fn replacing_an_installed_binary_is_atomic_and_repeating_is_safe() -> Result<()> {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");

@@ -106,6 +106,22 @@ cat "${archive%.tar.gz}/BUILD.json"
 so an installed CLI and a running daemon can be compared. All versions use metadata baked at
 compile time, independent of the caller's directory or environment.
 
+## Config keys and clients on an old PATH
+
+After an install adds configuration keys, replace stale `st` clients on session PATHs and
+restart the affected sessions through the normal coordinated lifecycle. Compare `st --version --json` in the session with the installed build and the daemon version from `st doctor --json`.
+Replacing installed files does not update a session pinned to an older executable or Nix path.
+
+New clients ignore unknown top-level and nested config keys with one stderr warning that lists
+escaped key paths, never their values. `st doctor` also lists those names. Known values still
+use the existing typed parser and validation; daemon startup, replication and policy reloads
+remain strict about unknown settings. Setup keeps unknown keys when it merges configuration.
+
+This change cannot repair clients already deployed with the older strict parser: the next
+key-adding upgrade still breaks those old clients once. Any install that adds a key must call
+out that limit and include the session/PATH upgrade instruction. This is not a general promise
+that different daemon releases can run together, and no config-version field is introduced.
+
 ## Restart the services and verify
 
 Schedule one coordinated upgrade window for the whole fleet, with the target files ready on
