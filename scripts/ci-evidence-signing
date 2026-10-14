@@ -143,6 +143,10 @@ def stage_facts(path):
         raise Refused('STAGE must name the ci-linux stage this job ran')
     logs = Path(env('RUNNER_TEMP') or tempfile.gettempdir()) / 'ci-logs'
     log, timing = logs / f'{stage}.log', logs / f'{stage}.time'
+    if not log.exists() and not timing.exists():
+        # Neither a log nor a timing file: the stage never started (a skipped or cancelled job).
+        # Nothing ran, so there is nothing to record, not even a failure.
+        raise Refused(f'stage {stage!r} left no log and no timing file: it did not run, so no note is made')
     seconds, status = '', 1
     if timing.exists():
         parts = timing.read_text().split()

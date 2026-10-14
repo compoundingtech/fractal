@@ -155,8 +155,8 @@ with tempfile.TemporaryDirectory() as directory:
     helper('stage-facts', str(out), env=dict(stage_env, STAGE='fleet-compat'))
     unfinished = json.loads(out.read_text())
     assert unfinished['exit_code'] == 1 and unfinished['inputs']['log_present'] == 'false', 'an unreadable timing file is a failure, never a success'
-    helper('stage-facts', str(out), env=dict(stage_env, STAGE='canaries'))
-    assert json.loads(out.read_text())['exit_code'] == 1
+    never = helper('stage-facts', str(out), env=dict(stage_env, STAGE='canaries'))
+    assert never.returncode == 1 and 'did not run' in never.stdout, 'a stage that left nothing never ran: no note, not even a failure'
     assert helper('stage-facts', str(out), env=dict(stage_env, STAGE='../x')).returncode == 1
     print('passed: a stage note carries the stage command, its real exit status and the digest of its exact log; a missing or garbled timing is a failure')
 
