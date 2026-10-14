@@ -792,14 +792,26 @@ class WorkflowStructure(unittest.TestCase):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
         return re.search(rf'^  {re.escape(name)}:\n((?:    .*\n|\n)+)', text, re.M).group(1)
 
+    @staticmethod
+    def fields(chunk):
+        """Top-level keys of one generated step, whatever order the generator wrote them in."""
+        found = {}
+        for index, line in enumerate(chunk.split('\n')):
+            if index == 0:
+                match = re.match(r'([a-z][a-z-]*): ?(.*)$', line)
+            else:
+                match = re.match(r'        ([a-z][a-z-]*): ?(.*)$', line)
+            if match:
+                found.setdefault(match.group(1), match.group(2))
+        return found
+
     def steps_of(self, name):
         """(step name or uses, its if or None) for each step of a job, in order."""
         body = self.job_text(name).split('    steps:\n', 1)[1]
         steps = []
         for chunk in re.split(r'^      - ', body, flags=re.M)[1:]:
-            label = re.match(r'(?:name: (.*)|uses: (.*))', chunk)
-            condition = re.search(r'^        if: (.*)$', chunk, re.M)
-            steps.append((label.group(1) or label.group(2), condition.group(1) if condition else None))
+            found = self.fields(chunk)
+            steps.append((found.get('name') or found.get('uses'), found.get('if')))
         return steps
 
     def test_a_wired_check_skips_its_steps_only_when_its_own_gate_says_so(self):
@@ -871,11 +883,11 @@ class WorkflowStructure(unittest.TestCase):
         chunks = re.split(r'^      - ', body, flags=re.M)[1:]
         seen_checkout = False
         for chunk in chunks:
-            if chunk.startswith('uses: actions/checkout'):
+            found = self.fields(chunk)
+            if str(found.get('uses', '')).startswith('actions/checkout'):
                 seen_checkout = True
                 continue
-            condition = re.search(r'^        if: (.*)$', chunk, re.M)
-            return condition.group(1) if condition else None
+            return found.get('if')
         return None
 
     def test_the_linux_group_is_consistent_for_every_combination_of_gate_decisions(self):
@@ -945,18 +957,19 @@ class WorkflowStructure(unittest.TestCase):
                 self.assertNotIn('evidence-gate', condition)  # the job itself is never skipped: a required check never reports skipped
                 body = block.split('    steps:\n', 1)[1]
                 chunks = re.split(r'^      - ', body, flags=re.M)[1:]
-                self.assertTrue(chunks[0].startswith('name: Require the shared test producer'), 'the pre-check on the build is the first step')
+                self.assertTrue(self.fields(chunks[0]).get('name', '').startswith('Require the shared test producer'),
+                                'the pre-check on the build is the first step')
                 saw_checkout = False
                 for chunk in chunks:
-                    label = chunk.split('\n')[0]
-                    condition = re.search(r'^        if: (.*)$', chunk, re.M)
-                    condition = condition.group(1) if condition else None
-                    if chunk.startswith('uses: actions/checkout'):
+                    found = self.fields(chunk)
+                    label = found.get('name') or found.get('uses') or ''
+                    condition = found.get('if')
+                    if str(found.get('uses', '')).startswith('actions/checkout'):
                         saw_checkout = True
                         self.assertIsNone(condition, 'the checkout is never skipped')
-                    elif label.startswith('name: evidence covered by a trusted note'):
+                    elif label.startswith('evidence covered by a trusted note'):
                         self.assertTrue(all(f"needs.evidence-gate-{g}.outputs.skip == 'true'" in condition for g in gates))
-                    elif label.startswith('name: Report job cache coverage'):
+                    elif label.startswith('Report job cache coverage'):
                         self.assertEqual(condition, 'always()')
                     else:
                         self.assertIsNotNone(condition, f'{label} would run on a skip')
@@ -977,11 +990,13 @@ class WorkflowStructure(unittest.TestCase):
                         readers.append(chunk)
                 self.assertGreaterEqual(len(readers), 2, f'{check}: expected the pre-check and the download to be found')
                 for chunk in readers:
-                    condition = re.search(r'^        if: (.*)$', chunk, re.M)
-                    self.assertIsNotNone(condition, chunk.split('\n')[0])
+                    found = self.fields(chunk)
+                    label = found.get('name') or found.get('uses') or chunk.split('\n')[0]
+                    condition = found.get('if')
+                    self.assertIsNotNone(condition, label)
                     for gate in gates:
-                        self.assertIn(f"needs.evidence-gate-{gate}.outputs.skip == 'true'", condition.group(1), chunk.split('\n')[0])
-                    self.assertIn('!(', condition.group(1))
+                        self.assertIn(f"needs.evidence-gate-{gate}.outputs.skip == 'true'", condition, label)
+                    self.assertIn('!(', condition)
 
     def test_the_build_is_skipped_only_through_its_dependents_never_on_its_own_say(self):
         block = self.blocks()['linux-test-build']
