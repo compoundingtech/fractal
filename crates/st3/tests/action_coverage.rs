@@ -765,7 +765,7 @@ async fn dispatch(
     actions! {
         "agent.create" => agent_create, "agent.queue-move" => agent_queue_move,
         "agent.resume" => agent_resume, "agent.start" => agent_start,
-        "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
+        "agent.retire" => agent_retire, "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
         "arrangement.edit" => arrangement_edit,
         "attention.resolve" => attention_resolve,
@@ -5910,4 +5910,119 @@ async fn onepassword_field_reference_manifest_registers_validates_replicates_and
         vec![json!({"locator":format!("{boundary}a")})],
     )
     .await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.apply(
+        "version 2\nagent \"example/worker\" { command \"true\"; workspace \"/tmp\"; }\n",
+        "retirement-declaration",
+    );
+    let parameters = json!({"to":WORKER,"content":"An invented note.","kind":"wake"});
+    let accepted = dispatch(
+        &daemon.client(PERSON),
+        "message.send",
+        "retirement-accepted-message",
+        daemon.fence(PERSON).await,
+        parameters.clone(),
+    )
+    .await
+    .unwrap();
+    let key = "terminal-retirement-operation";
+    let args = [
+        "agents",
+        "retire",
+        WORKER,
+        "--as",
+        PERSON,
+        "--reason",
+        "Work finished",
+        "--idempotency-key",
+        key,
+    ];
+    let retired = cli_value(daemon.cli(PERSON, &args).await);
+    daemon.restart().await;
+    let repeated = cli_value(daemon.cli(PERSON, &args).await);
+    assert_eq!(
+        retired["value"]["action_id"],
+        repeated["value"]["action_id"]
+    );
+    assert_eq!(
+        daemon
+            .store()
+            .claims_for_subject_kind_at(WORKER, "agent.retired", None, false, 10)
+            .unwrap()
+            .claims
+            .len(),
+        1
+    );
+    let retry = dispatch(
+        &daemon.client(PERSON),
+        "message.send",
+        "retirement-accepted-message",
+        daemon.fence(PERSON).await,
+        parameters.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.value.operation_id, accepted.value.operation_id);
+    assert_eq!(retry.value.affected_ids, accepted.value.affected_ids);
+    let before = daemon.store().index().unwrap();
+    let error = dispatch(
+        &daemon.client(PERSON),
+        "message.send",
+        "retirement-fresh-message",
+        daemon.fence(PERSON).await,
+        parameters,
+    )
+    .await
+    .unwrap_err();
+    match error {
+        ClientError::Api(code, _, error) => {
+            assert_eq!(code, ErrorCode::RecipientRetired);
+            assert_eq!(error.details["applied"], "none");
+            assert_eq!(error.details["refusal"]["variant"], "Retired");
+            assert_eq!(error.details["refusal"]["recipient"], WORKER);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(before, daemon.store().index().unwrap());
+    let refused = daemon
+        .cli(
+            PERSON,
+            &[
+                "conversations",
+                "send",
+                WORKER,
+                "--from",
+                PERSON,
+                "--body",
+                "A fresh note.",
+            ],
+        )
+        .await;
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("Retired") && stderr.contains(WORKER),
+        "{stderr}"
+    );
+    let raw = daemon.transport().post::<_,Value>("/v1/messages",&json!({"to":WORKER,"from":PERSON,"content":"An adapter note","idempotency_key":"retirement-adapter-message"})).await.unwrap_err();
+    let (status,code,_,details)=st3::client::api_error_parts(&raw).unwrap();
+    assert_eq!(status,409);assert_eq!(code,"recipient-retired");assert_eq!(details["applied"],"none");
+    let restarted = daemon
+        .cli(PERSON, &["agents", "start", WORKER, "--as", PERSON])
+        .await;
+    assert!(!restarted.status.success());
+    assert!(
+        daemon
+            .store()
+            .desired_subjects()
+            .unwrap()
+            .iter()
+            .all(|subject| subject.subject != WORKER || subject.member.is_none())
+    );
 }
