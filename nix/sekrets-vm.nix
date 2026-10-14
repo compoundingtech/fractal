@@ -36,6 +36,11 @@ let
     [programs."1002".checkout]
     backing_root = "/var/cache/evidence/work"
     mount_root = "/w"
+    [programs."1003"]
+    principal = "program/ci1/host-evidence"
+    person = "person/ada"
+    unit = "ci-host-evidence.service"
+    command = ["gh", "pr", "view", "1"]
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -68,6 +73,12 @@ pkgs.testers.runNixOSTest {
       group = "evidence-caller";
     };
     users.groups.evidence-caller = { };
+    users.users.host-evidence-caller = {
+      isSystemUser = true;
+      uid = 1003;
+      group = "host-evidence-caller";
+    };
+    users.groups.host-evidence-caller = { };
     services.openssh.enable = true;
     environment.systemPackages = [
       pty
@@ -173,6 +184,15 @@ pkgs.testers.runNixOSTest {
     machine.succeed("install -d -m 0755 /var/cache/evidence/other/smalltalk && ln -s /var/cache/evidence/other /var/cache/evidence/work/escape")
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/escape/smalltalk", succeed=False)
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", backing="/var/cache/evidence/other", succeed=False)
+    # Reachable private mount but wrong physical-root owner: refusal comes from the gateway,
+    # rather than a client that cannot enter its cwd.
+    machine.succeed("chown robin /var/cache/evidence/work && chmod 0755 /var/cache/evidence/work")
+    assert "runner checkout root has the wrong owner" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", succeed=False)
+    machine.succeed("chown evidence-caller /var/cache/evidence/work && chmod 0700 /var/cache/evidence/work && setfacl -m u:sekrets:x /var/cache/evidence/work")
+    # A Program with no private-mount mapping must refuse an out-of-roots cwd too;
+    # the ordinary person's profile-HOME fallback must not apply.
+    login("ada", f"{st} sekrets grant ada/agent-gh --to program/ci1/host-evidence --allow 'gh pr view'")
+    assert "not under a checkout root" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", unit="ci-host-evidence.service", user="host-evidence-caller", cwd="/tmp", succeed=False)
     assert "program/ci1/evidence" in login("ada", f"{st} sekrets log --limit 200")
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 2", succeed=False)
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", unit="other-evidence.service", succeed=False)

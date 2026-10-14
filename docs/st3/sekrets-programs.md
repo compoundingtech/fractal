@@ -100,8 +100,21 @@ its structured input and constructs the statement itself; it must not accept
 arbitrary bytes, caller-selected key/config, Git executable overrides or a clock
 override in production. No GitHub observation API is needed for these local facts.
 
-This isolates the key; it does not prove a hostile job truthfully reported its
-execution or that a caller-provided commit is the actual PR head. Verifier policy
+Every process inside the enrolled runner unit is the same Program caller,
+including code the job executes. The gateway identifies the runner, not the job,
+and `exit_code` and `output_sha256` are caller-supplied. A note signed through this
+route means “a job on this runner reported this result”; it does not prove the
+check ran or that a caller-provided commit is the actual PR head. Keep this
+Program signer at a distinct, weaker signer principal/level than the central
+protected observer in `.st/evidence-keys`. A Program-signed `wrapper` note must
+never satisfy an `observed` skip policy. The verifier owner must test this
+negative boundary; this gateway does not implement skip decisions.
+
+Do not grant the signer to a unit that runs untrusted fork or unreviewed PR code.
+First installation must use the reviewed merge-group-only runner unit and its
+actual routing restrictions. A shared runner UID alone cannot distinguish jobs;
+per-job identity or a protected measurement producer is a separate prerequisite
+before expanding enrollment. This isolates key access within that scope. Verifier policy
 must compare exact tree/check/input keys and signer role. Developer/cooperative
 trust is a **different principal/level**, not an invented `cooperative` value in
 the existing `full/degraded/test` schema. The service never decides whether CI is
