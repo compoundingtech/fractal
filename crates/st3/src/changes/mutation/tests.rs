@@ -75,6 +75,7 @@ mission "fixture-stage" state="ready" {
             &step,
             "claim",
             &WorkRequest {
+                wait_ms: None,
                 actor: Some(ACTOR.into()),
                 incarnation: Some(INCARNATION.into()),
                 summary: None,
@@ -112,6 +113,7 @@ fn work_authority_sql_is_history_independent() {
         if ceiling == 1000 {
             for n in 0..32 {
                 store.work_action(&binding.step, "progress", &WorkRequest {
+                    wait_ms: None,
                     actor: Some(ACTOR.into()), incarnation: Some(INCARNATION.into()),
                     summary: Some(format!("Bound attempt progress {n}")), reason: None,
                     evidence: vec![], idempotency_key: format!("authority-progress-{n}"),
@@ -156,6 +158,7 @@ fn work_authority_checks_exact_claim_actor_attempt_and_live_incarnation() {
             &binding.step,
             "renew",
             &WorkRequest {
+                wait_ms: None,
                 actor: Some(ACTOR.into()),
                 incarnation: Some(INCARNATION.into()),
                 summary: None,
@@ -733,6 +736,7 @@ async fn different_live_worker_cannot_change_state_and_deferred_is_typed() {
             &other_step,
             "claim",
             &WorkRequest {
+                wait_ms: None,
                 actor: Some(other_actor.into()),
                 incarnation: Some(other_incarnation.into()),
                 summary: None,
