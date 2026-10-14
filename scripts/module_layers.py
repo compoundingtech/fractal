@@ -14,6 +14,7 @@ import collections
 import json
 import os
 import re
+import tomllib
 
 SOURCE_DIRS = ("crates/st3-core/src", "crates/st3-daemon/src", "crates/st3/src")
 ENTRY_FILES = {"lib", "main", "fixture"}
@@ -182,6 +183,45 @@ def layers(edges):
     return depth
 
 
+BINARY_SIDE_CRATES = ("stui", "st3-conversation-ui")
+
+
+def crate_findings(root):
+    """Facts about the st3 and st3-daemon packages that docs/st3/crate-contract.md promises.
+
+    They apply once crates/st3-daemon exists: the library does not depend on a binary-side crate,
+    the two packages carry the same version (the library reports CARGO_PKG_VERSION), and their
+    build.rs files are the same (both read the ST3_FIXTURE_* variables for the same feature).
+    """
+    daemon = os.path.join(root, "crates", "st3-daemon")
+    if not os.path.isfile(os.path.join(daemon, "Cargo.toml")):
+        return []
+    problems = []
+
+    def manifest(directory):
+        with open(os.path.join(directory, "Cargo.toml"), "rb") as handle:
+            return tomllib.load(handle)
+
+    library, binary = manifest(daemon), manifest(os.path.join(root, "crates", "st3"))
+    if library["package"]["version"] != binary["package"]["version"]:
+        problems.append(f"crates/st3-daemon version {library['package']['version']} differs from "
+                        f"crates/st3 version {binary['package']['version']}")
+    for name in BINARY_SIDE_CRATES:
+        if name in library.get("dependencies", {}):
+            problems.append(f"crates/st3-daemon depends on {name}, which is binary-side")
+    build = [os.path.join(d, "build.rs") for d in (daemon, os.path.join(root, "crates", "st3"))]
+    contents = []
+    for path in build:
+        try:
+            with open(path) as handle:
+                contents.append(handle.read())
+        except FileNotFoundError:
+            contents.append(None)
+    if contents[0] != contents[1]:
+        problems.append("crates/st3-daemon/build.rs and crates/st3/build.rs differ or one is missing")
+    return problems
+
+
 def findings(root):
     modules, edges = production_graph(root)
     allowed = load_layers(root)
@@ -195,7 +235,7 @@ def findings(root):
     cycle = find_cycle(without(edges, allowed & present))
     if cycle:
         problems.append("module cycle outside the allowlist: " + " -> ".join(cycle))
-    return problems
+    return problems + crate_findings(root)
 
 
 def reverse_closure(edges, start):
