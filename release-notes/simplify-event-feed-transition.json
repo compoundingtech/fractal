@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Retire the new CLI legacy event-feed fallback while preserving server routes for older CLIs",
+  "replay": {
+    "status": "none",
+    "detail": "none"
+  },
+  "schema": {
+    "status": "none",
+    "detail": "none"
+  },
+  "rules": {
+    "status": "none",
+    "detail": "none"
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The server wire is unchanged: GET /v1/events, its existing health feature and GET /v1/events/page remain available. A new following CLI no longer enters the legacy feed when a missing-page reply from an older daemon is followed by health from its replacement; it stops with upgrade-and-rerun guidance. Landing requires an explicit compatibility decision for older published upgrade sources."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "none"
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "If the daemon has no bounded event route, install a build containing commit 7fc261ed03280300b4acfca4c2d0521173b78520 or newer on the daemon host, restart the managed daemon with st service restart, and rerun the original command. Reinstalling latest v0.3.17 is insufficient because it predates that commit. No fleet roll is performed by this change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "none"
+  }
+}
