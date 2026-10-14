@@ -33,7 +33,7 @@ struct Handoffs {
 pub async fn run(
     client: &Client,
     subject: &str,
-    incarnation: &str,
+    incarnation: impl std::future::Future<Output = Result<String>>,
     paths: &st_drivers::driver_paths::Paths,
     identity: &str,
     runtime_id: &str,
@@ -56,14 +56,55 @@ pub async fn run(
         // unconditional replay of instructions whose consumption is uncertain.
         let ledger = ledger.unwrap_or_default();
         State {
-            fence: Fence::new(subject, incarnation, "delivery"),
+            fence: Fence::new(subject, "", "delivery"),
             attempted: ledger.attempted,
             confirmed: ledger.confirmed,
             accepted: ledger.accepted,
             ..State::default()
         }
     };
-    state.fence.bind(client).await?;
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+    let spawn_reader =
+        |sender: tokio::sync::mpsc::UnboundedSender<st_drivers::reexec::StdinChunk>| {
+            st_drivers::reexec::StdinReader::spawn(move |chunk| sender.send(chunk).is_ok())
+        };
+    let mut reader = Some(spawn_reader(input_tx.clone()));
+    let mut stdout = tokio::io::stdout();
+    // Claude times out MCP startup independently of st's daemon. Serve the local protocol
+    // while discovering and binding ownership; this grants no mailbox access or readiness.
+    let mut fence = state.fence.clone();
+    let binding = async {
+        anyhow::ensure!(
+            fence.subject == subject && fence.component == "delivery",
+            "the resumed Claude channel belongs to another subject or component"
+        );
+        let incarnation = incarnation.await?;
+        anyhow::ensure!(
+            fence.incarnation.is_empty() || fence.incarnation == incarnation,
+            "the resumed Claude channel belongs to another runtime incarnation"
+        );
+        fence.incarnation = incarnation;
+        fence.bind(client).await?;
+        Ok::<_, anyhow::Error>(fence)
+    };
+    tokio::pin!(binding);
+    loop {
+        tokio::select! {
+            bound = &mut binding => { state.fence = bound?; break; },
+            chunk = input_rx.recv() => match chunk {
+                Some(st_drivers::reexec::StdinChunk::Bytes(bytes)) => {
+                    state.lines.push(&bytes);
+                    while let Some(line) = state.lines.next_line() {
+                        if let Some(response) = request(&line, &mut state.initialized)? {
+                            write(&mut stdout, &response).await?;
+                        }
+                    }
+                },
+                Some(st_drivers::reexec::StdinChunk::Eof) | None => return Ok(()),
+                Some(st_drivers::reexec::StdinChunk::Failed(error)) => return Err(error.into()),
+            },
+        }
+    }
     let report = || {
         json!({"transport":"claude-channel", "pid":std::process::id(),
         "image":st_drivers::reexec::running_identity().map(|i| i.token()),
@@ -72,14 +113,14 @@ pub async fn run(
         "ready":state.initialized})
     };
     let mut subscription = Subscription::start(client.clone(), state.fence.clone(), report());
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
-    let spawn_reader =
-        |sender: tokio::sync::mpsc::UnboundedSender<st_drivers::reexec::StdinChunk>| {
-            st_drivers::reexec::StdinReader::spawn(move |chunk| sender.send(chunk).is_ok())
-        };
-    let mut reader = Some(spawn_reader(input_tx.clone()));
     let mut watch = st_drivers::reexec::ReplacementWatch::for_current_process();
-    let mut stdout = tokio::io::stdout();
+    // Retry the identical claim after a failed acknowledgement. The existing tick
+    // schedules retries; polling the POST separately keeps MCP input and EOF live.
+    let initialization_input = channel_initialization_claim(&state.fence);
+    let initialization = announce_initialization(client, &initialization_input);
+    tokio::pin!(initialization);
+    let mut initialization_recorded = false;
+    let mut initialization_pending = true;
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut messages = Vec::<MessageView>::new();
@@ -92,8 +133,18 @@ pub async fn run(
     let mut diagnostics = BTreeMap::<String, DiagnosticReport>::new();
     loop {
         tokio::select! {
+            result = &mut initialization, if state.initialized && initialization_pending => {
+                initialization_pending = false;
+                initialization_recorded = result.is_ok();
+                if initialization_recorded {
+                    retries.remove("channel-initialized");
+                } else {
+                    retry_failed(&mut retries, "channel-initialized");
+                }
+            },
             frame = subscription.receiver.recv() => match frame {
                 Some(Frame::Mailbox { messages: next }) => { messages = next; replayed = true; },
+                Some(Frame::Replay { nonce }) => subscription.acknowledge_replay(nonce),
                 Some(Frame::Drain { operation }) => subscription.acknowledge_drain(operation),
                 Some(Frame::Seat { .. }) => {}, // the outer driver owns the PTY title
                 Some(Frame::Fenced { reason }) => anyhow::bail!("{reason}"),
@@ -107,21 +158,16 @@ pub async fn run(
                             write(&mut stdout, &response).await?;
                         }
                     }
-                    if state.initialized {
-                        // MCP initialization is positive native readiness, independent of hooks.
-                        let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
-                            subject: subject.into(), kind:"harness.observed".into(), actor:Some(subject.into()),
-                            fields:{let mut fields=BTreeMap::from([("state".into(),json!("ready")),("driver".into(),json!("claude")),
-                                ("transport".into(),json!("claude-channel")),("incarnation_id".into(),json!(incarnation))]);
-                                crate::suspension::annotate_quiescence(&mut fields); fields},
-                            evidence:Vec::new(),expected_subject:None,idempotency_key:Some(format!("channel-ready:{subject}:{incarnation}:{}",state.fence.epoch)),
-                        }).await;
-                    }
                 },
                 Some(st_drivers::reexec::StdinChunk::Eof) | None => return Ok(()),
                 Some(st_drivers::reexec::StdinChunk::Failed(error)) => return Err(error.into()),
             },
             _ = interval.tick() => {
+                if state.initialized && !initialization_recorded && !initialization_pending
+                    && retry_ready(&retries, "channel-initialized") {
+                    initialization.set(announce_initialization(client, &initialization_input));
+                    initialization_pending = true;
+                }
                 subscription.report(json!({"transport":"claude-channel", "pid":std::process::id(),
                     "image":st_drivers::reexec::running_identity().map(|i| i.token()),
                     "follows":st_drivers::reexec::installed_binary().map(|path| path.display().to_string()),
@@ -169,7 +215,7 @@ pub async fn run(
                             }
                             let body = body(client, message).await?;
                             let attachments = crate::blobs::materialize_for_seat(client, subject, &agent_dir.join("attachments"), message).await?;
-                            Ok::<_, anyhow::Error>(Some(st_drivers::ding::with_dictation_notice(
+                            Ok::<_, anyhow::Error>(Some(st_drivers::ding::with_tag_notices(
                                 st_drivers::ding::st3_notification_with_attachments(&message.subject, &message.from, &message.to,
                                     message.title.as_deref(), &body, &st_drivers::ding::st3_body_sha256(&body), &attachments), &message.tags)))
                         }.await;
@@ -299,6 +345,10 @@ pub async fn run(
     }
 }
 
+async fn announce_initialization(client: &Client, input: &ClaimInput) -> Result<ClaimRecord> {
+    client.post("/v1/claims", input).await
+}
+
 #[derive(Default)]
 struct Retry {
     failures: u32,
@@ -312,8 +362,10 @@ fn retry_ready(retries: &BTreeMap<String, Retry>, key: &str) -> bool {
 fn retry_failed(retries: &mut BTreeMap<String, Retry>, key: &str) {
     let retry = retries.entry(key.into()).or_default();
     retry.failures = retry.failures.saturating_add(1);
-    let seconds = (1_u64 << retry.failures.saturating_sub(1).min(5)).min(30);
-    retry.due = Some(Instant::now() + Duration::from_secs(seconds));
+    retry.due = Some(Instant::now() + retry_delay(retry.failures));
+}
+fn retry_delay(failures: u32) -> Duration {
+    Duration::from_secs((1_u64 << failures.saturating_sub(1).min(5)).min(30))
 }
 struct DiagnosticReport {
     reason: String,
@@ -491,7 +543,9 @@ fn user_text(record: &Value) -> Vec<&str> {
     }
 }
 async fn body(client: &Client, message: &MessageView) -> Result<String> {
-    if message.content.starts_with("doc/") {
+    if message.body_ref.is_some() {
+        crate::message_body::full_text(client, message).await
+    } else if message.content.starts_with("doc/") {
         let value: Value = client
             .get(&format!(
                 "/v1/documents/content?reference={}",
@@ -535,6 +589,48 @@ async fn receipt(
         )
         .await
 }
+/// A user-scoped plugin may be loaded by ordinary Claude sessions outside a seat.
+/// Serve the protocol without paths, daemon access, mailbox fences or readiness observations.
+pub async fn run_idle() -> Result<()> {
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut stdout = tokio::io::stdout();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let incoming: Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(_) => {
+                write(&mut stdout, &json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}})).await?;
+                continue;
+            }
+        };
+        let id = &incoming["id"];
+        if id.is_null() {
+            continue;
+        }
+        let result = match incoming["method"].as_str() {
+            Some("initialize") => json!({"protocolVersion":"2025-03-26","capabilities":{},
+                "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")}}),
+            Some("tools/list") => json!({"tools":[]}),
+            Some("resources/list") => json!({"resources":[]}),
+            Some("resources/templates/list") => json!({"resourceTemplates":[]}),
+            Some("prompts/list") => json!({"prompts":[]}),
+            Some("ping") => json!({}),
+            _ => {
+                write(&mut stdout, &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}})).await?;
+                continue;
+            }
+        };
+        write(
+            &mut stdout,
+            &json!({"jsonrpc":"2.0","id":id,"result":result}),
+        )
+        .await?;
+    }
+    Ok(())
+}
 async fn write(stdout: &mut tokio::io::Stdout, frame: &Value) -> Result<()> {
     stdout
         .write_all(format!("{}\n", serde_json::to_string(frame)?).as_bytes())
@@ -542,13 +638,37 @@ async fn write(stdout: &mut tokio::io::Stdout, frame: &Value) -> Result<()> {
     stdout.flush().await?;
     Ok(())
 }
+fn channel_initialization_claim(fence: &Fence) -> ClaimInput {
+    ClaimInput {
+        subject: fence.subject.clone(),
+        kind: "harness.diagnostic".into(),
+        actor: Some(fence.subject.clone()),
+        fields: BTreeMap::from([
+            ("code".into(), json!("claude-channel-initialized")),
+            ("status".into(), json!("initialized")),
+            ("driver".into(), json!("claude")),
+            ("incarnation_id".into(), json!(fence.incarnation)),
+            ("reason".into(), json!("The scoped MCP protocol initialized; provider activity and live attachment are reported independently.")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        // This payload is different from the legacy provider-ready observation.
+        // Preserve that old request's immutable input by using a fresh namespace.
+        idempotency_key: Some(format!(
+            "channel-initialized:{}:{}:{}",
+            fence.subject, fence.incarnation, fence.epoch,
+        )),
+    }
+}
+
 fn request(line: &str, initialized: &mut bool) -> Result<Option<Value>> {
     let request: Value = serde_json::from_str(line)?;
     let id = &request["id"];
     let result = match request["method"].as_str() {
         Some("initialize") => {
             json!({"protocolVersion":"2025-03-26","capabilities":{"experimental":{"claude/channel":{}}},
-            "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")}})
+            "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")},
+            "instructions":st_drivers::ding::CHANNEL_INSTRUCTIONS})
         }
         Some("notifications/initialized") => {
             *initialized = true;
@@ -567,6 +687,63 @@ fn request(line: &str, initialized: &mut bool) -> Result<Option<Value>> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn claude_channel_retry_backoff_caps_at_thirty_seconds() {
+        for (failures, seconds) in [
+            (1, 1),
+            (2, 2),
+            (3, 4),
+            (4, 8),
+            (5, 16),
+            (6, 30),
+            (7, 30),
+            (u32::MAX, 30),
+        ] {
+            assert_eq!(retry_delay(failures), Duration::from_secs(seconds));
+        }
+    }
+
+    #[test]
+    fn scoped_protocol_keeps_channel_capability_and_empty_tool_surface() {
+        let mut initialized = false;
+        let initialize = request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+            &mut initialized,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            initialize["result"]["capabilities"]["experimental"]["claude/channel"],
+            json!({})
+        );
+        assert_eq!(
+            initialize["result"]["instructions"],
+            st_drivers::ding::CHANNEL_INSTRUCTIONS
+        );
+        assert!(
+            initialize["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("people have no inbox, so do not reply with st")
+        );
+        let tools = request(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            &mut initialized,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(tools["result"], json!({"tools":[]}));
+        assert!(
+            request(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                &mut initialized
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(initialized);
+    }
 
     #[test]
     fn claude_receipt_state_accepts_ledgers_written_before_native_acceptance_tracking() {
@@ -607,6 +784,9 @@ mod tests {
                 title: None,
                 in_reply_to: None,
                 tags: Vec::new(),
+                body_ref: None,
+                body_bytes: None,
+                body_origin: None,
                 created_index: 1,
                 attachments: Vec::new(),
             };

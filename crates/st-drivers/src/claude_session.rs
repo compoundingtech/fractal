@@ -148,13 +148,23 @@ pub fn run_controlled_paths(
         !claude_argv.is_empty(),
         "Claude driver '{runtime_id}' has no provider argv"
     );
-    let claude_argv = prepare_st3_channel_argv(&paths.root, &identity, claude_argv)?;
+    let mut claude_argv = claude_argv;
     let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
+    if let Some(mode) = crate::access::AccessMode::from_environment()? {
+        let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
+        let explicit_permissions = claude_argv[1..boundary].iter().any(|arg| {
+            matches!(arg.as_str(), "--dangerously-skip-permissions" | "--permission-mode")
+                || arg.starts_with("--permission-mode=")
+        });
+        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions, &workspace));
+    }
+    let claude_argv = prepare_st3_channel_argv(&paths.root, &identity, claude_argv)?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
     install_signal_handler();
     let observer = SessionObserver::new(&paths.agent_dir, &identity, "claude", &runtime_id)?;
     let mut env = vec![
+        ("DISABLE_AUTOUPDATER".into(), "1".into()),
         (RUNTIME_ID_ENV.to_string(), runtime_id.clone()),
         (SESSION_ENV.to_string(), observer.session().to_string()),
         (SESSION_SEQ_ENV.to_string(), observer.seq().to_string()),
@@ -223,8 +233,12 @@ fn prepare_st3_channel_argv(
     if !requires_st3_channel(&argv) {
         return Ok(argv);
     }
-    match crate::claude_channel::verify_st3_installed() {
-        Ok(()) => select_st3_channel_plugin(argv, true),
+    match crate::claude_channel::verify_st3_plugin() {
+        Ok(()) => {
+            let approved = crate::claude_channel::st3_policy_available();
+            let argv = select_st3_channel_plugin(argv, true)?;
+            Ok(st3_plugin_admission_argv(argv, approved))
+        }
         Err(error) => {
             eprintln!(
                 "warning: the approved st3 Claude channel plugin is unavailable: {error:#}\n\
@@ -237,6 +251,19 @@ fn prepare_st3_channel_argv(
         }
     }
 }
+
+fn st3_plugin_admission_argv(mut argv: Vec<String>, approved: bool) -> Vec<String> {
+    if !approved {
+        for index in 0..argv.len().saturating_sub(1) {
+            if argv[index] == "--channels" && argv[index + 1] == crate::claude_channel::ST3_CHANNEL
+            {
+                argv[index] = "--dangerously-load-development-channels".into();
+            }
+        }
+    }
+    argv
+}
+
 
 /// Only the selected channel may own this seat's mailbox fence. User/project settings and
 /// older fleet declarations can still enable the previous st3 plugins after an upgrade.
@@ -1343,14 +1370,15 @@ fn observe_payload(
             payload
                 .get("session_id")
                 .and_then(serde_json::Value::as_str),
-        ) {
-            if !native_id.is_empty() {
-                if let Err(error) = write_native_session_binding(agent_dir, incarnation, native_id)
-                {
-                    tracing::warn!(
-                        "st claude-observe: native session binding write failed: {error:#}"
-                    );
-                }
+        ) && !native_id.is_empty()
+        {
+            let transcript_path = payload
+                .get("transcript_path")
+                .and_then(serde_json::Value::as_str);
+            if let Err(error) =
+                write_native_session_binding(agent_dir, incarnation, native_id, transcript_path)
+            {
+                tracing::warn!("st claude-observe: native session binding write failed: {error:#}");
             }
         }
     }
@@ -1373,11 +1401,17 @@ fn observe_payload(
         // Responses are read from the transcript at Stop, so the account is read here too: the
         // one this Claude config is signed in to when its responses are recorded.
         timeline.set_account(crate::account::claude_account_cached(agent_dir));
-        if let Some(home) = var("HOME") {
+        // The transcripts live in the config directory the session runs on, which a seat on a
+        // declared account's login sets itself.
+        let claude_config = var("CLAUDE_CONFIG_DIR")
+            .filter(|directory| !directory.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| var("HOME").map(|home| Path::new(&home).join(".claude")));
+        if let Some(claude_config) = claude_config {
             if let Err(error) = crate::harness_timeline::observe_claude_stop_transcript(
                 &mut timeline,
                 &payload,
-                Path::new(&home),
+                &claude_config,
             ) {
                 tracing::warn!("st claude-observe: native answer publication failed: {error:#}");
             }
@@ -1435,17 +1469,24 @@ fn observe_payload(
     writer.observe_unless_ended(observation).map(|_wrote| ())
 }
 
+/// `transcript_path` is the file Claude says holds the session, which follows the seat's own
+/// `CLAUDE_CONFIG_DIR`; st3 reads it so a seat on any account is found without guessing.
 fn write_native_session_binding(
     agent_dir: &Path,
     incarnation: &str,
     native_id: &str,
+    transcript_path: Option<&str>,
 ) -> Result<()> {
+    let mut binding = serde_json::json!({
+        "incarnation": incarnation,
+        "native_session_id": native_id,
+    });
+    if let Some(path) = transcript_path.filter(|path| Path::new(path).is_absolute()) {
+        binding["transcript_path"] = serde_json::Value::String(path.to_owned());
+    }
     harness_state::write_json_atomic(
         &agent_dir.join("claude-native-session"),
-        &serde_json::json!({
-            "incarnation": incarnation,
-            "native_session_id": native_id,
-        }),
+        &binding,
         agent_dir,
         ".claude-native-session",
     )
@@ -1845,7 +1886,14 @@ pub fn observe_hook_event(event: &str, payload: &serde_json::Value) -> Option<Ob
             Observation::new(Activity::Idle, BlockedOn::None, InputBuffer::Unknown)
                 .with_reason("sessionStart"),
         ),
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(Observation::new(
+        // Compacting is a status of the seat, not a wait on anyone: it ends at the next tool use
+        // or turn when auto-compaction runs inside a turn, and at `SessionStart` (source
+        // `compact`) after a `/compact`, which reads as idle.
+        "PreCompact" => Some(
+            Observation::new(Activity::Active, BlockedOn::None, InputBuffer::Unknown)
+                .with_reason("compaction"),
+        ),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some(Observation::new(
             Activity::Active,
             BlockedOn::None,
             InputBuffer::Unknown,
@@ -1892,10 +1940,18 @@ pub fn observe_hook_event(event: &str, payload: &serde_json::Value) -> Option<Ob
             } else {
                 Ask::Permission
             };
+            // The tool the prompt asks to use. Its input is conversation content: a client reads
+            // the pending call from the seat's conversation, never from this replicated record.
+            let reason = payload
+                .get("tool_name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|tool| !tool.is_empty())
+                .unwrap_or("permissionRequest")
+                .to_owned();
             Some(
                 Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)
                     .with_ask(ask)
-                    .with_reason("permissionRequest"),
+                    .with_reason(reason),
             )
         }
         _ => None,
@@ -2031,6 +2087,58 @@ mod tests {
     use crate::provider_session::run_provider;
 
     #[test]
+    fn st3_plugin_admission_uses_development_without_policy_and_preserves_other_channels() {
+        let args = vec![
+            "claude".into(),
+            "--channels".into(),
+            crate::claude_channel::ST3_CHANNEL.into(),
+            "--channels".into(),
+            "plugin:other@other".into(),
+            "boot prompt".into(),
+        ];
+        assert_eq!(st3_plugin_admission_argv(args.clone(), true), args);
+        let development = st3_plugin_admission_argv(args, false);
+        assert_eq!(
+            &development[1..3],
+            &[
+                "--dangerously-load-development-channels",
+                crate::claude_channel::ST3_CHANNEL
+            ]
+        );
+        assert_eq!(
+            &development[3..],
+            &["--channels", "plugin:other@other", "boot prompt"]
+        );
+    }
+
+    #[test]
+    fn the_auto_read_rules_merge_with_authored_permission_settings() {
+        let argv = vec![
+            "claude".into(),
+            "--permission-mode".into(),
+            "auto".into(),
+            "--settings".into(),
+            crate::access::auto_read_settings(Path::new("/home/example/src/github.com/org/repo"), Some(Path::new("/home/example"))),
+            "--settings".into(),
+            serde_json::json!({"permissions":{"allow":["Bash(git status)"],"deny":["Read(./.env)"]}}).to_string(),
+            "boot".into(),
+        ];
+        let merged = merge_claude_json_settings(argv).unwrap();
+        let settings: Vec<serde_json::Value> = merged
+            .windows(2)
+            .filter(|pair| pair[0] == "--settings")
+            .map(|pair| serde_json::from_str(&pair[1]).unwrap())
+            .collect();
+        assert_eq!(settings.len(), 1, "{merged:?}");
+        assert_eq!(
+            settings[0]["permissions"]["allow"],
+            serde_json::json!(["Read(~/src/**)", "Read(//var/tmp/**)", "Read(//private/var/tmp/**)", "Read(//nix/store/**)", "Bash(git status)"])
+        );
+        let deny = settings[0]["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.contains(&serde_json::json!("Read(./.env)")) && deny.contains(&serde_json::json!("Read(~/.ssh/**)")), "{deny:?}");
+    }
+
+    #[test]
     fn duplicate_json_settings_keep_lifecycle_hooks_and_authored_plugins() {
         let argv = vec![
             "claude".into(),
@@ -2103,13 +2211,38 @@ mod tests {
     #[test]
     fn native_session_binding_is_atomic_and_names_the_exact_provider_incarnation() {
         let root = tempfile::tempdir().unwrap();
-        write_native_session_binding(root.path(), "wrapper-current", "native-current").unwrap();
+        write_native_session_binding(root.path(), "wrapper-current", "native-current", None)
+            .unwrap();
         let binding: serde_json::Value = serde_json::from_slice(
             &std::fs::read(root.path().join("claude-native-session")).unwrap(),
         )
         .unwrap();
         assert_eq!(binding["incarnation"], "wrapper-current");
         assert_eq!(binding["native_session_id"], "native-current");
+        assert!(binding.get("transcript_path").is_none());
+        // A seat on its own account: Claude's path, outside ~/.claude, is kept; a relative one is not.
+        write_native_session_binding(
+            root.path(),
+            "wrapper-current",
+            "native-current",
+            Some("/srv/accounts/second/projects/-work/native-current.jsonl"),
+        )
+        .unwrap();
+        let binding: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("claude-native-session")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            binding["transcript_path"],
+            "/srv/accounts/second/projects/-work/native-current.jsonl"
+        );
+        write_native_session_binding(root.path(), "wrapper-current", "native-current", Some("rel.jsonl"))
+            .unwrap();
+        let binding: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("claude-native-session")).unwrap(),
+        )
+        .unwrap();
+        assert!(binding.get("transcript_path").is_none());
     }
 
     #[test]
@@ -2317,6 +2450,17 @@ mod tests {
     }
 
     #[test]
+    fn a_permission_prompt_names_its_tool_and_keeps_its_input_out() {
+        let observed = observe_hook_event(
+            "PermissionRequest",
+            &serde_json::json!({"tool_name":"Bash","tool_input":{"command":"rm -r build"}}),
+        )
+        .unwrap();
+        assert_eq!(observed.blocked_on, BlockedOn::Human);
+        assert_eq!(observed.reason.as_deref(), Some("Bash"));
+    }
+
+    #[test]
     fn hook_events_map_to_observations_with_the_blocked_edges() {
         let none = serde_json::Value::Null;
 
@@ -2346,6 +2490,18 @@ mod tests {
 
         // Unmapped events say nothing rather than guessing.
         assert_eq!(observe_hook_event("Notification", &none), None);
+        // Compacting is a status, not a wait on anyone; the session that resumes after it reads
+        // as idle.
+        let compacting = observe_hook_event("PreCompact", &none).unwrap();
+        assert_eq!(compacting.state, Activity::Active);
+        assert_eq!(compacting.blocked_on, BlockedOn::None);
+        assert_eq!(compacting.reason.as_deref(), Some("compaction"));
+        assert_eq!(
+            observe_hook_event("SessionStart", &serde_json::json!({"source":"compact"}))
+                .unwrap()
+                .state,
+            Activity::Idle
+        );
         assert_eq!(observe_hook_event("SubagentStop", &none), None);
     }
 
