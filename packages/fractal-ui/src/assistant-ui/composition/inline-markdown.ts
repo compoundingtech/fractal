@@ -51,23 +51,49 @@ const unescape = (raw: string) => raw.replace(/\\([!-/:-@[-`{-~])/g, '$1')
 
 interface LinkMatch { readonly label: string; readonly destination: string; readonly end: number }
 
-/** `[label](destination "optional title")`; the label may hold brackets, escapes and code spans. Titles are dropped. */
-function matchLink(source: string, open: number): LinkMatch | undefined {
-  let depth = 0
-  let close = open
-  for (; close < source.length; close++) {
-    const char = source[close]
-    if (char === '\\') { close++; continue }
-    if (char === '`') {
-      const run = runLength(source, close, '`')
-      const end = closingRun(source, close + run, run)
-      close = (end === -1 ? close + run : end + run) - 1
-      continue
+/**
+ * Match brackets once, from right to left. Each suffix records its first unmatched
+ * closing bracket; an opening bracket skips its complete nested label in O(1).
+ * Computing suffixes independently preserves labels even after skipped link destinations.
+ */
+const bracketMatches = (source: string): ReadonlyMap<number, number> => {
+  const closes = new Map<number, number>()
+  const nextClose = new Int32Array(source.length + 2).fill(-1)
+  const codeEnds = new Map<number, number>()
+  const nextRun = new Map<number, number>()
+  // Include partial opening runs after an escape; closers must begin a full run.
+  for (let at = source.length - 1; at >= 0; at--) {
+    if (source[at] !== '`') continue
+    const end = at + 1
+    while (at > 0 && source[at - 1] === '`') at--
+    for (let start = at; start < end; start++) {
+      codeEnds.set(start, nextRun.get(end - start) ?? -1)
     }
-    if (char === '[') depth++
-    else if (char === ']' && --depth === 0) break
+    nextRun.set(end - at, at)
   }
-  if (close >= source.length || source[close + 1] !== '(') return undefined
+  let codeRunLength = 0
+  for (let at = source.length - 1; at >= 0; at--) {
+    const char = source[at]
+    codeRunLength = char === '`' ? codeRunLength + 1 : 0
+    if (char === '\\') nextClose[at] = nextClose[at + 2]!
+    else if (char === '`') {
+      const end = at + codeRunLength
+      const close = codeEnds.get(at) ?? -1
+      nextClose[at] = nextClose[close === -1 ? end : close + end - at]!
+    } else if (char === ']') nextClose[at] = at
+    else if (char === '[') {
+      const close = nextClose[at + 1]!
+      if (close !== -1) closes.set(at, close)
+      nextClose[at] = close === -1 ? -1 : nextClose[close + 1]!
+    } else nextClose[at] = nextClose[at + 1]!
+  }
+  return closes
+}
+
+/** `[label](destination "optional title")`; the label may hold brackets, escapes and code spans. Titles are dropped. */
+function matchLink(source: string, open: number, closes: ReadonlyMap<number, number>): LinkMatch | undefined {
+  const close = closes.get(open)
+  if (close === undefined || source[close + 1] !== '(') return undefined
   let at = close + 2
   while (source[at] === ' ') at++
   let destination: string
@@ -110,6 +136,7 @@ function scan(source: string, allowLinks: boolean): Item[] {
     text = ''
   }
   let at = 0
+  let closes: ReadonlyMap<number, number> | undefined
   while (at < source.length) {
     const char = source[at]!
     if (char === '\\' && isEscapable(source[at + 1])) {
@@ -160,7 +187,8 @@ function scan(source: string, allowLinks: boolean): Item[] {
     }
     const image = char === '!' && source[at + 1] === '['
     if (char === '[' || image) {
-      const link = matchLink(source, image ? at + 1 : at)
+      closes ??= bracketMatches(source)
+      const link = matchLink(source, image ? at + 1 : at, closes)
       if (link !== undefined) {
         flush()
         const children = resolve(scan(link.label, false))

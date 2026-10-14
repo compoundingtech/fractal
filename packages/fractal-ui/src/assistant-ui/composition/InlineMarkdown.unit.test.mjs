@@ -38,6 +38,26 @@ for (const entry of inlineMarkdownCases) test(`corpus: ${entry.name}`, () => {
   }
 })
 
+test('unmatched and nested brackets require linear source reads, not repeated suffix scans', () => {
+  for (const length of [5_000, 10_000, 20_000, 50_000]) {
+    for (const source of ['['.repeat(length), '['.repeat(length / 2) + ']'.repeat(length / 2)]) {
+      let reads = 0
+      // Instrument character access without adding a production diagnostics API.
+      // replace supplies the normalized source; ordinary string methods remain bound.
+      const counted = new Proxy(Object(source), {
+        get(target, key) {
+          if (typeof key === 'string' && /^\d+$/.test(key)) reads++
+          const value = Reflect.get(target, key)
+          return typeof value === 'function' ? value.bind(source) : value
+        },
+      })
+      assert.deepEqual(parseInlineMarkdown({ replace: () => counted }), [{ _tag: 'Text', text: source }])
+      assert.ok(reads <= 12 * source.length, `${source.length} characters used ${reads} indexed reads`)
+      assert.equal(toPlainText(source), source)
+    }
+  }
+})
+
 test('the report prompt renders a code element without literal backticks', () => {
   const markup = render('found that `NOPASSWD: darwin-rebuild` makes')
   assert.match(markup, /<code class="[^"]+">NOPASSWD: darwin-rebuild<\/code>/)
