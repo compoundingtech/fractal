@@ -3220,7 +3220,7 @@ me="{node}-fabric-id"
 echo "$me $*" >> "$registry/calls"
 key() {{ echo "$1.$(echo "$2" | tr '/' '_')"; }}
 case "$1" in
-  id) echo "$me" ;;
+  id) echo "{{\"id\":\"$me\"}}" ;;
   addr) epoch=$(cat "$registry/epoch" 2>/dev/null || echo 0); echo "{{\"addrs\":[\"$epoch\"]}}" ;;
   expose) [ ! -f "$registry/fail-expose-$me" ] || {{ echo "exposure refused" >&2; exit 1; }}; echo "$4" > "$registry/$(key "$me" "$2")" ;;
   unexpose)
