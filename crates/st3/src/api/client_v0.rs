@@ -22048,12 +22048,13 @@ mission "example/zero-run" state="ready" {
             for index in written..history {
                 state.store.append_claim(&ClaimInput {
                     subject: "agent/runtime-perf".into(),
-                    kind: "runtime.observed".into(),
+                    kind: if index == 0 { "runtime.observed" } else { "harness.diagnostic" }.into(),
                     actor: Some("agent/runtime-perf".into()),
-                    fields: serde_json::from_value(json!({
-                        "runtime_id": "fixed-runtime", "incarnation_id": "fixed-incarnation",
-                        "status": "running", "terminal": false, "sequence": index,
-                    })).unwrap(),
+                    fields: serde_json::from_value(if index == 0 {
+                        json!({"runtime_id": "fixed-runtime", "status": "running", "terminal": false})
+                    } else {
+                        json!({"code": "retained-diagnostic", "sequence": index})
+                    }).unwrap(),
                     evidence: Vec::new(), expected_subject: None, idempotency_key: None,
                 }).unwrap();
             }
