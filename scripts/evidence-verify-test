@@ -655,9 +655,27 @@ class CommittedPolicy(unittest.TestCase):
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
 
-    def test_only_the_observed_kind_is_listed_until_the_wrapper_rules_are_reviewed(self):
-        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
+    def test_the_wrapper_rules_match_what_the_note_jobs_record(self):
+        gate = self.rules('linux-gate')['kinds']['wrapper']
+        self.assertEqual(gate['command'][:2], ['linux-gate', 'aggregate'])
+        jobs = gate['command'][2:]
+        self.assertEqual(jobs, sorted(jobs))  # the aggregate lists its needed jobs sorted
+        self.assertIn('linux-gate', jobs)
+        common = ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256']
+        self.assertEqual(gate['required_inputs'], common)
+        self.assertEqual(gate['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
+        canaries = self.rules('mail-redelivery-canaries')['kinds']['wrapper']
+        self.assertEqual(canaries['command'], ['bash', 'scripts/ci-linux', 'mail-redelivery-canaries'])
+        self.assertEqual(canaries['required_inputs'], sorted(common + ['job', 'stage']))
+        self.assertEqual(canaries['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
+
+    def test_only_the_checks_with_a_defined_wrapper_note_have_a_wrapper_rule(self):
+        for check in ('typescript-client', 'isolation-vm', 'genie-freshness'):
             self.assertEqual(sorted(self.rules(check)['kinds']), ['observed'], check)
+        for check in ('linux-gate', 'mail-redelivery-canaries'):
+            self.assertEqual(sorted(self.rules(check)['kinds']), ['observed', 'wrapper'], check)
+            self.assertEqual(self.rules(check)['trust_levels'], ('fleet',))  # the wrapper signs as fleet/ci
+            self.assertIsNone(self.rules(check)['kinds']['wrapper']['trust_levels'])  # no weaker signer is admitted
 
 
 class Sha256Repository(unittest.TestCase):
