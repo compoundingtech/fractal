@@ -124,6 +124,18 @@ def compare_documents(rows):
     return [by_name[PREFIX + f"{number:02d}"] for number in range(50)]
 
 
+def verify_binding(row, claims):
+    matches = [claim for claim in claims if claim["id"] == row["binding_claim_id"]]
+    require(len(matches) == 1, "binding-not-in-cut")
+    claim = matches[0]
+    require(claim["kind"] == "doc.bound" and claim["subject"] == row["name"], "binding-kind-or-subject")
+    for field in ("name", "hash", "size"):
+        require(claim["body"][field] == row[field], "binding-body-mismatch")
+    require(claim["accepted_at_unix_ms"] == row["created_at_unix_ms"], "binding-time-mismatch")
+    require(claim["store_index"] == row["created_index"], "binding-physical-index-mismatch")
+    require((claim["actor"] or claim["origin"]) == row["owner"], "binding-owner-mismatch")
+
+
 def capture_cut():
     """Exhaustive bounded *fixture document/input* cut, not a global Source capability.
 
@@ -153,7 +165,7 @@ def capture_cut():
         require(content["reference"] == reference, "content-reference")
         number = int(row["name"].removeprefix(PREFIX))
         require(content["bytes"] == list(document_bytes(number)), "content-field-mismatch")
-        require(any(claim["id"] == row["binding_claim_id"] for claim in claims), "binding-not-in-cut")
+        verify_binding(row, claims)
         # created_index is a physical arrival index, not a replicated logical field.
         semantic.append({key: value for key, value in row.items() if key != "created_index"})
     after = local("GET", "/v1/health")

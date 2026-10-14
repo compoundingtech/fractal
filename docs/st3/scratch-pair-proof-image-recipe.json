@@ -30,7 +30,7 @@
     "destination": "/opt/st-scratch/st3-scratch-pair-proof",
     "owner": "root",
     "runtime_mode": "read-only, not copied from caller checkout",
-    "sha256": "3fd0a4e179e4e29aa3ede1b2f9edf46e70f641b5ccc7e4044e2449f8d6e7c297"
+    "sha256": "83f183d705e22ae9b91bc8e4dbe5991dbf0be13ef423c3d6fff98a4791c2d363"
   },
   "members": {
     "a": [

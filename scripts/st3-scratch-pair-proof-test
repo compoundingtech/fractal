@@ -23,6 +23,22 @@ def rows():
 
 
 class FixtureContract(unittest.TestCase):
+    def test_existing_unrelated_claim_is_not_a_document_binding_proof(self):
+        row = rows()[0]
+        row["owner"] = "a"
+        claim = {"id": row["binding_claim_id"], "kind": "doc.bound", "subject": row["name"],
+                 "body": {key: row[key] for key in ("name", "hash", "size")},
+                 "accepted_at_unix_ms": row["created_at_unix_ms"],
+                 "store_index": row["created_index"], "actor": None, "origin": "a"}
+        proof.verify_binding(row, [claim])
+        claim["kind"] = "principal.key-granted"
+        with self.assertRaisesRegex(proof.Refused, "binding-kind-or-subject"):
+            proof.verify_binding(row, [claim])
+        claim["kind"] = "doc.bound"
+        claim["accepted_at_unix_ms"] += 1
+        with self.assertRaisesRegex(proof.Refused, "binding-time-mismatch"):
+            proof.verify_binding(row, [claim])
+
     def test_complete_fields_not_just_fifty_rows(self):
         values = rows()
         self.assertEqual(proof.compare_documents(values), values)
