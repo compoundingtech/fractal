@@ -655,17 +655,9 @@ class CommittedPolicy(unittest.TestCase):
         with self.assertRaises(evidence_verify.Failure):
             self.rules('a-check-nobody-listed')
 
-    def test_the_linux_gate_wrapper_rule_matches_what_the_note_job_records(self):
-        wrapper = self.rules('linux-gate')['kinds']['wrapper']
-        self.assertEqual(wrapper['command'][:2], ['linux-gate', 'aggregate'])
-        jobs = wrapper['command'][2:]
-        self.assertEqual(jobs, sorted(jobs))  # the aggregate lists its needed jobs sorted
-        self.assertIn('linux-gate', jobs)
-        self.assertEqual(wrapper['required_inputs'],
-                         ['attempt', 'flake_lock_sha256', 'system', 'toolchain_sha256', 'wrapper_sha256'])
-        self.assertEqual(wrapper['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
-        # Only linux-gate has a wrapper rule so far.
-        self.assertNotIn('wrapper', self.rules('typescript-client')['kinds'])
+    def test_only_the_observed_kind_is_listed_until_the_wrapper_rules_are_reviewed(self):
+        for check in ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries'):
+            self.assertEqual(sorted(self.rules(check)['kinds']), ['observed'], check)
 
 
 class Sha256Repository(unittest.TestCase):

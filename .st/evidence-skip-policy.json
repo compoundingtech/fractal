@@ -14,32 +14,6 @@
             "{check}"
           ],
           "runner_prefix": "github:{repository}/"
-        },
-        "wrapper": {
-          "command": [
-            "linux-gate",
-            "aggregate",
-            "linux-clippy",
-            "linux-fleet-compat",
-            "linux-gate",
-            "linux-test-build",
-            "linux-tests",
-            "linux-tests-shard-2",
-            "linux-tests-shard-3",
-            "linux-tests-shard-4",
-            "mail-redelivery-canaries",
-            "upgrade-impact"
-          ],
-          "required_inputs": [
-            "flake_lock_sha256",
-            "toolchain_sha256",
-            "wrapper_sha256",
-            "system",
-            "attempt"
-          ],
-          "bind_inputs": {
-            "flake_lock_sha256": "flake.lock"
-          }
         }
       }
     },
