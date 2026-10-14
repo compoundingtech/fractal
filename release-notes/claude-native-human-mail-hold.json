@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Hold ordinary mail outside Claude native human decisions until authoritative prompt resolution",
+  "replay": {"status": "none", "detail": "No historical claim replay change. Unacknowledged mail remains durable and is re-offered by successor channels."},
+  "schema": {"status": "none", "detail": "Adds a native harness episode lookup index; no persisted record schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "Uses existing human-blocked observations and delivery reason fields. No new wire fields or message lifecycle states."},
+  "downtime": {"status": "none", "detail": "No additional service interruption. Claude channels follow the replacement st binary."},
+  "manual": {"status": "none", "detail": "No operator steps. Native questions still require native answers; ordinary mail cannot answer them."},
+  "recovery": {"status": "none", "detail": "Applied native answers, dismissal, native resolution and session restart release the human hold. A Claude permission hook's polling timeout does not close its dialog, and a later Smalltalk answer request alone cannot release mail or reopen an authoritatively closed episode. Stale/indeterminate evidence never proves closure. Receipt recovery for previously offered Claude mail continues while new notifications wait; episode-fenced releases survive blocked-file heartbeats."}
+}
