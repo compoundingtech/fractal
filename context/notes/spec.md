@@ -269,6 +269,9 @@ A note kind registration includes:
   agent target/assignment restrictions too? This requires
   `AuthorizedParticipant` with ownership evidence; the draft enforces these
   graph-state restrictions only at local API admission.
+  The generic claim API (`POST /v1/claims`, `st claim`) applies only
+  `SubjectEncodedAuthor`; target restrictions and the agent-self prohibition
+  apply only through the note API.
 - **DQ9 Agent privacy:** Should agents get a private `self` audience? The
   prototype rejects agent-authored `self` notes at local API admission; agents
   write `agent` audience only, while the schema remains open.

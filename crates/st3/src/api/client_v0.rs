@@ -12205,7 +12205,7 @@ mod tests {
             target, target, Some("Agent author's self note"), "self", None, None).unwrap();
         state.store.set_subject_note("note/person/ada/019a0000-0000-7000-8000-000000000004",
             "person/ada", target, Some("Expired reminder"), "agent", None, Some("2000-01-01T00:00:00Z")).unwrap();
-        let request: CollectionSubscribe = serde_json::from_value(json!({"id":"notes","collection":"notes","limit":200})).unwrap();
+        let request: CollectionSubscribe = serde_json::from_value(json!({"kind":"subscribe","id":"notes","collection":"notes","limit":200})).unwrap();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         for (reader, expected) in [("person/ada", 2), ("person/other", 1), (target, 1), ("agent/example/unrelated", 0)] {
             let mut session = ClientSession::for_tests(reader, reader, "unix");
