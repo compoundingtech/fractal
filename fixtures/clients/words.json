@@ -21,6 +21,11 @@
       "name": "working"
     },
     {
+      "glyph": "◐",
+      "id": "compacting",
+      "name": "compacting"
+    },
+    {
       "glyph": "●",
       "id": "idle",
       "name": "idle"
@@ -29,6 +34,11 @@
       "glyph": "◌",
       "id": "starting",
       "name": "starting"
+    },
+    {
+      "glyph": "⊘",
+      "id": "down",
+      "name": "down"
     },
     {
       "glyph": "○",
