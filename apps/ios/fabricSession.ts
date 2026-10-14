@@ -89,3 +89,16 @@ export class FabricSession {
 export function nativeRefusedAfter(stats: Record<string, unknown>, floor: number): boolean {
   return Array.isArray(stats.attempts) && stats.attempts.some(a => a && typeof a.id === 'number' && a.id > floor && a.result === 'refused');
 }
+
+/**
+ * The newest refusal after `floor`, with fabric's typed code when the bridge recorded one (fabric
+ * 0.2.41 and later send it; an older member's refusal has none), or null when there was none.
+ */
+export function nativeRefusalAfter(stats: Record<string, unknown>, floor: number): { code: string | null } | null {
+  const attempts = Array.isArray(stats.attempts) ? stats.attempts : [];
+  for (let index = attempts.length - 1; index >= 0; index--) {
+    const a = attempts[index];
+    if (a && typeof a.id === 'number' && a.id > floor && a.result === 'refused') return { code: typeof a.code === 'string' && /^[a-z_]{1,64}$/.test(a.code) ? a.code : null };
+  }
+  return null;
+}
