@@ -25,6 +25,7 @@ import type {
   BlobChunk,
   BlobUpload,
   ConversationSearch,
+  SubjectNote,
 } from '@smalltalk/st3-client/schema'
 import type { ErrorEnvelope } from '@smalltalk/st3-client'
 import type { MessageSendInput } from '@st3/sdk/effect'
@@ -257,6 +258,14 @@ export interface DataSource {
   readonly agents: Atom.Atom<Feed<readonly AgentRow[]>>
   readonly missions: Atom.Atom<Feed<readonly Mission[]>>
   readonly attention: Atom.Atom<Feed<readonly Attention[]>>
+  /** Independent notes window; target summaries derive from these rows, never agent fields. */
+  readonly notes?: Atom.Atom<Feed<readonly SubjectNote[]>>
+  readonly notesActor?: Atom.Atom<string | undefined>
+  /** Generated note operations, admitted by the same authenticated gateway as message sends. */
+  readonly noteActions?: {
+    readonly create: (target: string, text: string, audience: 'self' | 'agent') => Promise<void>
+    readonly archive: (note: SubjectNote) => Promise<void>
+  }
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>
   readonly events: Atom.Atom<Feed<readonly GatewayEvent[]>>
   /** Keyed by agent ref; retained data follows keep folding while invisible until evicted. */

@@ -1,6 +1,6 @@
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
 /** Shared derivations over generated rows, installed once per data source. */
-import type { Agent as AgentRow, Attention, Mission } from '@smalltalk/st3-client/schema'
+import type { Agent as AgentRow, Attention, Mission, SubjectNote } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { createContext, type ReactNode, useContext } from 'react'
@@ -9,6 +9,7 @@ import * as React from 'react'
 import type { MissionView } from '../missions/model.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { createProjections } from './projections.ts'
+import { notesByTarget } from './notes.ts'
 import { type Agent, type DataSource, type Feed, type Fleet, observed } from './source.ts'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 
@@ -33,6 +34,7 @@ interface DerivedData {
   readonly agent: (ref: string) => Atom.Atom<Feed<Agent | undefined>>
   readonly agentRow: (ref: string) => Atom.Atom<Feed<AgentRow | undefined>>
   readonly agentAttention: (ref: string) => Atom.Atom<Feed<readonly Attention[]>>
+  readonly subjectNotes: (ref: string) => Atom.Atom<Feed<readonly SubjectNote[]>>
   readonly terminalConnected: (ref: string) => Atom.Atom<boolean | undefined>
 }
 const derive = (source: DataSource) => {
@@ -134,6 +136,16 @@ const derive = (source: DataSource) => {
       })
     }).pipe(Atom.withEquality<Feed<readonly Attention[]>>((a, b) => sameFeed(a, b, sameItems))),
   )
+  const notesIndex = Atom.make((get) => mapFeed({
+    feed: source.notes === undefined
+      ? { _tag: 'Unavailable' as const, reason: 'unsupported' as const, detail: 'Notes are not available from this source.' }
+      : get(source.notes),
+    map: notesByTarget,
+  }))
+  const emptyNotes: readonly SubjectNote[] = []
+  const subjectNotes = Atom.family((ref: string) => Atom.make((get) =>
+    mapFeed({ feed: get(notesIndex), map: (targets) => targets.get(ref) ?? emptyNotes }),
+  ).pipe(Atom.withEquality<Feed<readonly SubjectNote[]>>((left, right) => sameFeed(left, right, sameItems))))
   const terminalConnected = Atom.family((ref: string) =>
     Atom.make((get) => {
       const feed = get(fleet)
@@ -152,6 +164,7 @@ const derive = (source: DataSource) => {
     agent,
     agentRow,
     agentAttention,
+    subjectNotes,
     terminalConnected,
   }
 }
@@ -283,6 +296,9 @@ export const useAgentRowSelection = <T,>({
 /** Only open cards about this agent or its current missions notify its information surfaces. */
 export const useAgentAttention = (ref: string): Feed<readonly Attention[]> =>
   useAtomValue(useData().agentAttention(ref))
+/** Notes about a target, derived from the independent notes collection. */
+export const useSubjectNotes = (ref: string): Feed<readonly SubjectNote[]> =>
+  useAtomValue(useData().subjectNotes(ref))
 /** Badge/count projections ignore unrelated card metadata while detail readers keep native cards. */
 export const useAgentAttentionSelection = <T,>({
   ref,

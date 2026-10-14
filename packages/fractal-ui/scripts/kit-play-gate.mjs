@@ -7,8 +7,9 @@ import { availableParallelism } from 'node:os'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
 
 // Own an ephemeral localhost server: missing assets remain real, standard 404s.
-const [buildDirectory, outputDirectory] = process.argv.slice(2)
-if (!buildDirectory || !outputDirectory) throw new Error('Usage: node kit-play-gate.mjs <storybook-static> <receipt-directory>')
+const [buildDirectory, outputDirectory, storyIdPattern, storyArgs] = process.argv.slice(2)
+if (!buildDirectory || !outputDirectory) throw new Error('Usage: node kit-play-gate.mjs <storybook-static> <receipt-directory> [story-id-pattern] [story-args]')
+const storyFilter = storyIdPattern === undefined ? undefined : new RegExp(storyIdPattern)
 const root = resolve(buildDirectory)
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2' }
 const server = createServer(async (request, response) => {
@@ -41,6 +42,7 @@ const writeReceipt = async () => {
   const receipt = {
     pass: !fatalError && ids.length > 0 && rows.length === ids.length * 4 && rows.every(row => row.pass),
     stories: ids.length, expectedCases: ids.length * 4, cases: rows.length, workers,
+    storyIdPattern, storyArgs,
     elapsedSeconds: (performance.now() - started) / 1000, fatalError, rows: rows.toSorted((a, b) => a.id.localeCompare(b.id) || a.scheme.localeCompare(b.scheme) || a.width - b.width),
   }
   await writeFile(join(outputDirectory, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n')
@@ -50,6 +52,8 @@ try {
   const response = await fetch(`${base}/index.json`)
   if (!response.ok) throw new Error(`Storybook index: HTTP ${response.status}`)
   ids = storyIdsFromIndex(await response.json())
+  if (storyFilter !== undefined) ids = ids.filter(id => storyFilter.test(id))
+  if (ids.length === 0) throw new Error('No stories match the requested story-id pattern')
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
   browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
   const cases = ids.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width }))))
@@ -61,7 +65,7 @@ try {
     const row = { id, scheme, width, height: 900, pass: false }
     try {
       // The guard awaits strict storyFinished; unrelated network idleness is not play readiness.
-      await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(`scheme:${scheme}`)}`, { waitUntil: 'domcontentloaded' })
+      await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(`scheme:${scheme}${storyArgs === undefined ? '' : `;${storyArgs}`}`)}`, { waitUntil: 'domcontentloaded' })
       await guard.check()
       if (!guard.records.every(record => record.finished.every(event => event.payload.storyId === id))) {
         throw new Error('storyFinished evidence belongs to a different story')

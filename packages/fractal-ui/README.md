@@ -62,6 +62,17 @@ node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
 - **Fractal UI / Human time**: all four kinds and unreported time, pinned to New York, at 440/1440 in light/dark plus a host-theme tooltip and a fake-timer live tick.
+- **Fractal / Plugins / Notes / Note badge**, **Note list**, **Note composer**: the `@smalltalk/fractal-ui/notes` surfaces on synthetic `person/example` and `agent/example/…` notes decoded through the generated `SubjectNote` schema, at 440/1440 in light/dark (`AllStates`, `Light440`, `Dark1440`, `Light1440`). Plays assert newest-first order, the neutral **Other audience** label for unrecognized audiences (never the raw value or "Unknown"), a laid-out, painted agent SVG marker, preserved input and announced errors after refused mutations, and no green computed colour.
+- **Fractal / Explore / Notes / Inline quick composer** and **Keyboard n popover**: two input variants for CR01 (one key or click, the text, one confirm), with the same matrix and checks. The popover opens on `n` only outside text fields.
+
+Each notes story has a `negativeControl` boolean arg (off by default) whose play must then fail: the badge drops the newest note, the list leaks the raw future audience, the composer host remounts after a refused create, the inline host never publishes the created note, and the popover drops its typing guard. Inside `nix develop .#web`, after building Storybook:
+
+```sh
+node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static /tmp/fractal-notes-receipt '^fractal-(plugins|explore)-notes-'
+node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static /tmp/fractal-notes-negative '^fractal-plugins-notes-note-badge--all-states$' 'negativeControl:true' # must exit 1
+```
+
+`@smalltalk/fractal-ui/notes` exports presentational `NoteBadge({ notes })`, `NoteList({ notes, author?, onArchive? })` and `NoteComposer({ onSubmit, disabledReason?, autoFocus?, agentAuthor? })` over the generated `SubjectNote` type; the host owns data and mutations. `audiencePresentation` is the single audience label mapping (`self` → **Only me**, `agent` → **Shared with agent** with the `AgentMarker` SVG, anything else → **Other audience**). The composer uses the Embrace `composerChrome`/`density` geometry tokens, defaults to **Only me**, and explains each audience in a kit `Tooltip`; `Alt+A` (`⌥A` on macOS) switches audience, Enter adds and Shift+Enter starts a new line; `agentAuthor` fixes the audience to the agent and says why. Text is limited to 1024 UTF-8 bytes. A rejected `onSubmit` or `onArchive` keeps the draft or row and shows an alert that includes the rejection's `Error.message`. A resolved `onArchive` disables the row's action and announces acceptance; the row leaves only when the host's next `notes` omits it.
 
 ## Families
 

@@ -1,6 +1,6 @@
 import { ClientError, St3Client, isTransient } from '@smalltalk/st3-client'
 import { Runtime, Snapshot, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import type { Agent, Attention, Mission, TerminalScreen } from '@smalltalk/st3-client/schema'
+import type { Agent, Attention, Mission, Note, SubjectNote, TerminalScreen } from '@smalltalk/st3-client/schema'
 import {
   St3,
   St3Live,
@@ -32,6 +32,7 @@ import { gatewayTerminalInput } from '../terminal/terminal-input-port.ts'
 import { gatewayTerminalResize } from '../terminal/terminal-resize-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
+import { gatewayNoteActions } from './noteActions.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
 import { mergeOutboxItems } from './outbox.ts'
@@ -671,6 +672,15 @@ export const liveSource = ({
       ),
   })
   const missions = missionsRetained.atom
+  const notesRetained = retain<readonly SubjectNote[], Extract<FollowSpec, { _tag: 'Window' }>>({
+    resolve: () => Effect.succeed({ _tag: 'Window', collection: 'notes', limit: 100 }),
+    follow: ({ st3, spec }) => st3.followWindow(spec).pipe(
+      Stream.map((event) => event._tag === 'Observed'
+        ? { _tag: 'Observed' as const, value: event.value.items.filter((row): row is Note => row.kind === 'note') }
+        : event),
+    ),
+  })
+  const notesActor = Atom.keepAlive(Atom.make<string | undefined>(undefined))
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
     follow: ({ st3, spec }) =>
@@ -1030,6 +1040,7 @@ export const liveSource = ({
         Effect.gen(function* () {
           const st3 = yield* St3
           const discovered = yield* st3.capabilities
+          registry.set(notesActor, discovered.session_actor)
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1080,6 +1091,9 @@ export const liveSource = ({
       agents,
       missions,
       attention,
+      notes: notesRetained.atom,
+      notesActor,
+      noteActions: gatewayNoteActions({ client, actor: () => registry.get(notesActor) }),
       conversation,
       conversationInterest: (ref) => retainConversation(ref).interest,
       prefetchConversation: (ref) => {

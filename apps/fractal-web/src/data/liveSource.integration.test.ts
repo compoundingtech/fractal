@@ -413,6 +413,35 @@ const withGateway = (
     yield* test(live, gateway)
   }).pipe(Effect.scoped)
 
+it.live('follows notes independently and folds streamed archives without polling', () =>
+  withGateway((live, gateway) => Effect.gen(function* () {
+    const notes = live.source.notes
+    if (notes === undefined) throw new Error('Live notes projection missing')
+    const release = live.registry.mount(notes)
+    yield* settle
+    const subscription = gateway.subscription('notes')
+    expect(subscription).toMatchObject({ kind: 'subscribe', collection: 'notes', limit: 100 })
+    const note = {
+      kind: 'note' as const, id: 'note/person/example/0192', author: 'person/example',
+      target: 'agent/example/planner', audience: 'self', text: 'Keep the handoff short.',
+      revision: 'claim/example', created_at: snapshot.created_at, updated_at: snapshot.created_at,
+      session: null, expires_at: null,
+    }
+    gateway.send({ kind: 'snapshot', id: subscription.id, collection: 'notes',
+      has_more: false, items: [note], order: [note.id], snapshot })
+    yield* settle
+    expect(live.registry.get(notes)).toMatchObject({
+      _tag: 'Observed', freshness: 'live', value: [{ target: note.target, text: note.text }],
+    })
+    gateway.send({ kind: 'changes', id: subscription.id, collection: 'notes',
+      has_more: false, upserts: [], removes: [note.id], order: [], snapshot })
+    yield* settle
+    expect(live.registry.get(notes)).toMatchObject({ _tag: 'Observed', freshness: 'live', value: [] })
+    expect(gateway.commands.filter(command => command.kind === 'subscribe' && command.collection === 'notes')).toHaveLength(1)
+    release()
+  })),
+)
+
 
 describe('connection loss detection', () => {
   const withBrowser = (test: (live: LiveSource, gateway: Gateway, browser: EventTarget, documentEvents: EventTarget) => Effect.Effect<void>) =>
