@@ -313,7 +313,8 @@ for GitHub reads and the push, and the observer's own `HOME` for its private con
 The controller never records a check that the evidence gate skipped. A gate job that decides to skip ends
 with a step named `evidence skip taken` and still concludes success; if the controller recorded the check
 anyway, one real run would keep refreshing its own skips. It therefore reads the run's jobs, and any record
-whose check has an `evidence-gate-<check>` job whose `evidence skip taken` step ran is neither imported nor
+whose check has an `evidence-gate-<check>` job whose `evidence skip taken` step ran, or whose own job ran the
+step `evidence covered by a trusted note` (a second, independent signal), is neither imported nor
 published (the summary names it). If the jobs cannot be read nothing is recorded. It also refuses any run
 that is not a run of `Workspace CI`, so it can never act on its own workflow's runs.
 
