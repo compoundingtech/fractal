@@ -14,6 +14,7 @@ base, never the change under test). The trust level of a signer is the part of i
 principal before the first slash, and is never read from the record itself.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -34,10 +35,11 @@ KINDS = ('nix', 'wrapper', 'sekrets')
 
 
 class Failure(Exception):
-    def __init__(self, reason, detail):
+    def __init__(self, reason, detail, **extra):
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
+        self.extra = extra
 
 
 def git(repo, *args, stdin=None, config=()):
@@ -77,6 +79,10 @@ def statement_of(blob, tree):
                 or observed.get('kind') != 'tests'
                 or not isinstance(observed.get('runner'), str)
                 or not isinstance(observed.get('checks'), dict)):
+            return None
+        inputs = observed.get('inputs', {})
+        if not isinstance(inputs, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip() for k, v in inputs.items()):
             return None
         # A zone is required: naive and aware times cannot be ordered against each other.
         if parse_time(predicate['observed_at']).tzinfo is None:
@@ -125,12 +131,19 @@ def load(repo, commit, tree):
     if statement is None:
         return None
     subject = statement['subject'][0]['name']
-    if git(repo, 'show', '-s', '--format=%P', commit).decode().strip() != subject:
+    # Read the parent from the raw commit: `git show` hides it in a shallow fetch, which is
+    # how a CI checkout gets the notes.
+    header = git(repo, 'cat-file', 'commit', commit).split(b'\n\n', 1)[0].decode(errors='replace')
+    parents = [line.split(' ', 1)[1] for line in header.splitlines() if line.startswith('parent ')]
+    if parents != [subject]:
         return None
+    # The signed statement already names the tree. When the subject commit is present it must
+    # agree; when it is not (shallow fetch), the signer's claim stands.
     try:
-        if git(repo, 'rev-parse', '--verify', '--end-of-options', subject + '^{tree}').decode().strip() != tree:
-            return None
+        present = git(repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', subject + '^{tree}').decode().strip()
     except Failure:
+        present = None
+    if present is not None and present != tree:
         return None
     return statement
 
@@ -143,7 +156,7 @@ def signature(repo, commit, keys, revocations):
     return status, principal
 
 
-def verify(repo, tree, check, keys, command):
+def verify(repo, tree, check, keys, command, kinds=KINDS, bind=()):
     with tempfile.NamedTemporaryFile() as revocations:
         everything = note_refs(repo)
         hits = with_note_for(repo, everything, tree)
@@ -178,20 +191,41 @@ def verify(repo, tree, check, keys, command):
     predicate = statement['predicate']
     observed = predicate['observed']
     result = observed['checks'][check]
+    attempts = len(with_check)
     if predicate['tier'] != 'full':
-        raise Failure('untrusted_tier', f'latest record has tier {predicate["tier"]}, not full')
-    if observed['runner'] not in KINDS:
-        raise Failure('unsupported_kind', f'runner {observed["runner"]!r} is not one of {", ".join(KINDS)}')
+        raise Failure('untrusted_tier', f'latest record has tier {predicate["tier"]}, not full', attempts=attempts)
+    if observed['runner'] not in kinds:
+        raise Failure('unsupported_kind', f'runner {observed["runner"]!r} is not one of {", ".join(kinds)}',
+                      attempts=attempts)
     if result['exit_code'] != 0:
-        raise Failure('check_failed', f'latest record for check {check} exited {result["exit_code"]}')
+        raise Failure('check_failed', f'latest record for check {check} exited {result["exit_code"]}',
+                      attempts=attempts)
     if command is not None and result['command'] != command:
-        raise Failure('wrong_command', f'latest record for check {check} ran a different command')
+        raise Failure('wrong_command', f'latest record for check {check} ran a different command',
+                      attempts=attempts)
+    inputs = observed.get('inputs', {})
+    for key, path in bind:
+        actual = blob_sha256(repo, tree, path)
+        recorded = inputs.get(key)
+        # Both must exist: a missing file and a missing key must never count as equal.
+        if actual is None or not isinstance(recorded, str) or not recorded or recorded != actual:
+            raise Failure('wrong_input', f'record input {key} does not match {path} in this tree',
+                          attempts=attempts)
     return {
         'satisfied': True, 'tree': tree, 'check': check, 'record': commit,
         'kind': observed['runner'], 'signer': principal, 'trust_level': principal.split('/', 1)[0],
         'tier': predicate['tier'], 'observed_at': predicate['observed_at'],
-        'command': result['command'],
+        'command': result['command'], 'inputs': inputs, 'attempts': attempts,
     }
+
+
+def blob_sha256(repo, tree, path):
+    """sha256 of a file as it is in the tree being verified, or None if the tree lacks it."""
+    try:
+        content = git(repo, 'cat-file', 'blob', f'{tree}:{path}')
+    except Failure:
+        return None
+    return hashlib.sha256(content).hexdigest()
 
 
 def batch(output):
@@ -246,6 +280,9 @@ def main(argv):
     source.add_argument('--keys', help='allowed-signers file')
     source.add_argument('--keys-from', help=f'read {KEYS_PATH} from this commit (the accepted base)')
     parser.add_argument('--command', help='JSON argument vector the record must have run')
+    parser.add_argument('--kinds', help=f'comma-separated record kinds this check accepts (default: {",".join(KINDS)})')
+    parser.add_argument('--bind-input', action='append', default=[], metavar='KEY=PATH',
+                        help="require the record's input KEY to equal the sha256 of PATH in the verified tree")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
@@ -259,6 +296,19 @@ def main(argv):
         except ValueError:
             print('--command must be a JSON array of strings', file=sys.stderr)
             return 2
+    kinds = KINDS
+    if args.kinds is not None:
+        kinds = tuple(k for k in args.kinds.split(',') if k)
+        if not kinds or not set(kinds) <= set(KINDS):
+            print(f'--kinds must be a comma-separated subset of {",".join(KINDS)}', file=sys.stderr)
+            return 2
+    bind = []
+    for item in args.bind_input:
+        key, sep, path = item.partition('=')
+        if not sep or not key or not path:
+            print('--bind-input must be KEY=PATH', file=sys.stderr)
+            return 2
+        bind.append((key, path))
     keyfile = None
     try:
         tree = args.tree
@@ -275,12 +325,12 @@ def main(argv):
             keys = os.path.abspath(args.keys)
             if not os.path.isfile(keys):
                 raise Failure('error', f'key list {args.keys} not found')
-        result = verify(args.repo, tree, args.check, keys, command)
+        result = verify(args.repo, tree, args.check, keys, command, kinds, bind)
         print(json.dumps(result, indent=2))
         return 0
     except Failure as failure:
         print(json.dumps({'satisfied': False, 'reason': failure.reason, 'check': args.check,
-                          'detail': failure.detail}, indent=2))
+                          'detail': failure.detail, **failure.extra}, indent=2))
         return 1
     finally:
         if keyfile is not None:
