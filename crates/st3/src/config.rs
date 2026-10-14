@@ -55,6 +55,12 @@ pub struct Config {
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
+    /// The setup screen's "Let Codex work without asking" box. Unset and `true` give Codex the
+    /// install's access mode; `false` makes Codex ask. Written only by the setup screen when Codex
+    /// is found. A build that does not know the key rejects a config that has it, so a config
+    /// without the line still loads in older builds and one with it needs the line deleted first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_work_without_asking: Option<bool>,
     /// `STATE/fleet/fleet.toml`, merged by `apply_fleet_file` after command-line overrides.
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
@@ -367,6 +373,7 @@ impl Default for Config {
             checkpoint: CheckpointConfig::default(),
             limits: LimitsConfig::default(),
             reconcile: ReconcileConfig::default(),
+            codex_work_without_asking: None,
             fleet: None,
         }
     }

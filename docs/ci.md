@@ -28,6 +28,16 @@ existing PR concurrency group and cancels obsolete ready-head work while skippin
 Keep a PR draft while iterating and testing locally, then mark its final head ready for Intake.
 A later push to a ready PR still validates the replacement head and cancels its superseded run;
 this policy reduces iteration demand, rather than enforcing a lifetime one-run limit.
+A stacked PR can retain workflow files from an older base that lacks these job guards.
+`Draft CI admission` therefore observes requested PR workflows using main's `workflow_run`
+code. It reads the target run and current PR metadata, rechecks readiness before requesting
+cancellation, and never checks out PR code or downloads its artifacts. Ready PRs and
+merge-group/main/manual runs are preserved. Its token has only Actions write and PR read.
+Cancellation is asynchronous: the request summary is not terminal cancellation proof,
+and scheduling can start a legacy job before the observer runs. The one-day observation
+records actual build/test job starts as well as accepted requests and final cancellations.
+GitHub does not emit the requested activity for reruns; do not rerun drafts.
+
 GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run is the
 final safety gate and runs every required stage regardless of PR draft payload. Do not arm
 auto-merge before the fresh ready-head checks register. Re-running an old draft run retains its
@@ -493,8 +503,14 @@ workflow-level path filters. `linux-gate` does not depend on them.
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
-  execution job; build output is not cached. App, UI kit, Storybook, browser and
-  performance lanes join the script with the packages that add them.
+  execution job; build output is not cached. The config's `fractalCssAssets` plugin
+  (`apps/fractal-web/scripts/vite-css-assets.mjs`) fails every production build that
+  emits a stylesheet without rules, or a chunk that loads a font file no `@font-face`
+  in its loaded stylesheets declares. The preceding CSS asset guard lane builds
+  fixtures that must trip both failures, and controls (quoted URLs with parentheses,
+  faces declared by the entry's stylesheet) that must pass.
+  App, UI kit, Storybook, browser and performance lanes join the script with the
+  packages that add them.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
   either no relevant paths changed and execution was skipped, or execution succeeded.
