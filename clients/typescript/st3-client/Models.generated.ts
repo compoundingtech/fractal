@@ -2005,6 +2005,13 @@ export type TimelineViewAssistantError = {
   label: string;
   message: string;
   model?: string;
+  native?: {
+  errorId?: unknown;
+  errorMessage?: unknown;
+  errorStatus?: unknown;
+  retryRecovery?: unknown;
+  stopReason?: unknown;
+};
   presentation: "full" | "compact-recovered" | "none";
   provider?: string;
   retry?: {
