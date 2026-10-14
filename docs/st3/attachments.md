@@ -39,6 +39,18 @@ needs the `control.messages` scope. The answer is `{blob, sha256, size, media_ty
 is `blob/<sha256>`. The same bytes answer the same reference. `st blobs put FILE` does it from the
 CLI, and `st conversations send --attach FILE` does it as part of a send.
 
+Before it uploads, the CLI prepares the file (`crates/st3/src/attach_image.rs`): an SVG is
+rendered to a PNG on white at twice its size (at most 4096 pixels on a side), and an `<image href>`
+such as a screenshot it marks up is drawn only from a `data:` URL or a file inside the SVG's own
+folder (after `..` and symbolic links), so an SVG from elsewhere cannot pull another local image
+into what the recipient sees; any other path refuses the attachment and names it; text is drawn in
+the font it names or else in any font the machine has, and with no font at all the attachment is
+refused rather than sent without its text; a BMP becomes a PNG; and a still image
+over 10 MiB (up to 256 MiB) is scaled down until it fits, as a PNG for a PNG and as a JPEG
+otherwise. It prints what it changed. A GIF over the limit, HEIC, AVIF, TIFF and PDF are refused
+with a way to convert them. `st blobs put --media-type TYPE` uploads the bytes exactly. The daemon
+takes only the four types in [Limits](#limits) either way.
+
 Errors: `blob-too-large` (413), `unsupported-media-type` (415), `blob-content-mismatch` (422),
 `blob-quota-exceeded` (429).
 

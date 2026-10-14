@@ -1,7 +1,6 @@
 # Eval run report — YYYY-MM-DD
 
 - Eval: `<name>`
-- Runtime: `st2|st3`
 - Run ID: `<id>`
 - Candidate commit: `<sha>`
 - Eval KDL SHA-256: `<sha256>`

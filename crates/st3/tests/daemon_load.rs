@@ -54,6 +54,8 @@ use crate::daemon_bench::{
     percentile, stub_pty,
 };
 
+use crate::load_hog;
+
 /// Shared runners tolerate up to twice main's baseline p99 or average daemon CPU.
 /// Absolute budgets and request/correctness checks still apply independently.
 const WORSE: f64 = 2.0;
@@ -174,6 +176,34 @@ const MIX: &[Load] = &[
     load("client usage", 0.5, 300),
 ];
 
+/// What a run adds to the busy host's conditions.
+#[derive(Clone, Copy, Default)]
+struct Conditions {
+    /// Sample the four request-latency measures often enough for a p99, and report them by
+    /// target: person reads and message sends go out faster, and a fresh agents list joins.
+    measured: bool,
+    /// Run a CPU and disk hog at seat priority beside the daemon, holding the load average
+    /// above the core count.
+    hog: bool,
+}
+
+/// The requests of a run: the busy host's [`MIX`], faster where `conditions` measure.
+fn mix(conditions: Conditions) -> Vec<Load> {
+    let mut mix = MIX
+        .iter()
+        .map(|kind| load(kind.name, kind.per_second, kind.budget.as_millis() as u64))
+        .collect::<Vec<_>>();
+    if conditions.measured {
+        for kind in &mut mix {
+            if matches!(kind.name, "message send" | "person read") {
+                kind.per_second = 2.0;
+            }
+        }
+        mix.push(load("person read fresh", 1.0, 1_000));
+    }
+    mix
+}
+
 /// What a person reads while moving through stui, one after another, and each read's p99 budget.
 const PERSON_READS: &[(&str, u64)] = &[
     ("/v1/client/now", 250),
@@ -234,6 +264,40 @@ struct Report {
     store_open_ms: f64,
     paths: BTreeMap<String, PathReport>,
     failed: BTreeMap<String, usize>,
+    /// The host the run measured on, when it ran beside a hog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hog: Option<HogReport>,
+    /// Each request-latency target's samples across every path it covers, and `message-send`
+    /// against the write-ack target. Reported by the hog run; empty otherwise.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    targets: BTreeMap<String, TargetReport>,
+}
+
+/// What the hog was, and the load it held while the run measured.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct HogReport {
+    cores: usize,
+    cpu_hogs: usize,
+    disk_hogs: usize,
+    /// The test process's nice, and the hog's.
+    test_nice: i32,
+    hog_nice: i32,
+    /// The 1-minute load average when the timed load began, at its lowest sample, and at its end.
+    load_at_start: f64,
+    load_min: f64,
+    load_at_end: f64,
+}
+
+/// A request-latency target as one run met it.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct TargetReport {
+    count: usize,
+    p50_ms: f64,
+    p99_ms: f64,
+    max_ms: f64,
+    target_ms: f64,
+    /// Whether the p99 was over the target.
+    over_target: bool,
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -299,6 +363,7 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
             &peer_source,
             Duration::from_secs(seconds),
             regime,
+            Conditions::default(),
         );
         print(&report);
         if let Some(path) = std::env::var_os("ST_LOAD_REPORT") {
@@ -325,6 +390,301 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+/// The measures the hog run reports, in order: the request-latency targets and message send.
+const HOG_MEASURES: &[&str] = &["person-read", "person-read-fresh", "write-ack", "message-send"];
+
+/// Runs the daemon twice on the same generated store, once alone and once beside a CPU and disk
+/// hog at the priority seats get by default, with the load average held above the core count.
+/// It reports person-read, person-read-fresh, write-ack and message send against the targets in
+/// `slo/targets.toml` (what `GET /v1/client/request-latency` reports) for each run.
+///
+/// ```sh
+/// ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out TMPDIR=/var/tmp cargo test --release \
+///     -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+/// ```
+///
+/// - `ST_LOAD_HOG=1` runs it; `ST_LOAD_GATE=1` is needed too.
+/// - `ST_LOAD_HOG_REPORT` is a directory for `without-hog.json`, `with-hog.json` and `summary.md`.
+/// - `ST_LOAD_HOG_RAMP_SECONDS` is how long the load average may take to pass the core count
+///   before the timed load starts. The default is 180.
+/// - `ST_LOAD_HOG_STRICT=1` fails the run when the hog run misses a target. Without it a miss is
+///   reported, since the targets describe and the run is not a required check.
+///
+/// The run fails when a request fails, a snapshot is wrong, or the load average was not past the
+/// core count at the start, at the end and at its lowest sample.
+#[test]
+fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
+    if std::env::var_os("ST_LOAD_GATE").is_none() || std::env::var_os("ST_LOAD_HOG").is_none() {
+        println!("skipped: set ST_LOAD_GATE=1 and ST_LOAD_HOG=1 to run the hog load test");
+        return;
+    }
+    if cfg!(debug_assertions) {
+        println!("skipped: a debug build is too slow to measure; run with cargo test --release");
+        return;
+    }
+    let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scale = env_number("ST_LOAD_SCALE", 1.0_f64);
+    let seconds = env_number("ST_LOAD_SECONDS", 120_u64);
+    let keep = std::env::var_os("ST_BENCH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
+    std::fs::create_dir_all(&keep).unwrap();
+    let make_daemon = || {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .thread_name("st3-daemon")
+            .enable_all()
+            .build()
+            .unwrap()
+    };
+    let generation = make_daemon();
+    let (source, peer_source) = generation.block_on(generated_stores(&keep, scale));
+    drop(generation);
+    let mut reports = Vec::new();
+    for hog in [false, true] {
+        let daemon = make_daemon();
+        let report = run(
+            &daemon,
+            scale,
+            &source,
+            &peer_source,
+            Duration::from_secs(seconds),
+            LoadRegime::Steady,
+            Conditions { measured: true, hog },
+        );
+        print(&report);
+        drop(daemon);
+        reports.push(report);
+    }
+    let summary = hog_summary(&reports[0], &reports[1]);
+    println!("\n{summary}");
+    if let Some(dir) = std::env::var_os("ST_LOAD_HOG_REPORT") {
+        let dir = PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, report) in [("without-hog", &reports[0]), ("with-hog", &reports[1])] {
+            std::fs::write(
+                dir.join(format!("{name}.json")),
+                serde_json::to_vec_pretty(report).unwrap(),
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.join("summary.md"), &summary).unwrap();
+    }
+    let strict = std::env::var_os("ST_LOAD_HOG_STRICT").is_some();
+    let mut failures = hog_failures(&reports[0], false, false);
+    failures.extend(hog_failures(&reports[1], true, strict));
+    assert!(failures.is_empty(), "the hog run failed:\n{}", failures.join("\n"));
+}
+
+/// Why a run of the hog test is not valid, or with `strict`, missed a target. The p99 budgets of
+/// the unloaded gate do not apply: the targets are what this run reports.
+fn hog_failures(report: &Report, hogged: bool, strict: bool) -> Vec<String> {
+    let label = if hogged { "with the hog" } else { "without the hog" };
+    let mut failures = absolute_failures(report)
+        .into_iter()
+        .filter(|failure| !failure.contains("budget"))
+        .map(|failure| format!("{label}: {failure}"))
+        .collect::<Vec<_>>();
+    for name in HOG_MEASURES {
+        if report.targets.get(*name).map_or(0, |target| target.count) == 0 {
+            failures.push(format!("{label}: {name} was never measured"));
+        }
+    }
+    if hogged {
+        match &report.hog {
+            None => failures.push(format!("{label}: the report names no hog")),
+            Some(hog) => {
+                let cores = hog.cores as f64;
+                for (when, load) in [
+                    ("at the start", hog.load_at_start),
+                    ("at its lowest sample", hog.load_min),
+                    ("at the end", hog.load_at_end),
+                ] {
+                    if load <= cores {
+                        failures.push(format!(
+                            "{label}: the load average {load:.1} {when} was not past the {} cores",
+                            hog.cores
+                        ));
+                    }
+                }
+                if hog.hog_nice <= hog.test_nice && hog.test_nice < 19 {
+                    failures.push(format!(
+                        "{label}: the hog's nice {} is no lower than the test's {}",
+                        hog.hog_nice, hog.test_nice
+                    ));
+                }
+            }
+        }
+        if strict {
+            for (name, target) in &report.targets {
+                if target.over_target {
+                    failures.push(format!(
+                        "{label}: {name} p99 {:.1} ms is over its {:.0} ms target",
+                        target.p99_ms, target.target_ms
+                    ));
+                }
+            }
+        }
+    }
+    failures
+}
+
+/// The two runs side by side, as a table a person can read.
+fn hog_summary(without: &Report, with: &Report) -> String {
+    let mut out = String::from(
+        "| measure | target p99 | without hog: n / p50 / p99 / max (ms) | with hog: n / p50 / p99 / max (ms) | with hog |\n|---|---|---|---|---|\n",
+    );
+    let cell = |target: Option<&TargetReport>| match target {
+        Some(t) => format!("{} / {:.1} / {:.1} / {:.1}", t.count, t.p50_ms, t.p99_ms, t.max_ms),
+        None => "-".into(),
+    };
+    for name in HOG_MEASURES {
+        let (a, b) = (without.targets.get(*name), with.targets.get(*name));
+        let target = b.or(a).map_or("-".into(), |t| format!("{:.0} ms", t.target_ms));
+        let verdict = match b {
+            Some(t) if t.over_target => "missed",
+            Some(_) => "met",
+            None => "-",
+        };
+        out.push_str(&format!("| {name} | {target} | {} | {} | {verdict} |\n", cell(a), cell(b)));
+    }
+    for (label, report) in [("without the hog", without), ("with it", with)] {
+        let failed = report.failed.values().sum::<usize>();
+        let requests = report.paths.values().map(|path| path.count).sum::<usize>() + failed;
+        out.push_str(&format!("\nRequests that failed {label}: {failed} of {requests}"));
+        if failed > 0 {
+            out.push_str(&format!(" {:?}", report.failed));
+        }
+    }
+    out.push('\n');
+    if let Some(hog) = &with.hog {
+        out.push_str(&format!(
+            "\nHog: {} CPU and {} disk processes at nice {} (test process nice {}); load average {:.1} at the start, {:.1} at its lowest sample, {:.1} at the end, on {} cores. Daemon CPU {:.2} cores without the hog, {:.2} with it.\n",
+            hog.cpu_hogs, hog.disk_hogs, hog.hog_nice, hog.test_nice, hog.load_at_start,
+            hog.load_min, hog.load_at_end, hog.cores, without.daemon_cores, with.daemon_cores
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+fn ms(values: &[u64]) -> Vec<Duration> {
+    values.iter().map(|value| Duration::from_millis(*value)).collect()
+}
+
+#[test]
+fn target_rows_pool_each_targets_paths_and_keep_message_send_apart() {
+    let timings = BTreeMap::from([
+        ("person read /v1/client/now".to_owned(), ms(&[10, 20])),
+        ("person read /v1/client/work".to_owned(), ms(&[30])),
+        ("person read fresh".to_owned(), ms(&[250, 400])),
+        ("harness event".to_owned(), ms(&[5])),
+        ("message send".to_owned(), ms(&[7, 150])),
+        // Not a latency target's path.
+        ("claim".to_owned(), ms(&[900])),
+        (LONG_POLL.to_owned(), ms(&[30_000])),
+    ]);
+    let rows = target_rows(&timings);
+    assert_eq!(rows["person-read"].count, 3);
+    assert_eq!(rows["person-read-fresh"].count, 2);
+    assert!(rows["person-read-fresh"].over_target, "400 ms is over the 300 ms target");
+    assert_eq!(rows["write-ack"].count, 3, "a harness event and both message sends");
+    assert_eq!(rows["message-send"].count, 2);
+    assert_eq!(rows["message-send"].target_ms, rows["write-ack"].target_ms);
+    assert!(rows["message-send"].over_target);
+    assert!(!rows.contains_key("terminal-attach"));
+}
+
+#[cfg(test)]
+fn hogged_report(load: [f64; 3], hog_nice: i32) -> Report {
+    let targets = HOG_MEASURES
+        .iter()
+        .map(|name| {
+            let report = TargetReport {
+                count: 10,
+                p99_ms: 500.0,
+                target_ms: 100.0,
+                over_target: true,
+                ..TargetReport::default()
+            };
+            ((*name).to_owned(), report)
+        })
+        .collect();
+    Report {
+        targets,
+        hog: Some(HogReport {
+            cores: 16,
+            cpu_hogs: 32,
+            disk_hogs: 2,
+            test_nice: 0,
+            hog_nice,
+            load_at_start: load[0],
+            load_min: load[1],
+            load_at_end: load[2],
+        }),
+        ..Report::default()
+    }
+}
+
+#[test]
+fn a_hog_run_needs_the_load_average_past_the_cores_at_every_sample() {
+    let held = hog_failures(&hogged_report([20.0, 17.0, 21.0], 10), true, false);
+    assert!(!held.iter().any(|failure| failure.contains("load average")), "{held:?}");
+    for (load, when) in [
+        ([12.0, 17.0, 21.0], "at the start"),
+        ([20.0, 15.9, 21.0], "at its lowest sample"),
+        ([20.0, 17.0, 16.0], "at the end"),
+    ] {
+        let failures = hog_failures(&hogged_report(load, 10), true, false);
+        assert!(
+            failures.iter().any(|failure| failure.contains("load average") && failure.contains(when)),
+            "{when}: {failures:?}"
+        );
+    }
+}
+
+#[test]
+fn a_missed_target_fails_the_hog_run_only_when_strict() {
+    let report = hogged_report([20.0, 17.0, 21.0], 10);
+    let loose = hog_failures(&report, true, false);
+    assert!(!loose.iter().any(|failure| failure.contains("target")), "{loose:?}");
+    let strict = hog_failures(&report, true, true);
+    for name in HOG_MEASURES {
+        assert!(
+            strict.iter().any(|failure| failure.contains(name) && failure.contains("over its 100 ms target")),
+            "{name}: {strict:?}"
+        );
+    }
+}
+
+#[test]
+fn the_hog_must_run_lower_than_the_test_process() {
+    let failures = hog_failures(&hogged_report([20.0, 17.0, 21.0], 0), true, false);
+    assert!(failures.iter().any(|failure| failure.contains("no lower than the test's")), "{failures:?}");
+}
+
+#[test]
+fn the_summary_sets_each_measure_with_and_without_the_hog_side_by_side() {
+    let mut without = hogged_report([20.0, 17.0, 21.0], 10);
+    without.hog = None;
+    for target in without.targets.values_mut() {
+        target.p99_ms = 40.0;
+        target.over_target = false;
+    }
+    let summary = hog_summary(&without, &hogged_report([20.0, 17.0, 21.0], 10));
+    for name in HOG_MEASURES {
+        let row = summary.lines().find(|line| line.starts_with(&format!("| {name} |"))).unwrap();
+        assert!(row.contains("100 ms") && row.contains("40.0") && row.contains("500.0"), "{row}");
+        assert!(row.ends_with("| missed |"), "{row}");
+    }
+    assert!(summary.contains("32 CPU and 2 disk processes at nice 10"), "{summary}");
+    assert!(summary.contains("Requests that failed without the hog: 0 of 0"), "{summary}");
+    let mut failing = hogged_report([20.0, 17.0, 21.0], 10);
+    failing.failed.insert("replication exchange: timed out".into(), 3);
+    let summary = hog_summary(&without, &failing);
+    assert!(summary.contains("Requests that failed with it: 3 of 3 {"), "{summary}");
 }
 
 /// CPU the daemon's request and task kinds were charged in its performance window, by kind.
@@ -1019,6 +1379,16 @@ fn print(report: &Report) {
         );
     }
     println!("target: slo/targets.toml's p99, described and never gated");
+    if !report.targets.is_empty() {
+        println!("{:<20} {:>7} {:>8} {:>8} {:>8} {:>8}", "target", "n", "p50 ms", "p99 ms", "max ms", "target");
+        for (name, target) in &report.targets {
+            println!(
+                "{:<20} {:>7} {:>8.1} {:>8.1} {:>8.1} {:>8.0}{}",
+                name, target.count, target.p50_ms, target.p99_ms, target.max_ms, target.target_ms,
+                if target.over_target { " over" } else { "" }
+            );
+        }
+    }
     if !report.failed.is_empty() {
         println!("failed requests: {:?}", report.failed);
     }
@@ -1167,6 +1537,7 @@ fn start_event_migration(
 
 #[test]
 fn load_fixture_starts_the_shared_worker_and_steady_waits_for_completion() {
+    let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = tempfile::tempdir().unwrap();
     let daemon = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1256,8 +1627,11 @@ fn run(
     peer_source: &Path,
     duration: Duration,
     regime: LoadRegime,
+    conditions: Conditions,
 ) -> Report {
     let profile = LoadProfile::from_env();
+    // Leaked so each kind's task may hold it; a test process ends soon after.
+    let mix: &'static [Load] = Box::leak(mix(conditions).into_boxed_slice());
     let work = tempfile::tempdir().unwrap();
     let root = work.path();
     let database = root.join("state/claims.sqlite3");
@@ -1385,6 +1759,32 @@ fn run(
     });
     // Let the daemon settle after opening: its first reconciler pass is not the load's.
     std::thread::sleep(Duration::from_secs(5));
+    // The hog starts once the daemon is up and settled, and the timed load waits for the load
+    // average to pass the core count.
+    let mut hog = None;
+    let mut hog_report = None;
+    if conditions.hog {
+        let mut started = load_hog::Hog::start(root.join("hog"), load_hog::Shape::for_host())
+            .expect("the hog starts");
+        let ramp = Duration::from_secs(env_number("ST_LOAD_HOG_RAMP_SECONDS", 180_u64));
+        let load_at_start = started.ramp(ramp).unwrap_or_else(|error| panic!("{error}"));
+        println!(
+            "hog: {} CPU and {} disk processes at nice {} (test process nice {}); load average {load_at_start:.1} on {} cores",
+            started.shape.cpu, started.shape.disk, started.nice, load_hog::own_nice(),
+            load_hog::cores()
+        );
+        hog_report = Some(HogReport {
+            cores: load_hog::cores(),
+            cpu_hogs: started.shape.cpu,
+            disk_hogs: started.shape.disk,
+            test_nice: load_hog::own_nice(),
+            hog_nice: started.nice,
+            load_at_start,
+            ..HogReport::default()
+        });
+        hog = Some(started);
+    }
+    let load_samples = Arc::new(Mutex::new(Vec::<f64>::new()));
 
     let timings = Arc::new(Mutex::new(BTreeMap::<String, Vec<Duration>>::new()));
     let failed = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
@@ -1406,11 +1806,20 @@ fn run(
     let cursor = context.store.index().unwrap();
     let started = Instant::now();
     load.block_on(async {
+        if conditions.hog {
+            let (samples, running) = (load_samples.clone(), running.clone());
+            tokio::spawn(async move {
+                while running.load(Ordering::Relaxed) {
+                    samples.lock().unwrap().push(load_hog::load_average());
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            });
+        }
         let mut tasks = Vec::new();
         let mut polls = Vec::new();
         let (roster_stop, stopped) = watch::channel(false);
         let (initial_done, initial_ready) = watch::channel(false);
-        for (index, kind) in MIX.iter().enumerate() {
+        for (index, kind) in mix.iter().enumerate() {
             let (context, timings, failed, in_flight, running) = (
                 context.clone(),
                 timings.clone(),
@@ -1422,7 +1831,7 @@ fn run(
             tasks.push(tokio::spawn(async move {
                 // The first person read must not warm the shared roster before the simultaneous
                 // snapshots. The rest of the fleet's writes and reads run throughout.
-                if kind.name == "person read" {
+                if kind.name.starts_with("person read") {
                     let _ = initial_ready.changed().await;
                 }
                 let period = Duration::from_secs_f64(1.0 / kind.per_second);
@@ -1677,10 +2086,17 @@ fn run(
     assert!(event_migration.as_ref().unwrap().completed);
     assert!(!context.store.event_payload_migration_pending().unwrap());
     let timings = std::mem::take(&mut *timings.lock().unwrap());
-    let budgets = MIX
+    let budgets = mix
         .iter()
         .map(|load| (load.name, load.budget))
         .collect::<BTreeMap<_, _>>();
+    let targets = if conditions.measured { target_rows(&timings) } else { BTreeMap::new() };
+    if let Some(report) = &mut hog_report {
+        let samples = load_samples.lock().unwrap();
+        report.load_min = samples.iter().copied().fold(f64::INFINITY, f64::min);
+        report.load_at_end = load_hog::load_average();
+    }
+    drop(hog);
     let paths = timings
         .into_iter()
         .map(|(name, samples)| {
@@ -1724,6 +2140,8 @@ fn run(
         store_open_ms,
         paths,
         failed,
+        hog: hog_report,
+        targets,
     }
 }
 
@@ -2254,6 +2672,13 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             )
             .await
         }
+        "person read fresh" => {
+            // What `st agents ls` always sends: it waits for one roster refresh by design.
+            match context.person.get::<Value>(&format!("/v1/client/agents?fresh=true&limit={ROSTER_LIMIT}")).await {
+                Ok(_) => Err("person read fresh".into()),
+                Err(error) => Err(format!("fresh agents: {error}")),
+            }
+        }
         "person read" => {
             let (path, _) = PERSON_READS[turn % PERSON_READS.len()];
             match context.person.get::<Value>(path).await {
@@ -2281,6 +2706,7 @@ fn target_path(name: &str) -> Option<String> {
         "harness event" => Some("POST /v1/harness-events".into()),
         "message send" => Some("POST /v1/messages".into()),
         "lease renewal" => Some("POST /v1/work/{action}/{*subject}".into()),
+        "person read fresh" => Some("GET /v1/client/agents (fresh)".into()),
         "seat work" => Some("GET /v1/work".into()),
         ROSTER_SNAPSHOT | ROSTER_CONNECT_SNAPSHOT => Some("stream agents".into()),
         _ => match name.strip_prefix("person read ") {
@@ -2292,6 +2718,40 @@ fn target_path(name: &str) -> Option<String> {
                 .map(|collection| format!("stream {collection}")),
         },
     }
+}
+
+/// The request-latency targets, as `timings` met them: every path a target covers, pooled, and
+/// `message-send` on its own against the write-ack target it counts toward.
+fn target_rows(timings: &BTreeMap<String, Vec<Duration>>) -> BTreeMap<String, TargetReport> {
+    let mut pooled = BTreeMap::<String, (Duration, Vec<Duration>)>::new();
+    for (name, samples) in timings {
+        let Some(path) = target_path(name) else { continue };
+        let Some(latency) = st3::slo::targets().for_path(&path) else { continue };
+        let target = latency.target(false);
+        let mut keys = vec![latency.name.clone()];
+        if name == "message send" {
+            keys.push("message-send".into());
+        }
+        for key in keys {
+            pooled.entry(key).or_insert_with(|| (target, Vec::new())).1.extend(samples);
+        }
+    }
+    pooled
+        .into_iter()
+        .map(|(name, (target, samples))| {
+            let millis = |duration: Duration| duration.as_secs_f64() * 1e3;
+            let p99 = percentile(&samples, 99);
+            let report = TargetReport {
+                count: samples.len(),
+                p50_ms: millis(percentile(&samples, 50)),
+                p99_ms: millis(p99),
+                max_ms: millis(samples.iter().max().copied().unwrap_or_default()),
+                target_ms: millis(target),
+                over_target: p99 > target,
+            };
+            (name, report)
+        })
+        .collect()
 }
 
 /// A request's descriptive p99 target from `slo/targets.toml`, served on its owner.
@@ -2312,6 +2772,9 @@ fn budget(budgets: &BTreeMap<&str, Duration>, name: &str) -> Duration {
             .any(|collection| snapshot_names(collection).iter().any(|snapshot| snapshot == name))
     {
         return ROSTER_BUDGET;
+    }
+    if name == "person read fresh" {
+        return Duration::from_millis(1_000);
     }
     if let Some(route) = name.strip_prefix("person read ") {
         let budget = PERSON_READS

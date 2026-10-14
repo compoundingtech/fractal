@@ -267,3 +267,107 @@ fn catalog_eligibility_ignores_only_literal_internal_prefixes() {
     internal.execute_batch("PRAGMA writable_schema=ON; INSERT INTO sqlite_schema(type,name,tbl_name,rootpage,sql) VALUES('table','sqlite_x','sqlite_x',0,NULL);").unwrap();
     assert_eq!(predicates(&internal), (true, true));
 }
+
+#[test]
+fn fresh_auxiliary_schema_families_share_durable_commits() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::Mutex;
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("schema.sqlite")).unwrap();
+    connection
+        .pragma_update(None, "journal_mode", "WAL")
+        .unwrap();
+    let commits = Arc::new(AtomicUsize::new(0));
+    let observed = commits.clone();
+    connection.commit_hook(Some(move || {
+        observed.fetch_add(1, Ordering::Relaxed);
+        false
+    }));
+    let installations = Arc::new(Mutex::new(Vec::new()));
+    let recorded = installations.clone();
+    let committed = commits.clone();
+    connection.authorizer(Some(move |context: AuthContext<'_>| {
+        let family = match context.action {
+            AuthAction::CreateTrigger { trigger_name, .. }
+                if trigger_name.starts_with("fleet_generation_") =>
+            {
+                Some("fleet")
+            }
+            AuthAction::CreateTrigger { trigger_name, .. }
+                if trigger_name.contains("_inventory_") =>
+            {
+                Some("inventory")
+            }
+            AuthAction::CreateTrigger { trigger_name, .. }
+                if trigger_name.ends_with("_graph_insert")
+                    || trigger_name.ends_with("_graph_update")
+                    || trigger_name.ends_with("_graph_delete") =>
+            {
+                Some("graph")
+            }
+            AuthAction::CreateTable {
+                table_name: "claim_signatures" | "claim_verdicts" | "claim_verdict_links" | "held_keys",
+            } => Some("principals"),
+            _ => None,
+        };
+        if let Some(family) = family {
+            recorded
+                .lock()
+                .unwrap()
+                .push((family, committed.load(Ordering::Relaxed)));
+        }
+        Authorization::Allow
+    }));
+    Store::create_schema(&connection, &Plain).unwrap();
+    // Plain has no legacy graph tables. Exercise the same fresh-install batch with
+    // two existing graph tables, as a runtime that supplies a legacy digest does.
+    super::install_schema_batch(&connection, true, |connection| {
+        super::create_graph_generation_triggers(
+            connection,
+            &[
+                ("operations", "operations", &["id", "state"], "id"),
+                ("documents", "documents", &["name", "hash"], "name"),
+            ],
+        )
+    })
+    .unwrap();
+    connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    let installations = installations.lock().unwrap();
+    for family in ["fleet", "inventory", "graph", "principals"] {
+        let positions = installations
+            .iter()
+            .filter(|(name, _)| *name == family)
+            .map(|(_, position)| *position)
+            .collect::<Vec<_>>();
+        assert!(positions.len() > 1, "missing {family} DDL: {positions:?}");
+        assert!(
+            positions.iter().all(|position| *position == positions[0]),
+            "{family} DDL committed separately: {positions:?}"
+        );
+    }
+    assert!(connection.is_autocommit());
+    connection
+        .execute("INSERT INTO meta VALUES('fixture','preserved')", [])
+        .unwrap();
+    Store::create_schema(&connection, &Plain).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM meta WHERE key='fixture'", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        "preserved"
+    );
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "synchronous", |row| row.get::<_, u32>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+}

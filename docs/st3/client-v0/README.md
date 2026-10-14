@@ -978,6 +978,19 @@ The v0 action discriminators are:
 | Terminals | `terminal.input`, `terminal.resize`, `terminal.attach`, `terminal.detach` | runtime incarnation; resize and a line of input (`mode` `line`) also require the screen sequence; raw and key input do not |
 | Pairing | `pairing.begin`, `pairing.complete`, `pairing.revoke` | pairing/device revision where applicable |
 
+After authentication and snapshot admission, `message.send` waits at most three seconds
+for confirmation of dispatch and its action receipt. HTTP 503 `message-send-unconfirmed`
+has `retryable: false` and details `{applied: "unknown", action_id, idempotency_key}`.
+The admitted send can still finish; this response does not assert rollback or rejection.
+Keep the original action ID, key and payload, and resend that identical request to recover
+the durable outcome. Never create a new key for this response. At most sixteen send workers
+remain pending in a daemon. Concurrent retries wait for the held key within the same
+confirmation deadline and consume no additional worker capacity while waiting. Healthy
+retries return the original durable receipt; an expired wait returns the same unconfirmed
+outcome. A full limit returns the existing `rate-limited` code with
+`applied: "none"` before submitting that request. This bounds confirmation waiting and
+pending send workers, not authentication, snapshot admission or the underlying writer hold.
+
 `runtime.stop` publishes a stop for the selected member. `runtime.restart` terminates the current
 incarnation of a member with an `always` restart policy; its desired state then starts the next
 incarnation. `runtime.reset` publishes a restart-window reset for a run-owned member. A client
@@ -1199,9 +1212,16 @@ as the configured person. The CLI checks that the gateway grants that person `te
 `terminal.control`, and reads the owner, PTY session, and runtime incarnation from its local daemon.
 It then dials the owner's Fabric NodeID, which the owner's member record advertises or, in a
 config-peer fleet, the one trusted Fabric peer with the owner's name, ignoring case. The protocol is
-`st3/pty/FLEET_ID`, which `st terminals expose-fabric` has the owner's Fabric serve by running
-`st terminals serve-fabric --stdio` for each tunnel, so no st daemon on either host takes part. The
-CLI sends one line, the `pty remote-serve` route line plus the subject and incarnation:
+`st3/pty/FLEET_ID`, which `st terminals expose-fabric` has the owner's Fabric forward to the owner
+daemon's terminal socket, `STATE_DIR/run/terminals.sock`: one connection per tunnel, with no process
+or pipe per attach. The daemon serves that socket on a thread and runtime of its own, and an attach
+reads only the PTY registry and the kernel's socket peer, so a daemon busy with its store or other
+requests does not delay it. A stopped, crashed or restarting daemon refuses new tunnels, and each
+daemon restart, including every deploy, ends its live remote attaches; the CLI reconnects with the
+same incarnation once the daemon answers again. `st terminals expose-fabric --exec`, and any
+exposure made before the terminal socket existed, has Fabric run `st terminals serve-fabric
+--stdio` for each tunnel instead, which needs no daemon and behaves the same otherwise; running
+`st terminals expose-fabric` again replaces either kind. The CLI sends one line, the `pty remote-serve` route line plus the subject and incarnation:
 `{"op":"route","name":RUNTIME_ID,"subject":SUBJECT,"incarnation":INCARNATION}`. The owner refuses
 a name that is not one file under its PTY root and a session that is not tagged as the subject's.
 It refuses a session whose kernel-reported socket peer and PTY record do not match the incarnation.
@@ -1823,12 +1843,12 @@ projection time of its cut.
 
 Before the missions list's first publication, and while its refresher fails three folds in a
 row or after it stops, missions windows fold on read and follow commits as before, until a fold
-publishes again. When projections are replaced without a claim (a replay, trim or heal), they
+publishes again. When projections are replaced without a claim (a replay or trim), they
 keep the newest rows, under their own cut, until the list's fold from nothing publishes.
 
 The work list is never folded on read while its refresher runs. Until it has a current
 publication (at startup, after its refresher withdrew it on three failed folds in a row, and
-after a replay, trim or heal until its fold from nothing publishes), a work window receives one
+after a replay or trim until its fold from nothing publishes), a work window receives one
 retryable `resync`, then waits for the list's next publication; neither commits, the reread
 interval nor a repeat of that answer sends it anything more. A paired session's clock still
 rechecks its grant meanwhile, and an expired or revoked grant ends the window. If the work
@@ -1838,7 +1858,7 @@ list's refresher stops for good, a work window receives one `error` frame and en
 `GET /v1/client/work` (the current list, not `history=true`) answers the same way. A first
 page is a slice of the newest publication, under that publication's snapshot. A continuation
 is a slice of the same publication, even after a newer one, a withdrawal or the refresher's end
-(new first pages then refuse), until its cursor expires or a replay, trim or heal replaced the
+(new first pages then refuse), until its cursor expires or a replay or trim replaced the
 projections behind it (`page-cursor-expired`). Asking for the same first page again reuses its
 cursor and its original expiry: a cursor close to expiring can still expire before its next page
 is read, and the client restarts from a first page. The daemon keeps at most 32 cached first pages,
@@ -1855,7 +1875,7 @@ comes, it answers HTTP 503, retryable, with `details.reason: "work-list-not-fres
 asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across every
 attempt. A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
 model, gets that retryable 503 until the work list's first fold after the daemon starts, and again
-after each replay, trim or heal and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
+after each replay or trim and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
 
 A daemon started with `ST3_PUBLISHED_LISTS=off` folds each window and page on read instead.
 
@@ -2026,6 +2046,18 @@ reads are restricted to content-addressed files in the bound Pi/OMP blob store. 
 signatures, with SVG/HTML/unrecognized bytes returned only as opaque octets.
 
 `message.send` accepts `kind: "silent" | "wake"`; omitted kind means wake. Silent mail stays unread until a real wake offers at most eight held messages, or it is read on demand. Replies default to wake independently of their parent; there is no question tag or per-seat wake policy. Person and system wake events always wake. Signed silent requests carry `st3-silent` in signed tags. Old daemons ignore the kind field and do not hold silent tags; inspect receipt tags in mixed-version fleets. See [silent messages](../silent-messages.md).
+
+Message resources and `GET /v1/messages/delivery/{subject}` expose the existing
+`delivery` projection: `state` (`pending`, `waiting`, or `read`), durable handoff `phase`,
+human-readable `reason`, `age_ms`, and `recipient_delivery`. Native transport acceptance
+(`phase: delivered`) is not recipient read. A `sent` or `staged` message whose recipient's
+current, fresh native harness observation is `blocked_on: human` has `state: waiting`
+and a `reason` explicitly saying it is held outside the native harness for a human answer
+or approval. The durable message remains queued, not delivered; no separate held wire
+state is introduced. The held reason clears when an answer, cancellation, or timeout
+clears that observation, when its runtime incarnation ends or restarts, or when the
+observation is no longer fresh. Old-incarnation observations cannot restore a hold.
+Already delivered, read, and closed messages never acquire this held reason.
 
 ### Submission incarnation
 
