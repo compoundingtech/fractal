@@ -136,6 +136,7 @@ impl Store {
                 let body = row.get::<_, String>(1)?;
                 Ok(DetailDeclaration {
                     desired: DesiredSubject {
+                        accountable: None,
                         subject: subject.into(),
                         kind: stored_kind.clone(),
                         desired: decode_body(&body, 1)?,

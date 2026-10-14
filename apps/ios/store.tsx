@@ -4,7 +4,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, outcomeUnknown, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
+import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
+import { API_VERSION, ClientError, St3Client, isTransient, notApplied, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
@@ -15,9 +16,10 @@ import { rememberBounded } from './boundedCache';
 import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from './terminalControls';
 import { sendFences } from './sendFence';
 import { Feed } from './feed';
+import { quality, localDrafts } from './qualityNative';
 import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
-import { Observations, type Context } from './observations';
+import { Observations, toObservationReport, type Context } from './observations';
 import { buildFabricDefault, decodeFabricTarget, encodeFabricTarget, fabricGatewayId, fabricTargetFromText, isFabricGatewayId, type FabricTarget } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
 import { ForegroundGate } from './foreground';
@@ -38,6 +40,10 @@ import { decodeBase64, encodeBase64, type Picked } from './images';
 export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
+/** A message.send request as sent, kept whole so an unconfirmed one can be sent again unchanged. */
+export type MessageRequest = Parameters<St3Client['messageSend']>[0];
+/** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
+export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
 const URL_KEY = 'st3.gateway.url', ORDER_KEY = 'st3.tabs.order.resources-v1', CREDENTIAL_KEY = 'st3.device.credential';
 // The enrolled signing key's public half, the person it signs as and its grant chain (the private
@@ -88,6 +94,7 @@ function items<K extends Resource['kind']>(page: { items: Resource[] }, kind: K)
   return page.items.filter((item): item is Extract<Resource, { kind: K }> => item.kind === kind);
 }
 function actionId() { return `action/ios-${Crypto.randomUUID()}`; }
+function sentAs(outcome: SendOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: errorText(outcome.error) } : outcome; }
 
 /** Where a measurement was served from: the route it ran over and, for fabric, the path once measured. */
 function observedContext(route: Route, fabricPath: 'direct' | 'relay' | 'unknown'): Context {
@@ -136,6 +143,21 @@ function useAppStore(proof?: FabricProfile) {
   const sidebarSeen = useRef(new Map<string, SidebarResource>());
   const cachedActor = useRef(''), cacheSavedAt = useRef(0), cacheGeneration = useRef(0);
   const conversationCache = useRef(new Map<string, Conversation<TimelineEntry>>()), draftCache = useRef(new Map<string, string>());
+  const [draftsReady, setDraftsReady] = useState(0);
+  const draftsOwner = useRef('');
+  useEffect(() => {
+    const owner = caps?.session_actor;
+    if (proof || !owner || draftsOwner.current === owner) return;
+    draftsOwner.current = owner;
+    let current = true;
+    void quality.ready.then(() => localDrafts.restore(owner, draftCache.current, () => current && draftsOwner.current === owner)).then(restored => {
+      if (!current) return;
+      if (quality.wasUnclean) quality.counters.add('drafts_restored_unclean', restored);
+      setDraftsReady(n => n + 1);
+    });
+    return () => { current = false; };
+  }, [proof, caps?.session_actor]);
+  useEffect(() => foreground.current.subscribe(active => { if (!active && !proofRef.current) void localDrafts.save(draftsOwner.current, draftCache.current); }), []);
   // Images messages carry, as data URIs, so a conversation scrolled back to does not read them again.
   const imageCache = useRef(new Map<string, Promise<string>>());
   // Attention the person acted on from here: st closing it is their doing, not a vanishing.
@@ -213,8 +235,30 @@ function useAppStore(proof?: FabricProfile) {
     held.connect = observations.begin('ios-connect');
   }, [proof, observations, fabricSnapshot.phase]);
   const connectUrl = selected.baseUrl ?? '';
+  // What the phone measured goes to the member it is connected to, as one report at a time and never
+  // faster than every thirty seconds: a retry that failed waits for the next measurement to ask again.
+  const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
   const client = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => credential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, credential]);
   // Image bytes go up through Expo's fetch: React Native's cannot send a byte array as a body.
+  useEffect(() => {
+    if (proof || !client) { observations.ready = undefined; return; }
+    const state = reporting.current;
+    state.send = () => {
+      if (state.busy || Date.now() - state.last < 30_000) return;
+      const batch = observations.nextReport();
+      if (!batch) return;
+      const report = toObservationReport(batch);
+      if (!report.samples.length) { observations.accepted(batch.report_id); return; }
+      state.busy = true;
+      state.last = Date.now();
+      void client.observationsReport(report as never).then(
+        () => observations.accepted(batch.report_id),
+        () => { /* the identical batch is sent again at the next measurement; an older member just refuses */ },
+      ).finally(() => { state.busy = false; });
+    };
+    observations.ready = state.send;
+    return () => { if (observations.ready === state.send) observations.ready = undefined; };
+  }, [proof, client, observations]);
   const uploader = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => credential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, credential]);
 
   // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_ST3_FABRIC_DEFAULT, set in an
@@ -273,6 +317,8 @@ function useAppStore(proof?: FabricProfile) {
     sidebarSeen.current.clear(); sidebarCreation.current = null;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
+    draftsOwner.current = '';
+    if (!proofRef.current) void localDrafts.clear();
     setGlasses([]); setGlassesIssue(''); setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]); setSidebarResources([]); setSidebarResourcesIssue(''); sidebarResourcesRead.current = null;
     setData(emptyData); setTruncated({}); setHasSynced(false); setCachedHostId(''); setSnapshot(null);
   }
@@ -301,9 +347,13 @@ function useAppStore(proof?: FabricProfile) {
     attentionLive.current = false;
     if (!proofRef.current && timers.current.connect === null) timers.current.connect = observations.begin('ios-connect');
     const opened = new Feed(client, {
-      onWindow: (name, rows, hasMore, at) => {
+      onWindow: (name, rows, hasMore, at, received) => {
         if (!current()) return;
         if (at?.id) lastSnapshot.current = at.id;
+        if (!proofRef.current) {
+          if (name === 'attention') { quality.received(1, received); quality.attentionWindow(rows as Attention[], hasMore); }
+          if (name === 'agents') quality.received(2, received);
+        }
         // Home decides what of attention to show, as stui does; agents drop only history.
         const shown = name === 'agents' ? (rows as Array<{ operational?: { layer?: string } }>).filter(currentAgent) : rows;
         // Nothing leaves Home by itself: what st closes while it is shown stays until cleared.
@@ -319,6 +369,7 @@ function useAppStore(proof?: FabricProfile) {
       onConnection: (state, issue) => {
         if (!current()) return;
         proofRef.current?.record('feed', { state });
+        if (!proofRef.current) { quality.live(state === 'live'); if (state !== 'live') quality.resetWindows(); }
         setStatus(state === 'live' ? 'online' : state === 'connecting' ? 'connecting' : 'offline');
         setConnectionIssue(issue ?? '');
         if (!proofRef.current) {
@@ -621,6 +672,8 @@ function useAppStore(proof?: FabricProfile) {
       if (typeof typed === 'string') { setError(typed); return false; }
       if (status !== 'online' || (proof && !proof.ready)) { setError('Still connecting; try again in a moment.'); return false; }
       setBusy(true);
+      const qualityToken = proof ? 0 : quality.answerSent(item.id);
+      let qualityAccepted = false;
       try {
         // An answer that landed is an answer, however the reply came back (Cos, 2026-10-10: the app
         // said it failed for a decision that was recorded, and Nathan answered it again).
@@ -634,10 +687,11 @@ function useAppStore(proof?: FabricProfile) {
           wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
         });
         if (!outcome.ok) { setError(errorText(outcome.error)); return false; }
+        qualityAccepted = true;
         setError('');
         await loadLists([]);
         return true;
-      } finally { setBusy(false); }
+      } finally { if (qualityToken) quality.answerConfirmed(item.id, qualityToken, qualityAccepted); setBusy(false); }
     },
     /** Clear an item st closed: only the person's own word removes it from Home. */
     clearClosed(id: string) {
@@ -656,7 +710,10 @@ function useAppStore(proof?: FabricProfile) {
       const prompt = promptAnswers(item);
       if (!prompt || !prompt.answers.includes(answer)) { setError('This prompt cannot be answered here. Answer it in the terminal.'); return false; }
       acted.current.add(item.id);
-      return runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer } }); });
+      const qualityToken = proof ? 0 : quality.answerSent(item.id);
+      const accepted = await runAction(async () => { const id = actionId(); return client.promptRespond({ id, idempotency_key: id, fence: await fence({ [item.id]: item.revision }), parameters: { target_id: prompt.target_id, episode: prompt.episode, answer } }); });
+      if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
+      return accepted;
     },
     /** An image a message carries, as a data URI; st reads it from the member that has it. */
     image(image: { sha256: string; message: string; mediaType: string }): Promise<string> {
@@ -670,9 +727,9 @@ function useAppStore(proof?: FabricProfile) {
       return reading;
     },
     /** Send Small Talk to an agent, as stui does: fenced to a fresh snapshot, once more if it moved. */
-    async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<string | null> {
-      if (!client || !uploader) return 'not connected';
-      if (status !== 'online' || (proof && !proof.ready)) return 'offline';
+    async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
+      if (!client || !uploader) return { how: 'failed', error: 'not connected' };
+      if (status !== 'online' || (proof && !proof.ready)) return { how: 'failed', error: 'offline' };
       // Images are kept on this member first; the message names them, and st fetches each from
       // here for a reader on another machine (docs/st3/attachments.md).
       const attachments: AttachmentInput[] = [];
@@ -681,37 +738,39 @@ function useAppStore(proof?: FabricProfile) {
           const kept = (await uploader.uploadBlob(decodeBase64(image.base64), image.mediaType)).value;
           attachments.push({ blob: kept.blob, media_type: image.mediaType, ...(image.name ? { name: image.name } : {}) });
         } catch (e) {
-          if (e instanceof ClientError && e.status === 404) return 'the st this phone is paired with cannot carry images yet; it needs a newer st';
-          return `the image could not be sent: ${errorText(e)}`;
+          if (e instanceof ClientError && e.status === 404) return { how: 'failed', error: 'the st this phone is paired with cannot carry images yet; it needs a newer st' };
+          return { how: 'failed', error: `the image could not be sent: ${errorText(e)}` };
         }
       }
       const began = performance.now();
       // The first try goes on the snapshot a window frame already brought, with no capabilities read;
       // each try after st said the last applied nothing reads a fresh one.
       const fences = sendFences(lastSnapshot.current, fence);
-      try {
-        // Each try is a new request, made only after st said the last applied nothing.
-        await retryTransient(8, async () => {
+      const outcome = await sendMessage<MessageRequest>({
+        build: async () => {
           const id = actionId();
           const unsigned = { to, content, ...(sessionId ? { session_id: sessionId } : {}), ...(tags?.length ? { tags } : {}), ...(attachments.length ? { attachments } : {}) };
           const parameters = proof ? unsigned : await signMessage(id, unsigned);
-          const request = { id, idempotency_key: id, fence: await fences(), parameters };
-          try {
-            await client.messageSend(request);
-          } catch (e) {
-            if (!outcomeUnknown(e)) throw e;
-            // st's answer was lost, or st said it may still complete (`applied: "unknown"`), so the
-            // message may have arrived. The identical request (same key, signature and nonce) gets
-            // st's first answer, never a second message.
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            await client.messageSend(request);
-          }
-        }, notApplied);
-        proof?.record('message-accepted', { elapsedMs: performance.now() - began });
-        // The person's wait, fence read and any repeat included, to st's acknowledgement.
-        if (!proof) observations.observe('ios-message-ack', performance.now() - began);
-        return null;
-      } catch (e) { proof?.record('message-failed', { elapsedMs: performance.now() - began }); return errorText(e); }
+          return { id, idempotency_key: id, fence: await fences(), parameters };
+        },
+        send: request => client.messageSend(request),
+        wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      });
+      if (outcome.how !== 'sent') { proof?.record(outcome.how === 'unconfirmed' ? 'message-unconfirmed' : 'message-failed', { elapsedMs: performance.now() - began }); return sentAs(outcome); }
+      proof?.record('message-accepted', { elapsedMs: performance.now() - began });
+      // The person's wait, fence read and any repeat included, to st's acknowledgement.
+      if (!proof) observations.observe('ios-message-ack', performance.now() - began);
+      return outcome;
+    },
+    /** Send an unconfirmed message again as the same request (id, key, signature and nonce), freshly fenced. */
+    async resend(request: MessageRequest): Promise<Sent> {
+      // Offline it stays as it was, ready to send again.
+      if (!client || status !== 'online' || (proof && !proof.ready)) return { how: 'unconfirmed', request };
+      return sentAs(await resendMessage<MessageRequest>({
+        fence: sendFences(lastSnapshot.current, fence),
+        send: next => client.messageSend(next),
+        wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+      }, request));
     },
     /** A plain shell, named as stui names one; its terminal id, or null with the reason shown. */
     async createTerminal(name: string): Promise<string | null> {
@@ -837,8 +896,9 @@ function useAppStore(proof?: FabricProfile) {
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
-    error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, client,
+    error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
+    saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
     carrierInfo: { choice: carrierChoice, built: fabricBuilt, target: fabricTarget, fallback: fallbackOn, route: selected.route, routeText: routeLabel(selected.route), pending: selected.pending, issue: selected.issue, fabric: fabricSnapshot, node: fabricNode, path: fabricPath },
