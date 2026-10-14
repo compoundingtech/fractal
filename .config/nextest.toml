@@ -22,8 +22,8 @@ final-status-level = "flaky"
 # The outbound-only real-network timing check also runs once in perf-cost. Its strict
 # convergence and redundant-connection windows stay separate from required deterministic
 # backoff and inbound/route interruption controls.
-# scripts/ci-nextest also omits entirely excluded st2 targets from Cargo's build selection;
-# keep its retained target list in sync when changing the binary-level exclusions below.
+# scripts/ci-nextest preserves the retained binary selection in one workspace invocation.
+# Its filters control execution; Cargo still compiles excluded workspace test targets.
 default-filter = '''
 not (
   (package(=st3) and test(/^messaging_faults::link_minutes$/))
