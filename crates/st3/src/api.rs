@@ -1371,6 +1371,15 @@ fn record_work_stage(stage: request_latency::WorkStage, elapsed: Duration) {
 fn record_roster_stage(stage: request_latency::RosterStage, elapsed: Duration) {
     // A poisoned diagnostic lock must not stop the refresher that records into it.
     request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_roster_stage(stage, elapsed);
+    #[cfg(test)]
+    roster_stage_recorded().send_modify(|_| {});
+}
+
+/// Publication precedes the completed refresh timing; tests asserting timings wait here.
+#[cfg(test)]
+fn roster_stage_recorded() -> &'static tokio::sync::watch::Sender<()> {
+    static RECORDED: OnceLock<tokio::sync::watch::Sender<()>> = OnceLock::new();
+    RECORDED.get_or_init(|| tokio::sync::watch::channel(()).0)
 }
 
 fn request_latency_snapshot() -> Vec<Value> {
