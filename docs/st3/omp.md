@@ -152,9 +152,18 @@ messages containing only tool calls. Message-level metadata belongs to its last 
 so newest-first header windows retain it even when a message spans the window boundary.
 Thinking and text parts do not each contribute another response's cost.
 
-Messages delivered during a running turn are held until the current tool batch returns. A tool call
-that runs longer than the hold limit can still be backgrounded. Read the exact graph message with
-`st conversations read` before acting on it, and archive it after the related action completes.
+Ordinary mail arriving during a running turn stays outside OMP until the current tool batch
+returns or the run ends. An ordinary tool call that runs longer than the ten-second hold limit
+can still be backgrounded. A native ask or approval overrides that limit: no mail is handed to
+OMP while either modal is open, even if the context reports idle. The sender's delivery status
+shows the mail as held for the native answer, not delivered.
+
+The matching ask result (including cancellation or timeout), approval resolution, or terminal
+run cancellation releases the hold. Mail reaches OMP at the next safe tool-batch boundary, in
+arrival order as one steering message. Session restart clears the old modal; the successor
+channel re-sends unacknowledged mail. A channel reconnect alone does not clear a live modal.
+Read the exact graph message with `st conversations read` before acting on it, and archive it
+after the related action completes.
 
 The channel reports idle only after `ctx.isIdle()` proves that the native turn has settled.
 It keeps sampling through slow final unwind rather than abandoning the idle edge after a
@@ -197,10 +206,11 @@ read logs I/O failures, fails open, and decodes bytes lossily; read, heal, retry
 failures do not stop native continuation.
 The extension holds mailbox delivery, waits for its ready frame and first idle, and requests one
 raw F5 from the Rust channel. For OMP's native interrupted result, the same toolCall id, questions,
-and options reopen without a model turn or human action. Delivery resumes when that ask starts
-again, or after a 120-second timeout with a diagnostic. Both exits send `delivery_ready` to release
-the Rust channel's first-idle delivery gate independently of activity; a reopened picker remains
-blocked on the person, not falsely idle. Shared native continuation does not depend on the bridge.
+and options reopen without a model turn or human action. Channel readiness resumes when that ask
+starts again, or after a 120-second timeout with a diagnostic. Both exits send `delivery_ready`
+to release the Rust channel's first-idle delivery gate independently of activity. A reopened
+picker remains blocked on the person and ordinary mail stays outside OMP until it resolves.
+Shared native continuation does not depend on the bridge.
 
 The contraction criterion is behavioral, not a version equality assertion. The standalone
 `crates/st3/fixtures/omp-resume/native-reopen-probe.py` copies its adjacent public canary fixture into
