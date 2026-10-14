@@ -5,6 +5,13 @@ use crate::store::push_registrations::{PushRegistration, PushRegistrationStatus}
 
 pub(super) const MAX_BODY_BYTES: usize = 4096;
 
+static CHANGES: std::sync::LazyLock<tokio::sync::broadcast::Sender<String>> =
+    std::sync::LazyLock::new(|| tokio::sync::broadcast::channel(64).0);
+
+pub(super) fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
+    CHANGES.subscribe()
+}
+
 fn invalid(message: &'static str) -> ApiError {
     ApiError::bad(St3Error::new("validation-failed", message))
 }
@@ -103,7 +110,8 @@ async fn update(state: AppState, session: ClientSession, registration: Option<Pu
             details: Box::default(),
         })
     }).await.map_err(|_| unavailable())??;
-    signal_local_change(&state);
+    // No graph claim changes: wake only this member's held device windows.
+    let _ = CHANGES.send(state.node.clone());
     Ok(Json(json!(status)))
 }
 

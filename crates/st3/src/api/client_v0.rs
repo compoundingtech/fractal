@@ -1752,6 +1752,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     let mut roster = state.store.subscribe_agent_roster();
     let mut views = state.store.subscribe_collection_views();
     let mut presence_changes = super::client_presence::subscribe();
+    let mut push_changes = super::client_push::subscribe();
     let mut native_watch: Option<inventory::NativeWatch> = None;
     let mut native_watch_pending: Option<tokio::task::JoinHandle<Result<inventory::NativeWatch, ApiError>>> = None;
     let windows = collection_windows::Windows::attach(&state.store);
@@ -2117,6 +2118,13 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 if result.as_ref().is_ok_and(|member| member != &state.node) { continue; }
                 if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
                 reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "clients").map(|(id, _)| id.clone()));
+                if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
+                refresh.extend(reread_due.iter().cloned());
+            }
+            result = push_changes.recv(), if !command_waiting => {
+                if result.as_ref().is_ok_and(|member| member != &state.node) { continue; }
+                if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "devices").map(|(id, _)| id.clone()));
                 if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
                 refresh.extend(reread_due.iter().cloned());
             }
