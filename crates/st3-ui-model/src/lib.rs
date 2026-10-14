@@ -6,4 +6,5 @@
 
 pub mod agents;
 pub mod missions;
+pub mod prompts;
 pub mod sidebar;
