@@ -55,9 +55,11 @@ PATTERNS = (
     ".github/workflows/cache-audit.ts",
     ".github/repo-settings.json*",
 )
-# The kit has no workspace dependencies. App/client changes cannot affect its plays.
+# Keep workspace dependency coverage in sync with the guarded package graph in ci-fractal-web-test.
 KIT_PATTERNS = (
     "packages/fractal-ui/**",
+    "clients/typescript/st3-scenarios/**",
+    "clients/typescript/st3-client/**",
     "package.json*",
     "pnpm-workspace.yaml*",
     "pnpm-lock.yaml",
@@ -88,7 +90,7 @@ def kit_paths(paths):
 
 
 def relevant_paths(paths):
-    return [path for path in paths if any(matcher.match(path) for matcher in MATCHERS)]
+    return [path for path in paths if any(matcher.match(path) for matcher in (*MATCHERS, *KIT_MATCHERS))]
 
 
 def git(directory, *args):

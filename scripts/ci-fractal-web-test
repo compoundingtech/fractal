@@ -2,6 +2,7 @@
 """Exercise fractal-web change detection, its fail-closed paths, the gate and the generated jobs."""
 
 import os
+import json
 from pathlib import Path
 import re
 import runpy
@@ -73,10 +74,6 @@ non_web_inputs = (
     "crates/st3-schema/x.rs",
     "docs/st3/client-v0/x.md",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
-    "clients/typescript/st3-client/README.md",
-    "clients/typescript/st3-client/contract.test.cjs",
-    "clients/typescript/st3-client/schema.test.cjs",
-    "clients/typescript/st3-client/fetch-receiver.test.ts",
 )
 unexpected = []
 for paths, expected in ((web_inputs, True), (non_web_inputs, False)):
@@ -86,6 +83,45 @@ for paths, expected in ((web_inputs, True), (non_web_inputs, False)):
         if actual != expected:
             unexpected.append(path)
 assert not unexpected, f"incorrect web input classification: {unexpected}"
+
+# Static kit scope must cover every declared workspace dependency, including transitive ones.
+package_paths = subprocess.run(["git", "ls-files", "--", "package.json", "*/package.json"],
+                               cwd=root, check=True, capture_output=True, text=True).stdout.splitlines()
+packages = {}
+for path in package_paths:
+    manifest = json.loads((root / path).read_text())
+    if "name" in manifest:
+        packages[manifest["name"]] = (str(Path(path).parent), manifest)
+
+
+def guard_workspace_dependencies(manifest, seen=None):
+    seen = set() if seen is None else seen
+    for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        for name, version in manifest.get(field, {}).items():
+            if not version.startswith("workspace:") or name in seen:
+                continue
+            seen.add(name)
+            assert name in packages, f"unknown kit workspace dependency: {name}"
+            directory, dependency = packages[name]
+            assert f"{directory}/**" in detector_contract["KIT_PATTERNS"], (
+                f"kit workspace dependency {name} needs {directory}/** in KIT_PATTERNS")
+            guard_workspace_dependencies(dependency, seen)
+
+
+guard_workspace_dependencies(json.loads((root / "packages/fractal-ui/package.json").read_text()))
+workspace_fixture = json.loads('{"devDependencies":{"@smalltalk/st3-scenarios":"workspace:*"}}')
+guard_workspace_dependencies(workspace_fixture)
+assert detector_contract["kit_paths"](["clients/typescript/st3-scenarios/src/index.ts"])
+assert detector_contract["kit_paths"](["clients/typescript/st3-client/index.ts"])
+packages["@fixture/uncovered"] = ("packages/uncovered-fixture", {})
+try:
+    guard_workspace_dependencies({"dependencies": {"@fixture/uncovered": "workspace:*"}})
+except AssertionError:
+    pass
+else:
+    raise AssertionError("uncovered workspace dependency must fail the kit scope guard")
+del packages["@fixture/uncovered"]
+print("passed: workspace dependency fixture runs kit lanes; uncovered dependencies fail the scope guard")
 
 
 with tempfile.TemporaryDirectory() as scratch:
@@ -119,6 +155,8 @@ with tempfile.TemporaryDirectory() as scratch:
     flake = commit(repo, "Chromium lock", write=["flake.lock"])
     git(repo, "checkout", "--quiet", "-b", "workflow", base)
     workflow_change = commit(repo, "workflow", write=[".github/workflows/workspace-ci.ts"])
+    git(repo, "checkout", "--quiet", "-b", "workspace-dependency", base)
+    dependency_change = commit(repo, "workspace dependency", write=["clients/typescript/st3-scenarios/src/index.ts"])
     # main moved on with a web change; a Rust-only PR based on the older main stays Rust-only.
     git(repo, "checkout", "--quiet", "main")
     advanced = commit(repo, "main web", write=["pnpm-workspace.yaml"])
@@ -143,6 +181,8 @@ with tempfile.TemporaryDirectory() as scratch:
                   (0, f"kit-inputs={str(expected).lower()}"))
         check(f"{event}: pnpm lock runs kit lanes", detect(repo, event, base, lock, kit=True),
               (0, "kit-inputs=true"))
+        check(f"{event}: fixture workspace dependency change runs kit lanes",
+              detect(repo, event, base, dependency_change, kit=True), (0, "kit-inputs=true"))
     for event in ("pull_request", "merge_group", "push"):
         check(f"{event}: missing head fails closed", detect(repo, event, base, ""), (1, ""))
         check(f"{event}: malformed base fails closed", detect(repo, event, "main", rust), (1, ""))
@@ -174,8 +214,7 @@ blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", jobs))
 changes, execution, gate_job = blocks["fractal-web-changes"], blocks["fractal-web-execution"], blocks["fractal-web"]
 for pattern in detector_contract["PATTERNS"]:
     assert f'"{pattern}"' in changes, f"generated detector omits {pattern}"
-for pattern in ("clients/typescript/st3-client/**", "crates/st3-client*/**", "crates/st3-schema/**",
-                "docs/st3/client-v0/**"):
+for pattern in ("crates/st3-client*/**", "crates/st3-schema/**", "docs/st3/client-v0/**"):
     assert f'"{pattern}"' not in changes, f"generated detector retains broad input {pattern}"
 for block in (changes, execution, gate_job):
     assert "runs-on: ubuntu-latest" in block
