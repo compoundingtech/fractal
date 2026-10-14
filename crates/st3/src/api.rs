@@ -26529,7 +26529,7 @@ mission "wake" state="ready" {
         let full = client_agent_resources_uncached(store, false, index).unwrap();
         let cards = client_agent_resources_selected(store, false, index, None).unwrap();
         assert_eq!(Sha256::digest(serde_json::to_vec(&cards).unwrap()),
-            Sha256::digest(serde_json::to_vec(&full).unwrap()));
+            Sha256::digest(serde_json::to_vec(&full).unwrap()), "cards={cards:?}\nfull={full:?}");
         assert_eq!(cards.iter().find(|c| c["id"] == "agent/undeclared").unwrap()["revision"],
             runtime.id);
     }

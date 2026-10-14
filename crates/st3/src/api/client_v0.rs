@@ -22053,7 +22053,7 @@ mission "example/zero-run" state="ready" {
                     fields: serde_json::from_value(if index == 0 {
                         json!({"runtime_id": "fixed-runtime", "status": "running", "terminal": false})
                     } else {
-                        json!({"code": "retained-diagnostic", "sequence": index})
+                        json!({"code": "retained-diagnostic", "reason": format!("retained diagnostic {index}")})
                     }).unwrap(),
                     evidence: Vec::new(), expected_subject: None, idempotency_key: None,
                 }).unwrap();
