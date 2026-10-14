@@ -5797,10 +5797,7 @@ mod tests {
         assert_eq!(items[0]["body"]["code"], "native_session_exit_unknown");
         assert_eq!(items[0]["body"]["details"], data);
         assert_eq!(items[0]["body"]["blocks"][0]["kind"], "error");
-        assert_eq!(
-            items[0]["body"]["blocks"][0]["payload"]["body_ref"],
-            true
-        );
+        assert_eq!(items[0]["body"]["blocks"][0]["payload"]["body_ref"], true);
     }
 
     #[test]

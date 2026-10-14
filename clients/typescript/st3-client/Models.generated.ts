@@ -2011,6 +2011,7 @@ export type TimelineViewAssistantError = {
   errorStatus?: unknown;
   retryRecovery?: unknown;
   stopReason?: unknown;
+  [key: string]: unknown;
 };
   presentation: "full" | "compact-recovered" | "none";
   provider?: string;
