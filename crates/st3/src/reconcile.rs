@@ -1209,6 +1209,38 @@ impl Reconciler<NativeRuntime> {
     }
 }
 
+/// The daemon's environment for every launch. The access mode is the install's and always wins; any
+/// other value, such as `ST_SEAT_PRIORITY`, is a default that a seat's own declaration replaces.
+/// A terminal a person owns is the exception: it is theirs to drive, so it always runs at normal
+/// priority.
+fn overlay_runtime_environment(
+    subject: &str,
+    member: &mut BTreeMap<String, String>,
+    runtime: &BTreeMap<String, String>,
+) {
+    for (key, value) in runtime {
+        if key == st_drivers::access::MODE_ENV || key == st_drivers::access::CODEX_ASKS_ENV {
+            member.insert(key.clone(), value.clone());
+        } else {
+            member.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    if is_person_terminal(subject) {
+        member.insert(
+            st_runtime::PRIORITY_ENV.into(),
+            st_runtime::SeatPriority::Normal.as_str().into(),
+        );
+    }
+}
+
+/// A standalone shell under a person: `pty/person/NAME/UUID`.
+fn is_person_terminal(subject: &str) -> bool {
+    matches!(
+        st3_schema::owned_terminals::owner(subject),
+        Ok(Some(owner)) if owner.starts_with("person/")
+    )
+}
+
 impl<R: RuntimeControl> Reconciler<R> {
     /// An unticked setup box makes Codex ask: its seats launch with Codex's own approval defaults.
     pub fn with_codex_asks(mut self, asks: bool) -> Self {
@@ -1220,6 +1252,15 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     pub fn with_access_mode(mut self, mode: st_drivers::access::AccessMode) -> Self {
         self.runtime_environment.insert(st_drivers::access::MODE_ENV.into(), mode.as_str().into());
+        self
+    }
+
+    /// The priority every seat and exec task starts at unless it declares its own
+    /// `ST_SEAT_PRIORITY`. Applies to launches after this call.
+    pub fn with_seat_priority(mut self, priority: st_runtime::SeatPriority) -> Self {
+        st_runtime::set_configured_seat_priority(priority);
+        self.runtime_environment
+            .insert(st_runtime::PRIORITY_ENV.into(), priority.as_str().into());
         self
     }
 
@@ -6346,16 +6387,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             );
         }
         let mut launch_member = member.clone();
-        for (key, value) in &self.runtime_environment {
-            if key == st_drivers::access::MODE_ENV || key == st_drivers::access::CODEX_ASKS_ENV {
-                launch_member.environment.insert(key.clone(), value.clone());
-                continue;
-            }
-            launch_member
-                .environment
-                .entry(key.clone())
-                .or_insert_with(|| value.clone());
-        }
+        overlay_runtime_environment(
+            &subject.subject,
+            &mut launch_member.environment,
+            &self.runtime_environment,
+        );
         if launch_member.terminal {
             launch_member.terminal_size = self.launch_geometry()?;
         }
@@ -17496,6 +17532,41 @@ fn now_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_seats_own_priority_replaces_the_installs() {
+        use super::overlay_runtime_environment;
+        use st_runtime::PRIORITY_ENV;
+        let runtime = std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), "background".to_string())]);
+        let mut plain = std::collections::BTreeMap::new();
+        overlay_runtime_environment("agent/example/worker", &mut plain, &runtime);
+        assert_eq!(plain[PRIORITY_ENV], "background");
+        let mut declared = std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), "normal".to_string())]);
+        overlay_runtime_environment("agent/example/worker", &mut declared, &runtime);
+        assert_eq!(declared[PRIORITY_ENV], "normal");
+    }
+
+    #[test]
+    fn a_terminal_a_person_opened_stays_at_normal_priority() {
+        use super::overlay_runtime_environment;
+        use st_runtime::PRIORITY_ENV;
+        let runtime = std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), "background".to_string())]);
+        let id = "019a0000-0000-7000-8000-000000000001";
+        for declared in [None, Some("background")] {
+            let mut environment = declared
+                .map(|value| std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), value.to_string())]))
+                .unwrap_or_default();
+            overlay_runtime_environment(&format!("pty/person/avery/{id}"), &mut environment, &runtime);
+            assert_eq!(environment[PRIORITY_ENV], "normal");
+            assert!(st_runtime::work_prefix(&environment).is_empty());
+        }
+        // A shell an agent opened is the agent's work, and so are mission terminals.
+        for subject in [format!("pty/agent/example/worker/{id}"), "pty/example/helper".to_string()] {
+            let mut environment = std::collections::BTreeMap::new();
+            overlay_runtime_environment(&subject, &mut environment, &runtime);
+            assert_eq!(environment[PRIORITY_ENV], "background", "{subject}");
+        }
+    }
+
     mod channel_recovery;
     mod differential;
     mod doctor_eligibility_tests;
