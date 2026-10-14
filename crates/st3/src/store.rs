@@ -19,6 +19,8 @@ mod mailbox_changes;
 mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
+#[cfg(test)]
+mod message_thread_legacy_rank_dependency_tests;
 pub mod owned_sets;
 #[cfg(test)]
 mod owned_sets_tests;
