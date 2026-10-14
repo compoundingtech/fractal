@@ -18,6 +18,12 @@ the library as `st3::X` and are part of the graph.
 
 `scripts/module_layers.py` builds it; `scripts/check-module-layers` reports on it.
 
+The parser is textual, not a compiler. It removes `#[cfg(test)]` items with a pattern for the item
+shapes that occur in this tree (`mod`, `fn`, `use`, `impl`, `const`, `static`, `struct`, `enum`,
+`type`, `trait`); a shape it does not list would count its test-only references as production
+edges, so it errs toward extra edges and cannot hide a cycle. Before this check becomes required,
+replace the pattern with a compiler-derived graph or keep the shape list tested.
+
 ## The rule
 
 The graph minus the pairs in `.st/module-layers.json` is acyclic. Today 48 module pairs (93
@@ -30,6 +36,9 @@ A module that has to use a type or function from a module above it moves that de
 takes a small trait. Do not add an allowlist entry for new code.
 
 ## What a change affects
+
+The `protocol` class in `docs/st3/change-impact.md` lists `api.rs` whole, so nearly every daemon
+change is a full run for now; narrowing it is a decision for the owners of the affected-set work.
 
 `scripts/check-module-layers --affected PATH...` prints the modules whose dependency closure
 contains the changed paths (the reverse closure), as JSON; paths outside `crates/st3` are listed
