@@ -58,6 +58,56 @@ test('unmatched and nested brackets require linear source reads, not repeated su
   }
 })
 
+for (const pattern of ['[a](', '[](', '[a](<', '[a](x "']) test(`failed destinations require linear source reads: ${pattern}`, () => {
+  for (const length of [5_000, 10_000, 20_000, 50_000]) {
+      const source = pattern.repeat(Math.ceil(length / pattern.length)).slice(0, length)
+      let reads = 0
+      const counted = new Proxy(Object(source), {
+        get(target, key) {
+          if (typeof key === 'string' && /^\d+$/.test(key)) reads++
+          const value = Reflect.get(target, key)
+          return typeof value === 'function' ? value.bind(source) : value
+        },
+      })
+      assert.deepEqual(parseInlineMarkdown({ replace: () => counted }), parseInlineMarkdown(source))
+      assert.ok(reads <= 20 * source.length, `${pattern}: ${source.length} characters used ${reads} indexed reads`)
+  }
+})
+
+for (const pattern of ['a* ', '**a']) test(`delimiter search and removal require linear operations: ${pattern}`, () => {
+  for (const length of [5_000, 10_000, 20_000, 50_000]) {
+      const source = pattern.repeat(Math.ceil(length / pattern.length)).slice(0, length)
+      const expected = parseInlineMarkdown(source)
+      let operations = 0
+      const push = Array.prototype.push
+      const splice = Array.prototype.splice
+      // Intercept the parser's actual delimiter property reads and array shifts, not elapsed time.
+      // Descriptors retain the original mutable values; no production diagnostics are required.
+      Array.prototype.push = function (...values) {
+        for (const value of values) if (value?._tag === 'Delimiter') {
+          for (const key of Object.keys(value)) {
+            let stored = value[key]
+            Object.defineProperty(value, key, {
+              configurable: true, enumerable: true,
+              get() { operations++; return stored },
+              set(next) { stored = next },
+            })
+          }
+        }
+        return push.apply(this, values)
+      }
+      Array.prototype.splice = function (start, ...args) {
+        operations += this.length - start
+        return splice.call(this, start, ...args)
+      }
+      let actual
+      try { actual = parseInlineMarkdown(source) }
+      finally { Array.prototype.push = push; Array.prototype.splice = splice }
+      assert.deepEqual(actual, expected)
+      assert.ok(operations <= 100 * source.length, `${pattern}: ${source.length} characters used ${operations} delimiter/shift operations`)
+  }
+})
+
 test('the report prompt renders a code element without literal backticks', () => {
   const markup = render('found that `NOPASSWD: darwin-rebuild` makes')
   assert.match(markup, /<code class="[^"]+">NOPASSWD: darwin-rebuild<\/code>/)

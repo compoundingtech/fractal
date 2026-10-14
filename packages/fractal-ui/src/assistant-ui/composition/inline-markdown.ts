@@ -90,42 +90,67 @@ const bracketMatches = (source: string): ReadonlyMap<number, number> => {
   return closes
 }
 
+interface DestinationMatches {
+  readonly ends: Int32Array
+  readonly spaces: Int32Array
+  readonly angles: Int32Array
+  readonly titles: Record<'"' | "'" | ')', Int32Array>
+}
+
+/** Suffix transitions share failed scans as well as balanced parentheses and escaped title ends. */
+const destinationMatches = (source: string): DestinationMatches => {
+  const size = source.length
+  const ends = new Int32Array(size + 2).fill(size)
+  const spaces = new Int32Array(size + 2).fill(size)
+  const angles = new Int32Array(size + 2).fill(-1)
+  const titles = { '"': new Int32Array(size + 2).fill(-1), "'": new Int32Array(size + 2).fill(-1), ')': new Int32Array(size + 2).fill(-1) }
+  for (let at = size - 1; at >= 0; at--) {
+    const char = source[at]!
+    spaces[at] = char === ' ' ? spaces[at + 1]! : at
+    angles[at] = char === '>' ? at : char === '<' ? -1 : angles[at + 1]!
+    for (const quote of ['"', "'", ')'] as const) {
+      const matches = titles[quote]
+      matches[at] = char === quote ? at : matches[at + (char === '\\' ? 2 : 1)]!
+    }
+    if (char === '\\' && isEscapable(source[at + 1])) ends[at] = ends[at + 2]!
+    else if (/\s/u.test(char) || char === ')') ends[at] = at
+    else if (char === '(') {
+      const close = ends[at + 1]!
+      ends[at] = source[close] === ')' ? ends[close + 1]! : close
+    } else ends[at] = ends[at + 1]!
+  }
+  return { ends, spaces, angles, titles }
+}
+
 /** `[label](destination "optional title")`; the label may hold brackets, escapes and code spans. Titles are dropped. */
-function matchLink(source: string, open: number, closes: ReadonlyMap<number, number>): LinkMatch | undefined {
+function matchLink(source: string, open: number, closes: ReadonlyMap<number, number>, matches: DestinationMatches): LinkMatch | undefined {
   const close = closes.get(open)
   if (close === undefined || source[close + 1] !== '(') return undefined
-  let at = close + 2
-  while (source[at] === ' ') at++
-  let destination: string
-  if (source[at] === '<') {
-    const end = source.indexOf('>', at)
-    if (end === -1 || source.slice(at + 1, end).includes('<')) return undefined
-    destination = unescape(source.slice(at + 1, end))
-    at = end + 1
+  let at = matches.spaces[close + 2]!
+  const start = at
+  let destinationEnd: number
+  const angle = source[at] === '<'
+  if (angle) {
+    destinationEnd = matches.angles[at + 1]!
+    if (destinationEnd === -1) return undefined
+    at = destinationEnd + 1
   } else {
-    const start = at
-    let parens = 0
-    for (; at < source.length; at++) {
-      const char = source[at]!
-      if (char === '\\' && isEscapable(source[at + 1])) { at++; continue }
-      if (/\s/u.test(char)) break
-      if (char === '(') parens++
-      else if (char === ')') { if (parens === 0) break; parens-- }
-    }
-    destination = unescape(source.slice(start, at))
+    destinationEnd = matches.ends[at]!
+    at = destinationEnd
   }
-  while (source[at] === ' ') at++
+  at = matches.spaces[at]!
   const quote = source[at]
   if (quote === '"' || quote === '\'' || quote === '(') {
-    const end = quote === '(' ? ')' : quote
-    let titleEnd = at + 1
-    for (; titleEnd < source.length && source[titleEnd] !== end; titleEnd++) if (source[titleEnd] === '\\') titleEnd++
-    if (titleEnd >= source.length) return undefined
-    at = titleEnd + 1
-    while (source[at] === ' ') at++
+    const titleEnd = matches.titles[quote === '(' ? ')' : quote][at + 1]!
+    if (titleEnd === -1) return undefined
+    at = matches.spaces[titleEnd + 1]!
   }
   if (source[at] !== ')') return undefined
-  return { label: source.slice(open + 1, close), destination, end: at + 1 }
+  return {
+    label: source.slice(open + 1, close),
+    destination: unescape(source.slice(start + (angle ? 1 : 0), destinationEnd)),
+    end: at + 1,
+  }
 }
 
 function scan(source: string, allowLinks: boolean): Item[] {
@@ -137,6 +162,7 @@ function scan(source: string, allowLinks: boolean): Item[] {
   }
   let at = 0
   let closes: ReadonlyMap<number, number> | undefined
+  let destinations: DestinationMatches | undefined
   while (at < source.length) {
     const char = source[at]!
     if (char === '\\' && isEscapable(source[at + 1])) {
@@ -188,7 +214,10 @@ function scan(source: string, allowLinks: boolean): Item[] {
     const image = char === '!' && source[at + 1] === '['
     if (char === '[' || image) {
       closes ??= bracketMatches(source)
-      const link = matchLink(source, image ? at + 1 : at, closes)
+      const labelEnd = closes.get(image ? at + 1 : at)
+      if (labelEnd === undefined || source[labelEnd + 1] !== '(') { text += char; at++; continue }
+      destinations ??= destinationMatches(source)
+      const link = matchLink(source, image ? at + 1 : at, closes, destinations)
       if (link !== undefined) {
         flush()
         const children = resolve(scan(link.label, false))
@@ -218,35 +247,96 @@ function merge(items: readonly InlineNode[]): InlineNode[] {
   return merged
 }
 
-/** CommonMark "process emphasis": each closer pairs with the nearest compatible opener, including the rule of three. */
+interface LinkedItem {
+  readonly item: Item
+  readonly index: number
+  previous: LinkedItem | undefined
+  next: LinkedItem | undefined
+  previousDelimiter: LinkedItem | undefined
+  nextDelimiter: LinkedItem | undefined
+  activeDelimiter: boolean
+}
+
+/** CommonMark process-emphasis: failed searches have a per-type/rule-of-three lower bound. */
 function resolve(items: Item[]): InlineNode[] {
+  let first: LinkedItem | undefined
+  let last: LinkedItem | undefined
+  let firstDelimiter: LinkedItem | undefined
+  let lastDelimiter: LinkedItem | undefined
   for (let index = 0; index < items.length; index++) {
-    const closer = items[index]!
-    if (closer._tag !== 'Delimiter' || !closer.canClose || closer.count === 0) continue
-    let openerIndex = index - 1
-    for (; openerIndex >= 0; openerIndex--) {
-      const opener = items[openerIndex]!
-      if (opener._tag !== 'Delimiter' || opener.char !== closer.char || !opener.canOpen || opener.count === 0) continue
-      const ruleOfThree = (opener.canClose || closer.canOpen) && (opener.length + closer.length) % 3 === 0 && !(opener.length % 3 === 0 && closer.length % 3 === 0)
-      if (!ruleOfThree) break
+    const node: LinkedItem = { item: items[index]!, index, previous: last, next: undefined, previousDelimiter: undefined, nextDelimiter: undefined, activeDelimiter: items[index]!._tag === 'Delimiter' }
+    if (last !== undefined) last.next = node
+    else first = node
+    last = node
+    if (node.item._tag === 'Delimiter') {
+      node.previousDelimiter = lastDelimiter
+      if (lastDelimiter !== undefined) lastDelimiter.nextDelimiter = node
+      else firstDelimiter = node
+      lastDelimiter = node
     }
-    if (openerIndex < 0) continue
-    const opener = items[openerIndex] as Delimiter
+  }
+  const removeDelimiter = (node: LinkedItem) => {
+    if (!node.activeDelimiter) return
+    node.activeDelimiter = false
+    if (node.previousDelimiter !== undefined) node.previousDelimiter.nextDelimiter = node.nextDelimiter
+    if (node.nextDelimiter !== undefined) node.nextDelimiter.previousDelimiter = node.previousDelimiter
+  }
+  const removeItem = (node: LinkedItem) => {
+    if (node.previous !== undefined) node.previous.next = node.next
+    else first = node.next
+    if (node.next !== undefined) node.next.previous = node.previous
+  }
+  // Six classes per character: whether a closer can open, and its original run length modulo three.
+  const bottoms = new Int32Array(12).fill(-1)
+  let current = firstDelimiter
+  while (current !== undefined) {
+    const closer = current.item
+    if (closer._tag !== 'Delimiter' || !closer.canClose) { current = current.nextDelimiter; continue }
+    const key = (closer.char === '*' ? 0 : 6) + (closer.canOpen ? 3 : 0) + closer.length % 3
+    let candidate = current.previousDelimiter
+    while (candidate !== undefined && candidate.index > bottoms[key]!) {
+      const opener = candidate.item
+      if (opener._tag === 'Delimiter' && opener.char === closer.char && opener.canOpen) {
+        const ruleOfThree = (opener.canClose || closer.canOpen) && (opener.length + closer.length) % 3 === 0 && !(opener.length % 3 === 0 && closer.length % 3 === 0)
+        if (!ruleOfThree) break
+      }
+      candidate = candidate.previousDelimiter
+    }
+    if (candidate === undefined || candidate.index <= bottoms[key]!) {
+      bottoms[key] = current.previousDelimiter?.index ?? -1
+      const next = current.nextDelimiter
+      if (!closer.canOpen) removeDelimiter(current)
+      current = next
+      continue
+    }
+    const opener = candidate.item
+    if (opener._tag !== 'Delimiter') continue
     const used = opener.count >= 2 && closer.count >= 2 ? 2 : 1
-    const children = merge(items.slice(openerIndex + 1, index).map(literal))
+    const children: InlineNode[] = []
+    for (let child = candidate.next; child !== undefined && child !== current; child = child.next) {
+      children.push(literal(child.item))
+      if (child.item._tag === 'Delimiter') removeDelimiter(child)
+    }
+    const wrapped: LinkedItem = {
+      item: { _tag: used === 2 ? 'Strong' : 'Emphasis', children: merge(children) },
+      index: candidate.index, previous: candidate, next: current,
+      previousDelimiter: undefined, nextDelimiter: undefined, activeDelimiter: false,
+    }
+    candidate.next = wrapped
+    current.previous = wrapped
     opener.count -= used
     closer.count -= used
-    items.splice(openerIndex + 1, index - openerIndex - 1, { _tag: used === 2 ? 'Strong' : 'Emphasis', children })
-    let closerIndex = openerIndex + 2
-    if (opener.count === 0) {
-      items.splice(openerIndex, 1)
-      closerIndex--
+    if (opener.count === 0) { removeDelimiter(candidate); removeItem(candidate) }
+    if (closer.count === 0) {
+      const next = current.nextDelimiter
+      removeDelimiter(current)
+      removeItem(current)
+      current = next
     }
-    if (closer.count === 0) items.splice(closerIndex, 1)
-    // Revisit this position: a closer with delimiters left can close again, otherwise the next item is here.
-    index = closerIndex - 1
   }
-  return merge(items.map(literal))
+  const nodes: InlineNode[] = []
+  for (let node = first; node !== undefined; node = node.next) nodes.push(literal(node.item))
+  return merge(nodes)
 }
 
 /** Line endings become spaces: the inline subset is single-line phrasing content. */
