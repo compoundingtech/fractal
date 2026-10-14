@@ -18,10 +18,10 @@ it('ANDs the host menu with typed facets, counts them, and resets facets while p
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  let filters: SidebarFilters = { ...defaultFilters, query: 'compiler machine:dev3 HOST:dev', sort: 'name' }
+  let filters: SidebarFilters = { ...defaultFilters, query: 'compiler machine:node3 HOST:node', sort: 'name' }
   const update = (value: SidebarFilters) => { filters = value; render() }
-  const render = () => root.render(<SidebarToolbar filters={filters} update={update} hosts={['dev3', 'dev5']} />)
-  const row: SidebarRow = { workspace: { id: 'agent/compiler', title: 'Compiler', host: 'dev3', layout: dailyDriver, unread: [], notifications: [] }, agent: undefined, status: 'idle', needsMe: false }
+  const render = () => root.render(<SidebarToolbar filters={filters} update={update} hosts={['node3', 'node5']} />)
+  const row: SidebarRow = { workspace: { id: 'agent/compiler', title: 'Compiler', host: 'node3', layout: dailyDriver, unread: [], notifications: [] }, agent: undefined, status: 'idle', needsMe: false }
   try {
     await act(async () => render())
     const filterButton = host.querySelector<HTMLButtonElement>('button[aria-label="Filter agents · 2 active"]')!
@@ -29,11 +29,11 @@ it('ANDs the host menu with typed facets, counts them, and resets facets while p
     await act(async () => filterButton.click())
     const menu = document.body.querySelector<HTMLSelectElement>('select[aria-label="Filter by host"]')!
     expect(menu).not.toBeNull()
-    await act(async () => { menu.value = 'dev5'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
-    expect(filters.host).toBe('dev5')
+    await act(async () => { menu.value = 'node5'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(filters.host).toBe('node5')
     expect(matchesRow({ row, filters, context: '' })).toBe(false)
     expect(host.querySelector('button[aria-label="Filter agents · 3 active"]')).not.toBeNull()
-    await act(async () => { menu.value = 'dev3'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
+    await act(async () => { menu.value = 'node3'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
     expect(matchesRow({ row, filters, context: '' })).toBe(true)
     const reset = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Reset filters')!
     await act(async () => reset.click())

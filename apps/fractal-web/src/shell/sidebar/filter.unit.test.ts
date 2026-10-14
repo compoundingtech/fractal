@@ -100,42 +100,42 @@ describe('sidebar machine query', () => {
   it.each([
     ['', '', []],
     ['  compiler  sidebar ', 'compiler sidebar', []],
-    ['machine:dev3', '', [['dev3']]],
-    ['machine:dev3,,dev5,', '', [['dev3', 'dev5']]],
-    ['HOST:DEV machine:dev3', '', [['dev'], ['dev3']]],
+    ['machine:node3', '', [['node3']]],
+    ['machine:node3,,node5,', '', [['node3', 'node5']]],
+    ['HOST:NODE machine:node3', '', [['node'], ['node3']]],
     ['machine: host:,, compiler', 'compiler', []],
-    ['compiler machine:dev3 sidebar host:DEV', 'compiler sidebar', [['dev3'], ['dev']]],
-    ['other:dev3 compiler-machine:dev3', 'other:dev3 compiler-machine:dev3', []],
+    ['compiler machine:node3 sidebar host:NODE', 'compiler sidebar', [['node3'], ['node']]],
+    ['other:node3 compiler-machine:node3', 'other:node3 compiler-machine:node3', []],
   ] as const)('parses %j without highlighting facets', (input, query, machines) => {
     expect(parseSidebarQuery(input)).toEqual({ query, machines })
   })
 
   it('shares row host namespace stripping without rewriting query values', () => {
-    expect(matchesSidebarHost('HOST/DEV3', parseSidebarQuery('machine:dev').machines)).toBe(true)
-    expect(matchesSidebarHost('host/dev3', parseSidebarQuery('machine:host/dev3').machines)).toBe(false)
-    expect(parseSidebarQuery('machine:HOST/DEV3').machines).toEqual([['host/dev3']])
+    expect(matchesSidebarHost('HOST/NODE3', parseSidebarQuery('machine:node').machines)).toBe(true)
+    expect(matchesSidebarHost('host/node3', parseSidebarQuery('machine:host/node3').machines)).toBe(false)
+    expect(parseSidebarQuery('machine:HOST/NODE3').machines).toEqual([['host/node3']])
   })
 
   const machineRows = [
-    row('dev3', 'Compiler', 'idle', 'host/dev3', 0),
-    row('dev5', 'Sidebar', 'idle', 'DEV5', 0),
+    row('node3', 'Compiler', 'idle', 'host/node3', 0),
+    row('node5', 'Sidebar', 'idle', 'NODE5', 0),
     row('other', 'Compiler', 'idle', 'host/laptop24', 0),
   ]
   it.each([
-    ['machine:dev3', '', ['dev3']],
-    ['machine:dev3,dev5', '', ['dev3', 'dev5']],
-    ['HOST:DEV', '', ['dev3', 'dev5']],
-    ['machine:dev machine:dev3', '', ['dev3']],
-    ['machine:dev3 host:dev5', '', []],
+    ['machine:node3', '', ['node3']],
+    ['machine:node3,node5', '', ['node3', 'node5']],
+    ['HOST:NODE', '', ['node3', 'node5']],
+    ['machine:node machine:node3', '', ['node3']],
+    ['machine:node3 host:node5', '', []],
     ['machine:dev9', '', []],
-    ['machine:', '', ['dev3', 'dev5', 'other']],
-    ['machine:,,', '', ['dev3', 'dev5', 'other']],
-    ['machine:dev3,,', '', ['dev3']],
-    ['compiler machine:dev', '', ['dev3']],
-    ['laptop machine:dev', '', []],
-    ['machine:dev', 'host/dev3', ['dev3']],
-    ['machine:dev3', 'DEV5', []],
-    ['machine:dev', 'dev3', []],
+    ['machine:', '', ['node3', 'node5', 'other']],
+    ['machine:,,', '', ['node3', 'node5', 'other']],
+    ['machine:node3,,', '', ['node3']],
+    ['compiler machine:node', '', ['node3']],
+    ['laptop machine:node', '', []],
+    ['machine:node', 'host/node3', ['node3']],
+    ['machine:node3', 'NODE5', []],
+    ['machine:node', 'node3', []],
   ] as const)('matches %j AND the exact menu host %j', (query, host, expected) => {
     expect(machineRows.filter((candidate) =>
       matchesRow({ row: candidate, filters: { ...defaultFilters, query, host }, context: '' }),
