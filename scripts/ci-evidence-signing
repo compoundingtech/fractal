@@ -104,10 +104,18 @@ def aggregate(path):
     Not the stages' commands, outputs, inventories, timings or toolchains: it did not run them.
     """
     needs = json.loads(env('NEEDS_JSON') or '{}')
-    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items())}
+    # The gate jobs only feed the skip check below; they are not part of the recorded command or results.
+    results = {name: str(entry.get('result', 'unknown')) for name, entry in sorted(needs.items()) if not name.startswith('evidence-gate-')}
     gate = env('GATE_JOB', 'linux-gate')
     if gate not in results:
         raise Refused(f'the {gate!r} job is not among the needed jobs, so there is no verdict to record')
+    # An evidence gate that decided to skip says so in its output, set only by its marker step. Required
+    # checks whose gate skipped still end in success with their steps skipped, so their own result
+    # cannot show it: this output can. No note then, whatever the other results say.
+    taken = sorted(name for name, entry in needs.items()
+                   if name.startswith('evidence-gate-') and str((entry.get('outputs') or {}).get('skip', '')).lower() == 'true')
+    if taken:
+        raise Refused(f'not recording: the evidence gate skipped work in this run ({", ".join(taken)}), so it did not test this tree itself')
     # A needed job that did not run (skipped by the evidence gate, or for any other reason) means this
     # run did not itself test those stages. A note that says success would let one real run refresh
     # its own skips forever, so no note is made. Only the merge-queue-only shards may be skipped, and

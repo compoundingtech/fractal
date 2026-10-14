@@ -126,6 +126,13 @@ with tempfile.TemporaryDirectory() as directory:
     helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(needs)))
     assert json.loads(out.read_text())['exit_code'] == 1
     needs['linux-gate']['result'] = 'success'
+    with_gates = {**needs, 'evidence-gate-mail-redelivery-canaries': {'result': 'success', 'outputs': {'skip': 'false'}},
+                  'evidence-gate-isolation-vm': {'result': 'success', 'outputs': {'skip': 'false'}}}
+    assert helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(with_gates), GITHUB_EVENT_NAME='merge_group')).returncode == 0, 'gates that did not skip do not block'
+    assert json.loads(out.read_text())['command'] == ['linux-gate', 'aggregate', 'linux-clippy', 'linux-gate', 'linux-tests'], 'the recorded command does not change when gate jobs are needed'
+    with_gates['evidence-gate-isolation-vm']['outputs']['skip'] = 'true'
+    stopped = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(with_gates), GITHUB_EVENT_NAME='merge_group'))
+    assert stopped.returncode == 1 and 'evidence-gate-isolation-vm' in stopped.stdout, 'every needed job succeeded but one gate said skip: no note'
     skipped = {**needs, 'linux-tests': {'result': 'skipped'}}
     refused = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps(skipped), GITHUB_EVENT_NAME='merge_group'))
     assert refused.returncode == 1 and 'did not run' in refused.stdout, 'a skipped stage means this run did not test the tree itself'
