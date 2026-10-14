@@ -1,21 +1,30 @@
 //! Test-support scheduling gate: delay a real mutation before it acquires the writer.
 use std::{path::{Path, PathBuf}, sync::OnceLock, time::{Duration, Instant}};
 use crate::model::St3Error;
-static ROOT: OnceLock<PathBuf> = OnceLock::new();
+struct Gate {
+    root: PathBuf,
+    grant_subject: Option<String>,
+}
+static GATE: OnceLock<Gate> = OnceLock::new();
 
-pub fn install(root: &Path) -> Result<(), St3Error> {
+pub fn install(root: &Path, grant_subject: Option<String>) -> Result<(), St3Error> {
     std::fs::create_dir_all(root).map_err(super::internal)?;
-    ROOT.set(root.to_owned()).map_err(|_| St3Error::new("internal", "mutation gate already installed"))
+    GATE.set(Gate { root: root.to_owned(), grant_subject })
+        .map_err(|_| St3Error::new("internal", "mutation gate already installed"))
 }
 
-pub(crate) struct Completion(PathBuf);
+pub(crate) struct Completion(&'static Path);
 impl Drop for Completion {
     fn drop(&mut self) { let _ = std::fs::write(self.0.join("done"), b"done"); }
 }
 
-pub(crate) fn pause() -> Result<Option<Completion>, St3Error> {
-    let Some(root) = ROOT.get().filter(|root| root.join("hold").exists()) else { return Ok(None) };
-    let completion = Completion(root.clone());
+pub(crate) fn pause(grant_subject: &str) -> Result<Option<Completion>, St3Error> {
+    let Some(gate) = GATE.get().filter(|gate|
+        gate.root.join("hold").exists()
+            && gate.grant_subject.as_deref().is_none_or(|target| target == grant_subject)
+    ) else { return Ok(None) };
+    let root = gate.root.as_path();
+    let completion = Completion(root);
     std::fs::write(root.join("entered"), b"entered").map_err(super::internal)?;
     let deadline = Instant::now() + Duration::from_secs(30);
     while !root.join("release").exists() {

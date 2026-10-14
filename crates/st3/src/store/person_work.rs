@@ -641,7 +641,10 @@ impl Store {
             { return Err(St3Error::new("forbidden", "assistant authorization does not bind this person answer")); }
         }
         #[cfg(feature = "test-support")]
-        let _gate = if authorization.is_some() { super::assistant_write_gate::pause()? } else { None };
+        let _gate = match authorization {
+            Some(authorization) => super::assistant_write_gate::pause(&authorization.grant_subject)?,
+            None => None,
+        };
         self.connection.batched(|tx| {
             if let Some(authorization) = authorization {
                 super::assistant_write::authorize(tx, &self.origin, authorization)?;

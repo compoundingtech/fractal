@@ -281,3 +281,53 @@ async fn writer_transaction_rechecks_policy_revision_recipient_and_revocation() 
     let transaction = connection.transaction().unwrap();
     assert!(authorize(&transaction, "assistant-native", &expired_authorization).is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synchronous_send_rechecks_revocation_and_recipient_removal_before_commit() {
+    let h = Arc::new(Harness::new());
+    let paired = h.pair().await;
+    let gate = h.root.path().join("mutation-gate");
+    st3::store::assistant_write_gate::install(&gate, Some(grant_subject(&paired))).unwrap();
+    let connection = rusqlite::Connection::open(h.root.path().join("store.sqlite")).unwrap();
+    let count_messages = || connection.query_row(
+        "SELECT count(*) FROM claims WHERE kind='message.sent'", [], |row| row.get::<_, u64>(0),
+    ).unwrap();
+    for revoke in [false, true] {
+        h.policy(&paired, scopes()).await;
+        let before = count_messages();
+        let request = h.message(AGENT, if revoke { "held-revoke" } else { "held-recipient" }).await;
+        for name in ["hold", "entered", "release", "done"] {
+            let path = gate.join(name);
+            if path.exists() { std::fs::remove_file(path).unwrap(); }
+        }
+        std::fs::write(gate.join("hold"), b"hold").unwrap();
+        let send_h = h.clone();
+        let send_paired = paired.clone();
+        let send = tokio::spawn(async move {
+            send_h.assistant(&send_paired, "POST", "/v1/client/assistant/propose", &request).await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !gate.join("entered").exists() {
+            assert!(std::time::Instant::now() < deadline, "send did not reach the pre-commit gate");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(!send.is_finished(), "synchronous send must still await its mutation");
+        if revoke {
+            h.owner("POST", &grant_path(&paired, "/revoke"), &json!({})).await;
+        } else {
+            h.owner("POST", &grant_path(&paired, "/policy"), &AssistantGrantPolicy {
+                api_version: st3_client::API_VERSION.into(), scopes: scopes(),
+                expires_in_seconds: Some(3600), disclosure_consent: true,
+                consent_evidence: "Owner removes recipient during held send".into(),
+                minimal_read_mode: AssistantMinimalReadMode::CallerBoundAllow,
+                recipient_allowlist: Some(vec![]),
+            }).await;
+        }
+        std::fs::remove_file(gate.join("hold")).unwrap();
+        std::fs::write(gate.join("release"), b"release").unwrap();
+        let (status, denial) = send.await.unwrap();
+        assert!(!status.is_success(), "{denial}");
+        assert_eq!(denial["code"], "forbidden", "{denial}");
+        assert_eq!(count_messages(), before, "denied send must append no message claim");
+    }
+}

@@ -1197,11 +1197,11 @@ agent recipient. Its non-read-only tool annotation asks ChatGPT to show a confir
 the daemon does not treat the advisory card as execution authorization or create another
 st approval. `custom.reply` is likewise grant-scoped at the daemon boundary.
 
-Execution carries the original assistant grant and policy revision through the action worker.
+Execution carries the original assistant grant and policy revision through typed action dispatch.
 The message append, person-answer transaction, and custom-reply transaction recheck the
 authoritative grant, revocation, expiry, exact scope, policy revision, recipient, and owner
-approval where required. A worker that survives an unconfirmed-send timeout cannot use
-the owning person's unrestricted session to bypass a changed assistant policy.
+approval where required. Revocation or recipient removal between handler preflight and the
+writer transaction denies the synchronous send without appending a message claim.
 
 `crates/st-chatgpt` uses official `rmcp` 3.5.1 for both stateless Streamable HTTP and stdio.
 Both transports use the same seven closed tools and paired-only `st3-client.sock` gateway.

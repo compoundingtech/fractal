@@ -7,7 +7,7 @@ use st3::{api::AppState,store::Store,model::{ClaimInput,PersonAskRequest}};
 async fn main() -> anyhow::Result<()> {
     let root=PathBuf::from(std::env::args().nth(1).expect("explicit scratch state directory"));
     std::fs::create_dir_all(&root)?;
-    st3::store::assistant_write_gate::install(&root.join("mutation-gate"))?;
+    st3::store::assistant_write_gate::install(&root.join("mutation-gate"), None)?;
     let store=Arc::new(Store::open(&root.join("store.sqlite"),"prototype")?);
     store.bind_fleet("3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69")?;
     store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate()?.0))?;
