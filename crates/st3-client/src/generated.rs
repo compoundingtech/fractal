@@ -633,6 +633,8 @@ pub struct AgentWorkspace {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accountable: Option<String>,
     pub id: String,
     pub revision: String,
     pub tree: Value,
@@ -1063,6 +1065,8 @@ pub struct WorkLabel {
     pub goal: Option<String>,
     pub state: String,
     pub since: String,
+    #[serde(default)]
+    pub holder_down_since: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Work {
@@ -1157,6 +1161,8 @@ pub struct Agent {
     pub host_id: Option<String>,
     pub last_activity_at: Option<String>,
     pub silent_since: Option<String>,
+    #[serde(default)]
+    pub down_since: Option<String>,
     #[serde(default)]
     pub fault: Option<String>,
     #[serde(default)]

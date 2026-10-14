@@ -1225,6 +1225,7 @@ fn parse_host(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: "host".into(),
             desired: canonical_node(&normalized)?,
@@ -1461,9 +1462,15 @@ fn parse_agent(
 
     let mut desired = canonical_node(node)?;
     normalize_agent_under(&mut desired, &host, context.owner_run.as_deref());
+    let accountable = st3_schema::accountable::from_desired(&desired)
+        .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
+    if accountable.is_some() && context.owner_run.is_some() {
+        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+    }
     insert_subject(
         context,
         DesiredSubject {
+            accountable,
             subject: subject.clone(),
             kind: "agent".into(),
             desired,
@@ -1517,6 +1524,7 @@ fn parse_agent(
         insert_subject(
             context,
             DesiredSubject {
+                accountable: None,
                 subject: task_subject,
                 kind: child.name().value().into(),
                 desired: canonical_node(child)?,
@@ -1593,6 +1601,7 @@ fn parse_standalone_member(
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: kind.into(),
             desired: canonical_node(node)?,
@@ -1636,6 +1645,7 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: kind.into(),
             desired: canonical_node(node)?,
@@ -1847,6 +1857,7 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject: subject.clone(),
             kind: "stop".into(),
             desired: json!({ "stop": subject }),
@@ -2839,6 +2850,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "bind-terminal",
         "one-shot",
         "handles-faults",
+        "accountable",
         "mission-authority",
         "queue-authority",
         "seat-authority",
@@ -2881,12 +2893,21 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "bind-terminal",
         "one-shot",
         "handles-faults",
+        "accountable",
         "mission-authority",
         "queue-authority",
         "seat-authority",
         "agent-authority",
     ] {
         unique_child(document, child)?;
+    }
+    if let Some(accountable) = unique_child(document, "accountable")? {
+        ensure_no_properties(accountable)?;
+        ensure_no_children(accountable)?;
+        let person = one_string(accountable)?;
+        if !st3_schema::accountable::person(&person) {
+            return Err(St3Error::new("invalid-accountable-root", "accountable must name one concrete person/NAME"));
+        }
     }
     if let Some(lifecycle) = unique_child(document, "lifecycle")? {
         ensure_no_properties(lifecycle)?;

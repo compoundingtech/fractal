@@ -1046,6 +1046,18 @@ fn parse_loop_stop(node: &KdlNode, metrics: &BTreeSet<String>) -> Result<LoopSto
                     ));
                 }
             }
+            "no-progress" => {
+                let value = child_integer_value(child)?;
+                if !(2..=100).contains(&value) {
+                    return Err(St3Error::new(
+                        "invalid-no-progress",
+                        "no-progress must be between 2 and 100",
+                    ));
+                }
+                if stop.no_progress.replace(value as u32).is_some() {
+                    return Err(St3Error::new("duplicate-no-progress", "no-progress repeats"));
+                }
+            }
             "token-budget" => {
                 let value = child_integer_value(child)?;
                 if value <= 0 {
@@ -1801,6 +1813,9 @@ fn take_agent_constraints(
     let Some(children) = node.children_mut() else {
         return Ok(node);
     };
+    if children.nodes().iter().any(|child| child.name().value() == "accountable") {
+        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+    }
     let (constraint_nodes, other_nodes): (Vec<_>, Vec<_>) = children
         .nodes()
         .iter()

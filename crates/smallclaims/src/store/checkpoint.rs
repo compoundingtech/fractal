@@ -27,7 +27,7 @@ pub const DAY_MS: u128 = 86_400_000;
 pub(crate) const SEALED_ENVELOPE_PAGE: i64 = 64;
 pub(crate) const SEALED_RECORD_PAGE: i64 = 64;
 
-fn checkpoint_accepted_time(raw: &str, id: &str, column: usize) -> rusqlite::Result<u128> {
+pub(super) fn checkpoint_accepted_time(raw: &str, id: &str, column: usize) -> rusqlite::Result<u128> {
     raw.parse::<u128>().map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
@@ -167,9 +167,6 @@ pub struct SealedSet {
     /// `envelopes` with no claims, so a trimmed and an untrimmed node seal the same identities.
     pub envelope_tombstones: Vec<EnvelopeTombstone>,
     pub claim_tombstones: Vec<ClaimTombstone>,
-    /// Unit-test ownership probe; released only when the captured set is released.
-    #[cfg(test)]
-    pub(crate) capture_lifetime: std::sync::Arc<()>,
 }
 
 /// What a seal records of a sealed set: its digest, how many envelopes it holds, and the row it
@@ -318,14 +315,13 @@ pub struct CheckpointProof {
 
 /// Source identity for an array item, used only for bounded scratch-proof failure diagnostics.
 /// It is excluded from reader answers, their digests and checkpoint certificates.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckpointItemSource {
     pub claim: String,
     pub order: super::canonical::ClaimKey,
 }
 
 pub type CheckpointAnswerSources = BTreeMap<String, Vec<CheckpointItemSource>>;
-type ProofSources = BTreeMap<(String, String), Vec<CheckpointItemSource>>;
 
 // Reuse the existing bounded 60-second diagnostic limiter with one fixed stage/code bucket.
 // No source/subject IDs are keys, and suppressed failures have no flush, queue or retry.
@@ -335,7 +331,7 @@ static CHECKPOINT_DIAGNOSTICS: std::sync::OnceLock<std::sync::Mutex<super::Proje
 /// is still recording them. A trim records tombstones in chunks, so after a crash part way
 /// through, the plan made again reads only what earlier checkpoints dropped, as it did the first
 /// time, and records the rest.
-const RECORDED_TOMBSTONE_FILTER: &str = "accepted_at_unix_ms < ?3
+pub(super) const RECORDED_TOMBSTONE_FILTER: &str = "accepted_at_unix_ms < ?3
     AND checkpoint NOT IN (SELECT id FROM checkpoints WHERE state='recording')";
 
 /// Record the tombstones of a checkpoint's drop. Recording them again changes nothing.
@@ -468,36 +464,30 @@ pub fn reader_answers(
         .collect()
 }
 
-fn reader_answers_with_sources(
-    runtime: &dyn Runtime,
-    connection: &Connection,
-    subjects: &BTreeSet<String>,
-    cut: u128,
-) -> Result<(BTreeMap<String, Value>, ProofSources)> {
-    let mut answers = BTreeMap::new();
-    let mut sources = BTreeMap::new();
-    for subject in subjects {
-        let (answer, item_sources) = runtime.checkpoint_subject_answers_with_sources(connection, subject, cut)?;
-        answers.insert(subject.clone(), answer);
-        for (reader, items) in item_sources {
-            sources.insert((subject.clone(), reader), items);
-        }
-    }
-    Ok((answers, sources))
+/// What a status-history mismatch diagnostic names of the checkpoint the proof is for.
+struct DiagnosticTerms<'a> {
+    cut_unix_ms: u128,
+    seal_rowid: i64,
+    sealed_digest: &'a str,
+    rules_digest: &'a str,
+    drop_digest: &'a str,
 }
 
-fn status_history_mismatch_diagnostics(
-    sealed: &SealedSet,
-    plan: &DropPlan,
-    before: &BTreeMap<String, Value>,
-    after: &BTreeMap<String, Value>,
-    before_sources: &ProofSources,
-    after_sources: &ProofSources,
-) -> Vec<Value> {
+/// A bounded diagnostic for one subject whose `status_history` answer changed: identities,
+/// lengths and at most three items on each side, never their content.
+fn status_history_mismatch_diagnostic(
+    terms: &DiagnosticTerms<'_>,
+    subject: &str,
+    old: &[Value],
+    new: &[Value],
+    before_sources: Option<&[CheckpointItemSource]>,
+    after_sources: Option<&[CheckpointItemSource]>,
+    dropped: &dyn Fn(&str) -> bool,
+) -> Option<Value> {
     fn text(value: Option<&Value>, limit: usize) -> Value {
         value.and_then(Value::as_str).map_or(Value::Null, |text| json!(text.chars().take(limit).collect::<String>()))
     }
-    fn preview(items: &[Value], sources: Option<&[CheckpointItemSource]>, start: usize, plan: &DropPlan) -> Vec<Value> {
+    let preview = |items: &[Value], sources: Option<&[CheckpointItemSource]>, start: usize| -> Vec<Value> {
         items.iter().enumerate().skip(start).take(3).map(|(index, item)| {
             let source = sources.and_then(|sources| sources.get(index));
             json!({
@@ -507,32 +497,24 @@ fn status_history_mismatch_diagnostics(
                     source.order.0, source.order.1.chars().take(256).collect::<String>(), source.order.2,
                     source.order.3.chars().take(256).collect::<String>(), source.order.4,
                     source.order.5.chars().take(128).collect::<String>())),
-                "dropped":source.map(|source| plan.claims.iter().any(|claim| claim.id == source.claim)),
+                "dropped":source.map(|source| dropped(&source.claim)),
                 "state":text(item.get("state"), 128),
                 "incarnation":text(item.get("runtime_incarnation"), 128),
                 "observed_at":text(item.get("observed_at"), 48), "reset":item.get("reset").and_then(Value::as_bool),
             })
         }).collect()
-    }
-    let mut diagnostics = Vec::new();
-    for (subject, answer) in before {
-        let Some(old) = answer.get("status_history").and_then(Value::as_array) else { continue; };
-        let Some(new) = after.get(subject).and_then(|answer| answer.get("status_history")).and_then(Value::as_array) else { continue; };
-        let Some(first) = (0..old.len().max(new.len())).find(|index| old.get(*index) != new.get(*index)) else { continue; };
-        let key = (subject.clone(), "status_history".to_owned());
-        diagnostics.push(json!({
-            "checkpoint":checkpoint_name(sealed.cut_unix_ms), "seal_rowid":sealed.seal_rowid,
-            "sealed_digest":plan.sealed_digest, "cut_unix_ms":sealed.cut_unix_ms,
-            "source_build":super::checkpoint_agreement::checkpoint_build().chars().take(256).collect::<String>(),
-            "rules_digest":plan.rules_digest, "drop_digest":plan.drop_digest,
-            "subject":subject.chars().take(256).collect::<String>(), "reader":"status_history",
-            "before_len":old.len(), "after_len":new.len(), "first_difference":first,
-            "before":preview(old, before_sources.get(&key).map(Vec::as_slice), first, plan),
-            "after":preview(new, after_sources.get(&key).map(Vec::as_slice), first, plan),
-        }));
-        if diagnostics.len() == 3 { break; }
-    }
-    diagnostics
+    };
+    let first = (0..old.len().max(new.len())).find(|index| old.get(*index) != new.get(*index))?;
+    Some(json!({
+        "checkpoint":checkpoint_name(terms.cut_unix_ms), "seal_rowid":terms.seal_rowid,
+        "sealed_digest":terms.sealed_digest, "cut_unix_ms":terms.cut_unix_ms,
+        "source_build":super::checkpoint_agreement::checkpoint_build().chars().take(256).collect::<String>(),
+        "rules_digest":terms.rules_digest, "drop_digest":terms.drop_digest,
+        "subject":subject.chars().take(256).collect::<String>(), "reader":"status_history",
+        "before_len":old.len(), "after_len":new.len(), "first_difference":first,
+        "before":preview(old, before_sources, first),
+        "after":preview(new, after_sources, first),
+    }))
 }
 
 #[test]
@@ -544,29 +526,17 @@ fn status_history_diagnostics_bound_items_and_exclude_content() {
     })).collect::<Vec<_>>();
     let mut changed = items.clone();
     changed.remove(2);
-    let subject = "agent/cedar".to_owned();
-    let before = BTreeMap::from([(subject.clone(), json!({"status_history":items}))]);
-    let after = BTreeMap::from([(subject.clone(), json!({"status_history":changed}))]);
-    let sources = BTreeMap::from([((subject, "status_history".to_owned()),
-        (0..8).map(|index| CheckpointItemSource {
-            claim:format!("claim-{index}"), order:(index, "cedar".into(), index as u64, "batch".into(), 0, format!("claim-{index}")),
-        }).collect::<Vec<_>>())]);
-    let sealed = SealedSet {
-        cut_unix_ms:DAY_MS, envelopes:Vec::new(), claims:Vec::new(), seal_rowid:7,
-        envelope_tombstones:Vec::new(), claim_tombstones:Vec::new(),
-        #[cfg(test)]
-        capture_lifetime: std::sync::Arc::default(),
-    };
-    let plan = DropPlan {
-        cut_unix_ms:DAY_MS, rules_digest:"rules".into(), sealed_envelopes:0, sealed_claims:0,
-        sealed_digest:"sealed".into(), drop_digest:"drop".into(), retained_digest:"retained".into(),
-        envelopes:Vec::new(), claims:Vec::new(), by_kind:BTreeMap::new(),
+    let sources = (0..8).map(|index| CheckpointItemSource {
+        claim:format!("claim-{index}"), order:(index, "cedar".into(), index as u64, "batch".into(), 0, format!("claim-{index}")),
+    }).collect::<Vec<_>>();
+    let terms = DiagnosticTerms {
+        cut_unix_ms:DAY_MS, seal_rowid:7, sealed_digest:"sealed", rules_digest:"rules", drop_digest:"drop",
     };
     let mut after_sources = sources.clone();
-    after_sources.values_mut().next().unwrap().remove(2);
-    let diagnostics = status_history_mismatch_diagnostics(&sealed, &plan, &before, &after, &sources, &after_sources);
-    assert_eq!(diagnostics.len(), 1);
-    let diagnostic = &diagnostics[0];
+    after_sources.remove(2);
+    let diagnostic = status_history_mismatch_diagnostic(
+        &terms, "agent/cedar", &items, &changed, Some(&sources), Some(&after_sources), &|_| false,
+    ).unwrap();
     assert_eq!(diagnostic["first_difference"], 2);
     assert_eq!(diagnostic["before_len"], 8);
     assert_eq!(diagnostic["after_len"], 7);
@@ -576,7 +546,9 @@ fn status_history_diagnostics_bound_items_and_exclude_content() {
     assert_eq!(diagnostic["after"][0]["source"], "claim-3");
     assert_eq!(diagnostic["before"][0]["incarnation"].as_str().unwrap().len(), 128);
     assert!(!diagnostic.to_string().contains("private transcript"));
-    assert!(status_history_mismatch_diagnostics(&sealed, &plan, &before, &before, &sources, &sources).is_empty());
+    assert!(status_history_mismatch_diagnostic(
+        &terms, "agent/cedar", &items, &items, Some(&sources), Some(&sources), &|_| false,
+    ).is_none());
 }
 
 pub fn answers_digest(answers: &BTreeMap<String, Value>) -> Result<String> {
@@ -701,10 +673,110 @@ fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> 
     Ok(())
 }
 
+/// What a proof reads of the sealed set and the drop it proves: from memory, or a page at a time
+/// from a staging file.
+pub trait ProofInput {
+    fn cut_unix_ms(&self) -> u128;
+    fn seal_rowid(&self) -> i64;
+    fn sealed_digest(&self) -> &str;
+    fn rules_digest(&self) -> &str;
+    fn drop_digest(&self) -> &str;
+    /// Prepare `connection`, outside any transaction, for `fill_sealed`.
+    fn attach(&self, _connection: &Connection) -> Result<()> {
+        Ok(())
+    }
+    /// Fill `temp.sealed_claims`, `temp.sealed_blobs` and `temp.sealed_envelopes`.
+    fn fill_sealed(&self, transaction: &Transaction<'_>) -> Result<()>;
+    /// The subjects of the dropped claims, in order, after `after`, at most `limit`.
+    fn subjects(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>>;
+    /// The dropped envelopes, then the dropped claims, a page at a time.
+    fn envelope_pages(&self, visit: &mut dyn FnMut(&[EnvelopeTombstone]) -> Result<()>) -> Result<()>;
+    fn claim_pages(&self, visit: &mut dyn FnMut(&[ClaimTombstone]) -> Result<()>) -> Result<()>;
+    fn drops_claim(&self, id: &str) -> Result<bool>;
+}
+
+/// A sealed set and its plan in memory, as `plan_drops` makes them.
+pub struct InMemoryProof<'a> {
+    pub sealed: &'a SealedSet,
+    pub plan: &'a DropPlan,
+}
+
+impl ProofInput for InMemoryProof<'_> {
+    fn cut_unix_ms(&self) -> u128 {
+        self.sealed.cut_unix_ms
+    }
+
+    fn seal_rowid(&self) -> i64 {
+        self.sealed.seal_rowid
+    }
+
+    fn sealed_digest(&self) -> &str {
+        &self.plan.sealed_digest
+    }
+
+    fn rules_digest(&self) -> &str {
+        &self.plan.rules_digest
+    }
+
+    fn drop_digest(&self) -> &str {
+        &self.plan.drop_digest
+    }
+
+    fn fill_sealed(&self, transaction: &Transaction<'_>) -> Result<()> {
+        let mut blobs = BTreeSet::new();
+        for sealed_claim in &self.sealed.claims {
+            transaction.execute(
+                "INSERT OR IGNORE INTO temp.sealed_claims(id) VALUES (?1)",
+                [&sealed_claim.claim.id],
+            )?;
+            collect_hash_fields(&sealed_claim.claim.body, &mut blobs);
+        }
+        for hash in &blobs {
+            transaction.execute("INSERT INTO temp.sealed_blobs(hash) VALUES (?1)", [hash])?;
+        }
+        for envelope in &self.sealed.envelopes {
+            transaction.execute(
+                "INSERT OR IGNORE INTO temp.sealed_envelopes VALUES (?1, ?2, ?3)",
+                params![envelope.key.writer, envelope.key.sequence, envelope.key.envelope_hash],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn subjects(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        Ok(self
+            .plan
+            .claims
+            .iter()
+            .map(|claim| claim.subject.as_str())
+            .filter(|subject| after.is_none_or(|after| *subject > after))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(limit)
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn envelope_pages(&self, visit: &mut dyn FnMut(&[EnvelopeTombstone]) -> Result<()>) -> Result<()> {
+        visit(&self.plan.envelopes)
+    }
+
+    fn claim_pages(&self, visit: &mut dyn FnMut(&[ClaimTombstone]) -> Result<()>) -> Result<()> {
+        visit(&self.plan.claims)
+    }
+
+    fn drops_claim(&self, id: &str) -> Result<bool> {
+        Ok(self.plan.claims.iter().any(|claim| claim.id == id))
+    }
+}
+
 /// Project a copy of the sealed set with and without the drop, and compare the graph and every
 /// reader answer. `copy` is a store file holding at least the sealed set; it is changed.
 /// The key a proof compares the runtime's global answers under, beside the subjects' answers.
 pub const GLOBAL_ANSWERS: &str = "fleet";
+
+/// Subjects a proof reads answers for at a time.
+const PROOF_SUBJECT_PAGE: usize = 64;
 
 pub fn prove_on_copy(
     runtime: &dyn Runtime,
@@ -712,7 +784,7 @@ pub fn prove_on_copy(
     sealed: &SealedSet,
     plan: &DropPlan,
 ) -> Result<CheckpointProof> {
-    prove(runtime, copy, sealed, plan, false)
+    prove(runtime, copy, &InMemoryProof { sealed, plan }, false)
 }
 
 /// `prove_on_copy` for a copy that is deleted afterwards. Keeping the sealed set and numbering
@@ -723,51 +795,192 @@ pub fn prove_on_copy(
 fn prove_on_scratch_copy(
     runtime: &dyn Runtime,
     copy: &Path,
-    sealed: &SealedSet,
-    plan: &DropPlan,
+    input: &dyn ProofInput,
 ) -> Result<CheckpointProof> {
-    prove(runtime, copy, sealed, plan, true)
+    prove(runtime, copy, input, true)
+}
+
+/// Read every dropped subject's answers on `transaction`, a page of subjects at a time, into
+/// `temp.proof_answers` and `temp.proof_readers` under `phase`. The answers live on the copy's
+/// temporary storage, not in memory. With `before`, a status history's item sources are kept
+/// for the diagnostics of a later mismatch; otherwise each changed status history yields one.
+#[allow(clippy::too_many_arguments)]
+fn record_answers(
+    runtime: &dyn Runtime,
+    transaction: &Transaction<'_>,
+    input: &dyn ProofInput,
+    phase: i64,
+    subjects: &mut usize,
+    diagnostics: &mut Vec<Value>,
+) -> Result<()> {
+    let terms = DiagnosticTerms {
+        cut_unix_ms: input.cut_unix_ms(),
+        seal_rowid: input.seal_rowid(),
+        sealed_digest: input.sealed_digest(),
+        rules_digest: input.rules_digest(),
+        drop_digest: input.drop_digest(),
+    };
+    let mut after: Option<String> = None;
+    loop {
+        let page = input.subjects(after.as_deref(), PROOF_SUBJECT_PAGE)?;
+        let Some(last) = page.last().cloned() else {
+            return Ok(());
+        };
+        for subject in &page {
+            let (answer, sources) =
+                runtime.checkpoint_subject_answers_with_sources(transaction, subject, input.cut_unix_ms())?;
+            store_answer(transaction, phase, subject, &answer)?;
+            let history = sources.get("status_history");
+            if phase == 0 {
+                *subjects += 1;
+                if let Some(history) = history {
+                    transaction.execute(
+                        "INSERT OR REPLACE INTO temp.proof_sources(subject, sources) VALUES (?1, ?2)",
+                        params![subject, serde_json::to_string(history)?],
+                    )?;
+                }
+            } else if diagnostics.len() < 3 {
+                let old: Option<String> = transaction
+                    .query_row(
+                        "SELECT text FROM temp.proof_readers WHERE phase=0 AND subject=?1 AND reader='status_history'",
+                        [subject],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let (Some(old), Some(new)) = (old, answer.get("status_history").and_then(Value::as_array)) else {
+                    continue;
+                };
+                let old: Value = serde_json::from_str(&old)?;
+                let Some(old) = old.as_array() else { continue };
+                let before_sources: Option<Vec<CheckpointItemSource>> = transaction
+                    .query_row("SELECT sources FROM temp.proof_sources WHERE subject=?1", [subject], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .optional()?
+                    .map(|text| serde_json::from_str(&text))
+                    .transpose()?;
+                if let Some(diagnostic) = status_history_mismatch_diagnostic(
+                    &terms,
+                    subject,
+                    old,
+                    new,
+                    before_sources.as_deref(),
+                    history.map(Vec::as_slice),
+                    &|id| input.drops_claim(id).unwrap_or(false),
+                ) {
+                    diagnostics.push(diagnostic);
+                }
+            }
+        }
+        after = Some(last);
+    }
+}
+
+/// Keep one subject's answer as canonical text, whole for the digest and per reader for the
+/// comparison, in the answer's own reader order.
+fn store_answer(transaction: &Transaction<'_>, phase: i64, subject: &str, answer: &Value) -> Result<()> {
+    transaction.execute(
+        "INSERT OR REPLACE INTO temp.proof_answers(phase, subject, text, object) VALUES (?1, ?2, ?3, ?4)",
+        params![phase, subject, canonical_json_text(answer)?, answer.is_object()],
+    )?;
+    transaction.execute(
+        "DELETE FROM temp.proof_readers WHERE phase=?1 AND subject=?2",
+        params![phase, subject],
+    )?;
+    if let Some(readers) = answer.as_object() {
+        let mut insert = transaction.prepare_cached(
+            "INSERT INTO temp.proof_readers(phase, subject, ordinal, reader, text) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for (ordinal, (reader, value)) in readers.iter().enumerate() {
+            insert.execute(params![phase, subject, i64::try_from(ordinal)?, reader, canonical_json_text(value)?])?;
+        }
+    }
+    Ok(())
+}
+
+/// `answers_digest` of one phase's recorded answers, in subject order.
+fn recorded_answers_digest(transaction: &Transaction<'_>, phase: i64) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"st3-checkpoint-readers-v1\0");
+    let mut statement = transaction
+        .prepare("SELECT subject, text FROM temp.proof_answers WHERE phase=?1 ORDER BY subject")?;
+    let mut rows = statement.query([phase])?;
+    while let Some(row) = rows.next()? {
+        digest_field(&mut digest, Some(&row.get::<_, String>(0)?));
+        digest_field(&mut digest, Some(&row.get::<_, String>(1)?));
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+/// `answer_mismatches` of the two recorded phases, in subject order, at most 20.
+fn recorded_answer_mismatches(transaction: &Transaction<'_>) -> Result<Vec<String>> {
+    let mut mismatches = Vec::new();
+    let mut subjects = transaction.prepare(
+        "SELECT before.subject, before.object, after.object FROM temp.proof_answers before
+         LEFT JOIN temp.proof_answers after ON after.phase=1 AND after.subject=before.subject
+         WHERE before.phase=0 ORDER BY before.subject",
+    )?;
+    let mut readers = transaction.prepare(
+        "SELECT reader, text FROM temp.proof_readers WHERE phase=?1 AND subject=?2 ORDER BY ordinal",
+    )?;
+    let mut rows = subjects.query([])?;
+    while let Some(row) = rows.next()? {
+        if mismatches.len() >= 20 {
+            break;
+        }
+        let subject: String = row.get(0)?;
+        if !(row.get::<_, bool>(1)? && row.get::<_, Option<bool>>(2)? == Some(true)) {
+            mismatches.push(format!("{subject} all"));
+            continue;
+        }
+        let read = |readers: &mut rusqlite::Statement<'_>, phase: i64| -> Result<Vec<(String, String)>> {
+            Ok(readers
+                .query_map(params![phase, subject], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+        let before = read(&mut readers, 0)?;
+        let after = read(&mut readers, 1)?;
+        let after_map = after.iter().map(|(reader, text)| (reader.as_str(), text.as_str())).collect::<BTreeMap<_, _>>();
+        let before_map = before.iter().map(|(reader, text)| (reader.as_str(), text.as_str())).collect::<BTreeMap<_, _>>();
+        for (reader, text) in &before {
+            if after_map.get(reader.as_str()) != Some(&text.as_str()) {
+                mismatches.push(format!("{subject} {reader}"));
+            }
+        }
+        for (reader, _) in &after {
+            if !before_map.contains_key(reader.as_str()) {
+                mismatches.push(format!("{subject} {reader}"));
+            }
+        }
+    }
+    mismatches.truncate(20);
+    Ok(mismatches)
 }
 
 fn prove(
     runtime: &dyn Runtime,
     copy: &Path,
-    sealed: &SealedSet,
-    plan: &DropPlan,
+    input: &dyn ProofInput,
     commit_preparation: bool,
 ) -> Result<CheckpointProof> {
     let _completion = super::checkpoint_completion::Completion::work();
     runtime.checkpoint_preflight()?;
     let mut connection = open_checkpoint_copy(copy)?;
+    input.attach(&connection)?;
     let transaction = connection.transaction()?;
     // Keep only the sealed set.
     transaction.execute_batch(
         "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
          CREATE TEMP TABLE sealed_blobs(hash TEXT PRIMARY KEY);
          CREATE TEMP TABLE sealed_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
-             PRIMARY KEY(writer, sequence, envelope_hash));",
+             PRIMARY KEY(writer, sequence, envelope_hash));
+         CREATE TEMP TABLE proof_answers(phase INTEGER, subject TEXT, text TEXT, object INTEGER,
+             PRIMARY KEY(phase, subject));
+         CREATE TEMP TABLE proof_readers(phase INTEGER, subject TEXT, ordinal INTEGER, reader TEXT,
+             text TEXT, PRIMARY KEY(phase, subject, ordinal));
+         CREATE TEMP TABLE proof_sources(subject TEXT PRIMARY KEY, sources TEXT);",
     )?;
-    let mut blobs = BTreeSet::new();
-    for sealed_claim in &sealed.claims {
-        transaction.execute(
-            "INSERT OR IGNORE INTO temp.sealed_claims(id) VALUES (?1)",
-            [&sealed_claim.claim.id],
-        )?;
-        collect_hash_fields(&sealed_claim.claim.body, &mut blobs);
-    }
-    for hash in &blobs {
-        transaction.execute("INSERT INTO temp.sealed_blobs(hash) VALUES (?1)", [hash])?;
-    }
-    for envelope in &sealed.envelopes {
-        transaction.execute(
-            "INSERT OR IGNORE INTO temp.sealed_envelopes VALUES (?1, ?2, ?3)",
-            params![
-                envelope.key.writer,
-                envelope.key.sequence,
-                envelope.key.envelope_hash
-            ],
-        )?;
-    }
+    input.fill_sealed(&transaction)?;
     runtime.clear_checkpoint_projections(&transaction)?;
     let transaction = if commit_preparation {
         transaction.commit()?;
@@ -777,33 +990,28 @@ fn prove(
         keep_sealed_claims_in_canonical_order(&transaction)?;
         transaction
     };
-    let subjects = plan
-        .claims
-        .iter()
-        .map(|claim| claim.subject.clone())
-        .collect::<BTreeSet<_>>();
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_before = graph_digest(&transaction)?;
     let digests_before = projection_digest::tables(&transaction)?;
-    let (mut before, before_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    let mut subjects = 0;
+    let mut diagnostics = Vec::new();
+    record_answers(runtime, &transaction, input, 0, &mut subjects, &mut diagnostics)?;
     if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
-        before.insert(GLOBAL_ANSWERS.into(), answers);
+        store_answer(&transaction, 0, GLOBAL_ANSWERS, &answers)?;
     }
     // As a trim does: tombstones first, which readers that walk ancestry pass through.
-    record_checkpoint_tombstones_tx(
-        &transaction,
-        &checkpoint_name(sealed.cut_unix_ms),
-        &plan.envelopes,
-        &plan.claims,
-    )?;
-    delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims)?;
+    let checkpoint = checkpoint_name(input.cut_unix_ms());
+    input.envelope_pages(&mut |envelopes| record_checkpoint_tombstones_tx(&transaction, &checkpoint, envelopes, &[]))?;
+    input.claim_pages(&mut |claims| record_checkpoint_tombstones_tx(&transaction, &checkpoint, &[], claims))?;
+    input.claim_pages(&mut |claims| delete_dropped_rows_tx(&transaction, &[], claims))?;
+    input.envelope_pages(&mut |envelopes| delete_dropped_rows_tx(&transaction, envelopes, &[]))?;
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_after = graph_digest(&transaction)?;
-    let (mut after, after_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    record_answers(runtime, &transaction, input, 1, &mut subjects, &mut diagnostics)?;
     if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
-        after.insert(GLOBAL_ANSWERS.into(), answers);
+        store_answer(&transaction, 1, GLOBAL_ANSWERS, &answers)?;
     }
-    let mut mismatches = answer_mismatches(&before, &after);
+    let mut mismatches = recorded_answer_mismatches(&transaction)?;
     if graph_digest_before != graph_digest_after {
         mismatches.splice(
             0..0,
@@ -816,26 +1024,23 @@ fn prove(
         );
     }
     let proof = CheckpointProof {
-        reader_digest_before: answers_digest(&before)?,
-        reader_digest: answers_digest(&after)?,
+        reader_digest_before: recorded_answers_digest(&transaction, 0)?,
+        reader_digest: recorded_answers_digest(&transaction, 1)?,
         graph_digest_before,
         graph_digest: graph_digest_after,
-        subjects: subjects.len(),
+        subjects,
         passed: mismatches.is_empty(),
         mismatches,
     };
-    if !proof.passed {
-        let diagnostics = status_history_mismatch_diagnostics(sealed, plan, &before, &after, &before_sources, &after_sources);
-        if !diagnostics.is_empty() {
-            let emission = CHECKPOINT_DIAGNOSTICS.get_or_init(Default::default).lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .observe("checkpoint", "status-history-mismatch", std::time::Instant::now());
-            if let Some(emission) = emission {
-                for mut diagnostic in diagnostics {
-                    diagnostic["suppressed_proof_logs"] = json!(emission.suppressed);
-                    diagnostic["rate_bucket_overflow"] = json!(emission.overflow);
-                    eprintln!("st3: checkpoint reader mismatch {diagnostic}");
-                }
+    if !proof.passed && !diagnostics.is_empty() {
+        let emission = CHECKPOINT_DIAGNOSTICS.get_or_init(Default::default).lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe("checkpoint", "status-history-mismatch", std::time::Instant::now());
+        if let Some(emission) = emission {
+            for mut diagnostic in diagnostics {
+                diagnostic["suppressed_proof_logs"] = json!(emission.suppressed);
+                diagnostic["rate_bucket_overflow"] = json!(emission.overflow);
+                eprintln!("st3: checkpoint reader mismatch {diagnostic}");
             }
         }
     }
@@ -863,8 +1068,37 @@ pub fn sealed_records_page_sql() -> String {
     )
 }
 
+/// One page of `replica_envelopes` in identity order after the key (?2, ?3, ?4), for a seal.
+/// As in `checkpoint_sealed_set_through`: an envelope is before the cut ?1 when it and every
+/// claim admitted from it, less repaired originals, are dated before the cut, and it is at or
+/// below the seal row ?5. That is a column, not a condition, so a page reads ?6 rows however
+/// many fail it.
+pub const SEALED_IDENTITY_ENVELOPES_SQL: &str = "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+        envelopes.rowid <= ?5
+        AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?1
+        AND NOT EXISTS (
+            SELECT 1 FROM replica_records AS records
+            JOIN claims ON claims.id=records.claim_id
+            WHERE records.writer=envelopes.writer
+              AND records.sequence=envelopes.sequence
+              AND records.envelope_hash=envelopes.envelope_hash
+              AND records.state<>'repaired'
+              AND CAST(claims.accepted_at_unix_ms AS INTEGER) >= ?1)
+     FROM replica_envelopes AS envelopes
+     WHERE (envelopes.writer, envelopes.sequence, envelopes.envelope_hash) > (?2, ?3, ?4)
+     ORDER BY envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+     LIMIT ?6";
+
+/// One page of `checkpoint_envelopes` in identity order after the key (?2, ?3, ?4), with whether
+/// each is dated before the cut ?1, at most ?5 rows.
+pub const SEALED_IDENTITY_TOMBSTONES_SQL: &str = "SELECT writer, sequence, envelope_hash, accepted_at_unix_ms < ?1
+     FROM checkpoint_envelopes
+     WHERE (writer, sequence, envelope_hash) > (?2, ?3, ?4)
+     ORDER BY writer, sequence, envelope_hash
+     LIMIT ?5";
+
 #[derive(Debug)]
-struct CheckpointCaptureChanged;
+pub(super) struct CheckpointCaptureChanged;
 
 impl std::fmt::Display for CheckpointCaptureChanged {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -918,6 +1152,30 @@ impl Store {
         anyhow::ensure!(envelope_page > 0 && record_page > 0, "checkpoint page sizes must be positive");
         let envelope_page = envelope_page.min(SEALED_ENVELOPE_PAGE);
         let record_page = record_page.min(SEALED_RECORD_PAGE);
+        let seal_rowid = self.register_checkpoint_capture(cut_unix_ms, through_rowid)?;
+        for _ in 0..3 {
+            let epoch: i64 = self.read_snapshot(|_| {
+                Ok(self.readers.get().query_row(
+                    "SELECT value FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
+                )?)
+            })?;
+            match self.checkpoint_sealed_set_attempt(
+                cut_unix_ms, seal_rowid, epoch, envelope_page, record_page,
+            ) {
+                Err(error) if error.downcast_ref::<CheckpointCaptureChanged>().is_some() => continue,
+                result => return result,
+            }
+        }
+        anyhow::bail!("checkpoint capture invalidated by concurrent store changes after 3 attempts")
+    }
+
+    /// Seal new local batches, then register the capture's seal row and cut with the capture
+    /// epoch's triggers, only advancing durable bounds when needed, and return the seal row.
+    pub(super) fn register_checkpoint_capture(
+        &self,
+        cut_unix_ms: u128,
+        through_rowid: Option<i64>,
+    ) -> Result<i64> {
         // Seal only new batches. A full history scan under the writer stalls live requests
         // every time a checkpoint is reconsidered, even when no new envelope is needed.
         self.seal_local_batches()?;
@@ -942,20 +1200,7 @@ impl Store {
                 params![seal_rowid, cut],
             )?;
         }
-        for _ in 0..3 {
-            let epoch: i64 = self.read_snapshot(|_| {
-                Ok(self.readers.get().query_row(
-                    "SELECT value FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
-                )?)
-            })?;
-            match self.checkpoint_sealed_set_attempt(
-                cut_unix_ms, seal_rowid, epoch, envelope_page, record_page,
-            ) {
-                Err(error) if error.downcast_ref::<CheckpointCaptureChanged>().is_some() => continue,
-                result => return result,
-            }
-        }
-        anyhow::bail!("checkpoint capture invalidated by concurrent store changes after 3 attempts")
+        Ok(seal_rowid)
     }
 
     fn checkpoint_sealed_set_attempt(
@@ -1188,12 +1433,10 @@ impl Store {
             seal_rowid,
             envelope_tombstones,
             claim_tombstones,
-            #[cfg(test)]
-            capture_lifetime: std::sync::Arc::default(),
         })
     }
 
-    fn checkpoint_capture_page<T>(&self, epoch: i64, read: impl FnOnce() -> Result<T>) -> Result<T> {
+    pub(super) fn checkpoint_capture_page<T>(&self, epoch: i64, read: impl FnOnce() -> Result<T>) -> Result<T> {
         self.read_snapshot(|_| {
             let current: i64 = self.readers.get().query_row(
                 "SELECT value FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
@@ -1248,10 +1491,14 @@ impl Store {
         self.checkpoint_sealed_identities_paged(cut_unix_ms, through_rowid, SEALED_ENVELOPE_PAGE)
     }
 
-    /// `checkpoint_sealed_identities`, reading `envelope_page` envelopes per read, each on a read
-    /// of its own so the WAL can be checkpointed between pages (see
-    /// `checkpoint_sealed_set_paged`). It read the whole set in one transaction before, which
-    /// held the WAL pinned for 35 seconds on a large store.
+    /// `checkpoint_sealed_identities`, reading at most `envelope_page` rows of each identity table
+    /// per read. The digest is over identities in key order, and both `replica_envelopes` and
+    /// `checkpoint_envelopes` are keyed by identity, so the pass walks the two keys together and
+    /// digests each identity as it passes: it holds one page, not the set (#2492). Each read
+    /// takes the next page of both tables in one snapshot and consumes the key range both pages
+    /// cover, so a trim moving an identity from an envelope to its tombstone between reads can
+    /// neither drop nor repeat it. Reads are separate snapshots, so the WAL can be checkpointed
+    /// between them; one read of the whole set held the WAL pinned for 35 seconds.
     pub fn checkpoint_sealed_identities_paged(
         &self,
         cut_unix_ms: u128,
@@ -1259,6 +1506,8 @@ impl Store {
         envelope_page: i64,
     ) -> Result<SealedIdentities> {
         self.runtime.checkpoint_preflight()?;
+        anyhow::ensure!(envelope_page > 0, "checkpoint page sizes must be positive");
+        let page = envelope_page.min(SEALED_ENVELOPE_PAGE);
         self.seal_local_batches()?;
         let seal_rowid: i64 = {
             let connection = self.readers.get();
@@ -1270,64 +1519,77 @@ impl Store {
             through_rowid.map_or(high, |through| through.min(high))
         };
         let cut = i64::try_from(cut_unix_ms)?;
-        // As in `checkpoint_sealed_set_through`: an envelope is before the cut when it and every
-        // claim admitted from it, less repaired originals, are dated before the cut.
-        let mut identities = BTreeSet::new();
-        let mut after = 0_i64;
-        while after < seal_rowid {
-            let upto = after.saturating_add(envelope_page).min(seal_rowid);
-            let connection = self.readers.get();
-            let page = connection
-                .prepare_cached(
-                    "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
-                     FROM replica_envelopes AS envelopes
-                     WHERE envelopes.rowid > ?3 AND envelopes.rowid <= ?2
-                       AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?1
-                       AND NOT EXISTS (
-                           SELECT 1 FROM replica_records AS records
-                           JOIN claims ON claims.id=records.claim_id
-                           WHERE records.writer=envelopes.writer
-                             AND records.sequence=envelopes.sequence
-                             AND records.envelope_hash=envelopes.envelope_hash
-                             AND records.state<>'repaired'
-                             AND CAST(claims.accepted_at_unix_ms AS INTEGER) >= ?1)",
-                )?
-                .query_map(params![cut, upto, after], |row| {
-                    Ok(EnvelopeKey {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        envelope_hash: row.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            identities.extend(page);
-            after = upto;
-        }
-        {
-            let connection = self.readers.get();
-            let tombstones = connection
-                .prepare_cached(
-                    "SELECT writer, sequence, envelope_hash FROM checkpoint_envelopes
-                     WHERE accepted_at_unix_ms < ?1",
-                )?
-                .query_map(params![cut], |row| {
-                    Ok(EnvelopeKey {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        envelope_hash: row.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            identities.extend(tombstones);
-        }
+        let identity = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(EnvelopeKey, bool)> {
+            Ok((
+                EnvelopeKey {
+                    writer: row.get(0)?,
+                    sequence: row.get(1)?,
+                    envelope_hash: row.get(2)?,
+                },
+                row.get(3)?,
+            ))
+        };
         let mut digest = Sha256::new();
         digest.update(b"st3-checkpoint-sealed-v1\0");
-        for key in &identities {
-            update_identity_digest(&mut digest, &key.writer, key.sequence, &key.envelope_hash);
+        let mut count = 0_usize;
+        // The last key consumed. Every identity sorts after the first one: sequences are never
+        // negative.
+        let mut after = (String::new(), -1_i64, String::new());
+        loop {
+            let (envelopes, tombstones) = self.read_snapshot(|_| {
+                let connection = self.readers.get();
+                let envelopes = connection
+                    .prepare_cached(SEALED_IDENTITY_ENVELOPES_SQL)?
+                    .query_map(
+                        params![cut, after.0, after.1, after.2, seal_rowid, page],
+                        identity,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let tombstones = connection
+                    .prepare_cached(SEALED_IDENTITY_TOMBSTONES_SQL)?
+                    .query_map(params![cut, after.0, after.1, after.2, page], identity)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((envelopes, tombstones))
+            })?;
+            // A full page may end before the other table's page does; keys past the smaller
+            // full page's last key wait for the next read, which sees both tables at once again.
+            let full = |rows: &[(EnvelopeKey, bool)]| {
+                (rows.len() == page as usize).then(|| rows.last().map(|(key, _)| key.clone())).flatten()
+            };
+            let bound = [full(&envelopes), full(&tombstones)].into_iter().flatten().min();
+            let within = |key: &EnvelopeKey| bound.as_ref().is_none_or(|bound| key <= bound);
+            let mut envelopes = envelopes.into_iter().filter(|(key, _)| within(key)).peekable();
+            let mut tombstones = tombstones.into_iter().filter(|(key, _)| within(key)).peekable();
+            loop {
+                let (key, included) = match (envelopes.peek(), tombstones.peek()) {
+                    (None, None) => break,
+                    (Some(_), None) => envelopes.next().expect("peeked"),
+                    (None, Some(_)) => tombstones.next().expect("peeked"),
+                    (Some((envelope, _)), Some((tombstone, _))) => match envelope.cmp(tombstone) {
+                        std::cmp::Ordering::Less => envelopes.next().expect("peeked"),
+                        std::cmp::Ordering::Greater => tombstones.next().expect("peeked"),
+                        std::cmp::Ordering::Equal => {
+                            let (key, envelope) = envelopes.next().expect("peeked");
+                            let (_, tombstone) = tombstones.next().expect("peeked");
+                            (key, envelope || tombstone)
+                        }
+                    },
+                };
+                if included {
+                    update_identity_digest(&mut digest, &key.writer, key.sequence, &key.envelope_hash);
+                    count += 1;
+                }
+            }
+            match bound {
+                Some(bound) => {
+                    after = (bound.writer, i64::try_from(bound.sequence)?, bound.envelope_hash);
+                }
+                None => break,
+            }
         }
         Ok(SealedIdentities {
             digest: hex::encode(digest.finalize()),
-            count: identities.len(),
+            count,
             seal_rowid,
         })
     }
@@ -1438,13 +1700,27 @@ impl Store {
         plan: &DropPlan,
         scratch: &Path,
     ) -> Result<CheckpointProof> {
+        self.prove_checkpoint_input(&InMemoryProof { sealed, plan }, scratch)
+    }
+
+    /// Prove a staged plan, reading the set and the drop from its staging file.
+    pub fn prove_staged_checkpoint_plan(
+        &self,
+        staged: &super::checkpoint_staging::StagedSet,
+        plan: &super::checkpoint_staging::StagedPlan,
+        scratch: &Path,
+    ) -> Result<CheckpointProof> {
+        self.prove_checkpoint_input(&super::checkpoint_staging::StagedProof { staged, plan }, scratch)
+    }
+
+    fn prove_checkpoint_input(&self, input: &dyn ProofInput, scratch: &Path) -> Result<CheckpointProof> {
         let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
         fs::create_dir_all(scratch)?;
         let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
         let result = self
             .copy_store_to(&copy)
-            .and_then(|_| prove_on_scratch_copy(&*self.runtime, &copy, sealed, plan));
+            .and_then(|_| prove_on_scratch_copy(&*self.runtime, &copy, input));
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = fs::remove_file(format!("{}{suffix}", copy.display()));
         }
@@ -1458,7 +1734,13 @@ impl Store {
         scratch: &Path,
     ) -> Result<CheckpointPlanView> {
         let _completion = super::checkpoint_completion::Completion::outer();
-        let (plan, proof) = self.plan_checkpoint(cut_unix_ms, scratch)?;
+        self.runtime.checkpoint_preflight()?;
+        // A directory of its own, so a dry run never replaces the scheduler's resumable capture.
+        let staged = self.checkpoint_staged_set(cut_unix_ms, None, &scratch.join("plan"))?;
+        let plan = self.plan_staged_checkpoint(&staged)?;
+        let proof = self.prove_staged_checkpoint_plan(&staged, &plan, scratch);
+        staged.remove()?;
+        let proof = proof?;
         Ok(CheckpointPlanView {
             checkpoint: checkpoint_name(cut_unix_ms),
             cut_unix_ms,
@@ -1466,8 +1748,8 @@ impl Store {
             sealed_envelopes: plan.sealed_envelopes,
             sealed_claims: plan.sealed_claims,
             sealed_digest: plan.sealed_digest,
-            dropped_envelopes: plan.envelopes.len(),
-            dropped_claims: plan.claims.len(),
+            dropped_envelopes: plan.dropped_envelopes,
+            dropped_claims: plan.dropped_claims,
             by_kind: plan.by_kind,
             drop_digest: plan.drop_digest,
             retained_digest: plan.retained_digest,

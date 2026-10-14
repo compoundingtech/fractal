@@ -25,7 +25,9 @@ A person's claim of any kind is durable, whatever its class: the planner never d
 
 ## Where writes go
 
-`log` says where a kind's writes go. It is the `retention` that `st3 schema show KIND` prints.
+`log` says where a kind's writes go. `st schema show KIND` prints it as `RETENTION` for every
+kind whose `log` is not `claims`; a kind with no `RETENTION` line is replicated and durable in
+the registry.
 
 | `log` | Registry retention | Meaning |
 |---|---|---|
@@ -44,7 +46,7 @@ A class says what may be dropped; a rule says how. A checkpoint drops a claim on
 its kind names a slot, the claim is not the one the rule keeps, a later kept claim of the slot
 witnesses it, and no guard protects it. A kind whose class allows dropping but which has no rule
 yet carries `pending`, a short reason it is still kept whole: usually that some fold reads every
-claim of the kind, so a later claim does not replace an earlier one. A test fails when a kind's
+claim of the kind, so a later claim does not replace an earlier one. A test fails when a replicated (`log = claims`) kind's
 class allows dropping and it has neither a rule nor a `pending` reason, and when a durable kind has
 a rule.
 
@@ -56,6 +58,7 @@ Each rule has:
 - `keep`: what the rule keeps. It names the planner function in
   `crates/st3/src/store/checkpoint_rules.rs` (`planner_rule`); the checkpoint tests fail on one
   it does not know;
+- `after_slot`: extra terms rendered after the slot in the rules description, for a rule whose planner needs them;
 - `min_age`: only claims accepted at least this long before the cut go.
 
 The first rule of a kind whose conditions hold applies.
