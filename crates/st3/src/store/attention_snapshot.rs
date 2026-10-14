@@ -1571,8 +1571,11 @@ fn native_prompt_sequence_resolution(
     ))?;
     // Native closure is terminal for this episode. A delayed answer request
     // cannot supersede Gone, even when it arrives later in canonical order.
+    // Operation identity distinguishes closure from an answer: question choices
+    // are answer payloads too, not just the permission words "allow" and "deny".
     let mut resolutions = connection.prepare_cached(&canonical_sql(
-        "SELECT json_extract(body, '$.fields.status'), accepted_at_unix_ms
+        "SELECT json_extract(body, '$._operation.id')=?1,
+           json_extract(body, '$.fields.status'), accepted_at_unix_ms
          FROM claims INDEXED BY claims_operation_index
          WHERE json_extract(body, '$._operation.id') IS NOT NULL
            AND json_extract(body, '$._operation.id') IN (?1,?2)
@@ -1586,12 +1589,12 @@ fn native_prompt_sequence_resolution(
         let claim = claim?;
         let gone = native_prompt_gone_operation(&claim);
         let answer = smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&claim));
-        let resolved: Option<(Option<String>, String)> = resolutions
-            .query_row(params![gone, answer, index], |row| Ok((row.get(0)?, row.get(1)?)))
+        let resolved: Option<(bool, Option<String>, String)> = resolutions
+            .query_row(params![gone, answer, index], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .optional()?;
-        if let Some((answer, at)) = resolved {
-            let state = match answer {
-                Some(answer) if matches!(answer.as_str(), "allow" | "deny") => NativePromptState::Answered { answer },
+        if let Some((gone, answer, at)) = resolved {
+            let state = match (gone, answer) {
+                (false, Some(answer)) => NativePromptState::Answered { answer },
                 _ => NativePromptState::Gone,
             };
             let resolution = (state, at.parse()?);
@@ -1830,5 +1833,66 @@ mod person_steps_plan_tests {
             !plan.iter().any(|line| line.starts_with("SCAN step_runs")),
             "the person-step read must not scan step_runs: {plan:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn choice_answers_remain_answered_and_native_closure_wins_over_delayed_answers() {
+        let store = Store::open_memory("node").unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value, key: Option<String>| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: key,
+                })
+                .unwrap()
+        };
+        let waiting = json!({
+            "state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"human", "ask":"question", "reason":"AskUserQuestion",
+            "ownership_sequence":1, "transition_sequence":3
+        });
+        let first = append("harness.observed", waiting.clone(), None);
+        let choice = r#"{"Database":"Postgres"}"#;
+        let answered = append("harness.diagnostic", json!({
+            "code":"native-prompt-answered", "status":choice,
+            "driver":"claude", "incarnation_id":"one"
+        }), Some(native_prompt_answer_key(&first.id)));
+        let restated = append("harness.observed", waiting.clone(), None);
+        for _ in 0..20 {
+            append("harness.observed", waiting.clone(), None);
+        }
+        let resolve = |index| {
+            native_prompt_sequence_resolution(&store.readers.get(), seat, 1, 3, index)
+                .unwrap()
+                .map(|(state, _)| state)
+        };
+        let expected = Some(NativePromptState::Answered { answer: choice.into() });
+        assert_eq!(resolve(answered.store_index), expected);
+        assert_eq!(resolve(store.index().unwrap()), expected);
+        assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(),
+            NativePromptState::Answered { answer: choice.into() });
+        let gone = append("harness.diagnostic", json!({
+            "code":"native-prompt-gone", "status":"resolved",
+            "driver":"claude", "incarnation_id":"one"
+        }), Some(native_prompt_gone_key(&first.id)));
+        append("harness.diagnostic", json!({
+            "code":"native-prompt-answered", "status":choice,
+            "driver":"claude", "incarnation_id":"one"
+        }), Some(native_prompt_answer_key(&restated.id)));
+        assert_eq!(resolve(gone.store_index), Some(NativePromptState::Gone));
+        assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));
+        assert_eq!(store.native_prompt_state(seat, 1, 3).unwrap(), NativePromptState::Gone);
+        assert_eq!(resolve(answered.store_index), expected);
     }
 }

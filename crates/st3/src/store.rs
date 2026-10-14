@@ -7736,7 +7736,9 @@ impl Store {
              FROM claims WHERE subject=?1 AND actor=?1 AND kind='harness.diagnostic'
                AND json_extract(body, '$.fields.code')='claude-message-unforwarded'
                AND json_extract(body, '$.fields.incarnation_id')=?3
-               AND json_extract(body, '$.evidence[0]')=?2
+               AND EXISTS (SELECT 1 FROM claims AS message_claim
+                 WHERE message_claim.id=json_extract(claims.body, '$.evidence[0]')
+                   AND message_claim.subject=?2)
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
         ))?.query_row(params![seat, message, incarnation], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

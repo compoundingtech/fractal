@@ -1,7 +1,7 @@
 //! st's Claude channel: daemon push input, native transcript receipts, and no file mailbox.
 use crate::client::Client;
 use crate::mailbox::{Fence, Frame, Receipt, Subscription};
-use crate::model::{ClaimInput, ClaimRecord, MessageView};
+use crate::model::{ClaimInput, ClaimRecord, ClaimsPage, MessageView};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -259,7 +259,7 @@ pub async fn run(
                                     preparation_errors.get(&messages[head].subject)
                                         .map_or("waiting for preparation", String::as_str))
                         }).or_else(|| preparation_errors.get(&message.subject).cloned());
-                        if preparation_diagnostic(client, &state.fence, &message.subject, reason.as_deref(),
+                        if preparation_diagnostic(client, &state.fence, message, reason.as_deref(),
                             recovery_pending.contains(&message.subject), &mut preparation_reports).await {
                             recovery_pending.remove(&message.subject);
                         }
@@ -489,11 +489,12 @@ pub(crate) const PREPARATION_WAIT_REASON: &str =
 async fn preparation_diagnostic(
     client: &Client,
     fence: &Fence,
-    message: &str,
+    mail: &MessageView,
     reason: Option<&str>,
     recover_waiting: bool,
     reports: &mut BTreeMap<String, PreparationReport>,
 ) -> bool {
+    let message = mail.subject.as_str();
     // Finish a lost acknowledgement before changing the diagnostic, so a late
     // retry cannot reinstate an old blocker after the successful preparation.
     if let Some(report) = reports.get_mut(message) {
@@ -517,6 +518,17 @@ async fn preparation_diagnostic(
             return true;
         }
     }
+    // Evidence is a stored claim ID, not the message subject. Fetch exactly the
+    // creation index already carried by the mailbox snapshot, without a scan.
+    let Ok(page) = client.get::<ClaimsPage>(&format!(
+        "/v1/claims?subject={}&after_index={}&before_index={}&limit=1",
+        urlencoding::encode(message),
+        mail.created_index.saturating_sub(1),
+        mail.created_index.saturating_add(1),
+    )).await else { return false; };
+    let Some(creation) = page.claims.into_iter().find(|claim|
+        claim.store_index == mail.created_index && claim.subject == message
+    ) else { return false; };
     let input = ClaimInput {
         subject: fence.subject.clone(),
         kind: "harness.diagnostic".into(),
@@ -528,7 +540,7 @@ async fn preparation_diagnostic(
             ("reason".into(), json!(reason.unwrap_or("preparation succeeded; FIFO blocker cleared"))),
             ("incarnation_id".into(), json!(fence.incarnation)),
         ]),
-        evidence: vec![message.into()],
+        evidence: vec![creation.id],
         expected_subject: None,
         idempotency_key: Some(format!("claude-preparation:{}", uuid::Uuid::now_v7())),
     };
@@ -859,13 +871,37 @@ mod tests {
 
     #[tokio::test]
     async fn claude_preparation_diagnostic_retries_lost_ack_before_clearing_recovered_body() {
-        use axum::{Json, Router, http::StatusCode, routing::{get, post}};
+        use axum::{Json, Router, http::StatusCode, routing::get};
         use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
         let store = Arc::new(crate::store::Store::open_memory("claude-preparation-ack").unwrap());
+        let sent = store.append_client_claim(&ClaimInput {
+            subject: "message/head".into(), kind: "message.sent".into(),
+            actor: Some("person/sender".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("person/sender")),
+                ("to".into(), json!("agent/worker")),
+                ("content".into(), json!("doc/missing")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
         let fail_ack = Arc::new(AtomicBool::new(true));
         let fail_clear_ack = Arc::new(AtomicBool::new(true));
-        let app = Router::new().route("/v1/claims", post({
+        let app = Router::new().route("/v1/claims", get({
+            let store = Arc::clone(&store);
+            move |axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>| {
+                let store = Arc::clone(&store);
+                async move {
+                    let page = store.claims_page(
+                        query.get("subject").map(String::as_str), None,
+                        query["after_index"].parse().unwrap(),
+                        Some(query["before_index"].parse().unwrap()), false, 1,
+                    ).unwrap();
+                    Json(json!({"api_version":"st3.v1", "value":page}))
+                }
+            }
+        }).post({
             let store = Arc::clone(&store);
             let fail_clear_ack = Arc::clone(&fail_clear_ack);
             move |Json(input): Json<ClaimInput>| {
@@ -905,38 +941,38 @@ mod tests {
             subject: "message/head".into(), from: "person/sender".into(), to: fence.subject.clone(),
             content: "doc/missing".into(), status: "staged".into(), title: None, in_reply_to: None,
             tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
-            created_index: 1, attachments: Vec::new(),
+            created_index: sent.store_index, attachments: Vec::new(),
         };
         let error = body(&client, &message).await.unwrap_err();
         let reason = format!("FIFO head preparation failed; retrying: {error:#}");
         let mut reports = BTreeMap::new();
-        preparation_diagnostic(&client, &fence, &message.subject, None, true, &mut reports).await;
+        preparation_diagnostic(&client, &fence, &message, None, true, &mut reports).await;
         assert!(reports.is_empty());
         assert!(store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap().is_empty(),
             "healthy initial mail must not append a ready claim");
-        preparation_diagnostic(&client, &fence, &message.subject, Some(&reason), false, &mut reports).await;
+        preparation_diagnostic(&client, &fence, &message, Some(&reason), false, &mut reports).await;
         assert!(!reports[&message.subject].recorded);
         let failure_key = reports[&message.subject].input.idempotency_key.clone();
         message.content = "recovered body".into();
         assert_eq!(body(&client, &message).await.unwrap(), "recovered body");
-        preparation_diagnostic(&client, &fence, &message.subject, None, false, &mut reports).await;
+        preparation_diagnostic(&client, &fence, &message, None, false, &mut reports).await;
         assert!(!reports[&message.subject].recorded, "the clear acknowledgement was lost");
         assert_ne!(reports[&message.subject].input.idempotency_key, failure_key);
         let claims = store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap();
         assert_eq!(claims.len(), 2, "lost acknowledgement retries the identical failure claim");
         assert_eq!(claims[0].body["fields"]["status"], "waiting");
         assert_eq!(claims[1].body["fields"]["status"], "ready");
-        assert!(claims.iter().all(|claim| claim.body["evidence"] == json!(["message/head"])));
+        assert!(claims.iter().all(|claim| claim.body["evidence"] == json!([sent.id])));
         for _ in 0..100 {
-            preparation_diagnostic(&client, &fence, &message.subject, None, false, &mut reports).await;
+            preparation_diagnostic(&client, &fence, &message, None, false, &mut reports).await;
         }
         assert!(reports.is_empty(), "acknowledged clears must be pruned");
         assert_eq!(store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap().len(), 2);
         // A channel reconnect must clear a durable waiting report in this incarnation,
         // but may not manufacture clears for healthy mail in its initial snapshot.
-        preparation_diagnostic(&client, &fence, &message.subject, Some(&reason), false, &mut reports).await;
+        preparation_diagnostic(&client, &fence, &message, Some(&reason), false, &mut reports).await;
         reports.clear();
-        preparation_diagnostic(&client, &fence, &message.subject, None, true, &mut reports).await;
+        preparation_diagnostic(&client, &fence, &message, None, true, &mut reports).await;
         assert!(reports.is_empty());
         let claims = store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap();
         assert_eq!(claims.len(), 4);

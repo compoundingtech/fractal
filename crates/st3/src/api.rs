@@ -18270,7 +18270,7 @@ mission "expiring-work" state="ready" {
             append(seat, "harness.diagnostic", seat, json!({
                 "severity":"warning", "code":"claude-message-unforwarded",
                 "status":status, "reason":reason, "incarnation_id":incarnation
-            }), vec![message.subject.clone()])
+            }), vec![store.claims_for(&message.subject, Some("message.sent")).unwrap()[0].id.clone()])
         };
         diagnostic(&messages[0].0, "first", "waiting",
             "FIFO head preparation failed: /private/internal/body.txt unavailable; token=private-detail");

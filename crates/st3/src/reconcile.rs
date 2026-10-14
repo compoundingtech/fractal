@@ -3971,7 +3971,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !st_drivers::blocking_screen::claude_input_idle(&screen) {
             return Ok(());
         }
-        let Some(current) = self.runtime.observe_start(member)? else {
+        // This is a live-seat fence, not verification of a prepared launch operation:
+        // desired members carry no launch-operation tag, including after daemon restart.
+        let Some(current) = self.runtime.snapshot_ptys()?.into_iter()
+            .find(|item| item.runtime_id == member.runtime_id) else {
             return Ok(());
         };
         if current.status != "running" || current.incarnation_id.as_deref() != Some(incarnation)

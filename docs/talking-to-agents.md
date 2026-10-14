@@ -93,7 +93,9 @@ A body or attachment preparation failure also holds that message and later mail
 in mailbox order. The sender's existing delivery reason explains the preparation
 blocker without exposing raw errors or internal paths. st retains and retries
 the mail, clearing that reason when preparation succeeds, including after a
-channel reconnect. Healthy mail does not add preparation diagnostics.
+channel reconnect. Healthy mail does not add preparation diagnostics. Waiting and
+recovery reports cite the stored message-creation claim, so each FIFO blocker and
+its clear remain tied to the same durable message.
 
 Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
 the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,
