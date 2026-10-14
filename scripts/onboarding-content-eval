@@ -211,8 +211,8 @@ def evaluate(args,archive,metadata,key,variant):
   if not run.check("no-welcome-model-turn",run.provider["message_calls"]==0,"native welcome completed before semantic model requests"): return run
   if not run.privacy("credential-isolation-before-eval"): return run
   run.semantic_started=True; run.save()
-  r=run.cli("Create actual bundled expert and onboarding run","setup","--yes","--harness","claude","--claude-channel","true","--service","true",timeout=90)
-  if r["exit"]: raise RuntimeError("expert setup failed")
+  r=run.cli("Create actual bundled assistant and onboarding run","setup","--yes","--harness","claude","--claude-channel","true","--service","true",timeout=90)
+  if r["exit"]: raise RuntimeError("assistant setup failed")
   run.observe()
  except Exception as error:
   run.check("runner-error",False,type(error).__name__+": "+run.scrub(str(error)))
