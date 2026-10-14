@@ -407,7 +407,7 @@ fn truncate_requests_the_fifo_writer_before_changing_the_wal() {
     let job = requests
         .recv_timeout(std::time::Duration::from_secs(2))
         .expect("TRUNCATE must ask the FIFO writer");
-    let crate::sqlite::WriterJob::Lend { lent, returned } = job else {
+    let crate::sqlite::WriterJob::Lend { lent, returned, .. } = job else {
         panic!("expected a writer loan");
     };
     assert!(
@@ -540,4 +540,33 @@ fn a_live_snapshot_and_a_lent_read_are_listed_with_their_call_sites_until_they_e
     assert!(oldest.live >= 1);
     drop(guard);
     assert!(!crate::sqlite::live_read_locations().contains(&(here(guard_line), false)));
+}
+
+#[test]
+fn the_trust_roots_fold_runs_again_only_when_the_fleet_generation_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let store = Store::open(&path, "node", Arc::new(FaultRuntime::new())).unwrap();
+    let folds = || super::principals::MEMBER_ROOT_FOLDS.with(|folds| folds.get());
+    // Each call is the first thing a write transaction does, as the judge's chunks are.
+    let roots = |store: &Store| {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        let roots = store.trust_roots(&transaction, "node").unwrap();
+        transaction.commit().unwrap();
+        roots
+    };
+    let before = folds();
+    let first = roots(&store);
+    assert_eq!(folds(), before + 1, "the first call folds membership");
+    assert_eq!(roots(&store), first);
+    assert_eq!(roots(&store), first);
+    assert_eq!(folds(), before + 1, "the same generation reuses the fold");
+    store
+        .connection
+        .write()
+        .execute("UPDATE fleet_generation SET value=value+1 WHERE id=1", [])
+        .unwrap();
+    assert_eq!(roots(&store), first);
+    assert_eq!(folds(), before + 2, "a moved generation folds again");
 }

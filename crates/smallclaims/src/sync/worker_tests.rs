@@ -33,7 +33,8 @@ fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
 
 /// Different checkpoint lineages leave payloadless ranges that can never settle through
 /// envelope transport. Both live writers already have a shared range, so a summary alone
-/// cannot prove either of their later gaps.
+/// cannot prove either of their later gaps. The live ranges are listed ahead of the payloadless
+/// ones, so one compact round settles them, and no request ever lists a whole inventory.
 #[tokio::test]
 async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
     let root = tempfile::tempdir().unwrap();
@@ -115,10 +116,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
                 };
                 let query: ReplicationExchange = serde_json::from_slice(&decoded).unwrap();
                 assert!(query.envelopes.len() <= crate::store::REPLICATION_PAGE_LIMIT as usize);
-                assert!(
-                    !query.inventory.digest.is_empty(),
-                    "a full-inventory request keeps its digest"
-                );
+                assert!(!query.inventory.digest.is_empty(), "a request keeps its digest");
                 observed.lock().unwrap().push((
                     query.inventory.buckets.is_empty(),
                     query.inventory.envelopes.len(),
@@ -149,12 +147,12 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
     {
         let requests = requests.lock().unwrap();
         assert!(
-            requests.len() <= 4,
-            "one compact round plus at most one full round, never an unbounded retry"
+            requests.len() <= 2,
+            "one compact round, never a full-inventory round or an unbounded retry"
         );
         assert!(
-            requests.contains(&(true, 0, 0)),
-            "a bare digest cannot prove an empty inventory"
+            requests.iter().all(|(bare, listed, _)| !bare && *listed <= 512),
+            "every request carries range digests and a bounded listing: {requests:?}"
         );
     }
     for store in [&left, &right] {
@@ -1795,6 +1793,40 @@ mod retry_tests {
             // reach the stable servers. Both queues drain despite server hour-long backoff.
             outbound = vec![start(2, 0), start(2, 1)];
             converge(&stores).await;
+            // The stores agreeing does not mean each server's last answer to the traveller
+            // carried its final inventory: a server that relays the traveller's own claims from
+            // the other server after answering has a changed inventory, which asks its worker to
+            // push to the traveller one coalescing interval later. That push is the policy for
+            // new local envelopes, not a redundant connection. Wake the traveller so both servers
+            // answer once more with the settled inventory, and measure only after they have.
+            wakes[2].send_modify(|generation| *generation += 1);
+            let settled_by = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let mut settled = true;
+                for index in 0..2 {
+                    let current = Local(stores[index].clone())
+                        .export(fleet_id, &ReplicationInventory::default(), true, &[])
+                        .await
+                        .unwrap()
+                        .exchange
+                        .authority_digest;
+                    let answered = contexts[index]
+                        .inbound_authority
+                        .read()
+                        .unwrap()
+                        .get("traveller")
+                        .cloned();
+                    settled &= answered.as_deref() == Some(current.as_str());
+                }
+                if settled {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < settled_by,
+                    "the servers did not answer the traveller with their settled inventory within ten seconds"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             let before = attempts.load(Ordering::Relaxed);
             tokio::time::sleep(Duration::from_secs(2)).await;
             assert_eq!(

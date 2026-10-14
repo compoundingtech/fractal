@@ -4,7 +4,7 @@ set -euo pipefail
 : "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
 agents="$(env -u ST_AGENT st3 agents --json)"
 run="mission-run/$ST_MISSION_RUN"
-mission="$(env -u ST_AGENT st3 --json mission show "$run")"
+mission="$(env -u ST_AGENT st3 --json missions show "$run")"
 grouping_reason="the supervisor combines the panel recommendation"
 
 for member in fd.a fd.b fd.c; do
