@@ -101,6 +101,9 @@ impl Store {
         };
         let mut items = Vec::new();
         for seat in seats {
+            if let Some(item) = self.screen_prompt_item(&connection, &seat, person)? {
+                items.push(item);
+            }
             let Some((claim, at, harness)) = newest(&seat, "harness.observed")? else {
                 continue;
             };
@@ -1481,6 +1484,212 @@ pub(super) fn conversation_agent(
     )
 }
 
+/// Whether a record with this idempotency key exists.
+fn recorded(connection: &Connection, key: &str) -> Result<bool> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_operation_index
+               WHERE json_extract(body, '$._operation.id') IS NOT NULL
+                 AND json_extract(body, '$._operation.id')=?1)",
+        )?
+        .query_row([smallclaims::store::operation_id_for_key(key)], |row| row.get(0))?)
+}
+
+/// The reason recorded with the record whose idempotency key this is, when it exists.
+fn recorded_reason(connection: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT json_extract(body, '$.fields.reason') FROM claims INDEXED BY claims_operation_index
+               WHERE json_extract(body, '$._operation.id') IS NOT NULL
+                 AND json_extract(body, '$._operation.id')=?1 LIMIT 1",
+        )?
+        .query_row([smallclaims::store::operation_id_for_key(key)], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .map(Option::unwrap_or_default))
+}
+
+/// The idempotency key of the record that the screen prompt `claim` recorded is gone.
+pub(crate) fn screen_prompt_gone_key(claim: &str) -> String {
+    format!("native-screen-prompt-gone:{claim}")
+}
+
+/// The idempotency key of the record that st pressed the keys of a person's answer to the screen
+/// prompt `claim` recorded. It is written before the keys, so they are never pressed twice.
+pub(crate) fn screen_prompt_delivered_key(claim: &str) -> String {
+    format!("native-screen-prompt-delivered:{claim}")
+}
+
+/// The idempotency key of the record that the terminal refused a key of a person's answer to the
+/// screen prompt `claim` recorded, after st recorded it delivered.
+pub(crate) fn screen_prompt_undelivered_key(claim: &str) -> String {
+    format!("native-screen-prompt-undelivered:{claim}")
+}
+
+impl Store {
+    /// The screen-only prompt (see `st_drivers::blocking_screen::screen_prompt`) the seat's
+    /// incarnation shows, as the reconciler last recorded it: the newest `native-screen-prompt`
+    /// of that incarnation, unless it is gone. Its id, when it was recorded, and its fields.
+    pub(crate) fn open_screen_prompt(
+        &self,
+        seat: &str,
+        incarnation: &str,
+    ) -> Result<Option<(String, u128, Value)>> {
+        let connection = self.readers.get();
+        open_screen_prompt(&connection, seat, incarnation)
+    }
+
+    /// The person's answer to the screen prompt `claim` recorded, and whether st pressed its keys.
+    pub(crate) fn screen_prompt_answer(&self, claim: &str) -> Result<(Option<String>, bool)> {
+        let connection = self.readers.get();
+        Ok((
+            native_prompt_answer(&connection, claim)?,
+            recorded(&connection, &screen_prompt_delivered_key(claim))?,
+        ))
+    }
+
+    /// The alert for the seat's open screen prompt: only while its incarnation runs, and until it
+    /// is answered or gone.
+    fn screen_prompt_item(
+        &self,
+        connection: &Connection,
+        seat: &str,
+        person: Option<&str>,
+    ) -> Result<Option<AttentionItemView>> {
+        let runtime = connection
+            .prepare_cached(&format!(
+                "{} LIMIT 1",
+                newest_claims_of_kind_query("claims.body", "runtime.observed")
+            ))?
+            .query_row(params![seat, i64::MAX], |row| row.get::<_, String>(0))
+            .optional()?;
+        let Some(runtime) = runtime else {
+            return Ok(None);
+        };
+        let runtime: Value = serde_json::from_str(&runtime)?;
+        let runtime = runtime.get("fields").unwrap_or(&runtime);
+        let Some(incarnation) = runtime["incarnation_id"].as_str() else {
+            return Ok(None);
+        };
+        if runtime["status"] != "running" {
+            return Ok(None);
+        }
+        let Some((claim, at, prompt)) = open_screen_prompt(connection, seat, incarnation)? else {
+            return Ok(None);
+        };
+        // An answer whose keys the terminal refused part way leaves the dialog for the person to
+        // finish in the terminal: it may now sit on a different option.
+        let undelivered = recorded_reason(connection, &screen_prompt_undelivered_key(&claim))?;
+        if (undelivered.is_none() && native_prompt_answer(connection, &claim)?.is_some())
+            || !person_work::declaration_live(connection, seat)?
+        {
+            return Ok(None);
+        }
+        let Some(owner) = self.agent_person(seat)? else {
+            return Ok(None);
+        };
+        if person.is_some_and(|person| person != owner) {
+            return Ok(None);
+        }
+        let driver = prompt["driver"].as_str().unwrap_or_default();
+        let kind = prompt["status"].as_str().unwrap_or_default();
+        let headline = prompt["matched_line"].as_str().unwrap_or_default();
+        // The folder a trust prompt asks about, as the reconciler recorded it.
+        let folder = prompt["reason"]
+            .as_str()
+            .filter(|folder| !folder.is_empty())
+            .map_or_else(|| "its workspace".to_owned(), |folder| format!("its workspace {folder}"));
+        let ask = match (driver, kind) {
+            ("claude", "mcp-server") => format!(
+                "{headline}. Claude asks before it starts whether to use this project's MCP server. Use it, use all, or skip it. Use all also approves every MCP server this project adds later, without asking again"
+            ),
+            ("claude", "trust") => format!("Claude asks before it starts whether you trust {folder}, and st's own attempts to record that trust did not hold. Trust trusts that folder: Claude can then read, edit and execute files there. Trust it, or exit"),
+            ("codex", "trust") => format!("Codex asks before it starts whether you trust the contents of {folder}. Trust trusts that folder: Codex then loads its project config, hooks and exec policies. Trust it, or quit"),
+            _ => headline.to_owned(),
+        };
+        let (answers, detail) = match undelivered {
+            Some(reason) => (
+                Vec::new(),
+                format!(
+                    "{headline}: st did not finish pressing your answer into the dialog ({reason}), so it may now sit on a different option. Answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone."
+                ),
+            ),
+            None => (
+                st_drivers::blocking_screen::screen_prompt_choices(driver, kind)
+                    .iter()
+                    .map(|(answer, _)| (*answer).to_owned())
+                    .collect(),
+                format!(
+                    "{ask} here, or in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
+                ),
+            ),
+        };
+        Ok(Some(AttentionItemView {
+            episode: claim,
+            priority: "high".into(),
+            kind: "harness-prompt".into(),
+            review_mode: None,
+            subject: seat.to_owned(),
+            person: owner,
+            requester_id: None,
+            launch_id: None,
+            variant_id: None,
+            message_id: None,
+            answers,
+            conversation: Some(seat.to_owned()),
+            title: format!("{seat} is waiting for you"),
+            detail,
+            request: None,
+            mission: None,
+            mission_run: None,
+            step: None,
+            targets: vec![seat.to_owned()],
+            requested_at_unix_ms: at,
+            actions: vec![attention_action(
+                "Attach to answer",
+                &["st", "terminals", "attach", seat],
+            )],
+        }))
+    }
+}
+
+fn open_screen_prompt(
+    connection: &Connection,
+    seat: &str,
+    incarnation: &str,
+) -> Result<Option<(String, u128, Value)>> {
+    let row = connection
+        .prepare_cached(&format!(
+            "{} LIMIT 1",
+            newest_claims_of_kind_query(
+                "claims.id, claims.accepted_at_unix_ms, claims.body",
+                "harness.diagnostic"
+            )
+            .replace(
+                " ORDER BY",
+                " AND json_extract(claims.body, '$.fields.code')='native-screen-prompt' ORDER BY"
+            )
+        ))?
+        .query_row(params![seat, i64::MAX], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .optional()?;
+    let Some((claim, at, body)) = row else {
+        return Ok(None);
+    };
+    let body: Value = serde_json::from_str(&body)?;
+    let fields = body.get("fields").cloned().unwrap_or(body);
+    if fields["incarnation_id"] != incarnation || recorded(connection, &screen_prompt_gone_key(&claim))? {
+        return Ok(None);
+    }
+    Ok(Some((claim, at.parse()?, fields)))
+}
+
 /// The idempotency key of the record that a native prompt opened by `observation` is gone.
 pub(crate) fn native_prompt_gone_key(observation: &str) -> String {
     format!("native-prompt-gone:{observation}")
@@ -1722,6 +1931,72 @@ impl Store {
         Ok(NativePromptState::Open)
     }
 
+    /// Record `actor`'s answer to the seat's open screen prompt, when `episode` names it: one of
+    /// that prompt's own answers, once. The reconciler presses its keys. `None` when `episode` is
+    /// not the seat's open screen prompt.
+    fn answer_screen_prompt(
+        &self,
+        seat: &str,
+        episode: &str,
+        answer: &str,
+        actor: &str,
+    ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
+        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+        let Some(incarnation) = self
+            .latest_actual_value(seat)
+            .map_err(internal)?
+            .and_then(|runtime| {
+                runtime
+                    .pointer("/fields/incarnation_id")
+                    .or_else(|| runtime.get("incarnation_id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        else {
+            return Ok(None);
+        };
+        let Some((claim, _, prompt)) = self
+            .open_screen_prompt(seat, &incarnation)
+            .map_err(internal)?
+            .filter(|(claim, _, _)| claim == episode)
+        else {
+            return Ok(None);
+        };
+        let driver = prompt["driver"].as_str().unwrap_or_default();
+        let choices = st_drivers::blocking_screen::screen_prompt_choices(
+            driver,
+            prompt["status"].as_str().unwrap_or_default(),
+        );
+        if !choices.iter().any(|(choice, _)| *choice == answer) {
+            return Err(St3Error::new(
+                "invalid-answer",
+                format!(
+                    "answer {}",
+                    choices
+                        .iter()
+                        .map(|(choice, _)| *choice)
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                ),
+            ));
+        }
+        self.append_claim(&ClaimInput {
+            subject: seat.to_owned(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(actor.to_owned()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::String("native-prompt-answered".into())),
+                ("status".into(), Value::String(answer.into())),
+                ("driver".into(), Value::String(driver.into())),
+                ("incarnation_id".into(), Value::String(incarnation)),
+            ]),
+            evidence: vec![claim.clone()],
+            expected_subject: None,
+            idempotency_key: Some(native_prompt_answer_key(&claim)),
+        })
+        .map(Some)
+    }
+
     /// Record `actor`'s answer to the native prompt `episode` (the observation that opened it) of
     /// `seat`. Only the seat's person answers, only the prompt still waiting, and only once.
     pub fn answer_native_prompt(
@@ -1732,16 +2007,19 @@ impl Store {
         actor: &str,
     ) -> std::result::Result<ClaimRecord, St3Error> {
         let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
-        if !matches!(answer, "allow" | "deny") && question_answers(answer).is_none() {
-            return Err(St3Error::new(
-                "invalid-answer",
-                "answer allow or deny, or a question's choices as a JSON object of question position to option positions",
-            ));
-        }
         if self.agent_person(seat).map_err(internal)?.as_deref() != Some(actor) {
             return Err(St3Error::new(
                 "forbidden",
                 "only the seat's person answers its prompts",
+            ));
+        }
+        if let Some(answered) = self.answer_screen_prompt(seat, episode, answer, actor)? {
+            return Ok(answered);
+        }
+        if !matches!(answer, "allow" | "deny") && question_answers(answer).is_none() {
+            return Err(St3Error::new(
+                "invalid-answer",
+                "answer allow or deny, or a question's choices as a JSON object of question position to option positions",
             ));
         }
         let current = self.newest_harness_observation(seat).map_err(internal)?;
