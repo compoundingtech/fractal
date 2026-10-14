@@ -9403,6 +9403,11 @@ pub struct FleetStatus {
     pub node: String,
     pub fleet_id: Option<String>,
     pub member_key: Option<String>,
+    /// Configured local transports, including when no endpoint is currently up.
+    #[serde(default)]
+    pub transports: Vec<String>,
+    #[serde(default)]
+    pub fabric_protocol: Option<String>,
     pub view: crate::fleet::FleetView,
     pub peers: Vec<crate::model::ReplicationPeerStatus>,
     pub invites: Vec<crate::store::FleetInviteView>,
@@ -9429,12 +9434,25 @@ async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetStatus>
     let fleet_id = state.fleet_id.clone();
     let state_dir = state.state_dir.clone();
     blocking_store(move || {
+        let file = crate::config::FleetFile::load(&state_dir)?;
         let replication =
             store.replication_status_sealed(fleet_id.is_some(), fleet_id.as_deref(), &peers)?;
         Ok(FleetStatus {
             node,
             fleet_id,
             member_key: store.member_public_key(),
+            transports: file
+                .as_ref()
+                .map(|file| file.transports.clone())
+                .unwrap_or_default(),
+            fabric_protocol: file
+                .as_ref()
+                .filter(|file| file.transports.iter().any(|name| name == "fabric"))
+                .map(|file| {
+                    file.fabric_protocol.clone().unwrap_or_else(|| {
+                        crate::fleet::transport::default_fabric_protocol(&file.fleet_id)
+                    })
+                }),
             view: store.fleet_view_sealed()?,
             peers: replication.peers,
             invites: store.fleet_invites(false)?,

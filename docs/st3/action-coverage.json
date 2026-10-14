@@ -1019,6 +1019,24 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st fleet transports add",
+      "description": "Enable Fabric on this existing fleet member without rejoining",
+      "tests": [
+        "crates/st3/tests/fleet.rs::an_existing_member_adds_and_removes_fabric_without_rejoining",
+        "crates/st3/tests/fleet.rs::fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged"
+      ],
+      "verification": "real CLI over isolated Unix daemons and workers with a Fabric shim; graph sync, restart restoration and refused exposure"
+    },
+    {
+      "command": "st fleet transports remove",
+      "description": "Withdraw Fabric from this fleet member while keeping a usable carrier",
+      "tests": [
+        "crates/st3/tests/fleet.rs::an_existing_member_adds_and_removes_fabric_without_rejoining",
+        "crates/st3/tests/fleet.rs::fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged"
+      ],
+      "verification": "real CLI over isolated Unix daemons and workers with a Fabric shim; withdrawal before unexpose, remaining-carrier sync, guards and rollback without Fabric"
+    },
+    {
       "command": "st fleet wait",
       "description": "Wait for this node's first sync to end, then check that it projects the same graph as the peer it synced from. Fails when the graphs differ after a heal",
       "tests": [
