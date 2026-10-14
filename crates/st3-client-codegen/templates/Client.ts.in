@@ -95,8 +95,6 @@ export type CollectionSocket = TerminalSocket & {
 export type CollectionSocketFactory = (url: string, protocols: string[], headers: Record<string, string>) => CollectionSocket;
 export type CollectionStreamOptions = {
     onFrame: (frame: CollectionFrame) => void;
-    /** Actual WebSocket readiness, before buffered commands are flushed. */
-    onOpen?: () => void;
     /** Called once when the socket ends: without an error after a normal close. Open a new
      * socket and subscribe again; its snapshots are authoritative. */
     onEnd?: (error?: Error) => void;
