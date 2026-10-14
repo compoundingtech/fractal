@@ -64,6 +64,73 @@ provider/IVM schema hooks, transaction maintenance and cache invalidation. The 3
 sites and test-inclusive counts are explicit remaining work; they are not silently approved
 production routing. No complete input/row/cache oracle follows from this source audit.
 
+## Routing commitment for the decision
+
+The separate exact classification and source/document set coverage are retained in
+`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/receive-replay-routing-decision-classification@9baa23fa799c8a1ae23d39a07504d31a605093b9ba161aa41aab961df51974cc`.
+
+This classification covers each of the 24 registered digest relations, marks the eight cleared
+relations, and classifies all seven hooks. It is a proposed routing commitment grounded in the
+pinned consumers below, not a compiled routing certificate. Native source means retained native
+content/admission materialization: it does **not** make a derived row independent authority.
+Staged output means generation-bound rebuildable rows, with current native mutations mirrored
+into the active generation and complete catch-up journal. Local overlay means host-local state
+or bookkeeping preserved outside a blanket shared-table swap and applied only under its fresh
+identity. Disposable means private preparation, never a published root.
+
+| Digest relation | Base clear? | Proposed class | Evidence and routing consequence |
+| --- | --- | --- | --- |
+| `operations` | No | Native source/admission materialization | `smallclaims/store.rs::{register_operation_tx,expected_operation,rebuild_operations_tx}`; preserve native idempotency/conflict receipts and checkpoint meaning. Shadow expected rows may be checked privately; reconcile bounded keyed changes under the native writer, never replace a live admission ledger wholesale |
+| `blobs` | No | Native source | `smallclaims/store.rs` blob admission and document selection; retain hash-bound immutable bytes and retention leases, with no second independent shadow blob catalog |
+| `documents` | No | Native source/binding materialization | `smallclaims/store.rs::select_replicated_document` (8564) and `custom.rs::refresh_registrations`; preserve admitted content/bindings, journal canonical binding-key changes, and certify the native binding cut used by a staged custom fold |
+| `desired` | Yes | Staged output | Base replay and `select_replicated_desired`; bind selected declarations and owned-set composition to one generation; effect guards still execute freshly at the current native cut |
+| `arrangements` | No | Staged output | `arrangements.rs::{rebuild,project}`; rebuild canonical heads from retained edited claims and route head/register joins to the same generation |
+| `arrangement_registers` | No | Staged output | Same reducer; retain winner keys and raw register/tombstone semantics with its corresponding arrangement head |
+| `message_index` | No | Staged output | Source schema insert/delete triggers on `claims` (store.rs 837–855) and `backfill_message_index`; route trigger writes to the active generation and journal claim deletion/rebuild, not only new sends |
+| `resource_observations` | No | Staged output | `resources.rs::{rebuild,flush,refresh}`; route repaired exclusions and pending-subject flush together; no current list authority from an old root |
+| `glass_heads` | No | Staged output | `glass_heads.rs::{rebuild,flush}`; route canonical head/deletion updates and dirty/pending queues without mixing generations |
+| `person_directive_notes` | No | Staged output | `directive_notes.rs::{rebuild,flush}`; preserve canonical selected note and repaired-claim exclusions; read-time expiration is not a new replicated clock input |
+| `custom_registrations` | No | Staged output | `custom.rs::refresh_registrations`; pin the native document/blob manifest and registry identity before folding custom sources |
+| `custom_sources` | No | Staged output | `custom.rs::refresh_source`; bind registration, dependency and canonical source revision in the same root; unsupported provider closure refuses sealing |
+| `custom_dependencies` | No | Staged output | `custom.rs::{flush,refresh_source}`; retain dependency edges/cycle evaluation with their source rows; route dirty-edge invalidation |
+| `mission_revisions` | No | Native source/content materialization | `select_replicated_mission` (31513) and native adoption append paths; preserve validated authored bodies/claim provenance used by run reconstruction; canonical claim-id corrections are journaled bounded native changes |
+| `mission_definitions` | Yes | Staged output | `select_replicated_mission` and owned-set selection; route the selected revision, not a stale catalog entry, under existing owner/definition fences |
+| `mission_runs` | Yes | Staged output | `project_replicated_mission_runs` (30608); route state/phase/generation selection and all descendant joins as one root; native request/result custody is retained |
+| `mission_run_deadlines` | Yes | Staged output | Run creation/state fold; bind deadline relations to the corresponding run, with exact immutable date semantics |
+| `mission_run_after` | Yes | Staged output | Run dependency projection; route predecessor/dependency membership with the same run generation, preserving terminal/stop fences |
+| `run_generations` | Yes | Staged output | Three-pass run replay; route generation lineage/supersession with run/step state; an old generation never grants successor effect authority |
+| `step_runs` | Yes | Staged output with local overlay columns | Run/work/carried folds plus `reapply_local_work_lease_renewals_tx`; staged durable state and native timing claims stay bound to the attempt. Apply quiet lease/update dates only for the same owner/incarnation/attempt; those digest-excluded columns are not discarded |
+| `revision_proposals` | Yes | Staged output | Run replay proposal lifecycle; route applied/pending/draining status with the run and current generation; do not duplicate or retime native acceptance |
+| `planning_sessions` | No | Staged output | `rebuild_planning_tx` (22008); generation-bind session and its mission/run targets; preserve quarantined-claim handling |
+| `planning_candidates` | No | Staged output | Same canonical planning fold; route candidate/session associations and native document references coherently |
+| `planning_previews` | No | Staged output | Same fold; route preview/candidate/session and target-generation joins to the root; cached preview is not an effect authorization |
+
+Primary relation counts: four native materializations and twenty staged outputs; the eight base
+clear targets are all within the twenty. `step_runs` additionally has local overlay columns.
+None of these 24 relations is disposable. This does not claim that every native table is listed:
+claims/batches/replica/checkpoint/principal/idempotency/local-runtime relations remain native,
+and their exact source coverage must be closed independently. Native materializations can change
+while an old staged root exists: joins/digests must certify a matching cut or refuse/recapture,
+never label current native rows with an old staged certificate. That integration is unproved.
+
+| Post-projection hook, in actual call order | Proposed routing class | Required consequence |
+| --- | --- | --- |
+| `custom::flush` | Staged output | Four custom relations/dirty queue participate in the stage; pin native manifest/dependency inputs and provider identity |
+| `resources::flush` | Staged output | Resource observations and pending-subject state bind to the target generation and repaired input cut |
+| `glass_heads::flush` | Staged output | Head rows and pending/dirty queues bind to the stage; do not leave a native trigger writing an unselected shadow |
+| `directive_notes::flush` | Staged output | Note rows and pending/dirty queues bind to the canonical stage input |
+| `agent_messages::flush` | Local overlay/bookkeeping | Counts/sends and coordination metadata are native host bookkeeping outside the 24-table shared digest root. Reconstruct the pure count image privately if required; run no coordination/effect from scratch and preserve current native receipts/queues. Separating `flush_with_coordination` needs exact owner review |
+| `limits::flush_limits` | Local overlay/bookkeeping | Preserve host account readings/seats and `meta` cursor/version; any stage dependency gets a fixed local snapshot/cut, not a shared-generation table replacement or replayed stop effect |
+| `reapply_local_work_lease_renewals_tx` | Local overlay | Retain the native renewal table and apply only to the current matching staged step attempt/owner/incarnation; no fabricated renewal claim or reset clock/budget |
+
+Hook counts: four staged-output hooks and three local-overlay/bookkeeping hooks. The
+`heal_replay_base_order` temporary relation (store.rs 30357) is **disposable**: create/fill/drop it
+in private preparation, never retain its live-writer lifetime or expose it as a source root.
+Native publication finalizers, digest triggers and committed authority observers are additional
+native boundaries, not an eighth post-projection hook to bypass. This classification names the
+commitment; dynamic provider closure, native/staged cut composition, hook side-effect separation,
+raw query routing, trigger/FK/index conversions and mixed-build enforcement remain unqualified.
+
 ## Non-claim inputs and journal closure
 
 These source consumers demonstrate why replaying the admitted claim bodies alone is incomplete.
@@ -90,12 +157,16 @@ must distinguish local overlays from shared digest columns and report the first 
 column, including whether it is a timestamp.
 
 The full authored interleaving design is retained in
-`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/receive-replay-interleaving-control-design@9510d9038a0084c8d3c501d514b5498a614812ec9527cb670541114b64cd1ec5`.
+`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/receive-replay-interleaving-v2-control-design@c6c5946110d0cc006df6f8532a9b4b3f8f39b26c09e8f529270af2ff35bfd212`.
 It uses disposable origin/replica/stage/reference stores,
 seeds 0, 1, 17 and 2861, and at most 64 dependency-valid events per seed. Its finite input cap is
 256 claims, 256 KiB payload and 4,096 reference rows. Events cover admission, duplicate/empty
 receive, repairs, checkpoint/trim, late canonical order, document/blob retention, local renewals,
 queue/finalizer completion and crashes at capture/build/copy/seal/commit/ack boundaries.
+Seed2861 additionally delivers the same retained input to a replica in two dependency-valid
+orders; compare only after their certified cuts match. Restart the disposable stage store
+mid-copy after a real page/cursor commit, with another bounded source event in the gap; resume
+only a matching manifest/owner/cut or refuse and clean.
 Actual native/page acknowledgments select scheduling points. Record the generated schedule
 before applying it; authority refusal is a result, not permission to manufacture state.
 
@@ -106,28 +177,54 @@ that oracle. Deliberately omit a local renewal, drop a repair invalidation and c
 after sealing: each must cause the relevant row mismatch or CAS refusal. Also exercise wake in
 Pending-to-wait and crash after physical commit before acknowledgment. Missing adapters prevent
 execution; this specification is UNRUN and supplies no parent-fails/fixed-passes claim.
+F3 results gate implementation landing, not the Nathan proposal question.
 
 ## Disposable table-name swap spike
 
 F1 remains unproved. The exact separable source and recipe are retained in
-`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/table-name-swap-source-recipe@60ad7abd01c052a05d52b93194461f6d6e27f730ea58d043f57ea6e54554dca4`.
-Source SHA256: `74719d00f3fae152203f8772d6e34ce2f3564d1cd866afb3d973c5009a3cb578`.
+`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/table-name-swap-v2-source-recipe@bc510726210d0ae650d7bc76581478256e05ccbe5ea1187b9a5c1fd2fbe7acb6`.
+Source SHA256: `894cca00a96b848e9c0a1b69b33a45f1163bfba73d829c38c587acb60b64678e`.
 Only Python `ast.parse` was used; the module was not imported or invoked.
 
 The proposed future unit runs serially on a newly created disposable directory and accepts no
-existing database path. Cases use 0, 1,024 and 16,384 rows with 128-byte values. The recipe proposes
-a 90-second queue-inclusive cap, 64 MiB total owned disk, MemoryHigh 256 MiB and MemoryMax 512 MiB;
-these are unadmitted ceilings, not measurements. Source, Python/SQLite binary, caller, lease,
-unit and cleanup owner still require a concrete ordinary hosted qualification disposition.
-No Nix/Cargo/native invocation, alternate executor or automatic retry is authorized here.
+existing database path. Row-scale cases use 0, 1,024, 16,384 and 131,072 rows per side
+with 128-byte values in one pair. Schema-scale cases use 1, 8 and 24 live/shadow pairs with the
+same 131,072 total rows per side. Thus the 24-pair case has 5,461/5,462 rows per pair; it measures
+schema growth at fixed row mass, not millions of rows in every table. The largest single-table
+case does not establish a production extrapolation for 24 large tables.
 
-The source prepares live/shadow tables with differently named indexes, a referencing table,
-a view and an insert trigger. It records the duplicate global-index-name refusal; swaps table
-names inside one transaction; records `INDEXED BY`, view/FK/trigger rewrites and the cached-query
-result; then separately measures populated index repair and populated retirement. Each timing
-includes its COMMIT, with WAL/FULL durability retained. Schema definitions, SQLite version,
-PRAGMAs, estimated VM progress and disk size accompany results. Connections close before removal
-of only the owned temporary directory; cap termination still needs a terminal cleanup receipt.
+Each pair has two indexes, two insert triggers, a view and a foreign-key dependent table, plus
+one common observation table. The 24-pair fixture therefore has 73 tables, 48 indexes/triggers,
+24 views and 24 FK edges. These are schema-shaped fixtures, not the actual product schema.
+The name-only transaction renames all pairs and includes COMMIT in its measured phase. A second
+physical connection warms its cached statement, opens a read transaction and retains a partly
+consumed cursor across both the swap and subsequent index repair. It records coherent old/new
+results, errors and schema definitions; Python may transparently reprepare, so no raw
+`SQLITE_SCHEMA` count or rusqlite cache behavior is inferred.
+
+Global-index-name collision, `INDEXED BY`, view/FK/trigger rewrites, populated index repair and
+populated retirement remain separate observations. Index repair is timed while the old reader
+is open, including its lock/error and commit behavior. No aggregate swap number hides it.
+WAL/FULL durability is retained; SQLite version, PRAGMAs (including legacy ALTER behavior),
+schema text, estimated VM progress and file sizes accompany each phase. Completed cases emit
+raw records incrementally; a genuine error emits its failing phase and stops without retry.
+
+The source's 256 MiB phase-boundary file-size check is **sampled**, not a hard aggregate disk
+limit; SQL may allocate before the next sample. The future hosted unit must attest a separate
+256 MiB hard owned volume/quota covering DB/WAL/SHM before invocation, or refuse to start.
+A per-file `RLIMIT_FSIZE` alone does not meet that aggregate requirement. MemoryHigh 256 MiB,
+MemoryMax 512 MiB and the unchanged 90-second queue-inclusive deadline remain proposed,
+unadmitted ceilings. Queue/setup/child/rollback/physical close and delegated cleanup all count;
+no extra grace, higher cap or automatic retry follows a failure.
+
+The concrete ordinary hosted runner recipe is retained at
+`doc/fleet/smalltalk/graph-projection-divergence/2026-10-14/hosted-f1-v2-runner-recipe@05ce0b06cb3cd7e25f2736ce74c0280531ff2c58b80b57f4f1bff71ba99568bb`.
+It proposes one serial supporting Linux job under the existing ordinary PR queue policy, with
+this seat as caller and the exact script hash above. Actual execution owner, slot/unit/lease,
+Python/SQLite binary pins, hard quota provider and absolute deadline are unset review inputs
+for Root/Factory; no local/production invocation, workflow dispatch or new worker is authorized.
+After real connection closure, remove only the owned disposable files/volume and retain terminal
+cleanup evidence even on cap/error. No Nix/Cargo/native experiment is part of this recipe.
 
 Success requires unchanged logical reader/writer/FK/trigger/index semantics and a bounded final
 native hold without deferring populated cleanup into another unbounded hold. A fast two-rename
@@ -142,8 +239,8 @@ No impossibility or positive result is claimed from the unrun source.
 | Finding | Proposal revision and remaining qualification |
 | --- | --- |
 | F1 | Name-swap alternative and bounded source recipe are explicit; mechanism/native results absent; no format-free impossibility claim |
-| F2 | Exact source census and entry/hook inventory above; compiled routing/dynamic-provider closure remains required |
-| F3 | Actual non-claim consumers and finite interleaving discriminator above; journal closure/native comparisons unproved |
+| F2 | All 8 clear/24 digest/7 hooks classified above with routing consequences; compiled routing/dynamic-provider closure remains required |
+| F3 | Non-claim consumers and mixed-order/mid-copy-restart discriminator specified; native results gate implementation, not the Nathan question |
 | F4 | Existing 19→20 format-hold owner join proposed in the design; legacy-19 refusal is insufficient to fence all flat-only version-20 binaries |
 | F5 | Proposed error/receive wire shapes and old-client behavior specified in the design; no emitted contract or generated client change |
 | F6 | Land #2859 telemetry before implementation; per-guard cause/hold evidence stays distinct from a successful bound |

@@ -77,7 +77,9 @@ At the pinned baseline, `st-storage-version::STORAGE_VERSION` is 19 and
 [#2390](https://github.com/compoundingtech/smalltalk/pull/2390) proposes the existing 19→20
 signature-candidate transition and fleet format hold; it is not a landed generation-routing
 capability. Join its storage owner and curator's Nathan decision before proposing activation.
-Reuse that reviewed transition/hold if it can carry this format safely; reserve no second bump.
+Reconcile this baseline with #2390 at exact `94b8e8414fd75eb11f9d5a7e153e0245666a2e03`: its
+shared storage constant is already 20. This proposal must join that existing 19→20 owner/hold,
+not reserve storage 21; it implements no version change and assumes no generation capability.
 
 The required gate is stronger than rejecting version 20 in an old version-19 binary: every
 binary allowed to open an active nonzero generation must understand and enforce its routing
@@ -145,6 +147,7 @@ propose HTTP 503 with the existing error envelope and this bounded value:
   "message": "the certified projection is not ready",
   "details": {
     "retryable": true,
+    "retry_after_ms": 1000,
     "applied": false,
     "admission": "not-admitted",
     "stage_id": "opaque-stage-id"
@@ -154,7 +157,11 @@ propose HTTP 503 with the existing error envelope and this bounded value:
 
 `stage_id` is bounded metadata, not authority or an input oracle. Preserve the transport's
 request/snapshot metadata. Add an explicit 503 mapping rather than inheriting 422 accidentally.
-Clients may wait on a stage-change signal and repeat the **same idempotency key**. A read must
+Propose `Retry-After: 1` plus the bounded `retry_after_ms` hint (500–5,000 ms) to prevent
+a busy request loop. Clients wait for the hinted minimum or a qualified stage signal under
+their bounded wait policy and repeat the **same idempotency key**; no fresh retry operation is
+inferred from a pending stage. Unchanged/progress signals do not bypass the retry minimum;
+only a certified publication or explicit refusal ends the pending wait. A read must
 not silently label an old cut as current. A mutation already admitted cannot return this
 `applied=false` refusal: retain/query its operation receipt and report pending completion;
 dropping the waiter neither cancels it nor grants a fresh attempt.
@@ -166,7 +173,7 @@ For receive, propose an optional `projection` member alongside the unchanged rec
   "receipt": "existing typed receipt, unchanged",
   "changed": false,
   "store_index": 0,
-  "projection": { "state": "pending", "stage_id": "opaque-stage-id" }
+  "projection": { "state": "pending", "stage_id": "opaque-stage-id", "retry_after_ms": 1000 }
 }
 ```
 
@@ -175,8 +182,16 @@ are `pending`, `published` and `refused`; published includes the certified outpu
 refused includes a fixed bounded reason, and pending never claims current projection authority.
 Admission acknowledgment is truthful in each case. Historical absence means projection status
 unknown, **not published**. Older peers/clients that cannot safely decode or represent the added
-state stay on the pre-activation capability path or refuse; do not silently send a new state to
-strict old decoders. Rust, Swift/iOS, TypeScript, CLI/peer relay and paired-contract handling need
+state stay on the pre-activation capability path or refuse. Gate the proposed new code/state
+on the existing comma-separated `x-st3-features` negotiation using a proposed
+`projection-pending.v1` feature; the baseline already negotiates custom subjects/conversation
+blocks there, and Rust/Swift/TypeScript clients send that header. Relay the declared capability
+through the validated peer route; a header is decoding capability, never effect authority.
+Without the feature, omit new projection members on truthful legacy receive acknowledgment
+and refuse dependent reads/mutations through a reviewed existing unavailable shape. Do not
+alias an unavailable projection to database contention or silently send strict old decoders a
+new enum. The precise legacy refusal mapping is part of the paired-contract owner review.
+Rust, Swift/iOS, TypeScript, CLI/peer relay and paired-contract handling need
 owner review, regenerated models and controls for historical absence, every state, invalid values,
 admitted-pending and not-admitted retry semantics. Put both contract changes in the same Nathan
 question as the proposed persisted generation format; this note implements neither.
@@ -394,8 +409,10 @@ implementation qualification, retaining the named guard and full acquired-to-ret
 Telemetry alone neither diagnoses the reported request nor bounds replay.
 
 Intake reviews this design and the complete generation/input inventory first. F1/F3 experiment
-and interleaving results remain absent; the source recipes are dormant review inputs. Nathan
-routing is held until Intake-required decision evidence exists. A docs-only proposal may land
+and interleaving results remain absent; the source recipes are dormant review inputs. F1 results,
+the routing classification and the storage 20 owner reconciliation precede the Nathan question;
+F3 results instead gate implementation landing. Nathan routing stays held until that required
+decision evidence exists. A docs-only proposal may land
 without approving its storage or wire changes. The curator routes
 the persisted-generation recommendation and any format hold to Nathan. Only then can an
 implementation mission choose exact format/rules transitions, limits, conversion, mixed-build
