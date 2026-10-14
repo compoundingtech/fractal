@@ -2,6 +2,7 @@ import { useAtomValue } from '@effect/atom-react'
 import * as stylex from '@stylexjs/stylex'
 import { DateTime, Option } from 'effect'
 import * as React from 'react'
+import { InlineMarkdown } from '@smalltalk/fractal-ui/assistant-ui/shell'
 
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -162,10 +163,10 @@ export const AgentTodos = ({
                   <span
                     {...stylex.props(styles.content, task.status === 'completed' && styles.done)}
                   >
-                    {task.content}
+                    <InlineMarkdown text={task.content} />
                     {Option.isSome(task.blocker) ? (
                       <p {...stylex.props(styles.note, styles.stale)}>
-                        Blocked: {task.blocker.value}
+                        Blocked: <InlineMarkdown text={task.blocker.value} />
                       </p>
                     ) : null}
                   </span>

@@ -2,6 +2,7 @@ import type { Attention } from '@smalltalk/st3-client/schema'
 import * as stylex from '@stylexjs/stylex'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
+import { InlineMarkdown, toPlainText } from '@smalltalk/fractal-ui/assistant-ui/shell'
 
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
 import { RenderProfiler } from '../telemetry/meters.tsx'
@@ -140,7 +141,7 @@ export const Sidebar = React.memo(
                 <TreeNode
                   key={item.id}
                   id={`inbox/${item.id}`}
-                  textValue={item.title}
+                  textValue={toPlainText(item.title)}
                   onHoverStart={() => {
                     if (item.ref.startsWith('agent/')) source.prefetchConversation?.(item.ref)
                   }}
@@ -149,8 +150,8 @@ export const Sidebar = React.memo(
                   }}
                   content={
                     <RenderProfiler id="inbox">
-                      <span title={item.title} {...stylex.props(styles.name)}>
-                        {item.title}
+                      <span title={toPlainText(item.title)} {...stylex.props(styles.name)}>
+                        <InlineMarkdown text={item.title} />
                       </span>
                       <span
                         role="img"
@@ -219,10 +220,10 @@ export const Sidebar = React.memo(
                       <TreeNode
                         key={view.mission.id}
                         id={`subject/${view.mission.id}`}
-                        textValue={subjects.get(view.mission.id)?.title ?? view.mission.title}
+                        textValue={toPlainText(subjects.get(view.mission.id)?.title ?? view.mission.title)}
                         content={
-                          <span title={view.mission.title} {...stylex.props(styles.name)}>
-                            {subjects.get(view.mission.id)?.title ?? view.mission.title}
+                          <span title={toPlainText(view.mission.title)} {...stylex.props(styles.name)}>
+                            <InlineMarkdown text={subjects.get(view.mission.id)?.title ?? view.mission.title} />
                           </span>
                         }
                       />
@@ -249,13 +250,13 @@ export const Sidebar = React.memo(
                 <TreeNode
                   key={subject.ref}
                   id={`subject/${subject.ref}`}
-                  textValue={subject.title}
+                  textValue={toPlainText(subject.title)}
                   content={
                     <span
-                      title={`${subject.title} · ${subject.detail ?? subject.ref}`}
+                      title={`${toPlainText(subject.title)} · ${subject.detail ?? subject.ref}`}
                       {...stylex.props(styles.name)}
                     >
-                      {subject.title}
+                      <InlineMarkdown text={subject.title} />
                     </span>
                   }
                 />
