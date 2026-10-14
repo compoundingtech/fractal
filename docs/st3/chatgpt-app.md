@@ -22,10 +22,10 @@ ChatGPT (web, developer mode)
 tunnel-client  ── person's own OpenAI Platform org
    │  MCP Streamable HTTP over a private Unix socket (0700 dir)
    ▼
-st-chatgpt adapter  ── this repo; holds the assistant profile
+st-chatgpt adapter  ── this repo; holds the assistant profile and its own shim signing key
    │  typed client-v0 assistant routes, Bearer + per-request proof
    ▼
-st3-client.sock (paired-only gateway) ── never st3.sock
+st3-client.sock (paired-only gateway, local) ── never st3.sock, never reachable from the tunnel
    ▼
 st daemon  ── authoritative: principal, grant, scopes, fences, receipts
 ```
@@ -71,27 +71,36 @@ Prerequisites for any person (written for a hypothetical `person/ada`):
 - A running st member whose configured owning person is `person/ada`.
 - A ChatGPT plan with developer-mode MCP apps. Pro allows read tools; writes need Business, Enterprise or Edu at
   the time of writing. ChatGPT reaches custom apps on the web only.
-- An OpenAI Platform organization in which Ada can create a Secure MCP Tunnel and a key restricted to Tunnels
-  Read + Use.
-- An approval attestor (see open question 1).
+- An OpenAI Platform organization in which Ada creates a Secure MCP Tunnel (Tunnels Read + Manage), a runtime key
+  restricted to Tunnels Read + Use, and an association between the tunnel and her ChatGPT workspace. A tunnel that
+  exists only in the Platform organization does not appear in ChatGPT.
+- An approval attestor with its own key, distinct from the adapter's shim key (see open question 1).
+
+Activation gate: #2290 forbids any live assistant grant, including a read-only one, until slice D (coordinated
+kill) and the adapter's coordinated-kill test pass on the exact candidate revisions, and until a caller-binding and
+disclosure decision and plan/client feasibility are recorded. The steps below describe the workflow after that gate.
 
 Steps:
 
 1. Install st as usual. The release contains `st-chatgpt`.
 2. On the daemon host, Ada issues the grant over the trusted-local API:
    `st devices --as person/ada pair --assistant chatgpt --scope read.assistant.summary --scope read.assistant.attention --disclose-to-openai --consent-evidence <record>`.
-3. On the same host, the adapter completes pairing: `st devices complete <gateway URL> <pairing ID> --assistant`
-   (code on stdin).
-4. Ada pins the attestor: `st devices grant read-trust <grant> --issuer … --key-id … --attestor-public-key …`.
+3. On the same host, the adapter completes pairing through the paired gateway:
+   `st devices complete <gateway URL> <pairing ID> --assistant` (code on stdin). Completion currently needs an HTTP
+   gateway URL; see open question 5.
+4. Ada pins read trust with both public keys: `st devices --as person/ada grant read-trust <grant> --issuer … --key-id …
+   --attestor-public-key … --shim-public-key …`. `st-chatgpt` prints its shim public key; the attestor provides its
+   own. Pinning raises the policy revision, so earlier proofs stop working.
 5. Ada starts `st-chatgpt` and `tunnel-client` as user services. Daemon startup never starts them, as it never
    starts Tailscale Serve or Fabric for the phone.
 6. In ChatGPT, Ada creates an MCP app with connection type Tunnel and selects her tunnel.
 7. Use: "What needs me in st?" calls the alerts tool, ChatGPT shows the confirmation card, the attestor asks Ada to
    approve the read, and the tool returns the bounded projection with its snapshot and freshness.
 
-Revocation and failure behave as with the phone: `st devices grant revoke` or expiry denies the next request;
-an offline daemon or adapter returns an explicit unavailable result; a stale fence, used nonce or exceeded budget
-returns its typed error and the adapter reports it without retrying.
+Revocation and failure: `st devices grant revoke` or expiry denies the next request. The principal kill
+(#2541 slice D) revokes every grant, disables the principal and stops the adapter, tunnel and attestor together.
+An offline daemon or adapter returns an explicit unavailable result. A stale fence, used nonce or exceeded budget
+returns its typed error, and the adapter reports it without retrying.
 
 Nothing in these steps is specific to one person, host or deployment. A downstream repository may package steps 3–5
 as declarative services, but the binary, tool list and docs come from this repository.
@@ -115,3 +124,7 @@ as declarative services, but the binary, tool list and docs come from this repos
 3. **Binary placement.** Separate `st-chatgpt` binary (proposed) or an `st assistant serve` subcommand.
 4. **Grant lifetime.** A 24-hour maximum means a daily owner renewal. Keep it, or allow a longer lifetime with
    per-request approval unchanged.
+5. **Local gateway transport.** Assistant pairing completion and requests accept only HTTP(S) gateway URLs, and a
+   daemon exposes the paired gateway as `st3-client.sock`. Proposal: let the assistant client use the Unix gateway
+   directly, so a same-host install needs no extra listener. The alternative is a loopback-only bridge, as the
+   phone setup uses when Tailscale Serve fails.
