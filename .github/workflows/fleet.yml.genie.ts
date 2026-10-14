@@ -542,7 +542,7 @@ nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackage
 printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
         {
-          name: 'Run all six selected systemd-scope tests in the VM',
+          name: 'Run all seven selected systemd-scope tests in the VM',
           id: 'vmtest',
           env: {
             ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',

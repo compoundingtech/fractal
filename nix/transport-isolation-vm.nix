@@ -1,8 +1,8 @@
-# Runs three retained st2 controls and three current-runtime scope controls in a VM with a real
+# Runs three retained st2 controls and four current-runtime scope controls in a VM with a real
 # systemd user manager for a lingering user, as on a fleet host. The isolation-vm CI job builds
 # this test's driver and runs it outside the Nix sandbox with its prebuilt nextest archive:
 #
-#   ST_ISOLATION_ARCHIVE    workspace archive containing the retained st2 controls and scope_cascade
+#   ST_ISOLATION_ARCHIVE    workspace archive containing the retained st2 controls and st-runtime tests
 #   ST_ISOLATION_WORKSPACE  the checkout the archive was built in; the test binary's compiled-in
 #                           st2 path lies below it, so the archive is extracted at the same path.
 #                           nextest also requires each selected package's working directory.
@@ -49,6 +49,12 @@ let
       binary = "scope_cascade";
       kind = "test";
       name = "literal_environment_is_preserved_across_a_work_scope";
+    }
+    {
+      package = "st-runtime";
+      binary = "st_runtime";
+      kind = "lib";
+      name = "isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor";
     }
   ];
   controlFilter = pkgs.lib.concatStringsSep " or " (
@@ -193,7 +199,7 @@ pkgs.testers.runNixOSTest {
     )
     test_seconds = time.monotonic() - started
     print(output)
-    assert re.search(r"\b6 tests run: 6 passed\b", output), "all six explicitly selected systemd-scope cases must run and pass"
+    assert re.search(r"\b7 tests run: 7 passed\b", output), "all seven explicitly selected systemd-scope cases must run and pass"
 
     with open(os.environ["ST_ISOLATION_TIMINGS"], "w") as timings:
         json.dump({"boot_seconds": round(boot_seconds, 1), "test_seconds": round(test_seconds, 1)}, timings)

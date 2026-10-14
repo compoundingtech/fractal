@@ -449,23 +449,32 @@ PTY restart. The current runtime adds three ignored tests in the `st-runtime` pa
 | `pty_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | A PTY scope survives the same cascade with its incarnation and cgroup intact, then stops cleanly. |
 | `literal_environment_is_preserved_across_a_work_scope` | Literal environment values cross a real user scope unchanged. |
 
-All six controls need a real systemd user manager, which Namespace's runner image does not
+The landed `st-runtime` library test
+`isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor`
+adds the fourth current-runtime control. It checks that a changed original request cannot
+signal either workload, then retires an escaped descendant while its neighboring scope
+survives. The test remains ignored in ordinary CI; the VM explicitly selects it by package,
+`st_runtime` binary, `lib` kind and full name. This execution does not authorize production
+activation of the retirement primitive.
+
+All seven controls need a real systemd user manager, which Namespace's runner image does not
 boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the required `isolation-vm` job:
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
 2. The producer prebuilds the preserved workspace selection into one archive, including the
-   existing st2 integration binary and executable plus the st-runtime `scope_cascade` binary.
+   existing st2 integration binary and executable plus the st-runtime `scope_cascade` and
+   library binaries.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive, extracts it at the checkout's path (the
-   st2 test binary has its executable's path compiled in) and runs the six controls with
+   st2 test binary has its executable's path compiled in) and runs the seven controls with
    nextest as a transient service of that user's systemd manager. The VM compiles nothing.
 
-The archive inventory must match the six exact package, binary, kind and test identities.
+The archive inventory must match the seven exact package, binary, kind and test identities.
 Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
-The JUnit report must contain exactly those six distinct successful results, with no missing,
-extra, skipped, rerun or flaky result. All six tests must run and pass, with no isolation
+The JUnit report must contain exactly those seven distinct successful results, with no missing,
+extra, skipped, rerun or flaky result. All seven tests must run and pass, with no isolation
 opt-out. The job summary records the KVM probe and each phase's elapsed time.
 
 ### TypeScript client
