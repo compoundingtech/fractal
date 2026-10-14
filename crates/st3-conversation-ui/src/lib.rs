@@ -10,6 +10,7 @@ pub mod adapt;
 #[cfg(feature = "ratatui")]
 pub mod ansi;
 mod clean;
+pub mod header;
 #[cfg(feature = "ratatui")]
 pub mod conversation;
 #[cfg(feature = "ratatui")]
@@ -23,7 +24,33 @@ pub mod text;
 pub mod theme;
 pub mod timeline;
 
-pub use clean::clean_message_text;
+pub use clean::{clean_message_text, clean_message_text_with_filters};
+
+/// UI preferences only; neither the owner read nor the normalized data applies these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayFilter {
+    HarnessMarkup,
+    ContextBlocks,
+    ControlCharacters,
+    InternalBlocks,
+    Excerpts,
+    /// Records a harness writes for itself (titles, modes, empty reasoning), not conversation.
+    Bookkeeping,
+    /// Routine status, usage and withheld-content records, which repeat every turn and say nothing
+    /// to read. Failures, cancellations and other withholding reasons are still shown.
+    Telemetry,
+}
+pub const DEFAULT_FILTERS: &[DisplayFilter] = &[
+    DisplayFilter::HarnessMarkup,
+    DisplayFilter::ContextBlocks,
+    DisplayFilter::ControlCharacters,
+    DisplayFilter::InternalBlocks,
+    DisplayFilter::Excerpts,
+    DisplayFilter::Bookkeeping,
+    DisplayFilter::Telemetry,
+];
+/// Empty filters render every entry as reversible JSON, including metadata and raw byte blocks.
+pub const SHOW_EVERYTHING: &[DisplayFilter] = &[];
 #[cfg(feature = "ratatui")]
 pub use conversation::Cache;
 pub use entry::{Body, Density, Entry, MailImage, ToolState, bundle_id, display_rows, folds};

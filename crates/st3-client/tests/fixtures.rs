@@ -1,8 +1,12 @@
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use st3_client::*;
 use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> Vec<u8> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let path = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/st3/client-v0/fixtures")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
@@ -10,6 +14,65 @@ fn fixture(name: &str) -> Vec<u8> {
 
 fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
     serde_json::from_slice(&fixture(name)).unwrap_or_else(|error| panic!("decode {name}: {error}"))
+}
+#[test]
+fn directive_notes_preserve_author_time_expiry_and_clear_as_empty() {
+    let wire: Envelope<DirectiveNotes> = decode("directive-notes.json");
+    let note = &wire.value.notes[0];
+    assert_eq!(note.person, "person/ada");
+    assert_eq!(note.author, note.person);
+    assert_eq!(note.time, "2026-10-10T09:00:00Z");
+    assert_eq!(note.expires_at.as_deref(), Some("2026-10-12T09:00:00Z"));
+    assert_eq!(note.revision, "claim/example");
+    let empty: DirectiveNotes = serde_json::from_value(serde_json::json!({"notes":[]})).unwrap();
+    assert!(empty.notes.is_empty());
+    let mut without_expiry = serde_json::to_value(note).unwrap();
+    without_expiry.as_object_mut().unwrap().remove("expires_at");
+    assert!(serde_json::from_value::<DirectiveNote>(without_expiry).unwrap().expires_at.is_none());
+}
+
+#[test]
+fn agent_lifecycle_future_value_keeps_the_roster_row() {
+    let row = serde_json::json!({
+        "kind": "agent", "id": "agent/example", "revision": "r1",
+        "updated_at": "2026-10-04T08:00:00Z", "name": "Example",
+        "state": "running", "reachability": "local", "runtime_ids": [],
+    });
+    for (value, expected) in [
+        ("standing", AgentLifecycle::Standing),
+        ("owner", AgentLifecycle::Owner),
+        ("bounded", AgentLifecycle::Bounded),
+        ("future-kind", AgentLifecycle::Unknown),
+    ] {
+        let mut declared = row.clone();
+        declared["lifecycle"] = serde_json::json!(value);
+        let page: Page = serde_json::from_value(serde_json::json!({
+            "kind": "page", "collection": "agents", "filters": {},
+            "items": [declared], "page": {"limit": 50, "has_more": false},
+        })).unwrap();
+        let [Resource::Agent(agent)] = page.items.as_slice() else {
+            panic!("lifecycle must not discard the agent row: {:?}", page.items);
+        };
+        assert_eq!(agent.header.id, "agent/example");
+        assert_eq!(agent.name, "Example");
+        assert_eq!(agent.lifecycle, Some(expected));
+    }
+    let absent: Agent = serde_json::from_value(row).unwrap();
+    assert_eq!(absent.lifecycle, None);
+    assert!(serde_json::to_value(absent).unwrap().get("lifecycle").is_none());
+}
+
+
+#[test]
+fn person_ask_mission_preserves_person_assignees_in_both_step_views_and_wake() {
+    let mission: Mission = decode("person-ask-mission.json");
+    let run = &mission.run_details[0];
+    assert_eq!(run.current_steps[0]["assignee"], "person/avery");
+    assert!(run.current_steps[0]["claimant"].is_null());
+    let step = &run.steps.as_ref().unwrap()[0];
+    assert_eq!(step.assignee.as_deref(), Some("person/avery"));
+    assert!(step.claimant.is_none());
+    assert_eq!(step.wake.as_ref().unwrap().assignee, "person/avery");
 }
 
 #[test]
@@ -287,6 +350,61 @@ fn session_usage_context_decodes_through_flattened_resource() {
 }
 
 #[test]
+fn timeline_tool_result_preserves_timing_metadata_and_decodes_legacy_results() {
+    let mut wire = serde_json::json!({
+        "id": "timeline-entry/tool-timing",
+        "sequence": 1,
+        "revision": 1,
+        "timestamp": "2026-10-05T12:00:00Z",
+        "role": "tool",
+        "type": "tool_result",
+        "final": true,
+        "body": {
+            "call_id": "call/timing",
+            "status": "success",
+            "media_type": "text/plain",
+            "content": "finished",
+            "blocks": [{
+                "id": "tool-timing/0",
+                "kind": "tool_output",
+                "source_type": "tool_result",
+                "payload": {"body_ref": true},
+                "metadata": {
+                    "wallTimeMs": 1250.5,
+                    "timeoutSeconds": 0,
+                    "future": {"unit": "ticks", "value": 0.125}
+                }
+            }]
+        }
+    });
+    let entry: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    let TimelineBody::ToolResult(body) = entry.body else {
+        panic!("tool result discriminator was not preserved");
+    };
+    assert_eq!(
+        body.blocks[0].metadata.as_ref(),
+        Some(&wire["body"]["blocks"][0]["metadata"])
+    );
+    assert_eq!(
+        serde_json::to_value(&body).unwrap()["blocks"][0]["metadata"],
+        wire["body"]["blocks"][0]["metadata"]
+    );
+
+    wire["body"]["blocks"][0].as_object_mut().unwrap().remove("metadata");
+    let untimed: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(
+        untimed.body,
+        TimelineBody::ToolResult(body) if body.blocks[0].metadata.is_none()
+    ));
+    wire["body"].as_object_mut().unwrap().remove("blocks");
+    let legacy: TimelineEntry = serde_json::from_value(wire).unwrap();
+    assert!(matches!(
+        legacy.body,
+        TimelineBody::ToolResult(body) if body.blocks.is_empty()
+    ));
+}
+
+#[test]
 fn timeline_models_tolerate_future_discriminators() {
     fn entry(entry_type: &str, body: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
@@ -344,10 +462,7 @@ fn timeline_models_tolerate_future_discriminators() {
     .expect("a newer tool status must not break an older client");
     assert!(matches!(
         tool.body,
-        TimelineBody::ToolResult(TimelineToolResultBody {
-            status: TimelineToolStatus::Unknown,
-            ..
-        })
+        TimelineBody::ToolResult(result) if result.status == TimelineToolStatus::Unknown
     ));
 
     let usage: TimelineEntry = serde_json::from_value(entry(
@@ -469,4 +584,16 @@ fn a_kind_this_client_does_not_know_reads_as_unknown_and_the_page_still_reads() 
         }))
         .is_err()
     );
+}
+
+#[test]
+fn relay_omission_fixture_round_trips_without_inventing_nonnullable_fields() {
+    let bytes = fixture("timeline-relay-omission.json");
+    let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let typed: Envelope<TimelinePage> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(serde_json::to_value(&typed).unwrap(), raw);
+    let changes = serde_json::json!({"kind":"conversation-changes", "session_id":raw["value"]["session_id"],
+        "items":raw["value"]["items"], "next_cursor":"conversation-cursor/relay/next"});
+    let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
+    assert_eq!(serde_json::to_value(typed).unwrap(), changes);
 }
