@@ -45,6 +45,9 @@ const CONVERSATION_CHANGED: &str = "SELECT
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_legacy_from_index
       WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
         AND json_extract(body,'$.from')=?1 AND store_index>?2 AND store_index<=?3)
+    OR EXISTS(SELECT 1 FROM main.local_native_delivery_receipts_v1
+      INDEXED BY local_native_delivery_owner_cut_v1
+      WHERE actor=?1 AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 

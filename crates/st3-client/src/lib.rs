@@ -3398,7 +3398,7 @@ impl Client {
                 Endpoint::FabricLoopback(base) => {
                     let mut request = self.http.request(method, format!("{base}{path}")).header(
                         "x-st3-features",
-                        "custom-subjects.v1, conversation-blocks.v1",
+                        "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1",
                     );
                     request = propagation::inject_http(request);
                     if let Some(key) = key {
@@ -3559,7 +3559,7 @@ async fn unix_request(
         .header("host", "localhost")
         .header(
             "x-st3-features",
-            "custom-subjects.v1, conversation-blocks.v1",
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1",
         );
     if let Some(credential) = credential {
         builder = builder.header("authorization", format!("Bearer {credential}"));
@@ -3638,7 +3638,9 @@ fn websocket_request(
     propagation::inject_headers(request.headers_mut());
     request.headers_mut().insert(
         hyper::header::HeaderName::from_static("x-st3-features"),
-        hyper::header::HeaderValue::from_static("custom-subjects.v1, conversation-blocks.v1"),
+        hyper::header::HeaderValue::from_static(
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1",
+        ),
     );
     request.headers_mut().insert(
         hyper::header::SEC_WEBSOCKET_PROTOCOL,

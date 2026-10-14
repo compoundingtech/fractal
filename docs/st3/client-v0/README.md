@@ -1915,6 +1915,38 @@ ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p st3 --test integration
 Choose a binary built before these terminal filters. The fake legacy-server refusal
 and escaping test, server filter/paging tests, and TypeScript client checks run in CI.
 
+### Native delivery receipt links
+
+Capability `conversation-delivery-links` version 1 supports the optional top-level
+`TimelineEntry.delivers` message reference. Request it with
+`X-St3-Features: conversation-delivery-links.v1` (alongside any other features).
+A link names the Small Talk message consumed by that native user turn. Use
+`message.read` to retrieve its full body; a clipped native envelope is a preview.
+Without this feature the field is omitted, including on relayed and cached pages.
+The updated Rust owner-relay client negotiates it and preserves it through typed
+serialization; older daemons/clients keep their existing envelope workaround.
+
+The first producer is Claude's current verified transcript binding, explicit
+user-record id and existing consumption predicate. Queue acceptance/removal,
+ordinal-only ids, other unqualified adapters and old receipts supply no link.
+The owner retains only native session/record ids beside the newly appended read
+receipt in the same existing writer savepoint. Claim body, signature, receipt
+operation/idempotency digest and ACK timing are unchanged. This local metadata
+is not replicated, a transcript payload or an admission authority. No history
+is backfilled: restore from claim-only backups leaves these links unavailable.
+A normal reopen retains metadata; changing/deleting its physical receipt drops
+that binding. Reads never initialize or rebuild it.
+
+One statement checks at most 200 selected native ids, at most three indexed
+receipts each, and at most 4 KiB of receipt body each. Two eligible receipts for
+one native turn, an exhausted physical bound, repaired/noncanonical claims or
+missing operation proof leave the optional field absent. Newly recorded receipts
+wake the existing follower and cause its ordinary cursor-gap refresh when they
+would change an already delivered native entry. This is receipt provenance,
+not a read-after-send guarantee or proof that the owner's harness has delivered
+any unobserved send. Daemons roll out first. Optional author/recipients fields
+are a separate approved follow-up; existing from/to types are unchanged here.
+
 ### Owner-native conversation blocks
 
 With `X-St3-Features: conversation-blocks.v1`, native timeline entries include
