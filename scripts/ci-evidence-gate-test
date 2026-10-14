@@ -913,6 +913,10 @@ class WorkflowStructure(unittest.TestCase):
                 if results[victim] == 'success':
                     broken = {**results, victim: 'failure'}
                     self.assertFalse(accepts(event, broken, skip), label + (victim,))
+            # ...and rejects a skipped upgrade-impact or canaries even under a skip: they are never covered by it.
+            if lg:
+                for never in ('upgrade-impact', 'mail-redelivery-canaries'):
+                    self.assertFalse(accepts(event, {**results, never: 'skipped'}, 'true'), label + (never,))
             # ...and rejects skipped stages if its own gate had not said skip.
             if any(v == 'skipped' for n, v in results.items() if n not in ('linux-tests-shard-3', 'linux-tests-shard-4')):
                 self.assertTrue(lg, label)  # a stage can only be skipped when the aggregate's gate decided skip
@@ -950,6 +954,24 @@ class WorkflowStructure(unittest.TestCase):
                         for g in gates:
                             self.assertIn(f"needs.evidence-gate-{g}.outputs.skip == 'true'", condition, label)
                 self.assertTrue(saw_checkout)
+
+    def test_every_step_that_reads_the_shared_build_carries_the_skip_term_in_both_required_jobs(self):
+        blocks = self.blocks()
+        for check, gates in (('mail-redelivery-canaries', ('linux-gate', 'mail-redelivery-canaries')), ('isolation-vm', ('isolation-vm',))):
+            with self.subTest(check):
+                body = blocks[check].split('    steps:\n', 1)[1]
+                readers = []
+                for chunk in re.split(r'^      - ', body, flags=re.M)[1:]:
+                    # A step reads the build when it mentions the producer's outputs or result, however it uses them.
+                    if 'needs.linux-test-build' in chunk and 'name: evidence covered' not in chunk:
+                        readers.append(chunk)
+                self.assertGreaterEqual(len(readers), 2, f'{check}: expected the pre-check and the download to be found')
+                for chunk in readers:
+                    condition = re.search(r'^        if: (.*)$', chunk, re.M)
+                    self.assertIsNotNone(condition, chunk.split('\n')[0])
+                    for gate in gates:
+                        self.assertIn(f"needs.evidence-gate-{gate}.outputs.skip == 'true'", condition.group(1), chunk.split('\n')[0])
+                    self.assertIn('!(', condition.group(1))
 
     def test_the_build_is_skipped_only_through_its_dependents_never_on_its_own_say(self):
         block = self.blocks()['linux-test-build']
