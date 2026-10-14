@@ -41,6 +41,7 @@ import type { TerminalHistoryFactory } from '../terminal/historySource.ts'
 import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
 import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
 import type { AgentControlPort } from '../agents/agent-control-port.ts'
+import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
@@ -275,6 +276,8 @@ export interface DataSource {
   readonly retryTerminal?: (terminalRef: string) => void
   /** Restart, suspend, retire, start, resume or interrupt a seat (`agent.*`, Esc to its terminal). */
   readonly agentControls?: AgentControlPort
+  /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
+  readonly documents?: DocumentPort
   /** Explicit geometry action; never tied to the browser pane dimensions. */
   readonly terminalResize?: TerminalResizePort
   /** Retained owner scrollback, with its own independently granted availability. */
