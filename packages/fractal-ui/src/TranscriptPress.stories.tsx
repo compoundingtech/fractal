@@ -295,7 +295,8 @@ const externalOwnerPlay: NonNullable<Story['play']> = async context => {
     const action = within(context.canvasElement).getByRole('button', { name: 'Activate action-39' })
     pointer(action, 'pointerdown', 1, 'mouse')
     pointer(action, 'pointerup', 1, 'mouse')
-    await expect(warnings.filter(text => text.startsWith('EmbraceScrollViewport:')), 'warn once per lane, not per press').toHaveLength(1)
+    // Production still proves stable press geometry and activation above; only diagnostics are stripped.
+    if (import.meta.env.DEV) await expect(warnings.filter(text => text.startsWith('EmbraceScrollViewport:')), 'warn once per lane, not per press').toHaveLength(1)
   } finally { console.warn = original }
 }
 /** Defense in depth for a misconfigured host: the document, not the lane, scrolls. */
