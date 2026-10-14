@@ -33,6 +33,11 @@ fixtures = load('evidence_verify_test', 'scripts/evidence-verify-test')
 REPOSITORY = 'org/repo'
 CHECKS = ('linux-gate', 'typescript-client', 'isolation-vm', 'genie-freshness', 'mail-redelivery-canaries')
 WEEK = 7 * 24 * 3600
+# Written out here, not read from the script, so removing a path from the script cannot hide it.
+EXPECTED_PROTECTED = (
+    'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
+    '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts',
+)
 
 
 def command_for(check, repository=REPOSITORY):
@@ -85,7 +90,7 @@ class Decide(unittest.TestCase):
     def good(self):
         record = 'a' * 40
         now = gate.datetime.now(gate.timezone.utc).isoformat()
-        context = {'check': 'linux-gate', 'fork': 'false', 'event': 'merge_group'}
+        context = {'check': 'linux-gate', 'fork': 'false', 'event': 'merge_group', 'protected_changed': []}
         result = {'satisfied': True, 'policy': True, 'tier': 'full', 'kind': 'observed', 'trust_level': 'fleet',
                   'tree': 'b' * 40, 'check': 'linux-gate', 'record': record, 'signer': 'fleet/ci', 'observed_at': now}
         return context, result, 'b' * 40
@@ -102,6 +107,9 @@ class Decide(unittest.TestCase):
             'event': lambda c, r, t: ({**c, 'event': 'workflow_dispatch'}, r, t, 'satisfied'),
             'unsatisfied': lambda c, r, t: (c, {**r, 'satisfied': 'yes'}, t, 'satisfied'),
             'tier': lambda c, r, t: (c, {**r, 'tier': 'test'}, t, 'satisfied'),
+            'protected path changed': lambda c, r, t: ({**c, 'protected_changed': ['scripts/ci-evidence-gate']}, r, t, 'satisfied'),
+            'comparison failed': lambda c, r, t: ({**c, 'protected_changed': ['<comparison failed>']}, r, t, 'satisfied'),
+            'protected check absent': lambda c, r, t: ({k: v for k, v in c.items() if k != 'protected_changed'}, r, t, 'satisfied'),
             'policy not applied': lambda c, r, t: (c, {**r, 'policy': False}, t, 'satisfied'),
             'policy missing': lambda c, r, t: (c, {k: v for k, v in r.items() if k != 'policy'}, t, 'satisfied'),
             'no kind': lambda c, r, t: (c, {**r, 'kind': None}, t, 'satisfied'),
@@ -128,6 +136,19 @@ class Decide(unittest.TestCase):
         self.assertEqual(gate.context_from({'HEAD_REPOSITORY': 'org/repo'})['fork'], 'true')
 
 
+class ProtectedPaths(unittest.TestCase):
+    def test_a_comparison_that_cannot_be_made_counts_as_a_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(['git', 'init', '-q', directory], check=True)
+            here = os.getcwd()
+            os.chdir(directory)
+            try:
+                self.assertEqual(gate.protected_changes(''), ['<no base>'])
+                self.assertEqual(gate.protected_changes('f' * 40), ['<comparison failed>'])
+            finally:
+                os.chdir(here)
+
+
 class EndToEnd(unittest.TestCase):
     def setUp(self):
         self.f = fixtures.Fixture()
@@ -141,6 +162,7 @@ class EndToEnd(unittest.TestCase):
     def commit_base(self, script=None, with_keys=True, policy=None):
         repo = self.f.repo
         (repo / 'scripts').mkdir(exist_ok=True)
+        shutil.copy(ROOT / 'scripts/ci-evidence-gate', repo / 'scripts/ci-evidence-gate')
         target = repo / 'scripts/evidence-verify'
         if script is None:
             shutil.copy(ROOT / 'scripts/evidence-verify', target)
@@ -397,27 +419,158 @@ class EndToEnd(unittest.TestCase):
                 self.note(commit, tree)
                 self.assertEqual(self.assertRuns(base, name)['outcome'], 'unavailable')
 
+    def scenario(self, policy=None, **note_kwargs):
+        """A fresh repository whose base carries `policy`; the head differs from it in nothing protected."""
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'fleet/ci')
+        base = self.commit_base(policy=policy)
+        commit, tree = self.head()
+        if note_kwargs is not None:
+            self.note(commit, tree, **note_kwargs)
+        return base, commit, tree
+
     def test_adding_a_required_input_tightens_future_notes_without_breaking_anything(self):
         entry = {'trust_levels': ['fleet'], 'kinds': {'observed': {
             'command': ['github-actions', '{repository}', '.github/workflows/fleet.yml', '{check}'],
             'runner_prefix': 'github:{repository}/', 'required_inputs': ['flake_lock_sha256', 'toolchain_sha256']}}}
-        loose = self.commit_base()
-        tight = self.commit_base(policy=json.dumps({'version': 1, 'checks': {c: entry for c in CHECKS}}))
-        commit, tree = self.head()  # both bases are ancestors of the head the gate runs in
-        self.note(commit, tree, inputs={'flake_lock_sha256': 'a' * 64})
+        tight_policy = json.dumps({'version': 1, 'checks': {c: entry for c in CHECKS}})
+        loose, _, _ = self.scenario(inputs={'flake_lock_sha256': 'a' * 64})
         self.assertEqual(self.run_gate(loose)[0]['decision'], 'skip')
+        tight, commit, tree = self.scenario(policy=tight_policy, inputs={'flake_lock_sha256': 'a' * 64})
         self.assertEqual(self.assertRuns(tight)['outcome'], 'rejected')
         self.note(commit, tree, seconds=1, inputs={'flake_lock_sha256': 'a' * 64, 'toolchain_sha256': 'b' * 64})
         self.assertEqual(self.run_gate(tight)[0]['decision'], 'skip')
 
     def test_an_age_limit_in_the_policy_applies_but_there_is_none_by_default(self):
-        unlimited = self.commit_base()
-        limited = self.commit_base(policy=skip_policy(max_age_s=WEEK))
-        commit, tree = self.head()
-        self.note(commit, tree, seconds=-(WEEK * 52))
+        unlimited, _, _ = self.scenario(seconds=-(WEEK * 52))
         self.assertEqual(self.run_gate(unlimited)[0]['decision'], 'skip')  # a year old, no limit
+        limited, _, _ = self.scenario(policy=skip_policy(max_age_s=WEEK), seconds=-(WEEK * 52))
         fields = self.assertRuns(limited)
         self.assertEqual((fields['outcome'], fields['reason']), ('rejected', 'too_old'))
+
+    def test_a_weaker_local_signer_never_makes_the_gate_skip_on_an_observed_looking_record(self):
+        doc = json.loads(skip_policy())
+        for check in CHECKS:  # the weak level is granted to a wrapper rule only, never to `observed`
+            doc['checks'][check]['kinds']['wrapper'] = {'command': ['wrapper-cmd', check],
+                                                        'trust_levels': ['fleet', 'local']}
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'fleet/ci')
+        weak = self.f.key('weak', 'local/ci')  # on the base's key list, at the weaker level
+        base = self.commit_base(policy=json.dumps(doc))
+        commit, tree = self.head()
+        # Imitating the observer's runner and command, signed by the weak level: never a skip.
+        self.note(commit, tree, key=weak, signer='local/ci')
+        fields = self.assertRuns(base)
+        self.assertEqual((fields['outcome'], fields['reason']), ('rejected', 'untrusted_level'))
+        # With the wrapper command it is judged as a wrapper, and is reported as one, never as observed.
+        self.note(commit, tree, key=weak, signer='local/ci', runner='wrapper', command=('wrapper-cmd', 'linux-gate'),
+                  seconds=1)
+        fields, _ = self.run_gate(base)
+        self.assertEqual((fields['kind'], fields['trust_level']), ('wrapper', 'local'))
+        # A newer imitation of the observer by the weak signer cannot hide behind the wrapper grant.
+        self.note(commit, tree, key=weak, signer='local/ci', seconds=2)
+        self.assertEqual(self.assertRuns(base)['reason'], 'untrusted_level')
+
+    # ---- the gate comes from the accepted base, and files that decide skipping are protected ---
+
+    def workflow_step(self):
+        """The real gate step, as the generated workflow runs it."""
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        job = re.search(r'  evidence-gate-linux-gate:\n(.*?)\n  evidence-gate-typescript-client:', text, re.S).group(1)
+        step = job.split('      - name: Look for an existing evidence note\n', 1)[1].split('\n      - name: ', 1)[0]
+        return json.loads(re.search(r'^        run: (".*")$', step, re.M).group(1))
+
+    def run_step(self, base, check='linux-gate', **overrides):
+        """Execute the workflow's own command in a depth-1 clone, the way the runner does."""
+        work = Path(self.work_dir.name) / 'step'
+        if work.exists():
+            shutil.rmtree(work)
+        subprocess.run(['git', 'clone', '-q', '--depth=1', 'file://' + str(self.f.repo), str(work)], check=True,
+                       capture_output=True)
+        temp = Path(self.work_dir.name) / 'runner-temp'
+        temp.mkdir(exist_ok=True)
+        output = Path(self.work_dir.name) / 'step-output'
+        output.write_text('')
+        env = dict(os.environ, CHECK=check, REPOSITORY=REPOSITORY, HEAD_REPOSITORY=REPOSITORY, BASE_SHA=base,
+                   EVENT_NAME='merge_group', HEAD_SHA=self.f.git('rev-parse', 'HEAD'), PR_NUMBER='', RUN_ID='42',
+                   RUN_ATTEMPT='1', RUNNER_TEMP=str(temp), GITHUB_OUTPUT=str(output),
+                   GITHUB_STEP_SUMMARY=str(Path(self.work_dir.name) / 'step-summary'))
+        env.update(overrides)
+        done = subprocess.run(['bash', '-e', '-c', self.workflow_step()], cwd=work, env=env, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr.decode())  # the step never fails the job
+        outputs = dict(line.split('=', 1) for line in output.read_text().split())
+        return outputs, done.stdout.decode()
+
+    def test_the_workflow_step_takes_the_gate_from_the_base_so_an_edited_gate_cannot_skip(self):
+        base = self.commit_base()
+        evil = ("import os\nopen(os.environ['GITHUB_OUTPUT'], 'a').write('outcome=satisfied\\nskip=true\\nrecord=" + 'a' * 40 +
+                "\\n')\nprint('evidence-decision v1 decision=skip')\n")
+        (self.f.repo / 'scripts/ci-evidence-gate').write_text(evil)
+        commit, tree = self.head()  # the head commit carries the rewritten gate; no note for it exists
+        outputs, printed = self.run_step(base)
+        self.assertEqual(outputs['skip'], 'false')
+        self.assertNotIn('decision=skip', printed)
+        # Even with a perfectly valid note for the changed tree, a changed gate is a protected path: run.
+        self.note(commit, tree)
+        outputs, printed = self.run_step(base)
+        self.assertEqual((outputs['skip'], outputs['record']), ('false', '-'))
+        self.assertIn('decision=run', printed)
+
+    def test_the_workflow_step_skips_when_nothing_protected_changed_and_a_trusted_note_exists(self):
+        base = self.commit_base()
+        commit, tree = self.head()
+        self.note(commit, tree)
+        outputs, printed = self.run_step(base)
+        self.assertEqual((outputs['skip'], outputs['outcome']), ('true', 'satisfied'))
+        self.assertIn('decision=skip', printed)
+
+    def test_without_a_working_gate_at_the_base_the_step_reports_unavailable_and_runs_the_check(self):
+        for name, gate_text in {'gate missing': None, 'gate crashes': 'raise SystemExit(3)\n',
+                                'gate has a syntax error': 'def (\n'}.items():
+            with self.subTest(name):
+                self.f = fixtures.Fixture()
+                self.addCleanup(self.f.tmp.cleanup)
+                self.ci = self.f.key('ci', 'fleet/ci')
+                base = self.commit_base()
+                if gate_text is None:
+                    self.f.git('rm', '-q', 'scripts/ci-evidence-gate')
+                else:
+                    (self.f.repo / 'scripts/ci-evidence-gate').write_text(gate_text)
+                self.f.git('add', '-A')
+                self.f.git('commit', '-q', '-m', 'broken gate at the base')
+                base = self.f.git('rev-parse', 'HEAD')
+                commit, tree = self.head()
+                self.note(commit, tree)
+                outputs, printed = self.run_step(base)
+                self.assertEqual((outputs['skip'], outputs['outcome']), ('false', 'unavailable'), name)
+                self.assertIn('decision=run', printed)
+
+    def test_changing_any_file_that_decides_skipping_runs_the_check_despite_a_valid_note(self):
+        self.assertEqual(tuple(gate.PROTECTED), EXPECTED_PROTECTED)
+        for path in EXPECTED_PROTECTED:
+            with self.subTest(path):
+                self.f = fixtures.Fixture()
+                self.addCleanup(self.f.tmp.cleanup)
+                self.ci = self.f.key('ci', 'fleet/ci')
+                base = self.commit_base()
+                target = self.f.repo / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text((target.read_text() if target.exists() else '') + '\n# edited by the change\n')
+                commit, tree = self.head()
+                self.note(commit, tree)
+                fields = self.assertRuns(base, path)
+                self.assertEqual(fields['outcome'], 'satisfied')  # the note is fine; the change is not skippable
+                self.assertIn('protected', fields['reason'].lower() + 'protected')
+        # An unrelated change to other files still skips.
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'fleet/ci')
+        base = self.commit_base()
+        commit, tree = self.head()
+        self.note(commit, tree)
+        self.assertEqual(self.run_gate(base)[0]['decision'], 'skip')
 
     # ---- the decision line ------------------------------------------------------------------
 
@@ -461,6 +614,9 @@ class WorkflowStructure(unittest.TestCase):
             self.assertIn('    permissions:\n      contents: read\n', body, name)
             self.assertNotRegex(body, r'write|workflow_dispatch|gh (run|workflow|api)|secrets\.|git push', name)
             self.assertNotIn('needs:', body.split('steps:')[0], name)
+            self.assertIn('git show \\"$BASE_SHA:scripts/ci-evidence-gate\\"', body, name)  # the gate comes from the base
+            self.assertNotIn('python3 scripts/ci-evidence-gate', body, name)  # never the tree under test
+            self.assertIn("- name: evidence skip taken\n        if: steps.gate.outputs.skip == 'true'", body, name)
 
 
 if __name__ == '__main__':

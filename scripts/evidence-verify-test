@@ -569,6 +569,45 @@ class SkipPolicy(unittest.TestCase):
         code, result = self.f.verify(future_tree, rules=self.rules())
         self.assertEqual((code, result['reason']), (1, 'future_dated'))
 
+    def test_a_weaker_signer_admitted_for_wrapper_notes_never_satisfies_the_observed_rule(self):
+        weak = self.f.key('weak', 'local/ci')
+        doc = json.loads(policy_text(trust_levels=['fleet', 'machine']))
+        doc['checks']['unit']['kinds']['wrapper']['trust_levels'] = ['fleet', 'machine', 'local']
+        rules = self.rules(json.dumps(doc))
+        flake = {'flake_lock_sha256': self.good, 'toolchain_sha256': 'f' * 64}
+        # The weak signer imitates the central observer exactly: runner, command, everything the record says.
+        self.f.note(self.commit, self.tree, weak, 'local/ci', runner=OBSERVED,
+                    command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        code, result = self.f.verify(self.tree, rules=rules)
+        self.assertEqual((code, result['reason']), (1, 'untrusted_level'))
+        # It cannot dress an observed-looking command in a wrapper record either: the wrapper rule has its own command.
+        self.f.note(self.commit, self.tree, weak, 'local/ci', runner='wrapper', seconds=1, inputs=flake,
+                    command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        code, result = self.f.verify(self.tree, rules=rules)
+        self.assertEqual((code, result['reason']), (1, 'wrong_command'))
+        # Admitted explicitly for wrapper notes, with the wrapper's own command and inputs, it passes as a wrapper.
+        self.f.note(self.commit, self.tree, weak, 'local/ci', runner='wrapper', seconds=2, inputs=flake)
+        code, result = self.f.verify(self.tree, rules=rules)
+        self.assertEqual((code, result['kind'], result['trust_level']), (0, 'wrapper', 'local'))
+        # Without that explicit per-kind grant the same wrapper note is refused: no silent promotion.
+        strict = self.rules(policy_text(trust_levels=['fleet', 'machine']))
+        code, result = self.f.verify(self.tree, rules=strict)
+        self.assertEqual((code, result['reason']), (1, 'untrusted_level'))
+        # And a newer failing wrapper note from the weak signer still stops a skip of the observed record.
+        self.f.note(self.commit, self.tree, self.ci, 'machine/ci1', runner=OBSERVED, seconds=3,
+                    command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        self.f.note(self.commit, self.tree, weak, 'local/ci', runner='wrapper', seconds=4, inputs=flake, exit_code=1)
+        code, result = self.f.verify(self.tree, rules=rules)
+        self.assertEqual((code, result['reason']), (1, 'check_failed'))
+
+    def test_a_per_kind_trust_level_list_is_validated(self):
+        for bad in ([], [''], 'fleet', [1]):
+            doc = json.loads(policy_text())
+            doc['checks']['unit']['kinds']['wrapper']['trust_levels'] = bad
+            with self.assertRaises(evidence_verify.Failure, msg=repr(bad)) as caught:
+                self.rules(json.dumps(doc))
+            self.assertEqual(caught.exception.reason, 'error')
+
     def test_the_cli_reads_the_policy_from_the_accepted_base(self):
         self.observed()
         (self.f.repo / '.st').mkdir(exist_ok=True)

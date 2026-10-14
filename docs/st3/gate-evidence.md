@@ -435,8 +435,12 @@ group base), never from the change under test, and says per check what a note mu
 ```
 
 Each kind has its own rule: the exact `command` the record must have run, an optional
-`runner_prefix`, the `required_inputs` it must carry (every one a nonempty string) and
-`bind_inputs`, which must equal the sha256 of a file as it is in the tree being verified.
+`runner_prefix`, optional per-kind `trust_levels`, the `required_inputs` it must carry (every one a nonempty string) and
+`bind_inputs`, which must equal the sha256 of a file as it is in the tree being verified. A kind's own
+`trust_levels` replaces the check's for that kind only, so a weaker signer (say `local`, the CI's
+own runner signer) can be admitted for `wrapper` notes without ever satisfying `observed`; a note
+never changes kind, since the kind comes from the record's runner and each kind keeps its own
+command and inputs.
 **Adding an input to `required_inputs` tightens future notes without breaking anything**: a
 note that lacks it simply stops satisfying the check (`missing_input`). `max_age_s` is `null`
 by default (no age limit; a signature is meant to grow to cover more over time); a note claiming
@@ -458,12 +462,42 @@ about this run's tree. It prints `decision=skip` only if **all** of these hold, 
 - the verifier exits 0 reporting `satisfied`, that it applied the policy, tier `full`, and a
   kind, trust level, signer and record id of the expected shape;
 - the verifier's tree equals this run's own tree and its check equals this job's check;
-- the record's time is not in the future.
+- the record's time is not in the future;
+- **no file that decides skipping differs between the accepted base and this run's tree**:
+  `scripts/ci-evidence-gate`, `scripts/evidence-verify`, `.st/evidence-skip-policy.json`,
+  `.st/evidence-keys`, `.github/workflows/fleet.yml` and its `.genie.ts` source. Such a change always
+  runs everything, and a comparison that cannot be made counts as a change.
 
 A verifier that is missing, slow (30 seconds), crashes, prints invalid UTF-8 or contradicts the run
-leaves `decision=run`. The jobs run the gate script from the checked-out change; a job that actually
-skips must run it from the accepted base as well (for example a required workflow, or a
-`pull_request_target` job that never checks out the change's code).
+leaves `decision=run`.
+
+**The gate script comes from the accepted base, like the verifier.** The step runs
+`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy, and if the base has no
+gate or it fails in any way the step reports `unavailable` and the check runs. A change that rewrites
+the gate therefore cannot make itself skip, and the protected-path rule above makes any such change
+run in full. What remains is the workflow file itself, which a same-repo change can edit; that is
+visible in review, is itself a protected path (so that very change runs in full), and is the documented
+same-repo limit. Fork pull requests never skip.
+
+Limits, stated plainly:
+- The shipped `observed` rule has no `required_inputs` or `bind_inputs`. That is deliberate: a note is
+  keyed to the exact tree, and the tree contains the workflow, so tree equality plus the pinned command
+  and runner prefix is the binding. The central observer additionally records full tier only for a
+  workflow and recipe matching its operator pin.
+- For a pull request the tree is the merge-ref tree, so a note matches only a branch that is current
+  with main.
+- With no age limit (`max_age_s` null), an old success on the identical tree can skip checks that depend
+  on the hosted image or on timing (`typescript-client`, `isolation-vm`). That is a choice, recorded in
+  the known defects; `age_s` in the decision line is there to audit it.
+
+### Skips are not recorded as fresh runs
+
+A job that skipped because a note covered it still ends in success. Each gate job therefore runs one
+more fixed step, `evidence skip taken`, when it decides to skip. **The observer must not record a check
+whose gate job ran that step as a finished run**: otherwise one real run would keep refreshing its own
+skips and the age and attempt data would lie. This is a contract with the observer (it lives in
+`.github/workflows` of the Evidence observe workflow, not in this change) and nothing may consume the
+skip decision until the observer honors it.
 
 ### The decision line
 
@@ -479,7 +513,7 @@ tree=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=tr
 (one line; wrapped here). Each job also ends with exactly one of these steps running, which is how a
 collector reads the outcome from the jobs API: `evidence satisfied by existing note`,
 `evidence existing note is degraded`, `evidence no note`, `evidence note rejected`,
-`evidence verifier unavailable`. A note made for a pull request is reused by the merge queue's run
+`evidence verifier unavailable`, plus `evidence skip taken` when the decision is skip. A note made for a pull request is reused by the merge queue's run
 only when the tree is identical, that is, when main has not moved in between.
 
 ### Loops

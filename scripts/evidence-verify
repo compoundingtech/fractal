@@ -62,7 +62,7 @@ def git(repo, *args, stdin=None, config=()):
 
 POLICY_KEYS = {'version', 'checks'}
 CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s'}
-KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs'}
+KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels'}
 
 
 def policy_rules(text, check, repository):
@@ -103,6 +103,10 @@ def policy_rules(text, check, repository):
         required = rule.get('required_inputs', [])
         bind = rule.get('bind_inputs', {})
         prefix = rule.get('runner_prefix')
+        kind_levels = rule.get('trust_levels')
+        if kind_levels is not None and not (isinstance(kind_levels, list) and kind_levels
+                                            and all(isinstance(v, str) and v for v in kind_levels)):
+            raise Failure('error', f'skip policy for {check}/{kind}: trust_levels must be a nonempty list of names')
         if not (isinstance(required, list) and all(isinstance(v, str) and v for v in required)
                 and isinstance(bind, dict) and all(isinstance(k, str) and k and isinstance(v, str) and v
                                                    for k, v in bind.items())
@@ -112,7 +116,10 @@ def policy_rules(text, check, repository):
                        'runner_prefix': fill(prefix) if prefix else None,
                        # Binding an input also requires it, so the list can never be shorter than the binding.
                        'required_inputs': sorted(set(required) | set(bind)),
-                       'bind_inputs': dict(bind)}
+                       'bind_inputs': dict(bind),
+                       # A kind may name its own signer levels; otherwise it uses the check's. Naming them
+                       # per kind is what lets a weaker signer satisfy `wrapper` without ever satisfying `observed`.
+                       'trust_levels': tuple(kind_levels) if kind_levels else None}
     return {'kinds': kinds, 'trust_levels': tuple(levels), 'max_age_s': max_age}
 
 
@@ -280,7 +287,8 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
         if rule:
             command, runner_prefix, bind = rule['command'], rule['runner_prefix'], list(rule['bind_inputs'].items())
             required_inputs = rule['required_inputs']
-        trust_levels, max_age = rules['trust_levels'], rules['max_age_s']
+        trust_levels = (rule['trust_levels'] if rule and rule['trust_levels'] else rules['trust_levels'])
+        max_age = rules['max_age_s']
     if kind is None or kind not in kinds:
         raise Failure('unsupported_kind', f'runner {observed["runner"]!r} is not one of {", ".join(kinds)}',
                       attempts=attempts)

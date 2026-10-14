@@ -138,13 +138,18 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
         RUN_ID: '${{ github.run_id }}',
         RUN_ATTEMPT: '${{ github.run_attempt }}',
       },
-      run: 'python3 scripts/ci-evidence-gate',
+      // The gate is taken from the accepted base, like the verifier, so a change cannot rewrite the
+      // script that decides whether it is skipped. No gate at the base, or any failure: run the check.
+      run: `git fetch --no-tags --depth=1 -q origin "$BASE_SHA" && git show "$BASE_SHA:scripts/ci-evidence-gate" > "$RUNNER_TEMP/ci-evidence-gate" && python3 "$RUNNER_TEMP/ci-evidence-gate" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> "$GITHUB_OUTPUT"; echo "evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }`,
     },
     ...evidenceGateOutcomes.map(([outcome, name]) => ({
       name,
       if: `steps.gate.outputs.outcome == '${outcome}'`,
       run: `echo ${name}`,
     })),
+    // Fixed name: a decision to skip was taken. The observer must not record a check whose gate ran
+    // this step as a fresh finished run, or one real run would keep refreshing its own skips.
+    { name: 'evidence skip taken', if: "steps.gate.outputs.skip == 'true'", run: 'echo evidence skip taken' },
   ],
 }]))
 

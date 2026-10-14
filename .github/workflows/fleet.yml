@@ -319,7 +319,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python3 scripts/ci-evidence-gate
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -335,6 +335,9 @@ jobs:
       - name: evidence verifier unavailable
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -365,7 +368,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python3 scripts/ci-evidence-gate
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -381,6 +384,9 @@ jobs:
       - name: evidence verifier unavailable
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -411,7 +417,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python3 scripts/ci-evidence-gate
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -427,6 +433,9 @@ jobs:
       - name: evidence verifier unavailable
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -457,7 +466,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python3 scripts/ci-evidence-gate
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -473,6 +482,9 @@ jobs:
       - name: evidence verifier unavailable
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -503,7 +515,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python3 scripts/ci-evidence-gate
+        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -519,6 +531,9 @@ jobs:
       - name: evidence verifier unavailable
         if: steps.gate.outputs.outcome == 'unavailable'
         run: echo evidence verifier unavailable
+      - name: evidence skip taken
+        if: steps.gate.outputs.skip == 'true'
+        run: echo evidence skip taken
       - name: Report job cache coverage
         if: always()
         shell: bash

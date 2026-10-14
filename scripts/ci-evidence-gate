@@ -29,6 +29,12 @@ sys.dont_write_bytecode = True
 # any maximum age. This script only adds what no policy can say: who may skip and when.
 SKIP_EVENTS = ('pull_request', 'merge_group')
 VERIFIER_TIMEOUT = int(os.environ.get('GATE_VERIFIER_TIMEOUT', '30'))
+# A change that touches anything that decides a skip is never skipped: those files are what
+# a forged skip would have to edit. Compared between the accepted base and this run's tree.
+PROTECTED = (
+    'scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
+    '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts',
+)
 
 NOTES = 'refs/notes/evidence/*:refs/notes/evidence/*'
 VERIFIER = 'scripts/evidence-verify'
@@ -67,6 +73,8 @@ def decide(context, outcome, result, tree):
         return 'run', 'fork or unknown head repository'
     if context['event'] not in SKIP_EVENTS:
         return 'run', 'event does not allow skipping'
+    if context.get('protected_changed') != []:
+        return 'run', 'a file that decides skipping changed, or could not be compared'
     checks = [
         (result.get('satisfied') is True, 'verifier did not report satisfied'),
         (result.get('policy') is True, 'the skip policy was not applied'),
@@ -94,6 +102,17 @@ def age_of(result):
         return int((datetime.now(timezone.utc) - moment).total_seconds())
     except (KeyError, ValueError):
         return None
+
+
+def protected_changes(base):
+    """Protected paths that differ between the accepted base and this run's tree; fails closed."""
+    if not base:
+        return ['<no base>']
+    done = run('git', 'diff', '--name-only', '-z', base, 'HEAD')
+    if done.returncode != 0:
+        return ['<comparison failed>']
+    paths = [p for p in done.stdout.decode(errors='replace').split('\0') if p]
+    return [p for p in paths if p in PROTECTED]
 
 
 def observe(context):
@@ -178,6 +197,10 @@ def main():
                 outcome, result, detail, verifier_sha = observe(context)
     except Exception as error:  # the gate must never fail the job
         outcome, result, detail = 'unavailable', None, f'{type(error).__name__}: {error}'
+    try:
+        context['protected_changed'] = protected_changes(context['base'])
+    except Exception:
+        context['protected_changed'] = ['<comparison failed>']
     try:
         decision, why = decide(context, outcome, result, tree)
     except Exception:
