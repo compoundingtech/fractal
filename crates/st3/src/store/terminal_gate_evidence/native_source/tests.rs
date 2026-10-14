@@ -75,9 +75,15 @@ impl Fixture {
         let mut writer = self.store.connection.write();
         let tx = writer.transaction().unwrap();
         tx.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('foreign','node',999,'fixture-foreign','1')",[]).unwrap();
+        // Keep the raw legacy volume fixture in bounded batches. Replica-record writes
+        // intentionally invalidate this private source adapter; a single 100000-row legacy
+        // batch would instead multiply position-recovery work while settling publication.
+        tx.execute("WITH RECURSIVE pages(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM pages WHERE n<(?1-1)/64)
+            INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+            SELECT 'foreign-page/'||n,'node',1000+n,'fixture-page/'||n,'1' FROM pages", [n]).unwrap();
         tx.execute("WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n<?1)
             INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
-            SELECT 'foreign/'||n,'foreign','exec/unrelated/'||n,'runtime.observed','node','{}','[]','1' FROM rows WHERE n<=?1",
+            SELECT 'foreign/'||n,'foreign-page/'||((n-1)/64),'exec/unrelated/'||n,'runtime.observed','node','{}','[]','1' FROM rows WHERE n<=?1",
             [n]).unwrap();
         tx.commit().unwrap();
     }
@@ -485,6 +491,10 @@ fn native_gate_unrelated_and_noop_work_at_zero_1024_and_100000_rows() {
         if n > 0 {
             f.populate_foreign(n);
         }
+        // Bulk admission intentionally leaves bounded publication-maintenance pages.
+        // Finish that independent work before measuring an idle terminal-gate transaction;
+        // its commit would otherwise correctly drain a publication page after the scope ends.
+        while !f.store.advance_publication_evidence().unwrap() {}
         {
             let writer = f.store.connection.write();
             writer

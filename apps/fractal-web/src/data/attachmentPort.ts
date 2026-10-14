@@ -1,4 +1,4 @@
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
+import { ClientError, appliedAnswer, type St3Client } from '@smalltalk/st3-client'
 import type { ActionResult } from '@smalltalk/st3-client/schema'
 import * as Native from '@smalltalk/st3-client/schema'
 
@@ -101,6 +101,11 @@ export const gatewayMessageSend =
     } catch (cause) {
       if (cause instanceof ClientError && cause.response.code === 'stale-fence') {
         return { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
+      }
+      // st could not confirm the send in time, and it may still complete: only the identical
+      // request (same id, key and parameters) is safe to send again.
+      if (cause instanceof ClientError && appliedAnswer(cause) === 'unknown') {
+        return { _tag: 'Refused', reason: 'unconfirmed', detail: cause.response.message, error: cause.response }
       }
       return conversationPortFailure(cause)
     }
