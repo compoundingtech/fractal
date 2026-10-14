@@ -8,7 +8,7 @@ import { ANSWERS, isRequest, personAnswer, report, spaced, yesNo } from '../../.
 import { ago } from '../../../../../clients/typescript/st3-views/time.ts'
 import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { AlertButton } from './AlertButton.tsx'
-import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
+import { tokens } from '../../ui-compat/tokens.stylex.ts'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 
 // Asks and review gates in an agent's conversation, answered in place with the answers stui and
@@ -112,24 +112,24 @@ const KIND_WORDS: Record<string, string> = {
 }
 
 const styles = stylex.create({
-  alert: { display: 'flex', flexDirection: 'column', gap: scale.space2, fontSize: '0.8125rem' },
+  alert: { display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.8125rem' },
   title: { fontWeight: 600, color: tokens['--ds-gray-1000'] },
   meta: { color: tokens['--ds-gray-900'], fontSize: '0.75rem' },
   body: { color: tokens['--ds-gray-1000'], overflowWrap: 'anywhere' },
-  report: { margin: 0, display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: scale.space2, fontSize: '0.75rem' },
+  report: { margin: 0, display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: '8px', fontSize: '0.75rem' },
   key: { color: tokens['--ds-gray-900'] },
   fault: { color: tokens['--ds-red-900'] },
   soft: { color: tokens['--ds-gray-900'] },
   value: { margin: 0 },
   list: { margin: 0, paddingInlineStart: '1.25rem' },
-  answers: { display: 'flex', flexWrap: 'wrap', gap: scale.space2, alignItems: 'center' },
+  answers: { display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' },
   consequence: { color: tokens['--ds-gray-900'], fontSize: '0.75rem' },
   words: {
     width: '100%',
     boxSizing: 'border-box',
     minHeight: '3.5rem',
     resize: 'vertical',
-    padding: scale.space2,
+    padding: '8px',
     borderRadius: 4,
     borderWidth: 1,
     borderStyle: 'solid',

@@ -17,7 +17,7 @@ import {
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAttention, useDataSource } from '../../data/react.tsx'
 import type { UxTelemetry } from '../../telemetry/ux.ts'
-import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
+import { tokens } from '../../ui-compat/tokens.stylex.ts'
 import { AlertButton } from './AlertButton.tsx'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { AnswerAlert } from './AnswerAlert.tsx'
@@ -39,7 +39,7 @@ const styles = stylex.create({
     marginInline: 'auto',
     display: 'flex',
     flexDirection: 'column',
-    gap: scale.space2,
+    gap: '8px',
     paddingBlock: s.md,
     borderTopWidth: 1,
     borderTopStyle: 'solid',
@@ -49,21 +49,21 @@ const styles = stylex.create({
     overflowY: 'auto',
   },
   count: { fontWeight: 600, fontSize: '0.75rem', color: tokens['--ds-gray-900'] },
-  folded: { display: 'flex', flexDirection: 'column', gap: scale.space2 },
+  folded: { display: 'flex', flexDirection: 'column', gap: '8px' },
   summary: { cursor: 'pointer', fontWeight: 600, fontSize: '0.8125rem', color: tokens['--ds-gray-1000'] },
-  alert: { display: 'flex', flexDirection: 'column', gap: scale.space1, fontSize: '0.8125rem' },
+  alert: { display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '0.8125rem' },
   title: { fontWeight: 600, color: tokens['--ds-gray-1000'] },
   detail: { color: tokens['--ds-gray-900'], whiteSpace: 'pre-wrap' },
   call: {
     margin: 0,
-    padding: scale.space2,
+    padding: '8px',
     borderRadius: 4,
     backgroundColor: tokens['--ds-gray-alpha-100'],
     whiteSpace: 'pre-wrap',
     overflowWrap: 'anywhere',
     fontSize: '0.75rem',
   },
-  answers: { display: 'flex', flexWrap: 'wrap', gap: scale.space2 },
+  answers: { display: 'flex', flexWrap: 'wrap', gap: '8px' },
   note: { color: tokens['--ds-gray-900'], fontSize: '0.75rem' },
 })
 
