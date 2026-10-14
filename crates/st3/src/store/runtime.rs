@@ -129,6 +129,7 @@ impl SmalltalkRuntime {
             [],
         )?;
         connection.execute_batch(git_changes::SCHEMA)?;
+        retirements::create_selection_triggers(connection)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
         backfill_message_index(connection)?;
@@ -554,11 +555,13 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(SCHEMA)?;
         transaction.execute_batch(&RUNTIME_ID_INDEX)?;
         transaction.execute_batch(arrangements::SCHEMA)?;
+        transaction.execute_batch(retirements::SCHEMA)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(&RUNTIME_ID_INDEX)?;
         connection.execute_batch(arrangements::SCHEMA)?;
+        connection.execute_batch(retirements::SCHEMA)?;
     }
     Ok(())
 }

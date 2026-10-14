@@ -2207,50 +2207,8 @@ impl Ui {
                 Hit::PaletteSection(1),
             );
             spans.push(Span::styled(working_text, bar(theme::fg(theme::WORKING))));
-            // Missions with work open: running, waiting their turn, or waiting on someone.
-            // The count comes from the mission rows: with the window not followed there is no count to
-            // show, and the bar says so rather than a stale number.
-            let followed = self.world.missions_followed && self.world.missions.ready().is_some();
-            let counted = |keep: fn(Word) -> bool| {
-                followed.then(|| {
-                    screens::mission_order(&self.world, false)
-                        .iter()
-                        .filter(|mission| keep(mission.word))
-                        .count()
-                })
-            };
-            let active = counted(Word::is_active);
-            let stuck = counted(Word::is_stuck).filter(|stuck| *stuck > 0);
-            spans.push(Span::styled(" · ", bar(theme::dim())));
-            x = area.x + Line::from(spans.clone()).width() as u16;
-            let active_text = match active.or(self.world.active_missions) {
-                Some(active) => format!("◇ {active} active"),
-                None => "◇ missions".to_owned(),
-            };
-            self.hit(
-                Rect {
-                    x,
-                    width: text::width(&active_text) as u16,
-                    ..area
-                },
-                Hit::PaletteSection(2),
-            );
-            spans.push(Span::styled(active_text, bar(theme::fg(theme::SAPPHIRE))));
-            // Stuck runs are not active, and not hidden: they are named beside the count.
-            if let Some(stuck) = stuck {
-                spans.push(Span::styled(" · ", bar(theme::dim())));
-                x = area.x + Line::from(spans.clone()).width() as u16;
-                let stuck_text = format!("▲ {stuck} stuck");
-                self.hit(
-                    Rect {
-                        x,
-                        width: text::width(&stuck_text) as u16,
-                        ..area
-                    },
-                    Hit::PaletteSection(2),
-                );
-                spans.push(Span::styled(stuck_text, bar(theme::fg(theme::FAULT))));
-            }
+            // No mission counts here (Nathan, 2026-10-12: until they become more meaningful); the
+            // missions list keeps them.
             let machines = self.world.machines.items();
             machines_shown = !machines.is_empty();
             if machines_shown {
@@ -2810,16 +2768,15 @@ impl Ui {
             KeyCode::Char('e') if control && conversation.is_some() => self.toggle_all_tools(),
             KeyCode::Char('p') if control && conversation.is_some() => self.toggle_simple(),
             KeyCode::Char('d') if control && conversation.is_some() => self.toggle_details(),
-            // Ctrl+R sends a message st never had again; with none to send it speaks into the box,
-            // as it does once the box is open (Nathan, 2026-10-05: it did nothing until a letter
-            // had opened the box).
+            // Ctrl+R tries again: it sends a message st never had again. Speaking into the box is
+            // Ctrl+Y, with the box open or not (Nathan, 2026-10-05: it did nothing until a letter
+            // had opened the box; 2026-10-14: Ctrl+R means retry, so voice moved off it).
             KeyCode::Char('r') if control && conversation.is_some() && self.live => {
                 if let Some(entry) = self.undelivered() {
                     self.effects.push(Effect::Resend { entry });
-                } else {
-                    self.start_voice();
                 }
             }
+            KeyCode::Char('y') if control && conversation.is_some() && self.live => self.start_voice(),
             // Backspace takes a message st never had back into the box, to change or delete.
             KeyCode::Backspace
                 if quiet
@@ -4241,6 +4198,18 @@ mod tests {
     }
 
     #[test]
+    fn a_retired_reserved_sidebar_is_never_created_again() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        // st refused a create because the person retired their Sidebar, and none older exists.
+        ui.resource_sidebar.reserved_retired = true;
+        ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, "Builds");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))), "nothing creates a retired subject");
+        assert_eq!(ui.flash.as_ref().map(|(text, _)| text.as_str()), Some(resource_sidebar::SIDEBAR_RETIRED));
+    }
+
+    #[test]
     fn sidebar_folder_names_and_add_finder_use_the_existing_palette() {
         use resource_sidebar::PaletteMode as Mode;
         let mut ui = glass();
@@ -4376,7 +4345,7 @@ mod tests {
             first.contains("alerts") && first.contains("working") && first.contains("main"),
             "{first}"
         );
-        assert!(!first.contains("⌂") && first.contains("active"), "{first}");
+        assert!(!first.contains("⌂") && !first.contains("active") && !first.contains("stuck"), "{first}");
         // A glass with nothing open shows Home, under a bar for starting things.
         assert!(shown.contains("New terminal") && !shown.contains("New agent"), "{shown}");
         assert!(shown.contains("ctrl+k open"));
@@ -4743,7 +4712,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_speaks_in_a_conversation_without_the_box_open_first() {
+    fn ctrl_y_speaks_in_a_conversation_without_the_box_open_first() {
         let mut ui = glass();
         ui.live = true;
         ui.open_in_glass(
@@ -4751,12 +4720,12 @@ mod tests {
             Open::Tab,
         );
         assert!(!ui.editing, "the box is closed");
-        ctrl(&mut ui, 'r');
+        ctrl(&mut ui, 'y');
         // Without a speech helper (this test has none) it says so; before, it did nothing.
         let flash = ui.flash.as_ref().map(|(message, _)| message.as_str());
         assert!(
             flash.is_some_and(|message| message.contains("voice")),
-            "ctrl+r reached voice: {flash:?}"
+            "ctrl+y reached voice: {flash:?}"
         );
     }
 
@@ -5198,7 +5167,7 @@ mod tests {
         ctrl(&mut ui, 'a');
         assert_eq!(ui.popover.as_deref(), Some("actions:agent/example/atlas/builder"));
         let shown = screen(&ui);
-        for action in ["Restart", "Suspend", "Retire", "Copy id", "ACTIONS · ESC CLOSES"] {
+        for action in ["Restart", "Suspend", "Stop", "Copy id", "ACTIONS · ESC CLOSES"] {
             assert!(shown.contains(action), "{action}: {shown}");
         }
         // Restart asks first; Esc would keep it, y restarts.
@@ -5220,6 +5189,14 @@ mod tests {
         press(&mut ui, KeyCode::Char('x'), KeyModifiers::NONE);
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(ui.effects.is_empty());
+    }
+
+    #[test]
+    fn a_retired_identity_has_no_start_resume_or_runtime_actions() {
+        let agent = Agent { state: AgentState::Retired, terminal: false, ..glass().world.agents.items()[0].clone() };
+        let keys = screens::agent_actions(&agent).iter().map(|action| action.key).collect::<String>();
+        for key in ['s','u','r','x','p','t'] { assert!(!keys.contains(key), "{keys}"); }
+        assert_eq!(screens::agent_word(agent.state), "retired");
     }
 
     #[test]
@@ -5893,11 +5870,6 @@ mod tests {
                 modifiers: KeyModifiers::NONE,
             })
         };
-        let active = hit_at(&ui, Hit::PaletteSection(2));
-        click(&mut ui, active);
-        assert_eq!(section(&ui), Some(2), "active opens the missions");
-        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        screen(&ui);
         let need = hit_at(&ui, Hit::Home);
         click(&mut ui, need);
         assert!(ui.home_open());
@@ -6670,19 +6642,6 @@ mod tests {
     }
 
     #[test]
-    fn the_top_bar_says_missions_instead_of_a_count_it_does_not_have() {
-        let mut ui = glass();
-        let top = |ui: &Ui| screen(ui).lines().next().unwrap().to_owned();
-        assert!(top(&ui).contains("active"), "{}", top(&ui));
-        ui.world.missions_followed = false;
-        let bar = top(&ui);
-        assert!(bar.contains("◇ missions") && !bar.contains("active"), "{bar}");
-        // st's own count stands in for the rows it does not send.
-        ui.world.active_missions = Some(57);
-        assert!(top(&ui).contains("◇ 57 active"), "{}", top(&ui));
-    }
-
-    #[test]
     fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
         let agent = "agent/example/atlas/builder";
         let mut ui = glass();
@@ -6713,49 +6672,12 @@ mod tests {
         ui.world.settled = false;
         ui.world.attention = Load::Ready(vec![]);
         let bar = top(&ui);
-        for word in ["working", "active", "nothing running", "alert", "Ctrl+K"] {
+        for word in ["working", "nothing running", "alert", "Ctrl+K"] {
             assert!(!bar.contains(word), "{word}: {bar}");
         }
         assert!(bar.contains("live"), "{bar}");
         ui.world.settled = true;
         assert!(top(&ui).contains("working"), "{}", top(&ui));
-    }
-
-    #[test]
-    fn the_top_bar_counts_only_missions_that_are_running_and_names_the_stuck_ones() {
-        let mut ui = glass();
-        let words = [
-            Word::Working,
-            Word::Queued,
-            Word::Decision,
-            Word::Stalled,
-            Word::Unstaffed,
-            Word::Unclaimed,
-            Word::Watching,
-            Word::Held,
-            Word::Idle,
-            Word::Done,
-            Word::Failed,
-            Word::Cancelled,
-        ];
-        if let Load::Ready(missions) = &mut ui.world.missions {
-            let template = missions[0].clone();
-            *missions = words
-                .iter()
-                .enumerate()
-                .map(|(index, word)| Mission {
-                    id: format!("mission/example/m{index}"),
-                    title: format!("Mission {index}"),
-                    word: *word,
-                    system: false,
-                    updated_at: chrono::Local::now().to_rfc3339(),
-                    ..template.clone()
-                })
-                .collect();
-        }
-        let bar = screen(&ui).lines().next().unwrap().to_owned();
-        assert!(bar.contains("◇ 2 active"), "{bar}");
-        assert!(bar.contains("▲ 3 stuck"), "{bar}");
     }
 
     #[test]

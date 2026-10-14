@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one pair of nextest archives, or verify/extract that run's exact-source pair."""
+"""Build or verify/extract one exact-source workspace test archive."""
 import argparse
 import hashlib
 import json
@@ -14,7 +14,7 @@ import time
 import zipfile
 import subprocess
 
-FILES = ('workspace.tar.zst', 'st2.tar.zst', 'sekrets-st3', 'production-build.json')
+FILES = ('workspace.tar.zst', 'sekrets-st3', 'production-build.json')
 
 
 def output(*command):
@@ -32,7 +32,8 @@ def identity():
             'platform': platform.machine(), 'nextest': output('cargo', 'nextest', '--version'),
             'rustc': output('rustc', '-vV'),
             'recipe': digest(Path('scripts/ci-nextest')),
-            'paths': digest(Path('scripts/ci-test-paths.rs'))}
+            'paths': digest(Path('scripts/ci-test-paths.rs')),
+            'targets': digest(Path('scripts/ci-nextest-targets'))}
 
 
 def verify(manifest, current, directory, producer_attempt):
@@ -41,10 +42,10 @@ def verify(manifest, current, directory, producer_attempt):
         raise ValueError("invalid successful producer attempt")
     if manifest.get('standalone_model') is not True:
         raise ValueError('standalone model tests and dependency boundary must pass in the producer')
-    if manifest.get('version') != 1 or manifest.get('identity') != expected:
+    if manifest.get('version') != 2 or manifest.get('identity') != expected:
         raise ValueError('test archive source/run/attempt/platform/tool/recipe identity mismatch')
     if set(manifest.get('files', {})) != set(FILES):
-        raise ValueError('both selected archive groups are required')
+        raise ValueError('the workspace archive and production gateway files are required')
     if not Path(manifest['workspace']).is_absolute():
         raise ValueError('build workspace must be absolute')
     for name in FILES:
@@ -80,7 +81,7 @@ def extract_verified_zip(archive, destination, expected_size, expected_hash, man
         entries = zipped.infolist()
         expected_names = set(FILES) | {'manifest.json'}
         if len(entries) != len(expected_names) or {e.filename for e in entries} != expected_names:
-            raise ValueError('downloaded artifact ZIP must contain exactly the five producer files')
+            raise ValueError('downloaded artifact ZIP must contain exactly the producer files')
         for entry in entries:
             mode = entry.external_attr >> 16
             if entry.is_dir() or stat.S_IFMT(mode) not in (0, stat.S_IFREG) or entry.flag_bits & 1:
@@ -92,7 +93,7 @@ def extract_verified_zip(archive, destination, expected_size, expected_hash, man
             raise ValueError('downloaded manifest differs from successful producer output')
         manifest = json.loads(manifest_bytes)
         if set(manifest.get('files', {})) != set(FILES):
-            raise ValueError('both selected archive groups are required')
+            raise ValueError('the workspace archive and production gateway files are required')
         destination.mkdir(mode=0o700, exist_ok=False)
         for entry in entries:
             target = destination / entry.filename
@@ -167,11 +168,10 @@ def main():
         raise ValueError('checkout must match the workflow tested SHA')
     if args.action == 'build':
         directory.mkdir(parents=True, exist_ok=True)
-        subprocess.run(['cargo', 'nextest', 'archive', '--workspace', '--exclude', 'st2', '--locked',
-                        '--profile', 'ci', '--archive-file', str(directory / FILES[0])], check=True)
-        subprocess.run(['cargo', 'nextest', 'archive', '-p', 'st2', '--test', 'integration', '--test',
-                        'agent_resource', '--test', 'driver_expansion', '--locked', '--profile', 'ci',
-                        '--archive-file', str(directory / FILES[1])], check=True)
+        targets = output('python3', 'scripts/ci-nextest-targets')
+        subprocess.run(['cargo', 'nextest', 'archive', '--workspace', '--locked',
+                        '--profile', 'ci', '-E', targets,
+                        '--archive-file', str(directory / FILES[0])], check=True)
         # Keep the original no-default-features unit/integration/doc tests and dependency gate,
         # using the producer's compiler cache instead of rebuilding in the runtime consumer.
         subprocess.run(['bash', 'scripts/ci-linux', 'conversation-model'], check=True)
@@ -186,7 +186,7 @@ def main():
             raise ValueError('standalone production gateway feature/profile identity required')
         import shutil
         shutil.copy2(binaries[0]['executable'], directory / 'sekrets-st3')
-        manifest = {'version': 1, 'standalone_model': True, 'identity': current, 'workspace': str(Path.cwd().resolve()),
+        manifest = {'version': 2, 'standalone_model': True, 'identity': current, 'workspace': str(Path.cwd().resolve()),
                     'files': {name: digest(directory / name) for name in FILES}}
         (directory / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True, indent=2) + '\n')
         with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
@@ -199,15 +199,14 @@ def main():
         manifest = json.loads(manifest_path.read_text())
         verify(manifest, current, directory, os.environ['CI_TEST_ARCHIVE_PRODUCER_ATTEMPT'])
         extracted = Path(os.environ['RUNNER_TEMP']) / 'ci-test-extracted'
-        for group, name in zip(('workspace', 'st2'), FILES):
-            destination = extracted / group
-            destination.mkdir(parents=True, exist_ok=True)
-            # Extract/list metadata once. Subsequent inventories and runs use these metadata files,
-            # without another extraction or invoking a build.
-            subprocess.run(['cargo', 'nextest', 'list', '--archive-file', str(directory / name),
-                            '--extract-to', str(destination), '--extract-overwrite', '--workspace-remap',
-                            str(Path.cwd()), '--list-type', 'binaries-only', '--message-format', 'json'], check=True)
-        hooks = extracted / 'st2/target/debug/st2'
+        destination = extracted / 'workspace'
+        destination.mkdir(parents=True, exist_ok=True)
+        # Extract/list metadata once. Subsequent inventories and runs use these metadata files,
+        # without another extraction or invoking a build.
+        subprocess.run(['cargo', 'nextest', 'list', '--archive-file', str(directory / FILES[0]),
+                        '--extract-to', str(destination), '--extract-overwrite', '--workspace-remap',
+                        str(Path.cwd()), '--list-type', 'binaries-only', '--message-format', 'json'], check=True)
+        hooks = destination / 'target/debug/ci-hooks-install'
         if not hooks.is_file() or not os.access(hooks, os.X_OK):
             raise ValueError('the matching rendered-hook executable must be archived')
         scratch = Path(os.environ['RUNNER_TEMP']) / 'ci-test-scratch'
@@ -226,7 +225,7 @@ def main():
                 if '\n' in value or '\r' in value:
                     raise ValueError('invalid workflow environment path')
                 stream.write(f'{key}={value}\n')
-        print('Verified both exact-source test archives:', current, flush=True)
+        print('Verified exact-source workspace test archive:', current, flush=True)
 
 
 if __name__ == '__main__':
