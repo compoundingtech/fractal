@@ -95,7 +95,7 @@ pub unsafe extern "C" fn st_fabric_dial(
         runtime().block_on(async {
             if let Some(old) = current.take() { old.stop().await; }
             let next = Bridge::start_with_mode(key, addr, target.service, target.mode).await?;
-            let description = json!({"url": next.url, "node": next.node, "fabricVersion": "0.2.30+8bd9017", "irohVersion": "1.0.2"});
+            let description = json!({"url": next.url, "node": next.node, "fabricVersion": "0.2.41+84c3208", "irohVersion": "1.0.2"});
             *current = Some(next);
             Ok(description)
         })

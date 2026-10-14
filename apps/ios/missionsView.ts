@@ -3,13 +3,13 @@ import { ago } from './presentation';
 import { missionSteps } from './presentation';
 import { theme } from './theme';
 
-// The Missions tab, drawn the way stui draws it (crates/stui/src/ui/screens.rs missions_list,
+// The Missions list, drawn the way stui draws it (crates/stui/src/ui/screens.rs missions_list,
 // adapt.rs missions): one word per mission naming who has to move, in this order.
 export const WORDS = ['decision', 'stalled', 'unstaffed', 'unclaimed', 'queued', 'working', 'watching', 'held', 'idle', 'done', 'failed', 'cancelled'] as const;
 export type Word = typeof WORDS[number];
 
 export function wordName(word: Word): string {
-  return word === 'decision' ? 'needs you' : word;
+  return word === 'decision' ? 'alert' : word;
 }
 
 export function wordStyle(word: Word, spinner = '⠿'): { glyph: string; color: string } {
@@ -89,7 +89,7 @@ export function isSystemMission(id: string): boolean {
   return id.startsWith('mission/__st3/') || id.split('/').includes('ci');
 }
 
-export type MissionRow = { mission: Mission; word: Word; title: string; path: string; age: string; done: number; total: number; system: boolean };
+export type MissionRow = { mission: Mission; word: Word; title: string; path: string; age: string; done: number; total: number; system: boolean; progress?: string };
 export function missionRows(missions: Mission[], attention: Attention[], agents: Agent[], showSystem: boolean, now = Date.now()): { rows: MissionRow[]; hidden: number } {
   const all = missions.map((mission): MissionRow => {
     const steps = missionSteps(mission);
@@ -102,6 +102,8 @@ export function missionRows(missions: Mission[], attention: Attention[], agents:
       done: steps.filter(step => step.state === 'completed').length,
       total: steps.length,
       system: isSystemMission(mission.id),
+      // What a step in hand last reported: the status of a run in progress.
+      progress: steps.filter(step => ['claimed', 'working', 'running'].includes(step.state)).map(step => step.last_progress?.split(/\s+/).filter(Boolean).join(' ')).find(Boolean),
     };
   });
   // A failure ages out of the list after its day, as in stui (Nathan, 2026-10-02); showing the
@@ -149,4 +151,13 @@ export function stepStyle(state: string, spinner = '⠿'): StepStyle {
   const style = stepStyles[stepState(state) as WorkState];
   if (!style) return { glyph: '▱', color: theme.surface2, word: 'later', rank: 5 };
   return activeStep(stepState(state)) ? { ...style, glyph: spinner } : style;
+}
+
+/** Match every search word against a mission's title, path, status and progress. */
+export function filterMissionRows(rows: MissionRow[], filter: string): MissionRow[] {
+  const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+  return words.length ? rows.filter(row => {
+    const text = `${row.title} ${row.path} ${wordName(row.word)} ${row.progress ?? ''}`.toLowerCase();
+    return words.every(word => text.includes(word));
+  }) : rows;
 }

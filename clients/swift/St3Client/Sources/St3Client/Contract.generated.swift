@@ -9,6 +9,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case agentStart = "agent.start"
     case agentStop = "agent.stop"
     case agentSuspend = "agent.suspend"
+    case arrangementEdit = "arrangement.edit"
     case attentionResolve = "attention.resolve"
     case customReply = "custom.reply"
     case laneApprove = "lane.approve"
@@ -30,6 +31,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case missionRevise = "mission.revise"
     case missionStart = "mission.start"
     case pairingRevoke = "pairing.revoke"
+    case promptRespond = "prompt.respond"
     case reviewApprove = "review.approve"
     case reviewReject = "review.reject"
     case reviewRequestChanges = "review.request-changes"
@@ -59,6 +61,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ReadOperation: String, CaseIterable, Sendable {
+    case notesList = "notes.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
     case hostRepositories = "host.repositories"
@@ -66,6 +69,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case setsGet = "sets.get"
     case capabilitiesGet = "capabilities.get"
     case documentGet = "document.get"
+    case publicationDefinition = "publication.definition"
     case subjectDefinition = "subject.definition"
     case mailBacklogSummary = "mail-backlog.summary"
     case usagePeriod = "usage.period"
@@ -77,6 +81,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case attentionGet = "attention.get"
     case messagesList = "messages.list"
     case messagesGet = "messages.get"
+    case messageBodyGet = "message-body.get"
     case launchesList = "launches.list"
     case launchesGet = "launches.get"
     case launchVariantsList = "launch-variants.list"
@@ -110,14 +115,18 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case sessionsGet = "sessions.get"
     case conversationSearch = "conversation.search"
     case timelineList = "timeline.list"
+    case conversationContentChunk = "conversation-content.chunk"
     case conversationChanges = "conversation.changes"
     case eventsList = "events.list"
     case terminalScreen = "terminal.screen"
+    case arrangementsList = "arrangements.list"
+    case arrangementsGet = "arrangements.get"
     case glassesList = "glasses.list"
     case glassesGet = "glasses.get"
 }
 
 public let st3ClientReadPaths: [ReadOperation: String] = [
+    .notesList: "/v1/client/notes",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
     .hostRepositories: "/v1/client/hosts/{id}/repositories",
@@ -125,6 +134,7 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .setsGet: "/v1/client/sets/{id}",
     .capabilitiesGet: "/v1/client/capabilities",
     .documentGet: "/v1/client/documents/content",
+    .publicationDefinition: "/v1/client/publication-definition",
     .subjectDefinition: "/v1/client/subject-definition",
     .mailBacklogSummary: "/v1/client/mail-backlog",
     .usagePeriod: "/v1/client/usage",
@@ -136,6 +146,7 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .attentionGet: "/v1/client/attention/{id}",
     .messagesList: "/v1/client/messages",
     .messagesGet: "/v1/client/messages/{id}",
+    .messageBodyGet: "/v1/client/message-bodies/{id}",
     .launchesList: "/v1/client/launches",
     .launchesGet: "/v1/client/launches/{id}",
     .launchVariantsList: "/v1/client/launches/{id}/variants",
@@ -169,9 +180,15 @@ public let st3ClientReadPaths: [ReadOperation: String] = [
     .sessionsGet: "/v1/client/sessions/{id}",
     .conversationSearch: "/v1/client/conversations/search",
     .timelineList: "/v1/client/sessions/{id}/timeline",
+    .conversationContentChunk: "/v1/client/conversations/{id}/content/{reference}/chunk",
     .conversationChanges: "/v1/client/conversations/{id}/changes",
     .eventsList: "/v1/client/events",
     .terminalScreen: "/v1/client/terminals/{id}/screen",
+    .arrangementsList: "/v1/client/arrangements",
+    .arrangementsGet: "/v1/client/arrangements/{person_name}/{uuid}",
     .glassesList: "/v1/client/glasses",
     .glassesGet: "/v1/client/glasses/{id}",
 ]
+
+/// Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043).
+public let st3SidebarArrangementUuid: String = "00000000-0000-7000-8000-000000000001"

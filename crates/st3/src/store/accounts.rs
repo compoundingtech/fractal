@@ -21,24 +21,7 @@ pub struct SeatAccount {
 impl Store {
     /// Every declared account, in name order.
     pub fn declared_accounts(&self) -> Result<Vec<AccountDecl>> {
-        let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
-            "SELECT subject, body FROM desired WHERE kind='account' ORDER BY subject",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut accounts = Vec::new();
-        for row in rows {
-            let (subject, body) = row?;
-            if let Some(account) = serde_json::from_str(&body)
-                .ok()
-                .and_then(|desired: Value| parse_account(&subject, &desired))
-            {
-                accounts.push(account);
-            }
-        }
-        Ok(accounts)
+        declared_accounts_at(&self.readers.get())
     }
 
     /// The account a pooled seat on this node was last placed on.
@@ -154,6 +137,17 @@ impl Store {
                 {
                     account.clone()
                 } else {
+                    // Until the limits projection has filled after an upgrade no account has a
+                    // reading, so every account would look unused and the choice, which is kept,
+                    // could pin the seat to an exhausted one. Choose and store nothing yet.
+                    if !self
+                        .account_limits_ready()
+                        .map_err(|error| error.to_string())?
+                    {
+                        return Err(
+                            "account limits are catching up, try again".to_owned()
+                        );
+                    }
                     let refs = bindable.iter().collect::<Vec<_>>();
                     let candidates = self
                         .candidates(&refs, now)
@@ -192,7 +186,8 @@ impl Store {
         limit_percent: f64,
         now: u128,
     ) -> Result<Vec<String>> {
-        if !matches!(binding.binding, Binding::Pool(_)) {
+        if !matches!(binding.binding, Binding::Pool(_)) || !self.account_limits_ready()? {
+            // Not yet known is no alternative: it must not read as every account being unused.
             return Ok(Vec::new());
         }
         let accounts = self.declared_accounts()?;
@@ -293,6 +288,57 @@ impl Store {
     }
 }
 
+pub(super) fn declared_accounts_at(connection: &Connection) -> Result<Vec<AccountDecl>> {
+    let mut statement = connection
+        .prepare_cached("SELECT subject, body FROM desired WHERE kind='account' ORDER BY subject")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut accounts = Vec::new();
+    for row in rows {
+        let (subject, body) = row?;
+        if let Some(account) = serde_json::from_str(&body)
+            .ok()
+            .and_then(|desired: Value| parse_account(&subject, &desired))
+        {
+            accounts.push(account);
+        }
+    }
+    Ok(accounts)
+}
+
+/// The declared account an unbound seat's launch environment puts it on, by login directory.
+fn unbound_login_account(connection: &Connection, seat: &str, body: &str) -> Result<Option<String>> {
+    let desired: Value = serde_json::from_str(body)?;
+    let Some(driver) = crate::accounts::harness_driver(&desired) else {
+        return Ok(None);
+    };
+    let Some(variable) = crate::accounts::login_environment_name(driver) else {
+        return Ok(None);
+    };
+    let member: Option<String> = connection
+        .query_row("SELECT member FROM desired WHERE subject=?1", [seat], |row| row.get(0))
+        .optional()?
+        .flatten();
+    let Some(member) = member.and_then(|text| serde_json::from_str::<crate::model::MemberSpec>(&text).ok()) else {
+        return Ok(None);
+    };
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let Some(directory) = member
+        .environment
+        .get(variable)
+        .cloned()
+        .or_else(|| std::env::var(variable).ok())
+        .filter(|directory| !directory.is_empty())
+        .and_then(|directory| crate::accounts::expand_login(&directory, home.as_deref()))
+    else {
+        return Ok(None);
+    };
+    let accounts = declared_accounts_at(connection)?;
+    Ok(crate::accounts::account_by_login(&accounts, driver, &member.host, &directory, home.as_deref())
+        .map(|account| account.name.clone()))
+}
+
 /// The newest durable or local observation, within the caller's snapshot or write transaction.
 fn observation_at(
     connection: &Connection,
@@ -340,7 +386,11 @@ pub(super) fn limit_binding_is_current(
         return Ok(false);
     }
     let Some(binding) = harness_binding(&serde_json::from_str::<Value>(&body)?) else {
-        return Ok(limit.account_ref.is_none());
+        // Unbound: the default login, or a declared account's login directory the seat sets itself.
+        return Ok(match limit.account_ref.as_deref() {
+            None => true,
+            Some(named) => unbound_login_account(connection, seat, &body)?.as_deref() == Some(named),
+        });
     };
     let Some(leaving) = limit.account_ref.as_deref() else {
         return Ok(false);

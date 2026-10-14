@@ -319,6 +319,24 @@ async fn assert_raw_terminal_transport(
     }).await.unwrap();
     assert_eq!(uploaded, upload);
 
+    if mode == RawTerminalMode::Attach {
+        let recovery = pty_packet(11, &[]);
+        stream.write_all(&recovery[..3]).await.unwrap();
+        stream.write_all(&recovery[3..]).await.unwrap();
+        let mut forwarded = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while forwarded.len() < recovery.len() {
+                forwarded.extend(input.recv().await.unwrap());
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            forwarded, recovery,
+            "recovery crosses both gateway transports unchanged"
+        );
+    }
+
     let output = b"\0\xff\x1b[?1049h\x1b[38;2;1;2;3mraw\r\n";
     pty.write(output);
     replay.extend_from_slice(output);
@@ -356,16 +374,27 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_unix() {
 }
 
 #[tokio::test]
-async fn dropping_a_raw_connector_closes_a_backpressured_attachment() {
+async fn dropping_a_controlled_raw_connector_closes_a_backpressured_attachment() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let (_root, state, pty, client, server) =
         serve_terminal_state("raw-client-drop", 24, 80).await;
     let incarnation = format!("{}:2026-09-30T00:00:00.000Z", std::process::id());
     publish_terminal(&state, &incarnation);
     let attachment = client
-        .raw_terminal_attachment("terminal/agent/terminal-demo", &incarnation, RawTerminalMode::Peek)
-        .await.unwrap();
-    let mut stream = client.raw_terminal_stream(&attachment).await.unwrap();
+        .raw_terminal_attachment(
+            "terminal/agent/terminal-demo",
+            &incarnation,
+            RawTerminalMode::Peek,
+        )
+        .await
+        .unwrap();
+    let controlled = client
+        .raw_terminal_stream_controlled(&attachment)
+        .await
+        .unwrap();
+    let activity = controlled.activity;
+    let retained_activity = activity.clone();
+    let mut stream = controlled.stream;
     stream.write_all(&pty_packet(6, &[0])).await.unwrap();
     let replay = [pty_packet(10, &[0, 24, 0, 80]), pty_packet(5, b"terminal ready\r\n$ ")].concat();
     let mut received = vec![0_u8; replay.len()];
@@ -379,7 +408,22 @@ async fn dropping_a_raw_connector_closes_a_backpressured_attachment() {
     assert_eq!(first, [0]);
     drop(stream);
     tokio::time::timeout(Duration::from_secs(5), pty.closed.notified())
-        .await.expect("dropping a slow consumer must release the PTY connection");
+        .await
+        .expect("dropping a slow consumer must release the PTY connection");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), activity.selected_use())
+            .await
+            .unwrap()
+            .is_err(),
+        "dropping the byte connector must close renewal even when activity handles survive",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), retained_activity.selected_use())
+            .await
+            .unwrap()
+            .is_err(),
+        "activity clones must not retain the bridge",
+    );
     server.abort();
 }
 
@@ -710,6 +754,7 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_small_talk(
             id,
             session_id,
             replace: true,
+            has_more: Some(false),
             ..
         } if id == "chat" => session_id,
         other => panic!("expected the conversation page, got {other:?}"),
@@ -739,6 +784,7 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_small_talk(
         CollectionEvent::Conversation {
             id,
             replace: false,
+            has_more: None,
             items,
             ..
         } if id == "chat" => items,
@@ -1779,4 +1825,66 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     );
     restarted_gateway.abort();
     restarted_local.abort();
+}
+
+#[tokio::test]
+async fn canonical_publication_definition_requires_declaration_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let server_socket = socket.clone();
+    let state = state(root.path(), "client-publication-definition");
+    let source = r#"version 2
+mission "example/readback" state="ready" {
+    goal "Read resolved defaults."
+    step "inspect" { agentless }
+}
+schedule "example/daily" {
+    host "client-publication-definition"
+    every "1h"
+    anchor "2026-01-01T00:00:00Z"
+    work { mission "example/readback"; workspace "/tmp"; }
+}
+"#;
+    let intent =
+        st3::graph::parse_owned_set_intent(source, "client-publication-definition").unwrap();
+    state
+        .store
+        .apply_internal(&intent, "readback-fixture")
+        .unwrap();
+    let app = st3::api::router(state.clone());
+    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+    wait_for_socket(&socket).await;
+    let reader = Client::unix(&socket);
+    let publisher = Client::unix_as(&socket, "person/test");
+    for subject in ["mission/example/readback", "schedule/example/daily"] {
+        assert!(matches!(
+            reader.publication_definition(subject).await,
+            Err(ClientError::Api(ErrorCode::Forbidden, _, _))
+        ));
+        let response = publisher.publication_definition(subject).await.unwrap();
+        assert_eq!(response.value.subject, subject);
+        assert_eq!(response.snapshot.store_index, state.store.index().unwrap());
+        let expected = if subject.starts_with("mission/") {
+            serde_json::to_value(&intent.missions["example/readback"]).unwrap()
+        } else {
+            serde_json::to_value(&intent.subjects[subject]).unwrap()
+        };
+        assert_eq!(
+            serde_json::to_value(response.value.declaration).unwrap(),
+            expected
+        );
+    }
+    assert!(matches!(
+        publisher
+            .publication_definition("mission/example/absent")
+            .await,
+        Err(ClientError::Api(ErrorCode::NotFound, _, _))
+    ));
+    assert!(matches!(
+        publisher
+            .publication_definition("runtime/unsupported")
+            .await,
+        Err(ClientError::Api(ErrorCode::ValidationFailed, _, _))
+    ));
+    server.abort();
 }

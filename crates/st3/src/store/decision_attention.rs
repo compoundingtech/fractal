@@ -38,6 +38,7 @@ impl DecisionAttention {
             kind: "decision".into(), review_mode: None,
             subject: self.observation.decision_id.clone(), person: self.person.clone(),
             requester_id: Some(self.requester.clone()), launch_id: None, variant_id: None, message_id: None,
+            conversation: Some(self.requester.clone()), answers: Vec::new(),
             title: format!("Q{} needs your answer", self.observation.q),
             detail: format!("Source decision is {}. Axe owns its answer.", self.state()),
             request: Some(metadata), mission: None, mission_run: None, step: None,

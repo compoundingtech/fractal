@@ -18,7 +18,7 @@ not close an unresolved delivery alert.
 
 Boots and channel reconnects hold earlier mail, including old probe messages.
 Those messages stay in the mailbox and contribute to the aged unread count
-in doctor and stui. Preview and close that backlog with the commands in
+in doctor and the terminal UI. Preview and close that backlog with the commands in
 [seat deploys](seat-deploys.md), including
 `st conversations cleanup --all --older-than 1h`. Cleanup does not count as a
 successful native probe; recovery still requires a fresh recipient read.
@@ -39,9 +39,18 @@ records the recipient's accepted read timestamp, but does not subtract clocks
 from different machines. `delivered` without `read` never passes the probe.
 
 The latest results and a heartbeat are replicated as immutable document versions
-under `doc/delivery-probes/NODE`, every 30 seconds and on state changes. `st doctor`
+under `doc/delivery-probes/NODE`. Every version is kept on every member, so the probe
+publishes one only when a route's outcome changes (overdue, a late read, an alert, a
+recovery) and as a heartbeat every five minutes with the newest latencies. An ordinary
+cycle, a read followed by a new send and its read, publishes nothing new: each latency
+is a point of a series and stays in the probe's local `events.jsonl`. A send stops being
+in flight once its deadline passes or it raises an alert, even while it keeps retrying,
+and that publishes at once. A heartbeat waits, for at most one deadline, until no send
+is in flight, and a report that showed a send in flight is replaced as soon as it
+resolves, so doctor never sees a stale wait as overdue.
+`st doctor`
 shows each direction's latest message, measured latency or pending age, overdue
-results, missing configured source nodes, and heartbeats older than 90 seconds.
+results, missing configured source nodes, and heartbeats older than 15 minutes.
 A reported success must match the actual sender, recipient and accepted read
 claim in the graph; a document alone cannot manufacture a successful read.
 A late receipt remains visible until the next probe completes successfully.
@@ -141,6 +150,25 @@ Shorter test intervals make the outage proof bounded; production uses the
 60-second deadline. The operations recipient fixture uses a token-free omp provider
 stand-in, requiring Node.js; probe recipients remain dedicated Python consumers.
 The native proof runs in the normal Linux Cargo test suite.
+
+An argv probe seat can start its native channel before reconciliation publishes
+that seat's running incarnation. A fresh pi-family channel records `starting` for
+the selected incarnation before binding, using the typed harness startup handshake.
+The daemon still allocates no mailbox ownership and permits no delivery or receipts
+until that incarnation is running; a stopped incarnation remains fenced. The native
+regression holds the real PTY launcher's return for two seconds to exercise this gap,
+then uses the existing delivery, outage, recovery and exactly-once read assertions.
+
+The probe's private `events.jsonl` pairs every channel start and exit by channel ID
+and PID. Exit records include whether the native hello arrived, the inherited runtime
+incarnation and ownership sequence, and separately timed observations of the agent's
+current owner at launch and exit. Those observations are context, not proof of the channel's accepted binding.
+Stderr is drained concurrently with native stdout. Only a 4 KiB tail is retained;
+diagnostics keep CLI error lines with credentials redacted and omit structured or native
+message payloads. An inherited pipe cannot hold up restart indefinitely. These records
+have mode 0600 and stay local; they never enter replicated probe reports. Native test
+failures print the private event tail so a startup refusal can be distinguished from a
+later recovery failure without manufacturing a consumed or read receipt.
 
 A member shown as last seen pauses its route: the probe queues no new sends, withdraws
 route attention, and retains any pending message. After a new replication exchange,

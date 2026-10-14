@@ -22,6 +22,21 @@ pub struct Extras {
     pub bodies: BTreeMap<String, (String, Option<String>, String)>,
     pub live: bool,
     pub offline: Option<String>,
+    /// Why the live stream to st is being replaced while st itself answers.
+    pub degraded: Option<String>,
+    /// Why a window has not loaded though st was asked (its source is not ready, or refused),
+    /// until it loads: the screen says so instead of showing a spinner forever.
+    pub window_errors: BTreeMap<String, String>,
+    /// Whether the missions window is followed and has loaded.
+    pub missions_followed: bool,
+    /// Whether st has sent the attention and agents windows on this run: until it has, what the
+    /// model holds is a cache from an earlier run, and nothing built on it is shown as current.
+    pub attention_live: bool,
+    pub agents_live: bool,
+    /// st's own counts, when it serves them.
+    pub summary: Option<st3_client::Summary>,
+    pub inventory_supported: Option<bool>,
+    pub inventory_partial: Vec<String>,
 }
 
 fn now() -> String {
@@ -38,6 +53,14 @@ fn loaded<T>(snapshot: bool, items: Vec<T>) -> Load<Vec<T>> {
         Load::Ready(items)
     } else {
         Load::Loading
+    }
+}
+
+/// `loaded`, but a window st keeps refusing says why rather than loading forever.
+fn loaded_or_why<T>(snapshot: bool, items: Vec<T>, why: Option<&String>) -> Load<Vec<T>> {
+    match (snapshot, why) {
+        (false, Some(why)) => Load::Failed(why.clone()),
+        _ => loaded(snapshot, items),
     }
 }
 
@@ -136,17 +159,39 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         .filter(|peer| peer.diverged_since.is_some())
         .map(|peer| peer.host_id.trim_start_matches("host/").to_owned())
         .collect();
+    let loaded_windows = [
+        ("Attention", model.now.snapshot.is_some()),
+        ("Agents", model.agents.snapshot.is_some()),
+        ("Missions", model.missions.snapshot.is_some()),
+    ];
+    let stale = extras
+        .window_errors
+        .iter()
+        .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str())
+            || ["clients", "usage", "machines", "devices", "sessions", "terminals"].contains(&name.as_str()))
+        .map(|(name, why)| format!("{name}: {why}"))
+        .chain(
+            extras
+                .degraded
+                .iter()
+                .map(|why| format!("live stream: {why} · st answers, reconnecting")),
+        )
+        .collect();
     World {
         person: person.to_owned(),
         host,
         link,
         diverged,
-        attention: loaded(model.now.snapshot.is_some(), attention),
-        agents: loaded(model.agents.snapshot.is_some(), agents(model)),
-        missions: loaded(model.missions.snapshot.is_some(), missions),
-        machines: loaded(model.machines.snapshot.is_some(), machines(model)),
+        stale,
+        missions_followed: extras.missions_followed,
+        settled: extras.attention_live && extras.agents_live,
+        active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
+        attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
+        agents: loaded_or_why(model.agents.snapshot.is_some(), agents(model, &missions), extras.window_errors.get("Agents")),
+        missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
+        machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model), extras.window_errors.get("machines")),
         worktrees: Load::Ready(super::demo::world().worktrees.items().to_vec()),
-        devices: loaded(
+        devices: loaded_or_why(
             model.devices.snapshot.is_some(),
             model
                 .devices()
@@ -160,6 +205,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
                     expires: device.expires_at.clone(),
                 })
                 .collect(),
+            extras.window_errors.get("devices"),
         ),
         conversations: extras.conversations.clone(),
         quiet_missions: quiet,
@@ -186,6 +232,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Err(why)) => Load::Failed(why.clone()),
             None => Load::Loading,
         },
+        inventory_supported: extras.inventory_supported,
+        inventory_partial: extras.inventory_partial.clone(),
     }
 }
 
@@ -353,15 +401,52 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                         },
                     )
                 }
-                // Home holds only requests and reviews. Messages stay in conversations, and st
-                // sends each fault to the agent that owns it.
+                // A prompt the seat's harness shows and waits on. Claude's permission prompts
+                // can be answered here; the others are answered in the seat's terminal.
+                "harness-prompt" => (
+                    Tier::Stopped,
+                    AttentionKind::Prompt {
+                        seat: requester_name(model, Some(&item.source_id)),
+                        seat_id: item.source_id.clone(),
+                        text: clean_message_text(&item.detail),
+                        answers: item
+                            .action_parameters
+                            .get("prompt.respond")
+                            .and_then(|parameters| parameters["answers"].as_array())
+                            .map(|answers| {
+                                answers.iter().filter_map(Value::as_str).map(str::to_owned).collect()
+                            })
+                            .unwrap_or_default(),
+                        episode: item.episode.clone(),
+                    },
+                ),
+                "harness-login" => (
+                    Tier::Stopped,
+                    AttentionKind::Login {
+                        text: clean_message_text(&item.detail),
+                        seats: item.targets.clone(),
+                    },
+                ),
+                // Messages stay in conversations, and st sends each fault to the agent that
+                // owns it.
                 _ => return None,
             };
+            let conversations = if item.conversation_ids.is_empty() {
+                item.conversation_id.iter().cloned().collect()
+            } else {
+                item.conversation_ids.clone()
+            };
+            // st names the agent whose conversation an alert belongs to; an older st does not,
+            // and then it is the step's claimant or the agent working in the mission.
             let agent = item
-                .step_run_id
-                .as_ref()
-                .and_then(|id| find_step(model, id))
-                .and_then(|(_, step)| step.claimant.clone())
+                .conversation_id
+                .clone()
+                .or_else(|| {
+                    item.step_run_id
+                        .as_ref()
+                        .and_then(|id| find_step(model, id))
+                        .and_then(|(_, step)| step.claimant.clone())
+                })
                 .or_else(|| {
                     // An agent working in the mission, for a gate that has no claimant.
                     item.mission_id.as_ref().and_then(|mission| {
@@ -443,6 +528,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                     step: blocked.step.clone(),
                     goal: clean_message_text(&blocked.goal),
                 }),
+                conversations,
                 tier,
                 title: extras
                     .bodies
@@ -565,7 +651,21 @@ fn harness(driver: Option<&str>) -> Harness {
     }
 }
 
-fn agents(model: &Model) -> Vec<Agent> {
+/// What a step last reported, on one line. A step run's ID names it in whichever mission holds it.
+fn step_progress(missions: &[Mission], step: &str) -> Option<String> {
+    let reported = missions
+        .iter()
+        .find_map(|mission| mission.step_metadata.get(step))?
+        .last_progress
+        .as_deref()?;
+    let line = clean_message_text(reported)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!line.is_empty()).then_some(line)
+}
+
+fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
     let mut agents = model
         .agents()
         .map(|agent| {
@@ -581,6 +681,8 @@ fn agents(model: &Model) -> Vec<Agent> {
                     AgentState::Fault
                 }
                 ("failed", _) => AgentState::Fault,
+                // st decides a seat with no session is down, since when; no app re-derives it.
+                ("down", _) => AgentState::Down,
                 // Signed out of its provider (Claude "Not logged in · Run /login"): a login on
                 // its host fixes it, not a restart (Nathan, 2026-10-04).
                 // st's additive detail names the known error outright; the legacy `unauthenticated`
@@ -592,12 +694,21 @@ fn agents(model: &Model) -> Vec<Agent> {
                 ("waiting", _) if agent.reason.as_deref() == Some("providerAuth") => {
                     AgentState::NeedsLogin
                 }
+                ("running", _) if agent.activity.as_deref() == Some("compacting") => {
+                    AgentState::Compacting
+                }
                 ("running", Some("working")) => AgentState::Working,
                 ("running", _) => AgentState::Idle,
                 ("waiting", Some("ready" | "working" | "idle"))
                     if agent.blocked_on.as_deref() == Some("human") =>
                 {
                     AgentState::NeedsYou
+                }
+                // Blocked on its st channel is the seat's to fix (its mail is held), not the
+                // person's: answering it cannot unblock it (Nathan, 2026-10-06: "why does Stui
+                // show up as needs you?").
+                ("waiting", Some("blocked")) if agent.blocked_on.as_deref() == Some("channel") => {
+                    AgentState::Fault
                 }
                 ("waiting", Some("blocked")) => AgentState::NeedsYou,
                 // st withdraws an idle claim it has not heard renewed lately: the harness reads
@@ -626,7 +737,7 @@ fn agents(model: &Model) -> Vec<Agent> {
                 harness: harness(agent.driver.as_deref()),
                 state,
                 host,
-                worktree: None,
+                worktree: agent.checkout.as_ref().map(st3_client::checkout_label),
                 mission: work.map(|work| work.mission_id.clone()),
                 step: work.map(|work| work.path.clone()),
                 activity: age(&agent.header.updated_at),
@@ -639,6 +750,17 @@ fn agents(model: &Model) -> Vec<Agent> {
                     .first()
                     .map(|relation| relation.agent_id.clone()),
                 details: AgentDetails {
+                    progress: work
+                        .and_then(|work| {
+                            let reported = step_progress(missions, &work.id);
+                            match work.holder_down_since.as_deref() {
+                                Some(since) => Some(match reported {
+                                    Some(line) => format!("Held by a seat with no session since {since}. Last reported: {line}"),
+                                    None => format!("Held by a seat with no session since {since}"),
+                                }),
+                                None => reported,
+                            }
+                        }),
                     goal: work.and_then(|work| work.goal.as_deref().map(clean_message_text)),
                     claimed: work.map(|work| format!("{} ago", age(&work.since))),
                     next: agent
@@ -650,6 +772,12 @@ fn agents(model: &Model) -> Vec<Agent> {
                         .iter()
                         .map(|label| label_text(model, label))
                         .collect(),
+                    next_mission: agent.next_work.as_ref().map(|label| label.mission_id.clone()),
+                    queue_missions: agent
+                        .upcoming_work
+                        .iter()
+                        .map(|label| label.mission_id.clone())
+                        .collect(),
                     queued: agent.queued_work_count,
                     harness_state: agent.harness_state.clone(),
                     runtime: None,
@@ -658,7 +786,35 @@ fn agents(model: &Model) -> Vec<Agent> {
                         .as_ref()
                         .and_then(|usage| usage.context.as_ref())
                         .and_then(|context| context.model.clone()),
-                    fault: agent.fault.clone(),
+                    effort: agent
+                        .extra
+                        .get("effort")
+                        .and_then(Value::as_str)
+                        .filter(|effort| !effort.is_empty())
+                        .map(str::to_owned),
+                    fault: agent.fault.clone().or_else(|| {
+                        agent.down_since.as_deref().filter(|_| agent.state == "down")
+                            .map(|since| format!("No running session since {since}"))
+                    }).or_else(|| {
+                        agent.delivery.as_ref()
+                            .filter(|delivery| delivery.state == "stale")
+                            .and_then(|delivery| delivery.reason.clone())
+                            .filter(|reason| reason.starts_with("delivery-control-unavailable:"))
+                    }).or_else(|| {
+                        (agent.state == "waiting"
+                            && agent.harness_state.as_deref() == Some("blocked")
+                            && agent.blocked_on.as_deref() == Some("channel"))
+                        .then(|| {
+                            format!(
+                                "Its st channel is not attached, so its mail is held{}",
+                                agent
+                                    .reason
+                                    .as_deref()
+                                    .map(|reason| format!(" ({reason})"))
+                                    .unwrap_or_default()
+                            )
+                        })
+                    }),
                     under: agent.under.first().map(|relation| {
                         model
                             .agents()
@@ -799,12 +955,68 @@ pub fn names(model: &Model, person: &str) -> BTreeMap<String, String> {
 
 #[cfg(test)]
 use st3_conversation_ui::adapt::from_harness;
-pub use st3_conversation_ui::adapt::{conversation, unreadable_transcript};
+pub use st3_conversation_ui::adapt::unreadable_transcript;
+
+/// Standalone native images need a focusable row even when the text adapter has no words.
+pub fn conversation(timeline: &[st3_client::TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
+    let mut entries = st3_conversation_ui::adapt::conversation(timeline, names);
+    for (index, source) in timeline.iter().enumerate() {
+        let st3_client::TimelineBody::Content(content) = &source.body else { continue };
+        if !super::content::has_images(&content.blocks) { continue; }
+        if content.blocks.iter().all(|block| matches!(block.kind.as_str(), "image" | "source_record"))
+            && content.text.as_deref().is_none_or(|text| {
+                text.is_empty() || matches!(text, "[image]" | "[image · load from owner]")
+            })
+        {
+            // Replace the shared text adapter's image-only placeholder instead
+            // of adding a second row for the same image.
+            let prefix = format!("{}#", source.id);
+            entries.retain(|entry| entry.id != source.id && !entry.id.starts_with(&prefix));
+        }
+        let at = entries.iter().rposition(|entry| entry.id == source.id || entry.id.starts_with(&format!("{}#", source.id)))
+            .map(|at| at + 1)
+            .or_else(|| timeline[index + 1..].iter().find_map(|next| {
+                entries.iter().position(|entry| entry.id == next.id || entry.id.starts_with(&format!("{}#", next.id)))
+            })).unwrap_or(entries.len());
+        entries.insert(at, Entry {
+            id: format!("{}#images", source.id),
+            at: source.timestamp.get(11..16).unwrap_or("").into(),
+            body: Body::Tool { title: "image · Ctrl+Enter details · Ctrl+U load inline".into(),
+                state: st3_conversation_ui::ToolState::Ok, output: Vec::new() },
+        });
+    }
+    entries
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_native_image_blocks_get_a_focusable_inline_row() {
+        let timeline = serde_json::from_value::<Vec<TimelineEntry>>(json!([{
+            "id":"picture","sequence":1,"revision":1,"timestamp":"2026-10-08T10:00:00Z",
+            "role":"assistant","type":"content","final":true,"body":{"media_type":"image/png","blocks":[{
+                "id":"picture-block","kind":"image","source_type":"native","payload":{},
+                "continuation":{"ref":"picture-ref","media_type":"application/octet-stream","reason":"on-demand"}
+            }]}
+        }])).unwrap();
+        let entries = conversation(&timeline, &BTreeMap::new());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "picture#images");
+        assert!(matches!(&entries[0].body, Body::Tool { title, .. } if title.contains("load inline")));
+    }
     use serde_json::json;
+
+    #[test]
+    fn a_window_st_keeps_refusing_says_why_until_it_loads() {
+        let why = "st hit a problem: collection source is unavailable".to_owned();
+        // Not loaded, and st said why: the reason, not a spinner.
+        assert!(matches!(loaded_or_why::<u8>(false, Vec::new(), Some(&why)), Load::Failed(text) if text == why));
+        // Not loaded and nothing said: still loading. Loaded: the rows, whatever was said before.
+        assert!(matches!(loaded_or_why::<u8>(false, Vec::new(), None), Load::Loading));
+        assert!(matches!(loaded_or_why(true, vec![1u8], Some(&why)), Load::Ready(rows) if rows == vec![1u8]));
+    }
 
     const HARNESS_TAGS: &[&str] = &[
         "task-notification",
@@ -887,11 +1099,9 @@ mod tests {
         ]))
         .unwrap();
         let entries = conversation(&timeline, &BTreeMap::new());
-        let Body::Mail { body, images, .. } = &entries[0].body else {
+        let Body::Mail { images, .. } = &entries[0].body else {
             panic!("{entries:#?}");
         };
-        // An image alone is the message, not a "(notification)".
-        assert_eq!(body, "");
         assert_eq!(
             images,
             &[st3_conversation_ui::MailImage {
@@ -1029,6 +1239,22 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_longer_than_its_line_budget_names_what_it_hides() {
+        let text = (0..450)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let entries = tool_pair(json!({"cmd":"cat notes.txt"}), Value::String(text));
+        let (_, _, output) = tool(&entries);
+        assert_eq!(output.len(), 401, "{:?}", output.last());
+        assert_eq!(output[399], "line 399");
+        assert_eq!(
+            output[400],
+            "… 50 more lines not shown in the timeline preview"
+        );
+    }
+
+    #[test]
     fn redacted_and_image_results_are_words_not_json() {
         let redacted = json!({"redacted":true,"sha256":"00ff","bytes":120});
         let (title, _, output) = tool(&tool_pair(redacted.clone(), redacted));
@@ -1100,6 +1326,21 @@ mod tests {
     }
 
     #[test]
+    fn both_delivery_sentences_are_sts_notes_not_the_persons_words() {
+        for note in [
+            "The person reads replies in st, not in the agent's session.",
+            "Answer the person in this conversation; people have no inbox, so do not reply with st.",
+        ] {
+            let delivery = format!("<smalltalk-message id=\"e6\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/e6\">\nis this a watcher?\n</smalltalk-message>\n{note}");
+            let bodies = from_harness(true, &delivery, &BTreeSet::new());
+            assert!(
+                matches!(&bodies[..], [Body::Mail { body, .. }] if body == "is this a watcher?"),
+                "{note}: {bodies:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_channel_delivery_carrying_an_envelope_is_that_mail_not_a_line() {
         // The Claude channel's delivery: st's envelope, then the delivery notes after it.
         let delivery = "<channel source=\"plugin:st3-channel:st3\" from=\"person/example\" messageId=\"message/c3\">\n<smalltalk-message id=\"c3\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/c3\">\nhow is it going?\n</smalltalk-message>\nThe person reads replies in st, not in the agent's session.\n</channel>";
@@ -1114,6 +1355,32 @@ mod tests {
                 if from == "person/example" && body == "how is it going?"),
             "{bodies:?}"
         );
+    }
+
+    #[test]
+    fn a_delivery_by_the_current_channel_plugin_leaves_no_empty_shell_behind() {
+        // Nathan, 2026-10-05: "I see xml in stui tonight": plugin:st-channel:st was not a name
+        // the delivery recognised, so its envelope was taken out and `<channel …></channel>` stayed.
+        let delivery = "<channel source=\"plugin:st-channel:st\" from=\"person/example\" messageId=\"message/c4\" threadId=\"message/c4\" identity=\"fleet/example/quay\">\n<smalltalk-message id=\"c4\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/c4\">\nhow is it going?\n</smalltalk-message>\nThe person reads replies in st, not in the agent's session.\n</channel>";
+        let shown = BTreeSet::from(["message/c4".to_owned()]);
+        let bodies = from_harness(true, delivery, &shown);
+        assert!(bodies.is_empty(), "{bodies:?}");
+        let bodies = from_harness(true, delivery, &BTreeSet::new());
+        assert!(
+            matches!(&bodies[..], [Body::Mail { body, .. }] if body == "how is it going?"),
+            "{bodies:?}"
+        );
+        // Every name the plugin has had, and no other, is st's.
+        for source in [
+            "plugin:st-channel:st",
+            "plugin:st3-channel:st3",
+            "plugin:st2-channel:st2",
+        ] {
+            assert!(st3_conversation_ui::adapt::channel_source(source), "{source}");
+        }
+        for source in ["plugin:slack-channel:slack", "plugin:st-channel", "st-channel:st", ""] {
+            assert!(!st3_conversation_ui::adapt::channel_source(source), "{source}");
+        }
     }
 
     #[test]
@@ -1162,27 +1429,6 @@ mod tests {
             "{text:?}"
         );
         assert!(text.iter().any(|line| line.contains("✓ sent")), "{text:?}");
-    }
-
-    #[test]
-    fn a_seat_that_has_said_nothing_since_it_started_shows_its_small_talk() {
-        let timeline: Vec<TimelineEntry> = serde_json::from_value(json!([
-            {"id":"m","sequence":1,"revision":1,"timestamp":"2026-10-01T10:00:00Z","role":"user","type":"message","final":true,
-             "body":{"message_id":"message/one","from":"person/avery","to":"agent/example/harbor/keeper","title":"Status?"}},
-            {"id":"c","sequence":2,"revision":1,"timestamp":"2026-10-01T10:00:00Z","role":"user","type":"content","final":true,
-             "body":{"media_type":"text/plain","text":"How is the audit going?"}},
-            {"id":"n","sequence":3,"revision":1,"timestamp":"2026-10-01T10:00:01Z","role":"system","type":"error","final":true,
-             "body":{"code":"transcript-not-bound","message":"transcript not bound: Claude session 0190 has no transcript file yet","retryable":true,
-                     "details":{"driver":"claude","not_yet":true}}},
-        ]))
-        .unwrap();
-        assert_eq!(unreadable_transcript(&timeline), None, "nothing is wrong");
-        let entries = conversation(&timeline, &BTreeMap::new());
-        assert!(matches!(&entries[0].body, Body::Mail { subject, .. } if subject == "Status?"));
-        assert!(
-            matches!(&entries[1].body, Body::Event(line) if line == "nothing in the harness yet since this seat started"),
-            "{entries:?}"
-        );
     }
 
     #[test]
@@ -1546,6 +1792,39 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_being_replaced_while_st_answers_is_never_called_offline() {
+        let model = Model::default();
+        let offline = Extras {
+            offline: Some("st stopped answering".into()),
+            ..Extras::default()
+        };
+        assert!(matches!(
+            world(&model, "person/avery", &offline).link,
+            Link::Offline(_)
+        ));
+        // st answered a fresh request: the link is being reopened, not down.
+        let degraded = Extras {
+            degraded: Some("st stopped answering".into()),
+            ..Extras::default()
+        };
+        assert!(matches!(
+            world(&model, "person/avery", &degraded).link,
+            Link::Connecting
+        ));
+        let live_degraded = Extras {
+            live: true,
+            degraded: Some("st closed the connection".into()),
+            ..Extras::default()
+        };
+        let live = world(&model, "person/avery", &live_degraded);
+        assert!(matches!(live.link, Link::Live));
+        assert_eq!(
+            live.stale,
+            ["live stream: st closed the connection · st answers, reconnecting"]
+        );
+    }
+
+    #[test]
     fn machines_say_how_they_are_reached_and_never_call_a_heard_member_offline() {
         let now = chrono::Utc::now();
         let ago = |minutes: i64| (now - chrono::Duration::minutes(minutes)).to_rfc3339();
@@ -1613,6 +1892,149 @@ mod tests {
     }
 
     #[test]
+    fn a_seats_status_is_what_its_step_last_reported_on_one_line() {
+        let mut mission = crate::ui::demo::world().missions.items()[0].clone();
+        mission.step_metadata.insert(
+            "step-run/example/build".into(),
+            st3_ui_model::missions::StepMetadata {
+                blocked_reason: None,
+                last_progress: Some("  Tests pass on\nmain; opening the PR \n".into()),
+                nudged: None,
+            },
+        );
+        mission.step_metadata.insert(
+            "step-run/example/quiet".into(),
+            st3_ui_model::missions::StepMetadata::default(),
+        );
+        let missions = [mission];
+        assert_eq!(
+            step_progress(&missions, "step-run/example/build").as_deref(),
+            Some("Tests pass on main; opening the PR")
+        );
+        assert_eq!(step_progress(&missions, "step-run/example/quiet"), None);
+        assert_eq!(step_progress(&missions, "step-run/example/unknown"), None);
+    }
+
+    #[test]
+    fn a_compacting_seat_reads_compacting_and_never_needs_you() {
+        let mut model = Model::default();
+        let resource = |activity: Option<&str>| {
+            serde_json::json!({
+                "id": "agent/example/seat", "kind": "agent", "revision": "r1",
+                "updated_at": "2026-10-10T12:00:00Z", "name": "example/seat",
+                "state": "running", "reachability": "local", "harness_state": "working",
+                "activity": activity, "runtime_ids": [], "under": [],
+            })
+        };
+        model.agents = window(vec![resource(Some("compacting"))]);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Compacting);
+        model.agents = window(vec![resource(None)]);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Working);
+    }
+
+    fn prompt_card(answers: bool) -> serde_json::Value {
+        serde_json::json!({
+            "kind":"attention","id":"attention/prompt","revision":"episode-1","updated_at":"2026-10-10T10:00:00Z",
+            "attention_kind":"harness-prompt","source_id":"agent/example/atlas","person_id":"person/example",
+            "episode":"episode-1","alert":true,"conversation_id":"agent/example/atlas",
+            "conversation_ids":["agent/example/atlas"],
+            "title":"agent/example/atlas is waiting for a permission","detail":"Claude asks to use Bash",
+            "priority":"high","state":"open","requested_at":"2026-10-10T10:00:00Z",
+            "actions": if answers { serde_json::json!(["prompt.respond"]) } else { serde_json::json!([]) },
+            "action_parameters": if answers {
+                serde_json::json!({"prompt.respond":{"target_id":"agent/example/atlas","episode":"episode-1","answers":["allow","deny"]}})
+            } else { serde_json::json!({}) },
+        })
+    }
+
+    #[test]
+    fn a_harness_prompt_is_an_alert_in_its_seats_conversation() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.now.items.push(serde_json::from_value(prompt_card(true)).unwrap());
+        let items = attention(&model, &Extras::default());
+        let [item] = &items[..] else { panic!("{items:#?}") };
+        assert!(item.is_alert());
+        assert!(item.is_in("agent/example/atlas") && !item.is_in("agent/example/other"));
+        assert_eq!(item.agent.as_deref(), Some("agent/example/atlas"));
+        let AttentionKind::Prompt { answers, episode, seat_id, .. } = &item.kind else {
+            panic!("{:#?}", item.kind);
+        };
+        assert_eq!(answers, &["allow", "deny"]);
+        assert_eq!(episode, "episode-1");
+        assert_eq!(seat_id, "agent/example/atlas");
+        assert_eq!(item.actions, ["prompt.respond"]);
+    }
+
+    #[test]
+    fn another_harnesss_prompt_has_no_answers_to_send() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.now.items.push(serde_json::from_value(prompt_card(false)).unwrap());
+        let items = attention(&model, &Extras::default());
+        let AttentionKind::Prompt { answers, .. } = &items[0].kind else { panic!() };
+        assert!(answers.is_empty());
+    }
+
+    #[test]
+    fn a_shared_login_shows_in_every_seat_it_covers() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.now.items.push(
+            serde_json::from_value(serde_json::json!({
+                "kind":"attention","id":"attention/login","revision":"one","updated_at":"2026-10-10T10:00:00Z",
+                "attention_kind":"harness-login","source_id":"agent/example/atlas","person_id":"person/example",
+                "alert":true,"conversation_id":"agent/example/atlas",
+                "conversation_ids":["agent/example/atlas","agent/example/harbor"],
+                "targets":["agent/example/atlas","agent/example/harbor"],
+                "title":"2 seats on wren need you to log in","detail":"Attach and run /login.",
+                "priority":"high","state":"open","requested_at":"2026-10-10T10:00:00Z","actions":[]
+            }))
+            .unwrap(),
+        );
+        let items = attention(&model, &Extras::default());
+        let [item] = &items[..] else { panic!("{items:#?}") };
+        assert!(item.is_in("agent/example/atlas") && item.is_in("agent/example/harbor"));
+        assert!(matches!(&item.kind, AttentionKind::Login { seats, .. } if seats.len() == 2));
+    }
+
+    #[test]
+    fn an_update_is_not_an_alert() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.now.items.push(
+            serde_json::from_value(serde_json::json!({
+                "kind":"attention","id":"attention/update","revision":"one","updated_at":"2026-10-03T10:00:00Z",
+                "attention_kind":"person-step","source_id":"step-run/update-aa/update","person_id":"person/example",
+                "requester_id":"agent/example/cos","title":"The audit","detail":"Done.","alert":false,
+                "priority":"normal","state":"open","requested_at":"2026-10-03T10:00:00Z","actions":["work.done"],
+                "update":{"version":1,"type":"update","about":"message/0123456789abcdef","subjects":[]}
+            }))
+            .unwrap(),
+        );
+        assert!(!attention(&model, &Extras::default())[0].is_alert());
+    }
+
+    #[test]
+    fn a_seats_configured_effort_reaches_its_details() {
+        let mut model = Model::default();
+        let resource = |effort: serde_json::Value| {
+            serde_json::json!({
+                "id": "agent/example/seat", "kind": "agent", "revision": "r1",
+                "updated_at": "2026-10-10T12:00:00Z", "name": "example/seat",
+                "state": "running", "reachability": "local", "harness_state": "working",
+                "effort": effort, "runtime_ids": [], "under": [],
+            })
+        };
+        model.agents = window(vec![resource(serde_json::json!("high"))]);
+        assert_eq!(agents(&model, &[])[0].details.effort.as_deref(), Some("high"));
+        model.agents = window(vec![resource(serde_json::Value::Null)]);
+        assert_eq!(agents(&model, &[])[0].details.effort, None);
+        model.agents = window(vec![resource(serde_json::json!(""))]);
+        assert_eq!(agents(&model, &[])[0].details.effort, None);
+    }
+
+    #[test]
     fn a_waiting_human_ask_needs_you_even_while_the_harness_activity_is_working() {
         let mut model = Model::default();
         let resource = |state: &str, activity: &str, blocked_on: Option<&str>| {
@@ -1624,13 +2046,72 @@ mod tests {
             })
         };
         model.agents = window(vec![resource("waiting", "working", Some("human"))]);
-        assert_eq!(agents(&model)[0].state, AgentState::NeedsYou);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::NeedsYou);
         model.agents = window(vec![resource("running", "working", None)]);
-        assert_eq!(agents(&model)[0].state, AgentState::Working);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Working);
         model.agents = window(vec![resource("failed", "working", Some("human"))]);
-        assert_eq!(agents(&model)[0].state, AgentState::Fault);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Fault);
         model.agents = window(vec![resource("waiting", "indeterminate", Some("human"))]);
-        assert_eq!(agents(&model)[0].state, AgentState::Starting);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Starting);
+    }
+
+    #[test]
+    fn a_down_seat_reads_down_with_its_time_and_marks_the_step_it_holds() {
+        let mut model = Model::default();
+        model.agents = window(vec![serde_json::json!({
+            "id": "agent/example/gone", "kind": "agent", "revision": "r1",
+            "updated_at": "2026-10-12T12:29:00Z", "name": "example/gone",
+            "state": "down", "down_since": "2026-10-12T12:31:00.000Z",
+            "reachability": "reachable", "harness_state": "indeterminate",
+            "observation": "stale", "runtime_ids": [], "under": [],
+            "current_work": [{
+                "id": "step-run/one/build", "mission_id": "mission/example",
+                "mission_run_id": "mission-run/example", "path": "build",
+                "state": "claimed", "since": "2026-10-12T12:00:00.000Z",
+                "holder_down_since": "2026-10-12T12:31:00.000Z"
+            }],
+        })]);
+        let seat = &agents(&model, &[])[0];
+        // Neither "starting" (the stale guess for a waiting seat) nor an idle one.
+        assert_eq!(seat.state, AgentState::Down);
+        assert_eq!(
+            seat.details.fault.as_deref(),
+            Some("No running session since 2026-10-12T12:31:00.000Z")
+        );
+        assert_eq!(
+            seat.details.progress.as_deref(),
+            Some("Held by a seat with no session since 2026-10-12T12:31:00.000Z")
+        );
+        assert_eq!(super::super::screens::agent_word(seat.state), "down");
+    }
+
+    #[test]
+    fn a_seat_blocked_on_its_channel_is_broken_not_waiting_on_the_person() {
+        // Nathan, 2026-10-06: "why does Stui show up as needs you?" It was blocked on its st
+        // channel (mail held), which an answer cannot unblock.
+        let mut model = Model::default();
+        let resource = |blocked_on: &str| {
+            serde_json::json!({
+                "id": "agent/example/seat", "kind": "agent", "revision": "r1",
+                "updated_at": "2026-10-06T12:00:00Z", "name": "example/seat",
+                "state": "waiting", "reachability": "reachable", "harness_state": "blocked",
+                "blocked_on": blocked_on, "reason": "claude-channel-unattached",
+                "runtime_ids": [], "under": [],
+            })
+        };
+        model.agents = window(vec![resource("channel")]);
+        let seat = &agents(&model, &[])[0];
+        assert_eq!(seat.state, AgentState::Fault);
+        assert!(
+            seat.details.fault.as_deref().is_some_and(|text| {
+                text.contains("st channel is not attached") && text.contains("claude-channel-unattached")
+            }),
+            "{:?}",
+            seat.details.fault
+        );
+        // Blocked on a person is still theirs.
+        model.agents = window(vec![resource("human")]);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::NeedsYou);
     }
 
     #[test]
@@ -1646,17 +2127,17 @@ mod tests {
         };
         // Its idle claim went stale: st says waiting/indeterminate; the seat is just idle.
         model.agents = window(vec![resource("waiting", "indeterminate", Some("stale"))]);
-        assert_eq!(agents(&model)[0].state, AgentState::Idle);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Idle);
         // Without that staleness, an indeterminate waiting seat is still starting.
         model.agents = window(vec![resource("waiting", "indeterminate", Some("current"))]);
-        assert_eq!(agents(&model)[0].state, AgentState::Starting);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Starting);
         model.agents = window(vec![resource("waiting", "indeterminate", None)]);
-        assert_eq!(agents(&model)[0].state, AgentState::Starting);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Starting);
         // A stale observation on an unreachable seat is no news that it is idle.
         let mut gone = resource("waiting", "indeterminate", Some("stale"));
         gone["reachability"] = "unreachable".into();
         model.agents = window(vec![gone]);
-        assert_eq!(agents(&model)[0].state, AgentState::Starting);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Starting);
     }
 
     #[test]
@@ -1673,15 +2154,15 @@ mod tests {
         };
         // st's own word for it (st-drivers' needs-login) reads the same.
         model.agents = window(vec![resource("waiting", "needs-login", None)]);
-        assert_eq!(agents(&model)[0].state, AgentState::NeedsLogin);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::NeedsLogin);
         // The additive field alone is enough, even when the harness state reads as stale.
         let mut detail = resource("waiting", "indeterminate", None);
         detail["harness_error_state"] = "needs-login".into();
         detail["observation"] = "stale".into();
         model.agents = window(vec![detail]);
-        assert_eq!(agents(&model)[0].state, AgentState::NeedsLogin);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::NeedsLogin);
         model.agents = window(vec![resource("waiting", "unauthenticated", Some("providerAuth"))]);
-        let agent = &agents(&model)[0];
+        let agent = &agents(&model, &[])[0];
         assert_eq!(agent.state, AgentState::NeedsLogin);
         let guidance = super::super::screens::login_guidance(agent);
         assert!(guidance.contains("Claude login required on harbor"), "{guidance}");
@@ -1695,10 +2176,10 @@ mod tests {
         assert!(header.contains("needs login") && header.contains("run /login"), "{header}");
         // st's reason alone says so too.
         model.agents = window(vec![resource("waiting", "idle", Some("providerAuth"))]);
-        assert_eq!(agents(&model)[0].state, AgentState::NeedsLogin);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::NeedsLogin);
         // Signed in again on the same run: it is simply idle, with nothing to restart.
         model.agents = window(vec![resource("running", "idle", None)]);
-        assert_eq!(agents(&model)[0].state, AgentState::Idle);
+        assert_eq!(agents(&model, &[])[0].state, AgentState::Idle);
     }
 
     #[test]
@@ -1778,6 +2259,7 @@ mod tests {
             "updated_at": "2026-09-29T09:59:00Z", "name": "fleet/harbor/keeper",
             "state": "running", "reachability": "local", "harness_state": "working",
             "host_id": "host/lighthouse", "runtime_ids": ["runtime/keeper"],
+            "checkout": {"repository":"/srv/example/atlas", "base":"origin/main", "branch":"keeper"},
             "current_work_ids": ["step-run/audit-1/scan"],
             "next_work_id": "step-run/audit-1/report",
             "upcoming_work_ids": ["step-run/audit-1/report"], "queued_work_count": 1,
@@ -1794,6 +2276,10 @@ mod tests {
         };
         let agent = &agents[0];
         assert_eq!(agent.host, "lighthouse");
+        assert_eq!(
+            agent.worktree.as_deref(),
+            Some("worktree · branch keeper · /srv/example/atlas")
+        );
         assert!(agent.terminal);
         assert_eq!(agent.mission.as_deref(), Some("mission/fleet/harbor/audit"));
         assert_eq!(agent.step.as_deref(), Some("scan"));
