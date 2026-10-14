@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Measurement-only finite hosted trim witness diagnostic; do not merge or release.",
+  "replay": {
+    "status": "none",
+    "detail": "Isolated diagnostic driver only; no production change or rollout."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Isolated diagnostic driver only; no production change or rollout."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Isolated diagnostic driver only; no production change or rollout."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Isolated diagnostic driver only; no production change or rollout."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Isolated diagnostic driver only; no production change or rollout."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Isolated diagnostic only: validate and print bounded samples after each case, record owned phase-group closure; no production change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Isolated diagnostic driver only; no production change or rollout."
+  }
+}
