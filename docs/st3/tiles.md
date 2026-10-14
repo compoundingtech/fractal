@@ -46,8 +46,9 @@ dynamic workload users and systemd's `DynamicUser=`. One difference: a tile's st
 one launch, so a tile keeps its user ID for as long as its state lasts, not for one run.
 
 - The launcher allocates the lowest free ID in the range. Free means no other tile has it on
-  record, no account or group holds it, and it owns nothing under the state root. So an ID that
-  still owns files is never handed out, even when no record remains.
+  record, no account or group holds it, and it owns no tile directory in the state root (an entry,
+  or its `home` or `work`). A tile writes nowhere else on the host, so an ID that still owns a
+  tile's files is never handed out, even when no record remains.
 - The launcher refuses a range that holds an account or a group. It also refuses one that
   overlaps a subordinate range in `/etc/subuid` or `/etc/subgid`, systemd's own dynamic users
   (61184-65519), systemd's container range (524288 and up), or 65534 and 65535. Every later

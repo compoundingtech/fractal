@@ -159,6 +159,11 @@ pub fn remove(registry_path: &Path, name: &str) -> Result<()> {
     if fs::symlink_metadata(&registry.state_root).is_err() {
         return Ok(());
     }
+    // What is removed as root must be root's to remove.
+    registry::root_controlled(&registry.state_root)?;
+    if fs::symlink_metadata(&registry.runtime_root).is_ok() {
+        registry::root_controlled(&registry.runtime_root)?;
+    }
     uids::release(&mut registry, name, |registry| {
         for path in [registry.tile_runtime(name), registry.tile_state(name)] {
             match fs::remove_dir_all(&path) {

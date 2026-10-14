@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write as _};
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
@@ -80,6 +80,9 @@ fn write(registry: &Registry, uids: &BTreeMap<String, u32>) -> Result<()> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&temporary)
         .with_context(|| format!("create {}", temporary.display()))?;
+    // The daemon and the gateway read this file, so its mode is set outright: root's umask
+    // may be 077.
+    file.set_permissions(fs::Permissions::from_mode(0o644))?;
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
     fs::rename(&temporary, &path).with_context(|| format!("replace {}", path.display()))?;
@@ -215,8 +218,9 @@ fn subordinate_ranges(text: &str) -> Vec<(String, u32, u32)> {
         .collect()
 }
 
-/// User IDs that own a tile's directory under the state root, allocated or not: a removed
-/// record never frees an ID that still owns files.
+/// User IDs that own an entry of the state root, or a tile's `home` or `work` in it, allocated
+/// or not: a removed record never frees an ID that still owns a tile's directories. A tile
+/// writes nowhere else on the host, so these are the places its ID can own files.
 fn owners_under(state_root: &Path) -> Result<BTreeSet<u32>> {
     let mut owners = BTreeSet::new();
     let entries = match fs::read_dir(state_root) {
