@@ -10,6 +10,7 @@ const MARKER: &str = "client_message_selectors_v1_cut";
 const BACKFILL_MARKER: &str = "client_message_selectors_v1_backfill";
 const FOLD_MARKER: &str = "client_message_selectors_v1_fold";
 const MALFORMED_MARKER: &str = "client_message_selectors_v1_malformed_desired";
+const TRIGGER_MARKER: &str = "client_message_selectors_v1_trigger_generation";
 // Leave ample room for SQLite's durable commit below the 100ms transaction target.
 const BACKFILL_SUBJECTS: usize = 16;
 const BACKFILL_CLEAR_ROWS: usize = 64;
@@ -191,10 +192,16 @@ END;
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     #[cfg(not(test))]
     drop_version_schema(connection)?;
+    let trigger_generation: Option<String> = connection.query_row(
+        "SELECT value FROM meta WHERE key=?1", [TRIGGER_MARKER], |row| row.get(0),
+    ).optional()?;
+    if trigger_generation.as_deref() != Some("1") {
+        // Upgrade old source capture once, never churn SQLite's schema on reopen.
+        connection.execute_batch("DROP TRIGGER IF EXISTS client_message_cut_repair;DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;")?;
+    }
     connection.execute_batch(r#"
 CREATE TABLE IF NOT EXISTS local_client_message_cut_epoch(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL);
 INSERT OR IGNORE INTO local_client_message_cut_epoch VALUES(1,0);
-DROP TRIGGER IF EXISTS client_message_cut_repair;
 CREATE TRIGGER IF NOT EXISTS client_message_cut_claim_delete AFTER DELETE ON claims WHEN OLD.subject LIKE 'message/%' BEGIN
  UPDATE local_client_message_cut_epoch SET epoch=epoch+1 WHERE id=1;
 END;
@@ -209,10 +216,11 @@ WHEN NEW.state='repaired' AND (OLD.state!='repaired' OR OLD.replacement_claim_id
  UPDATE local_client_message_cut_epoch SET epoch=epoch+1 WHERE id=1;
 END;
 "#)?;
-    // Reinstall source triggers so an existing selector layout gains the durable
-    // pending-generation counter without changing any header columns.
-    connection.execute_batch("DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;")?;
     connection.execute_batch(SELECTOR_SCHEMA)?;
+    connection.execute(
+        "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [TRIGGER_MARKER],
+    )?;
     // Older completed v1 caches acquire a conservative first-publication cohort.
     connection.execute(
         "INSERT INTO local_client_message_publications SELECT CAST(value AS INTEGER),?2 FROM meta WHERE key=?1 AND NOT EXISTS(SELECT 1 FROM local_client_message_publications)",
@@ -626,7 +634,7 @@ fn begin_backfill(transaction: &Transaction<'_>) -> Result<BackfillProgress> {
 
 fn has_pending(connection: &Connection) -> Result<bool> {
     Ok(connection.prepare_cached(
-        "SELECT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 WHERE born_index=-1)",
+        "SELECT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 INDEXED BY client_selector_pending WHERE born_index=-1)",
     )?.query_row([], |row| row.get(0))?)
 }
 
@@ -801,7 +809,8 @@ fn run_open_chunks(connection: &mut Connection, mut reset: bool) -> Result<Backf
     stats.total = started.elapsed();
     stats.malformed_desired = malformed_count(connection)?.saturating_sub(malformed_before);
     if stats.transactions > 0 {
-        tracing::info!(
+        let _span = tracing::info_span!(
+            "st.message_selector.backfill",
             transactions = stats.transactions,
             subjects = stats.subjects,
             max_subjects_per_transaction = stats.max_subjects_per_transaction,
@@ -809,7 +818,7 @@ fn run_open_chunks(connection: &mut Connection, mut reset: bool) -> Result<Backf
             malformed_desired = stats.malformed_desired,
             longest_transaction_ms = stats.longest_transaction.as_secs_f64() * 1_000.0,
             total_ms = stats.total.as_secs_f64() * 1_000.0,
-            "message selector backfill complete",
+            span.label = "message selector backfill complete",
         );
     }
     Ok(stats)
@@ -823,14 +832,14 @@ pub(super) fn open(connection: &mut Connection) -> Result<BackfillStats> {
 /// replay and repair helpers only capture durable pending work through triggers.
 pub(super) fn finalize_commit(transaction: &Transaction<'_>) -> Result<FoldBudget> {
     #[cfg(test)]
-    if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(FoldBudget::default()); }
+    if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(FoldBudget::default()); }
     // Startup/rebuild owns this queue until every header is available. Ordinary
     // replay hooks must not publish an incomplete selector projection.
     let ready: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [MARKER], |row| row.get(0))?;
     if !ready { return Ok(FoldBudget::default()); }
     let budget = flush_pending(transaction, true)?;
     #[cfg(test)]
-    if transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='local_client_message_versions')",[],|row|row.get::<_,bool>(0))? {
+    if transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_client_message_versions'))",[],|row|row.get::<_,bool>(0))? {
         super::client_messages_version_benchmark::flush(transaction)?;
     }
     Ok(budget)
@@ -1172,6 +1181,47 @@ mod tests {
         )?;
         assert_eq!(headers, 0, "append/projection helpers must not spend selector work");
         Ok(())
+    }
+
+    #[test]
+    fn source_empty_replication_keeps_selector_work_for_its_own_loan() {
+        let store = Store::open_memory("node").unwrap();
+        store.project_replication_backlog().unwrap();
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            append_message_batch(&transaction, BACKFILL_SUBJECTS * 8).unwrap();
+            transaction.commit().unwrap();
+        }
+        store.project_replication_backlog().unwrap();
+        assert!(store.client_message_selectors_pending().unwrap());
+        let snapshot = || {
+            let connection = store.readers.get();
+            let pending: u64 = connection.query_row(
+                "SELECT COUNT(*) FROM local_client_message_selectors_v1 INDEXED BY client_selector_pending WHERE born_index=-1",
+                [], |row| row.get(0),
+            ).unwrap();
+            let fold: Option<String> = connection.query_row(
+                "SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0),
+            ).optional().unwrap();
+            let health: (String, u64, String) = connection.query_row(
+                "SELECT status,last_good_store_index,updated_at_unix_ms FROM projection_health WHERE aggregate='graph'",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).unwrap();
+            (pending, fold, health)
+        };
+        let before = snapshot();
+        let clears = std::cell::Cell::new(0);
+        for _ in 0..3 {
+            assert!(store.project_replication_backlog_before_clear(|| {
+                clears.set(clears.get() + 1);
+            }).unwrap());
+            assert_eq!(snapshot(), before);
+            assert!(!store.replication_projection_deferred());
+        }
+        assert_eq!(clears.get(), 3);
+        while store.maintain_client_message_selectors().unwrap() {}
+        assert!(!store.client_message_selectors_pending().unwrap());
     }
 
     #[test]

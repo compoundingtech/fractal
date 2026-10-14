@@ -3961,7 +3961,7 @@ fn client_message_resource(
         Vec::new()
     };
     let current = reasons.is_empty();
-    Ok(json!({
+    let mut resource = json!({
         "id": message.subject,
         "kind": "message",
         "revision": metadata["revision"],
@@ -3978,7 +3978,13 @@ fn client_message_resource(
         "tags": message.tags,
         "attachments": message.attachments.iter().map(client_attachment).collect::<Vec<_>>(),
         "operational": { "layer": if current { "current" } else { "history" }, "actionable": current, "reasons": reasons }
-    }))
+    });
+    // Forward the folded envelope's body reference, never the on-demand body text.
+    if let (Some(reference), Some(bytes)) = (&message.body_ref, message.body_bytes) {
+        resource["body_ref"] = json!(reference);
+        resource["body_bytes"] = json!(bytes);
+    }
+    Ok(resource)
 }
 
 fn client_message_resources(

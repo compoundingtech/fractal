@@ -6893,15 +6893,14 @@ impl Store {
                     // deferred generation and attempt time. The daemon also schedules retry.
                     error
                 })?;
-            let frontier: u64 = transaction
+            let health: Option<(Option<u64>, String)> = transaction
                 .query_row(
-                    "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                    "SELECT last_good_store_index,status FROM projection_health WHERE aggregate='graph'",
                     [],
-                    |row| row.get::<_, Option<u64>>(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .optional()?
-                .flatten()
-                .unwrap_or(0);
+                .optional()?;
+            let frontier = health.as_ref().and_then(|(frontier, _)| *frontier).unwrap_or(0);
             let (through, count) = transaction
                 .query_row(
                     "SELECT MAX(store_index), COUNT(*) FROM (
@@ -6911,6 +6910,11 @@ impl Store {
                     |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, u64>(1)?)),
                 )?;
             let through = through.unwrap_or(target.max(frontier));
+            // A healthy, already-projected source needs no projection transaction.
+            // In particular, an empty peer wake must not spend another runtime's
+            // deferred maintenance allowance. Missing/stale health still retries.
+            let source_empty = count == 0 && frontier >= target
+                && health.as_ref().is_some_and(|(frontier, status)| frontier.is_some() && status == "healthy");
             progress(ProjectionProgress {
                 phase: "project-incremental",
                 frontier,
@@ -6919,6 +6923,9 @@ impl Store {
                 total: None,
             });
             let result = (|| -> Result<bool, St3Error> {
+                if source_empty {
+                    return Ok(false);
+                }
                 // Non-contention incremental failures retain the full replay fallback,
                 // which quarantines claims it cannot project. SQLite contention defers below.
                 transaction
@@ -7017,19 +7024,23 @@ impl Store {
                     } else {
                         through
                     };
-                    transaction.execute(
-                    "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
-                     VALUES ('graph', 'healthy', ?1, ?2)
-                     ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
-                        error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
-                    params![through, now_ms().to_string()],
-                )?;
-                    transaction.commit()?;
+                    if source_empty {
+                        transaction.rollback()?;
+                    } else {
+                        transaction.execute(
+                            "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+                             VALUES ('graph', 'healthy', ?1, ?2)
+                             ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
+                                error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
+                            params![through, now_ms().to_string()],
+                        )?;
+                        transaction.commit()?;
+                    }
                     if !replayed {
                         processed += count;
                     }
                     progress(ProjectionProgress {
-                        phase: "projection-committed",
+                        phase: if source_empty { "projection-current" } else { "projection-committed" },
                         frontier: through,
                         target,
                         processed: (!replayed).then_some(processed),

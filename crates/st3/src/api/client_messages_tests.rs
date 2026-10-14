@@ -167,6 +167,56 @@ async fn sql_message_pages_match_full_oracle_for_generated_filter_matrix() {
 }
 
 #[tokio::test]
+async fn sql_message_pages_preserve_local_body_references_without_inlining_text() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    let mut messages = Vec::new();
+    for size in [
+        crate::message_body::INLINE_MAX_BYTES,
+        100 * 1024,
+        crate::message_body::MAX_BYTES,
+    ] {
+        let receipt = accept_message_receipt(
+            &state,
+            MessageSendRequest {
+                idempotency_key: format!("sql-body-{size}"),
+                from: "person/alex".into(),
+                to: "agent/worker".into(),
+                content: "λ".repeat(size / 2),
+                title: Some("local body".into()),
+                in_reply_to: None,
+                tags: Vec::new(),
+                attachments: Vec::new(),
+            },
+            None,
+            None,
+        ).unwrap();
+        messages.push((receipt.message, size));
+    }
+    let now = client_now_ms();
+    let expected = client_message_resources_at(&state.store, None, true, None, now).unwrap();
+    let actual = collect_sql_pages(
+        &state,
+        ClientListQuery { history: true, limit: Some(1), ..Default::default() },
+        now,
+    ).await;
+    assert_eq!(actual, expected);
+    for (message, size) in messages {
+        let resource = actual.iter().find(|item| item["id"] == message.subject).unwrap();
+        assert_eq!(resource["content"], message.content);
+        if size > crate::message_body::INLINE_MAX_BYTES {
+            assert_eq!(resource["body_ref"], message.body_ref.as_deref().unwrap());
+            assert_eq!(resource["body_bytes"], size as u64);
+            assert!(resource["content"].as_str().unwrap().len() <= crate::message_body::PREVIEW_BYTES + 3);
+        } else {
+            assert!(resource.get("body_ref").is_none());
+            assert!(resource.get("body_bytes").is_none());
+            assert_eq!(resource["content"].as_str().unwrap().len(), size);
+        }
+    }
+}
+
+#[tokio::test]
 async fn sql_message_pages_preserve_snapshot_fields_and_delivery_age_after_writes() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
