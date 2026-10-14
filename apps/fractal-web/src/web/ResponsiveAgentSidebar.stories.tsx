@@ -3,7 +3,7 @@ import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { SidebarAgentRow, ThreadHeader, assistantDarkTheme, type SidebarAgentRowData } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, ThreadHeader, assistantDarkTheme, compositionLightTheme, type SidebarAgentRowData } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { AgentFolders } from '../shell/AgentFolders.tsx'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
@@ -17,7 +17,7 @@ const rows: readonly SidebarAgentRowData[] = ['Builder', 'Reviewer'].map(title =
 const tree: readonly SidebarNode[] = [{ _tag: 'Folder', id: 'product', label: 'Product', collapsed: false, children: rows.map(row => ({ _tag: 'Agent', id: row.ref, subject: row.ref, label: row.title })) }]
 
 /** Fixture data surrounds the same sidebar frame, tree, row and thread header as live. */
-const ResponsiveSidebarSurface = ({ viewport, shortcut = true, range = 'resizable' }: { readonly viewport: number; readonly shortcut?: boolean; readonly range?: 'resizable' | 'fixed' | 'reversed' | 'nonfinite' }) => {
+const ResponsiveSidebarSurface = ({ viewport, scheme = 'dark', shortcut = true, range = 'resizable' }: { readonly viewport: number; readonly scheme?: 'light' | 'dark'; readonly shortcut?: boolean; readonly range?: 'resizable' | 'fixed' | 'reversed' | 'nonfinite' }) => {
   const [collapsed, setCollapsed] = React.useState(false)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
   const [selected, setSelected] = React.useState(rows[0]!.ref)
@@ -32,7 +32,7 @@ const ResponsiveSidebarSurface = ({ viewport, shortcut = true, range = 'resizabl
   }, [narrow])
   useSidebarShortcut(shortcut ? toggle : undefined)
   const select = (ref: string) => { setSelected(ref); setDrawerOpen(false) }
-  return <main data-sidebar-layout-story="" data-viewport={viewport} data-range={range} data-resize-commits={commits} style={{ width: viewport }} {...stylex.props(styles.root, assistantDarkTheme)}>
+  return <main data-sidebar-layout-story="" data-viewport={viewport} data-scheme={scheme} data-range={range} data-resize-commits={commits} style={{ width: viewport }} {...stylex.props(styles.root, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
     <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxWidth} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setWidth} onWidthCommit={value => { setWidth(value); setCommits(count => count + 1) }} onWidthReset={() => setWidth(Math.min(maxWidth, 256))}>
       <Aria.SearchField aria-label="Search agents" {...stylex.props(styles.search)}><Aria.Input placeholder="Search agents" {...stylex.props(styles.input)} /></Aria.SearchField>
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>
@@ -161,6 +161,10 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull()
   await expect(thread.getBoundingClientRect().width).toBe(viewport)
   const opener = canvas.getByRole('button', { name: 'Expand sidebar' })
+  await expect(opener.querySelector('[title]')).toBeNull()
+  await userEvent.hover(opener)
+  await expect(await within(document.body).findByRole('tooltip', { name: 'Expand sidebar (⌘/Ctrl+B)' })).toBeVisible()
+  await userEvent.unhover(opener)
   const before = rect()
   const entries: { readonly value: number; readonly hadRecentInput: boolean }[] = []
   const record = (records: PerformanceEntry[]) => { for (const entry of records as LayoutShiftEntry[]) if (entry.sources.some(source => source.node !== null && thread.contains(source.node))) entries.push({ value: entry.value, hadRecentInput: entry.hadRecentInput }) }
@@ -227,13 +231,15 @@ export const At440: Story = { args: { viewport: 440 }, play: drawerPlay }
 export const At700: Story = { args: { viewport: 700 }, play: drawerPlay }
 export const At900: Story = { args: { viewport: 900 }, play: drawerPlay }
 export const At1440: Story = { args: { viewport: 1440 }, play: drawerPlay }
+export const At440Light: Story = { args: { viewport: 440, scheme: 'light' }, play: drawerPlay }
+export const At1440Light: Story = { args: { viewport: 1440, scheme: 'light' }, play: drawerPlay }
 const assertFrozenTrack = (track: HTMLElement): void => {
   if (track.hasAttribute('tabindex') || track.hasAttribute('role')) throw new Error('Frozen resize track must not be focusable or interactive')
   if (getComputedStyle(track).cursor === 'col-resize' || getComputedStyle(track).cursor === 'row-resize') throw new Error('Frozen resize track must not advertise resizing')
 }
 
 export const AllStates: Story = {
-  render: () => <div {...stylex.props(styles.matrix)}>{[440, 700, 900, 1440].map(viewport => <section key={viewport}><h2>{viewport}px</h2><ResponsiveSidebarSurface viewport={viewport} shortcut={false} /></section>)}{(['fixed', 'reversed', 'nonfinite'] as const).map(range => <section key={range}><h2>{range} resize range</h2><ResponsiveSidebarSurface viewport={900} range={range} shortcut={false} /></section>)}</div>,
+  render: () => <div {...stylex.props(styles.matrix)}>{(['light', 'dark'] as const).flatMap(scheme => [440, 700, 900, 1440].map(viewport => <section key={`${scheme}-${viewport}`}><h2>{scheme} · {viewport}px</h2><ResponsiveSidebarSurface viewport={viewport} scheme={scheme} shortcut={false} /></section>))}{(['fixed', 'reversed', 'nonfinite'] as const).map(range => <section key={range}><h2>{range} resize range</h2><ResponsiveSidebarSurface viewport={900} range={range} shortcut={false} /></section>)}</div>,
   play: async ({ canvasElement }) => {
     for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-range]:not([data-range="resizable"])')) {
       const track = root.querySelector<HTMLElement>('[data-resizer-track="live-agent-sidebar"]')!

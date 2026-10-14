@@ -4,6 +4,7 @@ import { Button } from 'react-aria-components'
 import { colorVars as c, typeVars as t, radiusVars as r, geometryVars as g } from '../composition-tokens.stylex'
 import { SidebarStatus as StatusGlyph } from '../sidebar/SidebarStatus'
 import { Icon } from './Icons'
+import { Tooltip } from './Controls'
 import type { AgentStatus } from '../sidebar/model'
 
 /**
@@ -168,9 +169,11 @@ export function ThreadHeader({
   return (
     <header data-testid="thread-header" {...stylex.props(styles.header)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
-        <Button ref={sidebarToggleRef} aria-label="Expand sidebar" onPress={onToggleSidebar} {...stylex.props(styles.ghostMd)}>
-          <span title="Expand sidebar (⌘/Ctrl+B)"><Icon name="chevron-right" /></span>
-        </Button>
+        <Tooltip label="Expand sidebar (⌘/Ctrl+B)">
+          <Button ref={sidebarToggleRef} aria-label="Expand sidebar" onPress={onToggleSidebar} {...stylex.props(styles.ghostMd)}>
+            <Icon name="chevron-right" />
+          </Button>
+        </Tooltip>
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
         {folder !== undefined ? <>

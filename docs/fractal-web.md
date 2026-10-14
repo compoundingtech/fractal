@@ -90,6 +90,9 @@ dragging move the same edge in the same direction, including reversed splits.
 Below the drawer breakpoint the agent sidebar becomes a modal navigation drawer
 (`aria-modal`, focus contained, Escape or the scrim closes it and focus returns to the
 opener); at and above it the sidebar is a non-modal docked region with its split.
+The **Expand sidebar** button keeps its accessible name and exposes the Cmd/Ctrl+B
+shortcut through the kit tooltip. `wf/Sidebar/Responsive navigation` covers light
+and dark surfaces at 440px and 1440px, with both themes included in `AllStates`.
 
 ## Fractal web transcript switch paint
 
