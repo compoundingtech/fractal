@@ -3,9 +3,12 @@ use serde_json::{Value, json};
 
 fn fields(out: &mut Value, source: &Value, names: &[(&str, &str)]) {
     for &(target, native) in names {
-        if let Some(value) = source.get(native).filter(|value| match target {
+        let Some(value) = source.get(native) else {
+            continue;
+        };
+        let projected = match target {
             "fallback" | "timed_out" | "case" | "hidden" | "gitignore" | "reset" | "truncated" => {
-                value.is_boolean()
+                value.is_boolean().then(|| value.clone())
             }
             "timeout_s"
             | "exit_code"
@@ -33,13 +36,33 @@ fn fields(out: &mut Value, source: &Value, names: &[(&str, &str)]) {
             | "match_count"
             | "file_count"
             | "file_limit_reached"
-            | "per_file_limit_reached" => value.is_number(),
-            "started_at" | "ended_at" => value.is_string() || value.is_number(),
-            _ => value.is_string(),
-        }) {
-            out[target] = value.clone();
+            | "per_file_limit_reached" => value.is_number().then(|| value.clone()),
+            "started_at" | "ended_at" => timestamp(value).map(Value::String),
+            _ => value.is_string().then(|| value.clone()),
+        };
+        if let Some(projected) = projected {
+            out[target] = projected;
         }
     }
+}
+
+/// A native instant as the contract's `Timestamp`: RFC 3339 UTC with milliseconds and `Z`.
+/// Natives write epoch milliseconds or RFC 3339 text; anything else is dropped, not passed on.
+fn timestamp(value: &Value) -> Option<String> {
+    let instant = match value {
+        Value::Number(number) => {
+            let millis = number.as_i64().or_else(|| {
+                number
+                    .as_f64()
+                    .filter(|ms| ms.is_finite() && ms.fract() == 0.0)
+                    .map(|ms| ms as i64)
+            })?;
+            chrono::DateTime::from_timestamp_millis(millis)?
+        }
+        Value::String(text) => chrono::DateTime::parse_from_rfc3339(text).ok()?.to_utc(),
+        _ => return None,
+    };
+    Some(instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 fn rows(source: &Value, key: &str, project: impl Fn(&Value) -> Value) -> Value {
@@ -249,7 +272,7 @@ pub(crate) fn tool_call_view(tool: &str, args: &Value) -> Value {
     out
 }
 
-fn job(value: &Value, completed: bool) -> Value {
+fn job(value: &Value, require_state: bool) -> Value {
     let mut out = json!({});
     fields(
         &mut out,
@@ -269,8 +292,8 @@ fn job(value: &Value, completed: bool) -> Value {
             ("output_bytes", "outputBytes"),
         ],
     );
-    if completed && out.get("state").is_none() {
-        out["state"] = json!("completed");
+    if require_state && out.get("state").is_none() {
+        out["state"] = json!("unknown");
     }
     out
 }
@@ -283,6 +306,7 @@ fn answer(value: &Value) -> Value {
         &[
             ("question", "question"),
             ("custom", "custom"),
+            ("custom", "customInput"),
             ("note", "note"),
         ],
     );
@@ -357,7 +381,9 @@ pub(crate) fn tool_output_view(
             })
         }
         "ask" => {
-            out["answers"] = if details.get("answers").is_some_and(Value::is_array) {
+            out["answers"] = if details.get("results").is_some_and(Value::is_array) {
+                rows(details, "results", answer)
+            } else if details.get("answers").is_some_and(Value::is_array) {
                 rows(details, "answers", answer)
             } else if details.get("question").is_some() {
                 json!([answer(details)])
@@ -726,6 +752,89 @@ mod tests {
     }
 
     #[test]
+    fn native_instants_become_contract_timestamps_or_are_dropped() {
+        let jobs = tool_output_view(
+            "hub",
+            "h",
+            false,
+            Some(&json!({"op":"list","jobs":[
+                {"jobId":"epoch","state":"exited","startedAt":1791408489859_u64,"exitedAt":1791408490000.0},
+                {"jobId":"text","state":"exited","startedAt":"2026-10-07T23:28:09.86+02:00","endedAt":"yesterday"},
+                {"jobId":"odd","state":"running","startedAt":true,"endedAt":1.5}
+            ]})),
+        )["jobs"]
+            .clone();
+        assert_eq!(jobs[0]["started_at"], "2026-10-07T21:28:09.859Z");
+        assert_eq!(jobs[0]["ended_at"], "2026-10-07T21:28:10.000Z");
+        assert_eq!(jobs[1]["started_at"], "2026-10-07T21:28:09.860Z");
+        for (job, field) in [(1, "ended_at"), (2, "started_at"), (2, "ended_at")] {
+            assert!(
+                jobs[job].get(field).is_none(),
+                "{job} {field}: {}",
+                jobs[job]
+            );
+        }
+        let (_, start, _) = omp_record_view(
+            &json!({"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"c","toolName":"bash","startedAt":1791408489859_u64}}),
+        )
+        .unwrap();
+        assert_eq!(start["started_at"], "2026-10-07T21:28:09.859Z");
+    }
+
+    #[test]
+    fn batched_ask_answers_keep_selections_and_custom_input() {
+        let details = json!({
+            "results": [
+                {"id":"db","question":"Which database should the prototype use?",
+                 "options":["SQLite","Postgres","In-memory"],"multi":false,
+                 "selectedOptions":["SQLite"],"note":"prefer zero-ops for the demo"},
+                {"id":"features","question":"Which features ship?",
+                 "options":["Auth","Search","Export","Sharing"],"multi":true,
+                 "selectedOptions":["Auth","Export"]},
+                {"id":"deploy","question":"Where do we deploy?",
+                 "options":["Fly.io","Vercel"],"multi":false,"selectedOptions":[],
+                 "customInput":"Cloudflare Workers","custom":"legacy fallback"}
+            ],
+            "answers": [{"question":"Ignored fallback","selected":["legacy"]}]
+        });
+        let view = tool_output_view("ask", "a", false, Some(&details));
+        let answers = view["answers"].as_array().unwrap();
+        assert_eq!(answers.len(), 3);
+        assert_eq!(answers[0]["selected"], json!(["SQLite"]));
+        assert_eq!(answers[0]["note"], "prefer zero-ops for the demo");
+        assert_eq!(answers[1]["selected"], json!(["Auth", "Export"]));
+        assert_eq!(answers[2]["selected"], json!([]));
+        assert_eq!(answers[2]["custom"], "Cloudflare Workers");
+        assert!(answers.iter().all(|answer| answer.get("id").is_none()));
+        let fallback = tool_output_view(
+            "ask",
+            "a",
+            false,
+            Some(&json!({"answers":[{"question":"Which?","selected":["A"],"custom":"Other"}]})),
+        );
+        assert_eq!(fallback["answers"][0]["custom"], "Other");
+        assert_eq!(fallback["answers"][0]["selected"], json!(["A"]));
+    }
+
+    #[test]
+    fn completion_job_states_are_unknown_unless_explicit() {
+        for (custom_type, key) in [("async-result", "jobs"), ("launch-completion", "daemons")] {
+            for state in [None, Some("cancelled"), Some("failed"), Some("failed (exit 2)")] {
+                let mut native_job = json!({"jobId":"j","durationMs":123});
+                if let Some(state) = state {
+                    native_job["state"] = json!(state);
+                }
+                let mut record = json!({"type":"custom_message","customType":custom_type,"details":{}});
+                record["details"][key] = json!([native_job]);
+                let (_, view, _) = omp_record_view(&record).unwrap();
+                assert_eq!(view["jobs"][0]["state"], state.unwrap_or("unknown"));
+            }
+        }
+        let hub = tool_output_view("hub", "h", false, Some(&json!({"jobs":[{"jobId":"j"}]})));
+        assert!(hub["jobs"][0].get("state").is_none());
+    }
+
+    #[test]
     fn record_views_parse_extensions_bookkeeping_and_visibility() {
         let cases = [
             (
@@ -784,6 +893,9 @@ mod tests {
             let (actual, view, visibility) = omp_record_view(&record).unwrap();
             assert_eq!(actual, kind);
             assert_eq!(view["type"], view_type);
+            if record["customType"] == "async-result" {
+                assert_eq!(view["jobs"][0]["state"], "unknown");
+            }
             assert_eq!(
                 visibility,
                 if view_type == "tool_start" {

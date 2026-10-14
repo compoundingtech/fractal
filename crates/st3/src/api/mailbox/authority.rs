@@ -17,7 +17,7 @@ fn source_agent_dir(state: &AppState, fence: &Fence) -> PathBuf {
     )
 }
 
-fn episode(fence: &Fence) -> String {
+pub(super) fn episode(fence: &Fence) -> String {
     let key = format!(
         "mailbox:{}:{}:{}",
         fence.subject, fence.incarnation, fence.component
@@ -212,12 +212,95 @@ pub(super) fn loss_if_current(
     }).map_err(|error| error.downcast::<St3Error>().unwrap_or_else(|error| refused(error.to_string())))
 }
 
+/// Inputs to a consumed replay, not authentication. Every report still goes
+/// through admission, including current custody, epoch and revocation checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ReplayProofInputs {
+    pub(super) failure: Option<String>,
+    pub(super) subject: String,
+    pub(super) component: String,
+    pub(super) incarnation: String,
+    pub(super) epoch: u64,
+    pub(super) peer_agent: String,
+    pub(super) peer_transport: &'static str,
+    pub(super) peer_pid: u32,
+    pub(super) peer_archives_inbox: bool,
+    pub(super) process_birth: u64,
+    // Provider, session, PID, process generation and native ownership sequence.
+    pub(super) lease_owner: Authority,
+    episode_key: String,
+    agent_dir: PathBuf,
+}
+
+pub(super) fn replay_proof_inputs(
+    state: &AppState,
+    fence: &Fence,
+    peer: &NativeDeliveryPeer,
+) -> Result<ReplayProofInputs, St3Error> {
+    let lease_owner = state.store.mailbox_lease_authority(fence)?
+        .ok_or_else(|| refused("the consumed replay has no canonical lease"))?;
+    let episode_key = episode(fence);
+    let failure = state.store.mailbox_failure_episode(fence, &episode_key)?
+        .and_then(|(failure, pending)| pending.then_some(failure));
+    Ok(ReplayProofInputs {
+        failure,
+        subject: fence.subject.clone(),
+        component: fence.component.clone(),
+        incarnation: fence.incarnation.clone(),
+        epoch: fence.epoch,
+        peer_agent: peer.agent.clone(),
+        peer_transport: peer.transport,
+        peer_pid: peer.pid,
+        peer_archives_inbox: peer.archives_inbox,
+        process_birth: process_birth(peer.pid)?,
+        lease_owner,
+        episode_key,
+        agent_dir: source_agent_dir(state, fence),
+    })
+}
+
+impl ReplayProofInputs {
+    /// Compare on dirty passes without rebuilding the immutable stream inputs.
+    /// Any read error invalidates the proof; none of these reads admits a report.
+    pub(super) fn is_current(
+        &self,
+        state: &AppState,
+        fence: &Fence,
+        peer: &NativeDeliveryPeer,
+    ) -> bool {
+        self.subject == fence.subject
+            && self.component == fence.component
+            && self.incarnation == fence.incarnation
+            && self.epoch == fence.epoch
+            && self.peer_agent == peer.agent
+            && self.peer_transport == peer.transport
+            && self.peer_pid == peer.pid
+            && self.peer_archives_inbox == peer.archives_inbox
+            && process_birth(peer.pid).is_ok_and(|birth| birth == self.process_birth)
+            && state.store.mailbox_replay_owner_matches(fence, &self.lease_owner)
+                .is_ok_and(|matches| matches)
+            && st_drivers::harness_events::read_runtime_state(
+                &self.agent_dir, &fence.incarnation,
+            ).ok().flatten().is_some_and(|raw| {
+                provider_authority(&raw).is_ok_and(|owner| {
+                    owner.harness.as_deref() == Some(&self.lease_owner.provider)
+                        && owner.evidence_incarnation.as_deref() == Some(&self.lease_owner.session)
+                        && owner.ownership_sequence == Some(self.lease_owner.sequence)
+                })
+            })
+            && state.store.mailbox_failure_episode(fence, &self.episode_key)
+                .is_ok_and(|episode| {
+                    episode.and_then(|(failure, pending)| pending.then_some(failure)) == self.failure
+                })
+    }
+}
+
 pub(super) fn repair_proven(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     raw: &str,
-) -> Result<(), St3Error> {
+) -> Result<ReplayProofInputs, St3Error> {
     let Ok(report) = serde_json::from_str::<Value>(raw) else {
         return Err(refused("the delivery report is malformed"));
     };
@@ -246,7 +329,7 @@ pub(super) fn repair_proven(
             }, true)?;
             signal_changed(state);
         }
-        Ok(())
+        replay_proof_inputs(state, fence, peer)
     })
 }
 

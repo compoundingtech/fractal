@@ -339,6 +339,9 @@ export function toolTitle(name: string, args: unknown): string {
   return ['Bash', 'bash', 'shell', 'exec_command'].includes(name) ? `$ ${first}` : `${name} ${first}`;
 }
 
+// Keep this line budget and marker in sync with st3-conversation-ui's tool_output.
+const PREVIEW_LINES = 400;
+
 export function toolOutput(content: unknown, full = false): string[] {
   let text: string;
   if (typeof content === 'string') text = content;
@@ -349,7 +352,11 @@ export function toolOutput(content: unknown, full = false): string[] {
   const lines = text ? text.split('\n') : [];
   while (lines.length && !lines[0]?.trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1]?.trim()) lines.pop();
-  return full ? lines : lines.slice(0, 400);
+  if (full || lines.length <= PREVIEW_LINES) return lines;
+  return [
+    ...lines.slice(0, PREVIEW_LINES),
+    `… ${lines.length - PREVIEW_LINES} more lines not shown in the timeline preview`,
+  ];
 }
 
 function contentText(body: unknown): string {
@@ -943,13 +950,35 @@ export function shownToolLines(body: Extract<Body, { kind: 'tool' }>, open: bool
   return { hidden: body.output.length - COLLAPSED_TOOL_LINES, lines: head ? body.output.slice(0, COLLAPSED_TOOL_LINES) : body.output.slice(-COLLAPSED_TOOL_LINES) };
 }
 
-/** What a problem means for what is shown: how old it is and that the phone keeps trying. */
-export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number): string {
+/** What a problem means for what is shown: how old it is and that the phone keeps trying, or,
+ * once st refused for good (`stopped`), that nothing retries until the person asks again. */
+export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number, stopped = false): string {
+  if (stopped) return `Could not load this conversation: ${issue} · tap to try again`;
   if (!loaded) return `Not loaded yet: ${issue}. Trying again.`;
   if (lastFrame === null) return `${issue} · trying again`;
   const seconds = Math.max(0, Math.round((now - lastFrame) / 1000));
   const age = seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
   return `${issue} · shown as of ${age} ago · trying again`;
+}
+
+/** How old a conversation's last news from st is, as stui writes it: "4s", "3m", "2h". */
+export function updatedAge(lastFrame: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - lastFrame) / 1000));
+  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+}
+
+/**
+ * The line under a conversation's header that says how fresh it is, as stui's does ("live ·
+ * updated 1m ago"), and shows that the phone is asking again: `refreshing` is true from the moment
+ * it starts following the conversation until st sends it. `tone` is how to colour it.
+ */
+export function freshnessLine(o: { issue: string; loaded: boolean; refreshing: boolean; lastFrame: number | null; now: number }): { text: string; tone: 'live' | 'refreshing' | 'warn' } {
+  const updated = o.lastFrame === null ? '' : ` · updated ${updatedAge(o.lastFrame, o.now)} ago`;
+  if (o.issue) return { text: `⚠ retrying${updated}`, tone: 'warn' };
+  if (!o.loaded) return { text: '↻ loading…', tone: 'refreshing' };
+  if (o.refreshing) return { text: `↻ refreshing…${updated}`, tone: 'refreshing' };
+  if (o.lastFrame === null) return { text: '● live · waiting for st', tone: 'live' };
+  return { text: `● live${updated}`, tone: 'live' };
 }
 
 const hasClippedValue = (value: unknown): boolean => typeof value === 'string'

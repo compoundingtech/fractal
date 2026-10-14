@@ -27,14 +27,14 @@ st3 --json claim resource/eval/review-escalation/source resource.observed \
   --field state=ready >source.json
 source_claim=$(jq -er '.id' source.json)
 
-st3 --json mission start eval/review-escalation/standing \
+st3 --json missions start eval/review-escalation/standing \
   --id eval/review-escalation/standing \
   --workspace "$PWD" \
   --as "$REQUESTER" >standing.json
 standing_run=$(jq -er '.mission_run.subject' standing.json)
 st3 trace wait "$OWNER" --for running --timeout 1m >/dev/null
 
-st3 --json mission start eval/review-escalation/work \
+st3 --json missions start eval/review-escalation/work \
   --id "eval/review-escalation/work/${ST_MISSION_RUN}" \
   --workspace "$PWD" \
   --input "source=resource/eval/review-escalation/source@${source_claim}" \
@@ -48,7 +48,7 @@ st3 claim "resource/mission-run/${work_run#mission-run/}/review" resource.observ
   --field target=resource/eval/review-escalation/source >/dev/null
 st3 trace wait "$work_run" --for running --timeout 1m >/dev/null
 
-route=$(st3 --json mission show "$work_run" | jq -er '.steps[] | select(.step == "route") | .subject')
+route=$(st3 --json missions show "$work_run" | jq -er '.steps[] | select(.step == "route") | .subject')
 st3 trace wait "$route" --for ready --timeout 1m >/dev/null
 st3 work claim "$route" --as "$OWNER" >/dev/null
 
@@ -62,7 +62,7 @@ route=$(jq -er '.mission_run.steps[] | select(.step == "route") | .subject' revi
 st3 work claim "$route" --as "$OWNER" >/dev/null
 st3 work complete "$route" --as "$OWNER" --summary "Alex must review this result" >/dev/null
 
-human=$(st3 --json mission show "$work_run" | jq -er '.steps[] | select(.step == "human-review") | .subject')
+human=$(st3 --json missions show "$work_run" | jq -er '.steps[] | select(.step == "human-review") | .subject')
 st3 trace wait "$human" --for ready --timeout 1m >/dev/null
 review_list_ready=false
 for attempt in $(seq 1 100); do

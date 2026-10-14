@@ -1,5 +1,5 @@
 import { Component, createRef, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
@@ -11,16 +11,17 @@ import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConv
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
+import { quality } from '../qualityNative';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
-import { conversationEntries, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
+import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport, VisibleConversationImage, type VisibleImageState } from '../visibleConversationImages';
 import { dictationAvailable, startDictation } from '../modules/st-dictation';
 import type { RootScreen } from '../navigation';
 import { openSubagentConversation } from '../conversationNavigation';
-import { useStore } from '../store';
+import { useStore, type MessageRequest, type Sent } from '../store';
 import { fonts, theme } from '../theme';
 import { Button, Field, LINE, Markdown, T } from '../ui';
 import { AlertsStrip } from './Alerts';
@@ -30,7 +31,8 @@ const RULES: ConversationRules = rules;
 const c = tokenColor;
 
 const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, older: { paged: false, start: false, loading: false } };
-type Pending = { id: string; text: string; at: string; failed?: string; images?: number };
+// `unconfirmed` is the exact request st may have taken and has not confirmed, to send again unchanged.
+type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
 
 function nowClock() {
@@ -42,7 +44,7 @@ function nowClock() {
 // above the composer, unless the person has scrolled back to read.
 export function ConversationScreen({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
-  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, actions, simpleOn } = useStore();
+  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
   // A running session st manages belongs to its agent: name it, and send to it, as the agent.
   const agent = data.agents.find(candidate => candidate.id === target)
@@ -69,9 +71,17 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   // Whether st has answered at all: until it has, the screen says it is loading, never "nothing".
   const [loaded, setLoaded] = useState(() => conversationCache.current.has(target));
   const [issue, setIssue] = useState('');
+  // st refused for good: nothing asks again until the person taps to retry, which follows again.
+  const [stopped, setStopped] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const retry = () => { if (stopped) { setStopped(false); setIssue(''); setAttempt(count => count + 1); } };
   // When st last sent this conversation, so a view that may be stale says how old it is.
   const [lastFrame, setLastFrame] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // Asking st again: true from the moment the phone starts following this conversation until st sends it.
+  const [refreshing, setRefreshing] = useState(true);
+  // The entry whose text is open for selecting in place: a long press selects it, any part of it can be copied.
+  const [selecting, setSelecting] = useState<string | null>(null);
   useEffect(() => {
     if (!issue) return;
     const timer = setInterval(() => setNow(Date.now()), 5_000);
@@ -83,6 +93,13 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   const [find, setFind] = useState(route.params.find ?? '');
   const [findOpen, setFinding] = useState(!!route.params.find);
   const [draft, setDraft] = useState(() => draftCache.current.get(target) ?? '');
+  const draftTouched = useRef(false);
+  useEffect(() => {
+    if (draftTouched.current) { if (!draft) draftCache.current.delete(target); return; }
+    const restored = draftCache.current.get(target);
+    if (restored) setDraft(restored);
+  }, [draftsReady, target]);
+  useEffect(() => { saveDrafts(); }, [draft, draftsReady]);
   const [away, setAway] = useState(false);
   // Scrolled a little way up from the newest entry: new entries must then not move what is read.
   const [reading, setReading] = useState(false);
@@ -97,7 +114,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   const box = useRef<TextInput>(null);
   /** Empty the message box. Clearing it natively too lets it shrink back to one line; with the
    * value alone it kept the height of what was sent (Nathan, 2026-10-02). */
-  const emptyBox = () => { setDraft(''); draftCache.current.delete(target); box.current?.clear(); };
+  const emptyBox = () => { draftTouched.current = true; setDraft(''); draftCache.current.delete(target); box.current?.clear(); };
   // Leaving the conversation while listening stops it, so the microphone and other audio are freed.
   useEffect(() => () => { const stop = stopListening.current; stopListening.current = null; void stop?.(); }, []);
   const canDictate = useMemo(() => dictationAvailable(), []);
@@ -147,22 +164,38 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   useEffect(() => {
     if (currentSession && timeline.sessionId && timeline.sessionId !== currentSession && followed !== currentSession) setFollowed(currentSession);
   }, [currentSession, timeline.sessionId, followed]);
+  const qualityOpen = useRef(0);
+  useFocusEffect(useCallback(() => {
+    qualityOpen.current = quality.beginConversation();
+    if (unresolved) quality.conversationError(qualityOpen.current, 'transcript-not-bound');
+    return () => quality.endConversation(qualityOpen.current);
+  }, [target, unresolved, attempt]));
+  const visibleEntries = useRef((info: { viewableItems: ViewToken<Row>[] }) => {
+    for (const item of info.viewableItems) {
+      const kind = item.item.kind;
+      if (item.isViewable && (kind === 'entry' || kind === 'call' || kind === 'bundle')) { quality.conversationVisible(qualityOpen.current); break; }
+    }
+  });
   // The socket sends the newest page, then each change; it never polls. Only while visible.
   useFocusEffect(useCallback(() => {
     if (!feed || unresolved) return;
     setIssue('');
+    setStopped(false);
+    setRefreshing(true);
     const follow = feed.followConversation(target, {
       onEntries: frame => setTimeline(previous => {
         setLastFrame(Date.now());
+        setRefreshing(false);
         setLoaded(true);
         const next = applyConversation(previous, frame);
         rememberBounded(conversationCache.current, target, next, 24);
         return next;
       }),
-      onIssue: setIssue,
+      onIssue: (text, refused = false) => { setIssue(text); setStopped(refused); },
+      onQualityError: code => quality.conversationError(qualityOpen.current, code),
     });
     return () => follow.close();
-  }, [feed, target, unresolved, conversationCache, followed]));
+  }, [feed, target, unresolved, conversationCache, followed, attempt]));
 
   const names = useMemo(() => {
     const map = new Map(data.agents.map(candidate => [candidate.id, agentName(candidate)]));
@@ -174,6 +207,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   }, [data.agents, caps?.session_actor]);
   // Half a conversation is worse than none: when st could not read the transcript, say why.
   const unreadable = useMemo(() => unreadableTranscript(timeline.entries), [timeline.entries]);
+  useEffect(() => { if (unreadable) quality.conversationError(qualityOpen.current, 'transcript-not-bound'); }, [unreadable]);
   // An entry that did not change keeps its object, so its row is not drawn and measured again:
   // redrawing every row on each frame made the list jump.
   const stable = useRef(new Map<string, { key: string; entry: ConversationEntry }>());
@@ -236,11 +270,22 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     list.current?.scrollToOffset({ offset: 0, animated: offset.current < 1200 });
     const tags = dictated || spoken !== undefined ? ['dictated'] : undefined;
     setDictated(false);
-    const failed = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
+    const sent = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
     // Images that did not go stay ready to send again.
-    if (failed && sending.length) setImages(previous => addImages(sending, previous).images);
-    if (failed) setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, failed } : candidate));
-    else setTimeout(() => setPending(previous => previous.filter(candidate => candidate.id !== item.id)), 60_000);
+    if (sent.how === 'failed' && sending.length) setImages(previous => addImages(sending, previous).images);
+    settle(item.id, sent);
+  }
+  // An unconfirmed message goes again as the same request, so st keeps at most one of it.
+  async function sendAgain(item: Pending) {
+    if (!item.unconfirmed || item.resending) return;
+    setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
+    settle(item.id, await actions.resend(item.unconfirmed));
+  }
+  // A sent message waits to show up in the conversation; one st has not confirmed keeps its request.
+  function settle(id: string, sent: Sent) {
+    setPending(previous => previous.map(candidate => candidate.id !== id ? candidate
+      : { ...candidate, resending: false, failed: sent.how === 'failed' ? sent.error : undefined, unconfirmed: sent.how === 'unconfirmed' ? sent.request : undefined }));
+    if (sent.how === 'sent') setTimeout(() => setPending(previous => previous.filter(candidate => candidate.id !== id)), 60_000);
   }
   // An image from the photo library or the clipboard, for the next message.
   function attach() {
@@ -319,7 +364,8 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={styles.strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
     {header ? <View style={styles.strip}><T dim>{header}</T></View> : null}
     {agent ? <AlertsStrip agentId={agent.id} entries={timeline.entries} /> : null}
-    {issue ? <View style={styles.strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now)}</T></View> : null}
+    {issue ? <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry} style={styles.strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now, stopped)}</T></Pressable> : null}
+    {!unresolved && !issue ? <Freshness refreshing={refreshing} loaded={loaded} lastFrame={lastFrame} /> : null}
     {findOpen ? <View style={[styles.strip, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
       <Field value={find} onChangeText={setFind} placeholder="Find in this conversation" autoFocus autoCapitalize="none" autoCorrect={false} spellCheck={false} returnKeyType="search" style={{ flex: 1 }} />
       <Pressable accessibilityRole="button" onPress={() => { setFinding(false); setFind(''); }}><T color={theme.accent}>Done</T></Pressable>
@@ -328,17 +374,22 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     <View ref={imageViewportBox} collapsable={false} style={{ flex: 1 }} onLayout={measureImageViewport}>
     <FlatList
       ref={list}
+      onViewableItemsChanged={visibleEntries.current}
       inverted
       data={rows}
+      extraData={selecting}
       keyExtractor={row => row.kind === 'entry' ? row.entry.id : row.kind === 'call' ? `call:${row.entry.id}` : row.kind === 'bundle' ? row.id : row.kind === 'pending' ? row.pending.id : 'older'}
       renderItem={({ item: row }) => row.kind === 'older'
         ? <Pressable accessibilityRole="button" onPress={() => { dragged.current = true; loadOlder(); }} style={styles.entry}><T dim>{olderNote(timeline)}</T></Pressable>
-        : row.kind === 'pending' ? <PendingView pending={row.pending} />
+        : row.kind === 'pending' ? <PendingView pending={row.pending} canSend={canSend} onSendAgain={sendAgain} />
         : row.kind === 'bundle' ? <BundleView row={row} onToggle={toggle} />
         : row.kind === 'call' && !open.has(row.entry.id) ? <CallView entry={row.entry} tool={row.tool} onToggle={toggle} />
-        // A long press opens the entry's text to select any part of it; iOS text selects only whole.
-        : <Pressable accessible={false} onLongPress={() => navigation.navigate('SelectText', { text: entryText(row.entry), title })} delayLongPress={350}><EntryView entry={row.entry} conversationId={timeline.sessionId ?? sessionId ?? target} revisionKey={row.entry.contentSources?.map(source => `${source.id}:${sourceRevisions[source.id] ?? 0}`).join('|') ?? String(sourceRevisions[row.entry.id] ?? 0)} imageViewport={imageViewport} open={open.has(row.entry.id)} onToggle={toggle} brief={simpleOn && !finding} onOpenSession={openSession} /></Pressable>}
-      ListEmptyComponent={<View style={[styles.entry, { transform: [{ scaleY: -1 }] }]}>{unreadable ? <T color={theme.waiting} selectable>{unreadable}</T> : <T dim>{unresolved ? 'This process has no exact native session history.' : !loaded ? (issue ? `Not loaded yet: ${issue}. Trying again.` : status === 'online' ? 'Loading the conversation…' : 'Offline; this conversation has not been loaded yet.') : 'No conversation in the recent timeline.'}</T>}</View>}
+        // A long press turns the entry into selectable text where it is, with the handles and menu of
+        // iOS; iOS paragraphs select only whole, a text view selects any part. Tapping away puts it back.
+        : row.entry.id === selecting
+          ? <TextInput accessibilityLabel="Entry text, selected for copying" style={styles.selecting} value={entryText(row.entry)} multiline autoFocus selectTextOnFocus showSoftInputOnFocus={false} scrollEnabled={false} autoCorrect={false} spellCheck={false} onChangeText={() => undefined} onBlur={() => setSelecting(null)} />
+          : <Pressable accessible={false} onLongPress={() => setSelecting(row.entry.id)} delayLongPress={350}><EntryView entry={row.entry} conversationId={timeline.sessionId ?? sessionId ?? target} revisionKey={row.entry.contentSources?.map(source => `${source.id}:${sourceRevisions[source.id] ?? 0}`).join('|') ?? String(sourceRevisions[row.entry.id] ?? 0)} imageViewport={imageViewport} open={open.has(row.entry.id)} onToggle={toggle} brief={simpleOn && !finding} onOpenSession={openSession} /></Pressable>}
+      ListEmptyComponent={<View style={[styles.entry, { transform: [{ scaleY: -1 }] }]}>{unreadable ? <T color={theme.waiting} selectable>{unreadable}</T> : <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry}><T dim>{unresolved ? 'This process has no exact native session history.' : !loaded ? (issue ? staleLine(issue, false, null, now, stopped) : status === 'online' ? 'Loading the conversation…' : 'Offline; this conversation has not been loaded yet.') : 'No conversation in the recent timeline.'}</T></Pressable>}</View>}
       // Scrolled up, a new entry must not move what is being read, so the position is kept. At
       // the newest it must not be: the position-keeping scrolls to a new entry with an animation,
       // which slid the whole conversation after each send and each reply (Nathan, 2026-10-05).
@@ -384,7 +435,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         <Field
           ref={box}
           value={draft}
-          onChangeText={text => { setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
+          onChangeText={text => { draftTouched.current = true; setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
           placeholder={`Message ${title}`}
           multiline
           style={[styles.input, canDictate ? { paddingRight: 36 } : null]}
@@ -419,13 +470,30 @@ function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof
   </View>;
 }
 
-const PendingView = memo(function PendingView({ pending }: { pending: Pending }) {
+const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }: { pending: Pending; canSend: boolean; onSendAgain: (pending: Pending) => void }) {
   const rule = RULES.pending;
-  return <View style={[styles.entry, styles.barred, { borderLeftColor: c(pending.failed ? rule.failed : rule.sending_edge) }]}>
-    <T color={c(pending.failed ? rule.failed : rule.sending.color)}>{pending.failed ? `you · not sent: ${pending.failed}` : rule.sending.text}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
+  const tone = pending.failed ? rule.failed : pending.unconfirmed ? rule.unconfirmed : null;
+  const label = pending.failed ? `you · not sent: ${pending.failed}`
+    : pending.unconfirmed ? (pending.resending ? 'you · sending again…' : 'you · st may have taken it and has not confirmed yet')
+    : rule.sending.text;
+  return <View style={[styles.entry, styles.barred, { borderLeftColor: c(tone ?? rule.sending_edge) }]}>
+    <T color={c(tone ?? rule.sending.color)}>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
     <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
+    {pending.unconfirmed ? <Button label="Send again" color={c(rule.unconfirmed)} disabled={!canSend || pending.resending} onPress={() => onSendAgain(pending)} /> : null}
   </View>;
 });
+
+/** How fresh the conversation is, as stui says it on the rule above its box: live, how long since st
+ * last sent it, and that the phone is asking again. It keeps its own clock so a tick redraws only this line. */
+function Freshness({ refreshing, loaded, lastFrame }: { refreshing: boolean; loaded: boolean; lastFrame: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(timer);
+  }, []);
+  const line = freshnessLine({ issue: '', loaded, refreshing, lastFrame, now });
+  return <View style={styles.freshness} accessible accessibilityLabel={line.text}><T dim={line.tone === 'live'} color={line.tone === 'refreshing' ? theme.accent : undefined} numberOfLines={1}>{line.text}</T></View>;
+}
 
 const EntryView = memo(function EntryView(props: { entry: ConversationEntry; conversationId: string; revisionKey: string; imageViewport: ConversationImageViewport; open: boolean; onToggle: (id: string) => void; brief?: boolean; onOpenSession?: (sessionId: string, title: string) => void }) {
   return <View>
@@ -649,8 +717,10 @@ const styles = StyleSheet.create({
   unthumb: { position: 'absolute', top: -6, right: -6, width: 20, height: 20, borderRadius: 10, backgroundColor: theme.surface1, alignItems: 'center', justifyContent: 'center' },
   mailImage: { width: 200, height: 150, borderRadius: 6, overflow: 'hidden', backgroundColor: theme.surface0 },
   screen: { flex: 1, backgroundColor: theme.base },
+  freshness: { paddingHorizontal: 12, paddingVertical: 3, backgroundColor: theme.base },
   strip: { paddingHorizontal: 12, paddingVertical: 6, borderBottomColor: theme.surface0, borderBottomWidth: StyleSheet.hairlineWidth * 2, backgroundColor: theme.base },
   entry: { paddingHorizontal: 12, paddingVertical: 6 },
+  selecting: { paddingHorizontal: 12, paddingVertical: 6, color: theme.text, backgroundColor: theme.surface0, fontFamily: fonts.regular, fontSize: 14, lineHeight: LINE },
   user: { backgroundColor: theme.userBg, paddingHorizontal: 12, paddingVertical: 8, marginVertical: 6 },
   barred: { borderLeftWidth: 2, marginLeft: 10, paddingLeft: 8 },
   tool: { marginHorizontal: 8, marginVertical: 4, paddingHorizontal: 8, paddingVertical: 4, borderLeftWidth: 2 },

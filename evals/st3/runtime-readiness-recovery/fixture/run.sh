@@ -79,7 +79,7 @@ mission "fixture/readiness-recovery" state="ready" {
 }
 KDL
 st3 --endpoint "$socket" publish fixture.kdl --as person/eval >/dev/null
-run_id="$(st3 --endpoint "$socket" --json mission start fixture/readiness-recovery \
+run_id="$(st3 --endpoint "$socket" --json missions start fixture/readiness-recovery \
   --workspace "$PWD" --as person/eval | jq -er '.mission_run.id')"
 agent="agent/$run_id/worker"
 
