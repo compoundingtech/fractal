@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""evidence-wrap and evidence-sign: a measured run becomes a signed note, and nothing else does.
+
+  python3 scripts/evidence-wrap-test                    run the checks
+  python3 scripts/evidence-wrap-test --write-fixture D  also write a golden note (throwaway key) to D
+"""
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+WRAP, SIGN = ROOT / 'scripts/evidence-wrap', ROOT / 'scripts/evidence-sign'
+FIXTURES = ROOT / 'scripts/testdata/evidence/wrapper-note'
+DATE = '2026-10-14T12:00:00Z'
+ENV = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
+           GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t',
+           GIT_COMMITTER_EMAIL='t@example.invalid', GIT_AUTHOR_DATE=DATE, GIT_COMMITTER_DATE=DATE)
+
+
+def git(repo, *args, stdin=None):
+    done = subprocess.run(['git', '-C', str(repo), *args], input=stdin.encode() if isinstance(stdin, str) else stdin,
+                          capture_output=True, env=ENV)
+    assert done.returncode == 0, (args, done.stderr.decode())
+    return done.stdout.decode().strip()
+
+
+def run(command, cwd, home, **extra):
+    env = dict(ENV, HOME=str(home), EVIDENCE_SIGN_NOW=DATE, **extra)
+    return subprocess.run(command, cwd=cwd, capture_output=True, env=env)
+
+
+def main(argv):
+    write_fixture = Path(argv[argv.index('--write-fixture') + 1]) if '--write-fixture' in argv else None
+    with tempfile.TemporaryDirectory() as directory:
+        tmp = Path(directory)
+        key = tmp / 'key'
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'fleet/dev', '-f', str(key)], check=True)
+        pub = key.with_suffix('.pub').read_text().split()
+        signers = tmp / 'allowed'
+        signers.write_text(f'fleet/dev namespaces="git" {pub[0]} {pub[1]}\n')
+        home = tmp / 'home'
+        (home / '.config/st').mkdir(parents=True)
+        (home / '.config/st/evidence-sign.json').write_text(json.dumps(
+            {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'scratch.git')}))
+        repo = tmp / 'repo'
+        git(tmp, 'init', '-q', str(repo))
+        (repo / 'flake.lock').write_text('{"nodes":{}}\n')
+        (repo / 'a').write_text('one\n')
+        git(repo, 'add', '.')
+        git(repo, 'commit', '-q', '-m', 'one')
+        signer = json.dumps([sys.executable, str(SIGN)])
+        toolchain = hashlib.sha256(b'drv').hexdigest()
+
+        def wrap(command, *extra):
+            return run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
+                        '--signer', signer, '--change-id', 'github:example/repo#5', *extra, '--', *command], repo, home)
+
+        def statement(record):
+            blob = git(repo, 'ls-tree', '-r', record).split()[2]
+            return json.loads(git(repo, 'cat-file', 'blob', blob))
+
+        done = wrap(['sh', '-c', 'echo built; echo tested >&2'])
+        assert done.returncode == 0, done.stderr.decode()
+        result = json.loads(done.stderr.decode()[done.stderr.decode().index('{'):])
+        record = result['record']
+        body = statement(record)
+        check = body['predicate']['observed']['checks']['linux-gate']
+        assert git(repo, 'for-each-ref', '--format=%(objectname)', result['ref']) == record
+        assert body['subject'][0] == {'name': git(repo, 'rev-parse', 'HEAD'), 'digest': {'gitTree': git(repo, 'rev-parse', 'HEAD^{tree}')}}
+        assert check['exit_code'] == 0 and check['command'] == ['sh', '-c', 'echo built; echo tested >&2']
+        assert check['output_sha256'] == hashlib.sha256(b'built\ntested\n').hexdigest()
+        assert body['predicate']['observed']['runner'] == 'wrapper' and body['predicate']['tier'] == 'full'
+        assert body['predicate']['observed']['inputs']['flake_lock_sha256'] == hashlib.sha256(b'{"nodes":{}}\n').hexdigest()
+        assert body['predicate']['observed']['inputs']['wrapper_sha256'] == hashlib.sha256(WRAP.read_bytes()).hexdigest()
+        assert body['predicate']['producer_sha256'] == hashlib.sha256(SIGN.read_bytes()).hexdigest()
+        assert body['predicate']['observed_at'] == DATE and body['predicate']['change_id'] == 'github:example/repo#5'
+        verified = subprocess.run(['git', '-C', str(repo), '-c', 'gpg.format=ssh', '-c', f'gpg.ssh.allowedSignersFile={signers}',
+                                   'verify-commit', record], capture_output=True, env=ENV)
+        assert verified.returncode == 0 and b'fleet/dev' in verified.stderr, verified.stderr
+        print('passed: a run is measured once and signed; the signer fills the tree, flake.lock hash, producer digest and time itself')
+
+        failing = wrap(['sh', '-c', 'echo broken; exit 3'])
+        assert failing.returncode == 3
+        failed = json.loads(failing.stderr.decode()[failing.stderr.decode().index('{'):])
+        assert statement(failed['record'])['predicate']['observed']['checks']['linux-gate']['exit_code'] == 3
+        print('passed: a failing command is recorded with its exit code, and the wrapper returns it')
+
+        (repo / 'a').write_text('dirty\n')
+        assert wrap(['true']).returncode == 1
+        git(repo, 'checkout', '--', 'a')
+        before = git(repo, 'for-each-ref', 'refs/notes/evidence/')
+        touched = wrap(['sh', '-c', 'echo x > new-file'])
+        assert touched.returncode == 1 and b'changed while the command ran' in touched.stderr
+        (repo / 'new-file').unlink()
+        assert git(repo, 'for-each-ref', 'refs/notes/evidence/') == before, 'a run that changed the tree must leave no note'
+        print('passed: a dirty checkout and a run that changes the tree are refused, leaving no note')
+
+        # The signer refuses anything it cannot recompute or that is not exactly the request shape.
+        commit = git(repo, 'rev-parse', 'HEAD')
+        good = {'commit': commit, 'check': 'linux-gate', 'command': ['true'], 'exit_code': 0,
+                'output_sha256': '0' * 64, 'change_id': 'local:x',
+                'inputs': {'flake_lock_sha256': hashlib.sha256(b'{"nodes":{}}\n').hexdigest(), 'toolchain_sha256': toolchain,
+                           'wrapper_sha256': '1' * 64, 'system': 'x86_64-linux', 'attempt': '1'}}
+
+        def sign(request):
+            return subprocess.run([sys.executable, str(SIGN)], cwd=repo, input=json.dumps(request).encode(),
+                                  capture_output=True, env=dict(ENV, HOME=str(home), EVIDENCE_SIGN_NOW=DATE))
+
+        assert sign(good).returncode == 0
+        for label, bad in {
+            'extra key': {**good, 'tier': 'full'},
+            'wrong flake.lock hash': {**good, 'inputs': {**good['inputs'], 'flake_lock_sha256': '2' * 64}},
+            'unknown commit': {**good, 'commit': 'f' * 40},
+            'bad output digest': {**good, 'output_sha256': 'zz'},
+            'empty command': {**good, 'command': []},
+            'extra input': {**good, 'inputs': {**good['inputs'], 'extra': 'x'}},
+            'check name with a slash': {**good, 'check': 'a/b'},
+        }.items():
+            refused = sign(bad)
+            assert refused.returncode == 1 and b'refused' in refused.stderr, (label, refused.stderr)
+        print('passed: the signer refuses extra keys, a wrong flake.lock hash, an unknown commit and malformed fields')
+
+        if write_fixture:
+            write_fixture.mkdir(parents=True, exist_ok=True)
+            fixture_home = tmp / 'fixture-home'
+            config_dir = fixture_home / '.config/st'
+            config_dir.mkdir(parents=True)
+            (config_dir / 'evidence-sign.json').write_text(json.dumps(
+                {'signer': 'fleet/dev', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'fixture.git')}))
+            made = subprocess.run([sys.executable, str(SIGN)], cwd=repo, input=json.dumps(good).encode(), capture_output=True,
+                                  env=dict(ENV, HOME=str(fixture_home), EVIDENCE_SIGN_NOW=DATE))
+            answer = json.loads(made.stdout)
+            (write_fixture / 'allowed-signers').write_text(signers.read_text())
+            (write_fixture / 'record.pack.base64').write_text(answer['object_pack_base64'] + '\n')
+            (write_fixture / 'expected.json').write_text(json.dumps({
+                'record': answer['record'], 'commit': answer['commit'], 'tree': answer['tree'], 'check': 'linux-gate',
+                'signer': 'fleet/dev', 'runner': 'wrapper', 'tier': 'full', 'exit_code': 0,
+                'flake_lock_sha256': good['inputs']['flake_lock_sha256']}, indent=2) + '\n')
+            print(f'wrote fixture {answer["record"]} to {write_fixture}')
+
+    if FIXTURES.exists():
+        with tempfile.TemporaryDirectory() as directory:
+            check = Path(directory) / 'r'
+            git(Path(directory), 'init', '-q', '--bare', str(check))
+            expected = json.loads((FIXTURES / 'expected.json').read_text())
+            git(check, 'index-pack', '--stdin', stdin=base64.b64decode((FIXTURES / 'record.pack.base64').read_text()))
+            verified = subprocess.run(['git', '-C', str(check), '-c', 'gpg.format=ssh', '-c',
+                                       f'gpg.ssh.allowedSignersFile={FIXTURES / "allowed-signers"}', 'verify-commit', expected['record']],
+                                      capture_output=True, env=ENV)
+            assert verified.returncode == 0, verified.stderr
+            blob = git(check, 'ls-tree', '-r', expected['record']).split()[2]
+            body = json.loads(git(check, 'cat-file', 'blob', blob))
+            assert body['subject'][0]['digest']['gitTree'] == expected['tree'] and body['predicate']['signer'] == expected['signer']
+            print('passed: the committed golden wrapper note still verifies')
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

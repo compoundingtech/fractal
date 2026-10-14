@@ -296,6 +296,27 @@ the script first fetches the source's missing parents from the repository. Run
 `python3 scripts/ci-evidence-observe-test` for the cases (signature verified, verifier refusal,
 wrong run, malformed pack, push with a missing parent, replay).
 
+## Recording a local run: evidence-wrap and evidence-sign
+
+`scripts/evidence-wrap --check NAME -- COMMAND...` runs one check once, from a clean checkout, on
+the developer's machine, and asks the signer to record it. It measures the commit, the command,
+its exit code, the sha256 of its exact output, and an environment fingerprint: the sha256 of
+`flake.lock`, of the dev shell derivation path, of the wrapper's own bytes, the system and the
+attempt. A failing command is recorded too. It refuses a dirty checkout and a run that changes the
+tree. Take the script from `main`, not from the change under test.
+
+`scripts/evidence-sign` runs where the key is (root-installed, hash-pinned, behind a sekrets grant
+that allows only that command; configuration in `$HOME/.config/st/evidence-sign.json`). It reads
+the commit, tree and `flake.lock` from the caller's checkout, never from the request, uses its own
+clock and its own digest as producer, accepts exactly the documented request keys, and signs a
+`tests` observation with `runner: "wrapper"`. It cannot check that the command really ran; that is
+the cooperative boundary (agents with the key's account can lie) and belongs in the known defects.
+
+`scripts/testdata/evidence/wrapper-note/` is a golden note made with a throwaway key
+(`python3 scripts/evidence-wrap-test --write-fixture DIR` regenerates one). The verifier's tests
+read it too. A note applies only to the tree it names, so it helps CI only when the pushed commit
+has the tree CI will test.
+
 ## Fresh CI re-attestation
 
 The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors
