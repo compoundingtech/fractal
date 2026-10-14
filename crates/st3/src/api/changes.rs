@@ -487,7 +487,7 @@ mod tests {
         .await
         .unwrap_err();
         let response = error.into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();
@@ -504,7 +504,7 @@ mod tests {
             "fixture-token /fixture/private/database: database is locked"
         ))
         .into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();

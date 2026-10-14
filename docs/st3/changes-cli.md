@@ -151,7 +151,7 @@ ownership assumption. Confirmed publication whose local index write failed uses
 `git_published_not_indexed` and carries the same reconciliation coordinates. The
 CLI preserves these details, including in JSON output, while short client messages
 exclude operator paths and Git stderr; diagnostic details stay in daemon logs.
-Work-binding lookup failures use `validation-failed` (400) with the fixed message
+Work-binding lookup failures use `validation-failed` (422) with the fixed message
 "Git change work binding is unavailable; verify current local work authority" and
 empty details. Store errors are logged only on the daemon.
 
