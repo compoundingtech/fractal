@@ -440,7 +440,7 @@ for (const modal of ["ask", "approval"]) {
   await handlers.get("agent_start")({}, holdCtx);
   await toolCall(`before-${modal}`);
   const beforeModal = handedOver.length;
-  const beforeReceipts = acknowledged().length;
+  const modalIds = [`message/hold-${mailSequence + 1}`, `message/hold-${mailSequence + 2}`];
   sendMail(`before ${modal}`);
   await pause(150);
   if (modal === "ask") {
@@ -454,7 +454,8 @@ for (const modal of ["ask", "approval"]) {
   await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, holdCtx);
   await pause(10_500);
   assert.strictEqual(handedOver.length, beforeModal, `${modal} stays outside omp past the cap`);
-  assert.strictEqual(acknowledged().length, beforeReceipts, `${modal} mail is not delivered`);
+  assert.deepStrictEqual(acknowledged().filter(id => modalIds.includes(id)), [],
+    `${modal} mail is not delivered; unrelated receipt recovery is independent`);
   if (modal === "ask") {
     await handlers.get("tool_result")({ toolCallId: "unrelated" }, holdCtx);
     assert.strictEqual(handedOver.length, beforeModal, "only the matching answer releases an ask");
@@ -466,8 +467,7 @@ for (const modal of ["ask", "approval"]) {
     content: `before ${modal}\n\nduring ${modal}`, options: { deliverAs: "steer" },
   }], `${modal} answer delivers one FIFO batch before its handler returns`);
   await pause(100);
-  assert.deepStrictEqual(acknowledged().slice(beforeReceipts),
-    [`message/hold-${mailSequence - 1}`, `message/hold-${mailSequence}`]);
+  assert.deepStrictEqual(acknowledged().filter(id => modalIds.includes(id)), modalIds);
   await handlers.get("agent_end")(successfulEnd, holdCtx);
   fs.rmSync(outboxPath, { force: true });
 }
