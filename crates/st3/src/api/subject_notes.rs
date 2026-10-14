@@ -1,5 +1,6 @@
 //! Authored subject context; authenticated identity, never body fields, supplies authorship.
 use super::*;
+use axum::extract::Path;
 
 fn reader(session: &client_v0::ClientSession, write: bool) -> Result<&str, ApiError> {
     client_v0::require_scope(session, if write { "control.notes" } else { "read.projections" })?;
