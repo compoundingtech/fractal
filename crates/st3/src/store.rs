@@ -9058,13 +9058,11 @@ impl Store {
                         format!("step run `{subject}` belongs to a superseded generation"),
                     ));
                 }
-                let completed_progress = action == "progress" && current.status == "completed";
-                if !completed_progress
-                    && (is_terminal_run_state(&run_status)
-                        || run_phase == "terminal"
-                        || is_terminal_generation_state(&generation_status)
-                        || is_terminal_run_state(&root_status)
-                        || root_phase == "terminal")
+                if is_terminal_run_state(&run_status)
+                    || run_phase == "terminal"
+                    || is_terminal_generation_state(&generation_status)
+                    || is_terminal_run_state(&root_status)
+                    || root_phase == "terminal"
                 {
                     return Err(St3Error::new(
                         "terminal-work-owner",
@@ -9148,7 +9146,7 @@ impl Store {
                 if action == "complete" && adhoc_work::is_adhoc(transaction, &current.run).map_err(internal)? && request.evidence.is_empty() {
                     return Err(St3Error::new("work-needs-evidence", "close spontaneous work with --evidence"));
                 }
-                if !completed_progress && matches!(
+                if matches!(
                     current.status.as_str(),
                     "completed" | "failed" | "cancelled"
                 ) {
@@ -9193,7 +9191,7 @@ impl Store {
                         format!("step run `{subject}` has an active lease"),
                     ));
                 }
-                if action != "claim" && !completed_progress
+                if action != "claim"
                     && (!lease_valid || current.claimant.as_deref() != Some(actor.as_str()))
                 {
                     return Err(St3Error::new(
@@ -9258,15 +9256,6 @@ impl Store {
                         Some(actor.clone()),
                         effective_incarnation.clone(),
                         Some(now + 600_000),
-                    ),
-                    // A completed step's owner can annotate its result without acquiring
-                    // a lease, restarting execution or changing its completion state.
-                    "progress" if completed_progress => (
-                        "completed",
-                        current.worker_reported,
-                        None,
-                        None,
-                        None,
                     ),
                     "progress" => (
                         "working",
@@ -9335,16 +9324,14 @@ impl Store {
                         params![subject, status, worker_reported, claimant, claim_incarnation, claim_expiry.map(|value| value.to_string()), request.reason, readiness_epoch, now.to_string(), publish],
                     )
                     .map_err(internal)?;
-                if !completed_progress {
-                    renew_nested_ancestor_leases_tx(
-                        transaction,
-                        &current.generation,
-                        &current.step,
-                        &actor,
-                        actor_incarnation.as_deref(),
-                        now,
-                    )?;
-                }
+                renew_nested_ancestor_leases_tx(
+                    transaction,
+                    &current.generation,
+                    &current.step,
+                    &actor,
+                    actor_incarnation.as_deref(),
+                    now,
+                )?;
                 let mut body = json!({"fields": {
                     "attempt": current.attempt,
                     "status": status,
@@ -54113,22 +54100,6 @@ version 2
             updated.progress_summary.as_deref(),
             Some("The check passed")
         );
-        let completed = report(
-            &step(&current, "done").subject,
-            "progress",
-            "notes-completed-update",
-            "Decision: archive the result",
-        );
-        assert_eq!(completed.status, "completed");
-        assert_eq!(completed.claimant, None);
-        assert_eq!(
-            completed.progress_summary.as_deref(),
-            Some("Decision: archive the result")
-        );
-        assert_eq!(
-            completed.completion_summary.as_deref(),
-            Some("The result is ready")
-        );
         let target = Store::open_memory("target").unwrap();
         target
             .import_replication("node", &store.export_replication(0).unwrap())
@@ -54155,95 +54126,6 @@ version 2
             "carried notes belong to attempt 1"
         );
         assert_eq!(retried.completion_summary, None);
-    }
-
-    #[test]
-    fn revise_notes_completed_steps_accept_progress_without_reopening_work() {
-        let store = Store::open_memory("node").unwrap();
-        publish_carry(&store, CARRY_SOURCE, "completed-notes-mission");
-        let run = store
-            .create_mission_run(&MissionRunRequest {
-                mission: "carry".into(),
-                revision: None,
-                workspace: "/tmp".into(),
-                requester: Some("person/requester".into()),
-                mode: Some("run".into()),
-                inputs: BTreeMap::new(),
-                idempotency_key: "completed-notes-run".into(),
-            })
-            .unwrap();
-        let subject = &run.steps[0].subject;
-        store.set_step_state(subject, "ready", None).unwrap();
-        store
-            .work_action(
-                subject,
-                "claim",
-                &carry_request("one", "completed-notes-claim"),
-            )
-            .unwrap();
-        let mut request = carry_request("one", "completed-notes-complete");
-        request.summary = Some("Delivered the result".into());
-        store.work_action(subject, "complete", &request).unwrap();
-        store.set_step_state(subject, "completed", None).unwrap();
-        let before = store.step_run(subject).unwrap().unwrap();
-        request.idempotency_key = "completed-notes-progress".into();
-        request.summary = Some("Decision: retain the result".into());
-        let updated = store.work_action(subject, "progress", &request).unwrap();
-        assert_eq!(updated.status, "completed");
-        assert_eq!(
-            updated.progress_summary.as_deref(),
-            Some("Decision: retain the result")
-        );
-        assert_eq!(updated.completion_summary, before.completion_summary);
-        assert_eq!(updated.submitted_incarnation, before.submitted_incarnation);
-        assert_eq!(updated.execution_elapsed_ms, before.execution_elapsed_ms);
-        assert_eq!(updated.execution_started_at_unix_ms, None);
-        assert_eq!(updated.claimant, None);
-        assert_eq!(updated.claim_expires_at_unix_ms, None);
-        assert_eq!(
-            serde_json::to_value(store.work_action(subject, "progress", &request).unwrap())
-                .unwrap(),
-            serde_json::to_value(&updated).unwrap()
-        );
-        request.idempotency_key = "completed-notes-stranger".into();
-        request.actor = Some("agent/node.stranger".into());
-        assert_eq!(
-            store
-                .work_action(subject, "progress", &request)
-                .unwrap_err()
-                .code,
-            "work-not-available"
-        );
-        request.actor = Some("agent/node.worker".into());
-        request.idempotency_key = "completed-notes-renew".into();
-        assert_eq!(
-            store
-                .work_action(subject, "renew", &request)
-                .unwrap_err()
-                .code,
-            "terminal-step-run"
-        );
-        store
-            .set_mission_run_state(&run.id, "completed", "terminal", None)
-            .unwrap();
-        request.idempotency_key = "completed-run-notes-progress".into();
-        request.summary = Some("Decision: preserve the final artifact".into());
-        let final_note = store.work_action(subject, "progress", &request).unwrap();
-        assert_eq!(final_note.status, "completed");
-        assert_eq!(final_note.claimant, None);
-        assert_eq!(final_note.completion_summary, before.completion_summary);
-        assert_eq!(
-            final_note.progress_summary.as_deref(),
-            Some("Decision: preserve the final artifact")
-        );
-        let target = Store::open_memory("target").unwrap();
-        target
-            .import_replication("node", &store.export_replication(0).unwrap())
-            .unwrap();
-        let replicated = target.step_run(subject).unwrap().unwrap();
-        assert_eq!(replicated.status, "completed");
-        assert_eq!(replicated.progress_summary, final_note.progress_summary);
-        assert_eq!(replicated.claimant, None);
     }
 
     #[test]

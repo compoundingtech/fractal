@@ -1089,39 +1089,27 @@ mission "example/notes" state="ready" {{
         }
     }
     let done = step(&current, "done");
-    cli_value(
-        daemon
-            .cli(
+    let refused = daemon
+        .cli(
+            WORKER,
+            &[
+                "work",
+                "progress",
+                &done.subject,
+                "--as",
                 WORKER,
-                &[
-                    "work",
-                    "progress",
-                    &done.subject,
-                    "--as",
-                    WORKER,
-                    "--incarnation",
-                    "4242:fixture",
-                    "--summary",
-                    "Decision: archive the result",
-                ],
-            )
-            .await,
+                "--incarnation",
+                "4242:fixture",
+                "--summary",
+                "Decision: archive the result",
+            ],
+        )
+        .await;
+    assert!(
+        !refused.status.success(),
+        "completed progress must remain refused"
     );
-    let updated: st3::model::MissionRunView = serde_json::from_value(cli_value(
-        daemon
-            .cli(PERSON, &["missions", "show", &run.subject])
-            .await,
-    ))
-    .unwrap();
-    let completed = step(&updated, "done");
-    assert_eq!(completed.status, "completed");
-    assert_eq!(
-        completed.progress_summary.as_deref(),
-        Some("Decision: archive the result")
-    );
-    assert_eq!(completed.completion_summary, done.completion_summary);
-    assert_eq!(completed.claimant, None);
-    assert_eq!(completed.claim_expires_at_unix_ms, None);
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("already completed"));
     let active = step(&current, "active");
     cli_value(
         daemon
