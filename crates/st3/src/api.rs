@@ -2816,6 +2816,7 @@ fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyh
                 .unwrap()
                 .remove("_status_source")
                 .unwrap_or(Value::Null);
+            let launch_since = item.as_object_mut().unwrap().remove("_launch_since_ms").and_then(|ms| ms.as_u64());
             let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
             // Freshness is approximate presentation. Use the card's already reduced observation;
             // querying diagnostic and local-observation history here made every read grow with it.
@@ -2829,17 +2830,56 @@ fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyh
                 Some(_) => "current",
             };
             item["observation"] = json!(observation);
-            if observation == "stale" && matches!(item["harness_state"].as_str(), Some("ready" | "idle" | "working")) {
+            // A turn can run for hours without a new harness claim, so only a claim that says the
+            // seat is waiting for input lapses; a `working` one stays until the harness says otherwise.
+            if observation == "stale" && matches!(item["harness_state"].as_str(), Some("ready" | "idle")) {
                 item["harness_state"] = json!("indeterminate");
                 if item["state"] == "running" {
                     item["state"] = json!("waiting");
                 }
             }
+            overlay_down(item, launch_since, observation, client_now_ms() as u64);
             overlay_delivery_presence(item, &local_host);
         }
         overlay_subagents(store, items)?;
         Ok(())
     })
+}
+
+/// How long a declared seat may take to show a running session before it is called down.
+const LAUNCH_WINDOW_MS: u64 = 120_000;
+
+/// Settles a seat whose runtime row says it is not running yet. Every app shows the result and
+/// none re-derives it.
+///
+/// A harness that reported within the freshness window is running, whatever a runtime row stuck at
+/// `pending` says: a seat can outlive its row. With no such report, a seat with a declaration and
+/// no session after its launch window is `down`, since the moment it began waiting, and the steps
+/// it holds say so (their progress was written by a holder that is not running).
+fn overlay_down(item: &mut Value, launch_since: Option<u64>, observation: &str, now_ms: u64) {
+    if !matches!(item["state"].as_str(), Some("desired" | "starting")) {
+        return;
+    }
+    if observation == "current" && matches!(item["harness_state"].as_str(), Some("ready" | "idle" | "working")) {
+        item["state"] = json!("running");
+        return;
+    }
+    let Some(since) = launch_since.filter(|since| now_ms.saturating_sub(*since) > LAUNCH_WINDOW_MS) else {
+        return;
+    };
+    let since = client_timestamp(u128::from(since));
+    item["state"] = json!("down");
+    item["down_since"] = json!(since);
+    // A harness report that predates the loss of the session says nothing about now; leaving
+    // `working` beside `down` would make the two fields disagree.
+    item["harness_state"] = json!("indeterminate");
+    // The activity of an earlier incarnation is not activity of a seat that has no session.
+    item["silent_since"] = Value::Null;
+    if let Some(work) = item["current_work"].as_array_mut() {
+        for label in work {
+            label["holder_down_since"] = json!(since);
+        }
+    }
 }
 
 /// A seat's latest suspend or resume as client-v0 shows it.
@@ -3098,6 +3138,7 @@ fn client_agent_cards_presented(
     } else {
         BTreeMap::new()
     };
+    let stop_deferral_faults = store.stop_deferral_faults_for(&agent_subjects, snapshot_index)?;
     // Harnesses, activity, and who can have a suspension or rollout, for many agents at once.
     // Each status names the actual-state claim it selected, the newest runtime observation
     // whenever the agent has one.
@@ -3113,7 +3154,10 @@ fn client_agent_cards_presented(
         &status
             .subjects
             .iter()
-            .filter_map(|subject| subject.actual_claim.as_deref())
+            .flat_map(|subject| {
+                // A seat that never reported has only its declaration to say how long it has waited.
+                subject.actual_claim.as_deref().into_iter().chain(subject.desired_token.as_deref())
+            })
             .collect::<Vec<_>>(),
     );
     let mut agents = status
@@ -3127,7 +3171,8 @@ fn client_agent_cards_presented(
             subject.harness = card_reads.take_harness(store, &subject.subject)?;
             let member_fault = member_faults.get(&subject.subject);
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
-            let fault = member_fault.or(mailbox_fault);
+            let fault = member_fault.or(mailbox_fault)
+                .or_else(|| stop_deferral_faults.get(&subject.subject));
             let fields = subject
                 .actual
                 .as_ref()
@@ -3222,6 +3267,21 @@ fn client_agent_cards_presented(
                 _ if subject.desired.is_some() => "desired",
                 _ => "stopped",
             };
+            // When a seat that has no running session began waiting for one.
+            let launch_since_ms = (matches!(state, "desired" | "starting")
+                && !matches!(observed, Some("running" | "ready" | "working" | "idle")))
+            .then(|| {
+                let claim_time = |claim: &str| match &actual_claim_times {
+                    Ok(times) => times.get(claim).copied(),
+                    Err(_) => store.claim_by_id(claim).ok().flatten().map(|claim| claim.accepted_at_unix_ms),
+                };
+                subject
+                    .actual_claim
+                    .as_deref()
+                    .and_then(claim_time)
+                    .or_else(|| subject.desired_token.as_deref().and_then(claim_time))
+            })
+            .flatten();
             let handoff = subject.desired_token.as_deref()
                 .map(|token| crate::placement::handoff(store, &subject.subject, token, snapshot_index))
                 .transpose()?.flatten();
@@ -3299,6 +3359,7 @@ fn client_agent_cards_presented(
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
                 "_status_source": subject.harness,
+                "_launch_since_ms": launch_since_ms.map(|ms| ms as u64),
                 "blocked_on": subject.harness.as_ref().and_then(|harness| harness.blocked_on.as_deref()),
                 "ask": subject.harness.as_ref().and_then(|harness| harness.ask.as_deref()),
                 "reason": subject.harness.as_ref().and_then(|harness| harness.reason.as_deref()),
@@ -3331,7 +3392,7 @@ fn client_agent_cards_presented(
                     None
                 },
             });
-            if mailbox_faults.is_none() && member_fault.is_none() {
+            if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
             }
@@ -5674,6 +5735,27 @@ async fn client_agents_detail(
         )?;
         add_agent_todos(&store, &mut items, snapshot_index)?;
         overlay_agent_resources(&store, &mut items, &created_at)?;
+        for item in &mut items {
+            if let Some(subject) = item["id"].as_str()
+                && let Some(operation) = store.runtime_start_for(subject)?
+            {
+                let phase = if operation.revoked_by.is_some() { "revoked" }
+                    else if operation.result.as_ref().is_some_and(|result| result["phase"] == "unknown") { "unknown" }
+                    else if operation.finished { "completed" }
+                    else if operation.dispatched { "running" } else { "queued" };
+                let (running_jobs, revoked_running_jobs) = store.runtime_start_counts()?;
+                let (unresolved_jobs, revoked_unresolved_jobs) = store.unresolved_runtime_start_counts()?;
+                item["runtime_start"] = json!({
+                    "operation_id": operation.id, "phase": phase,
+                    "worker_running": operation.dispatched && !operation.finished,
+                    "cleanup_verified": operation.cleanup_verified,
+                    "running_jobs": running_jobs,
+                    "revoked_running_jobs": revoked_running_jobs,
+                    "unresolved_jobs": unresolved_jobs,
+                    "revoked_unresolved_jobs": revoked_unresolved_jobs,
+                });
+            }
+        }
         Ok(items)
     })
     .await?;

@@ -18,7 +18,7 @@ import { Feed } from './feed';
 import { quality, localDrafts } from './qualityNative';
 import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
-import { Observations, type Context } from './observations';
+import { Observations, toObservationReport, type Context } from './observations';
 import { buildFabricDefault, decodeFabricTarget, encodeFabricTarget, fabricGatewayId, fabricTargetFromText, isFabricGatewayId, type FabricTarget } from './fabricTarget';
 import { fabricAvailable, fabricIdentity, fabricPathInUse, nativeCarrierPorts } from './fabricBridge';
 import { ForegroundGate } from './foreground';
@@ -229,8 +229,30 @@ function useAppStore(proof?: FabricProfile) {
     held.connect = observations.begin('ios-connect');
   }, [proof, observations, fabricSnapshot.phase]);
   const connectUrl = selected.baseUrl ?? '';
+  // What the phone measured goes to the member it is connected to, as one report at a time and never
+  // faster than every thirty seconds: a retry that failed waits for the next measurement to ask again.
+  const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
   const client = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => credential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, credential]);
   // Image bytes go up through Expo's fetch: React Native's cannot send a byte array as a body.
+  useEffect(() => {
+    if (proof || !client) { observations.ready = undefined; return; }
+    const state = reporting.current;
+    state.send = () => {
+      if (state.busy || Date.now() - state.last < 30_000) return;
+      const batch = observations.nextReport();
+      if (!batch) return;
+      const report = toObservationReport(batch);
+      if (!report.samples.length) { observations.accepted(batch.report_id); return; }
+      state.busy = true;
+      state.last = Date.now();
+      void client.observationsReport(report as never).then(
+        () => observations.accepted(batch.report_id),
+        () => { /* the identical batch is sent again at the next measurement; an older member just refuses */ },
+      ).finally(() => { state.busy = false; });
+    };
+    observations.ready = state.send;
+    return () => { if (observations.ready === state.send) observations.ready = undefined; };
+  }, [proof, client, observations]);
   const uploader = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => credential ?? undefined, fetchImpl: gatewayFetch(expoFetch as unknown as typeof fetch), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, credential]);
 
   // Settings: read once. A build that carries a fabric target (EXPO_PUBLIC_ST3_FABRIC_DEFAULT, set in an

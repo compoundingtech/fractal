@@ -9,6 +9,7 @@ mod version;
 mod voice;
 
 pub use ui::screens::HOME_IDLE_TEXT;
+pub use ui::checklist;
 pub use version::display_version;
 
 use st3_feed as feed;

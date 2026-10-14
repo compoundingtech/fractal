@@ -93,6 +93,8 @@ pub(super) mod arrangements;
 pub(super) mod conversation_blocks;
 mod collection_windows;
 mod inventory;
+#[cfg(test)]
+mod conversation_follow_tests;
 mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
@@ -1329,7 +1331,7 @@ fn conversation_open_local_marked(
     });
     let (page, source_generation) =
         match conversation_first_page_at_generation(state, &snapshot, session, session_id) {
-            Ok(page) => page,
+            Ok((page, generation, _)) => (page, generation),
             Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS => return Err(error),
             // OPEN keeps the established managed-transcript availability notice and stored
             // fallback. Successful native reads still capture page and generation together;
@@ -1366,6 +1368,39 @@ fn native_latest_sequence(page: &Value) -> u64 {
 fn conversation_stream_error(id: &str, error: &ApiError) -> Value {
     json!({"kind":"error", "id":id, "collection":"conversation", "code":client_error_code(Some(&error.code)), "message":error.message,
         "retryable":client_error_retryable(error.status, Some(&error.code))})
+}
+
+/// Attribute re-OPENs without changing the frames or replay cursor clients receive.
+fn record_conversation_reopen(
+    id: &str, session_id: &str, remote: bool, reason: &str, code: &str, bytes: usize,
+) {
+    let _span = tracing::info_span!(
+        parent: None,
+        "st.conversation.reopen",
+        st.subscription.id = id,
+        st.session.id = session_id,
+        st.remote = remote,
+        st.conversation.reopen.reason = reason,
+        st.error.code = code,
+        st.page.bytes = bytes,
+    ).entered();
+}
+
+fn conversation_replay_gap(session_id: &str, reason: &str, message: &str) -> ApiError {
+    let _span = tracing::info_span!(
+        parent: None,
+        "st.conversation.replay_gap",
+        st.session.id = session_id,
+        st.conversation.gap.reason = reason,
+    ).entered();
+    ApiError {
+        status: StatusCode::GONE,
+        code: "cursor-gap".into(),
+        message: message.into(),
+        details: Box::new(serde_json::Map::from_iter([(
+            "full_resync".into(), Value::Bool(true),
+        )])),
+    }
 }
 
 /// Follow a conversation with no subscription time. The collections socket calls
@@ -1488,7 +1523,9 @@ async fn follow_conversation_since(
                             frame["header"] = header.clone();
                         }
                         // Too much changed for one frame: send the newest page instead.
-                        if frame_bytes(&frame) > CLIENT_MAX_RESPONSE_BYTES {
+                        let bytes = frame_bytes(&frame);
+                        if bytes > CLIENT_MAX_RESPONSE_BYTES {
+                            record_conversation_reopen(&id, &session_id, remote.is_some(), "delta-oversize", "", bytes);
                             break;
                         }
                         if queue.send(|| outbox.send((id.clone(), generation, frame))).is_err() {
@@ -1500,9 +1537,11 @@ async fn follow_conversation_since(
                 Err(error)
                     if matches!(error.code.as_str(), "cursor-gap" | "page-cursor-expired") =>
                 {
+                    record_conversation_reopen(&id, &session_id, remote.is_some(), "replay-gap", &error.code, 0);
                     break;
                 }
                 Err(error) if client_error_retryable(error.status, Some(&error.code)) => {
+                    record_conversation_reopen(&id, &session_id, remote.is_some(), "retryable-error", &error.code, 0);
                     tokio::time::sleep(COLLECTION_REREAD_INTERVAL).await;
                     break;
                 }
@@ -6965,13 +7004,14 @@ fn conversation_read_now(
 }
 
 /// Read OPEN and change-replay pages through the same bounded fold, retaining the generation
-/// of the returned page without a second native read.
+/// of the returned page without a second native read. The final flag says whether the page
+/// came from the native projection rather than the stored timeline.
 fn conversation_first_page_at_generation(
     state: &AppState,
     snapshot: &ClientSnapshot,
     session: &ClientSession,
     session_id: &str,
-) -> Result<(Value, u64), ApiError> {
+) -> Result<(Value, u64, bool), ApiError> {
     let query = ClientListQuery { limit: Some(200), ..Default::default() };
     match conversation_blocks::source(state, session_id) {
         // Replay selects only its newest bounded projection, including for OpenCode.
@@ -6991,9 +7031,9 @@ fn conversation_first_page_at_generation(
             } else {
                 generation
             };
-            Ok((page.0, fence))
+            Ok((page.0, fence, true))
         }
-        Err(_) => Ok((timeline_value(state, snapshot, session, session_id, &query)?.0, 0)),
+        Err(_) => Ok((timeline_value(state, snapshot, session, session_id, &query)?.0, 0, false)),
     }
 }
 
@@ -7004,7 +7044,7 @@ fn conversation_read_now_unbounded(
     after: Option<&str>,
 ) -> Result<Value, ApiError> {
     let snapshot = new_client_snapshot(state);
-    let (page, source_generation) =
+    let (page, source_generation, native_replay) =
         conversation_first_page_at_generation(state, &snapshot, session, session_id)?;
     let all = page["items"]
         .as_array()
@@ -7028,28 +7068,18 @@ fn conversation_read_now_unbounded(
             || position.local_position > local_latest
             || position.native_sequence > native_latest
         {
-            return Err(ApiError {
-                status: StatusCode::GONE,
-                code: "cursor-gap".into(),
-                message: "the conversation cursor is outside the bounded replay window".into(),
-                details: Box::new(serde_json::Map::from_iter([(
-                    "full_resync".into(),
-                    Value::Bool(true),
-                )])),
-            });
+            return Err(conversation_replay_gap(
+                session_id, "cursor-outside-window",
+                "the conversation cursor is outside the bounded replay window",
+            ));
         }
         if position.source_generation != source_generation {
             // Already-delivered entries changed in place under unchanged sequences, which a
             // sequence-filtered delta cannot carry: send the authoritative newest page.
-            return Err(ApiError {
-                status: StatusCode::GONE,
-                code: "cursor-gap".into(),
-                message: "the transcript was rewritten in place; refresh the newest conversation page".into(),
-                details: Box::new(serde_json::Map::from_iter([(
-                    "full_resync".into(),
-                    Value::Bool(true),
-                )])),
-            });
+            return Err(conversation_replay_gap(
+                session_id, "source-generation",
+                "the transcript was rewritten in place; refresh the newest conversation page",
+            ));
         }
     }
     let mut changed_indexes = BTreeSet::new();
@@ -7060,7 +7090,10 @@ fn conversation_read_now_unbounded(
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
-        if let Some(owner) = owner.as_deref() {
+        // Native pages contain native records and Small Talk messages, not the driver's
+        // mirrored harness.timeline entries. Requiring those IDs in a native page creates
+        // a false gap on every observation, even when the native transcript is unchanged.
+        if let Some(owner) = owner.as_deref().filter(|_| !native_replay) {
             for claim in state
                 .store
                 .claims_page(Some(owner), None, store_index, None, false, 10_000)
@@ -7091,22 +7124,24 @@ fn conversation_read_now_unbounded(
                 message_indexes.insert(claim.store_index);
             }
         }
-        for claim in state
-            .store
-            .local_observations_after(local_position, 10_000)
-            .map_err(ApiError::internal)?
-        {
-            if claim.subject == owner.as_deref().unwrap_or_default()
-                && claim.kind == "harness.timeline"
+        if !native_replay {
+            for claim in state
+                .store
+                .local_observations_after(local_position, 10_000)
+                .map_err(ApiError::internal)?
             {
-                retention_changed |= claim.body.pointer("/fields/entry_type")
-                    .and_then(Value::as_str) == Some("truncation");
-                if let Some(id) = claim
-                    .body
-                    .pointer("/fields/entry_id")
-                    .and_then(Value::as_str)
+                if claim.subject == owner.as_deref().unwrap_or_default()
+                    && claim.kind == "harness.timeline"
                 {
-                    explicit_ids.insert(id.to_owned());
+                    retention_changed |= claim.body.pointer("/fields/entry_type")
+                        .and_then(Value::as_str) == Some("truncation");
+                    if let Some(id) = claim
+                        .body
+                        .pointer("/fields/entry_id")
+                        .and_then(Value::as_str)
+                    {
+                        explicit_ids.insert(id.to_owned());
+                    }
                 }
             }
         }
@@ -7114,14 +7149,10 @@ fn conversation_read_now_unbounded(
     if retention_changed {
         // A covering interval can remove a projection-only availability notice.
         // The delta protocol cannot delete it: send an authoritative page instead.
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "cursor-gap".into(),
-            message: "transcript retention changed; refresh the newest conversation page".into(),
-            details: Box::new(serde_json::Map::from_iter([(
-                "full_resync".into(), Value::Bool(true),
-            )])),
-        });
+        return Err(conversation_replay_gap(
+            session_id, "retention-changed",
+            "transcript retention changed; refresh the newest conversation page",
+        ));
     }
     let mut items = all
         .iter()
@@ -7156,7 +7187,7 @@ fn conversation_read_now_unbounded(
             .cmp(&b["timestamp"].as_str())
             .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
     });
-    if message_indexes.iter().any(|index| {
+    let missing_message_pair = message_indexes.iter().any(|index| {
         ![
             index.saturating_mul(4),
             index.saturating_mul(4).saturating_add(1),
@@ -7167,23 +7198,20 @@ fn conversation_read_now_unbounded(
                 .iter()
                 .any(|item| item["sequence"].as_u64() == Some(*sequence))
         })
-    }) || explicit_ids
-        .iter()
-        .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)))
-        || (all.len() == 200
-            && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
-                native_oldest.is_some_and(|first| first > native)
-            }))
-    {
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "cursor-gap".into(),
-            message: "the conversation exceeded its bounded replay window".into(),
-            details: Box::new(serde_json::Map::from_iter([(
-                "full_resync".into(),
-                Value::Bool(true),
-            )])),
+    });
+    let missing_explicit_id = explicit_ids.iter()
+        .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)));
+    let native_window_gap = all.len() == 200
+        && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
+            native_oldest.is_some_and(|first| first > native)
         });
+    if missing_message_pair || missing_explicit_id || native_window_gap {
+        let reason = if missing_message_pair { "message-pair" }
+            else if missing_explicit_id { "explicit-id" }
+            else { "native-window" };
+        return Err(conversation_replay_gap(
+            session_id, reason, "the conversation exceeded its bounded replay window",
+        ));
     }
     let next_cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
@@ -7224,11 +7252,13 @@ const CONVERSATION_MARK_REUSE: Duration = Duration::from_secs(10);
 type HashMap<K, V> = std::collections::HashMap<K, V>;
 const ISSUED_CURSORS: usize = 4096;
 
-fn issued_cursors()
--> &'static std::sync::Mutex<(std::collections::VecDeque<String>, HashMap<String, TranscriptSeen>)> {
-    static ISSUED: std::sync::OnceLock<
-        std::sync::Mutex<(std::collections::VecDeque<String>, HashMap<String, TranscriptSeen>)>,
-    > = std::sync::OnceLock::new();
+type IssuedCursors = std::sync::Mutex<(
+    std::collections::VecDeque<String>,
+    HashMap<String, TranscriptSeen>,
+)>;
+
+fn issued_cursors() -> &'static IssuedCursors {
+    static ISSUED: std::sync::OnceLock<IssuedCursors> = std::sync::OnceLock::new();
     ISSUED.get_or_init(Default::default)
 }
 
@@ -7464,45 +7494,41 @@ pub(super) async fn conversation_changes(
         || {
             let session_id = conversation_session_id(&state, &id)?;
             let snapshot = new_client_snapshot(&state);
-            let owner = super::managed_session_owner_at(
-                &state.store, snapshot.store_index, &session_id,
-            ).map_err(ApiError::internal)?;
+            let owner =
+                super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+                    .map_err(ApiError::internal)?;
             Ok((session_id, owner))
         },
     )?;
     if let Some((_, _, Some(origin))) = owner
+        && origin != state.store.origin()
     {
-        if origin != state.store.origin() {
-            if !acting_party(&session) {
-                return Err(forbidden(
-                    "remote conversation changes require a concrete person or agent",
-                ));
-            }
-            let owner = client_host_id(&origin);
-            let relay = state
-                .client_relay
-                .as_ref()
-                .ok_or_else(|| conversation_blocks::availability(remote_unavailable_for_owner(&state, &owner)))?;
-            let mut value = relay
-                .read(
-                    &owner,
-                    &crate::peer::ClientReadRequest {
-                        authority_actor: session.authority_actor.clone(),
-                        relay: None,
-                        request: crate::peer::ClientReadOperation::ConversationChanges {
-                            session_id,
-                            after: query.after,
-                            wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
-                        },
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    conversation_blocks::availability(remote_read_error(&owner, error))
-                })?;
-            conversation_blocks::legacy(&mut value, &session);
-            return Ok(Json(value));
+        if !acting_party(&session) {
+            return Err(forbidden(
+                "remote conversation changes require a concrete person or agent",
+            ));
         }
+        let owner = client_host_id(&origin);
+        let relay = state.client_relay.as_ref().ok_or_else(|| {
+            conversation_blocks::availability(remote_unavailable_for_owner(&state, &owner))
+        })?;
+        let mut value = relay
+            .read(
+                &owner,
+                &crate::peer::ClientReadRequest {
+                    authority_actor: session.authority_actor.clone(),
+                    relay: None,
+                    request: crate::peer::ClientReadOperation::ConversationChanges {
+                        session_id,
+                        after: query.after,
+                        wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
+                    },
+                },
+            )
+            .await
+            .map_err(|error| conversation_blocks::availability(remote_read_error(&owner, error)))?;
+        conversation_blocks::legacy(&mut value, &session);
+        return Ok(Json(value));
     }
     conversation_changes_local(
         &state,
@@ -19198,11 +19224,19 @@ mission "example/zero-run" state="ready" {
                 &path,
                 format!("{header}\n{question}\n{}\n{reply}\n", failed(Some(retry))),
             ).unwrap();
-            let gap = conversation_read_now(&state, &session, &session_id, Some(&cursor))
-                .unwrap_err();
+            let mut gap = None;
+            let spans = crate::otel::capture_test_spans(|| {
+                gap = Some(conversation_read_now(&state, &session, &session_id, Some(&cursor))
+                    .unwrap_err());
+            });
+            let gap = gap.unwrap();
             assert_eq!(gap.status, StatusCode::GONE);
             assert_eq!(gap.code, "cursor-gap");
             assert_eq!(gap.details["full_resync"], true);
+            assert!(spans.iter().any(|span| span.name == "st.conversation.replay_gap"
+                && span.attributes.iter().any(|field|
+                    field.key.as_str() == "st.conversation.gap.reason"
+                        && field.value.as_str() == "source-generation")));
             // The follower's reload carries the updated presentation under the same sequence.
             let reloaded = newest_page();
             let (sequence, view) = error_view(&reloaded).expect("the settled turn keeps its error block");
@@ -21965,6 +21999,127 @@ mission "example/zero-run" state="ready" {
             runtime_resources(&owner, true, &snapshot, &session).unwrap(),
         );
     }
+    fn sessionless_card(harness_state: Value) -> Value {
+        json!({
+            "id": "agent/cedar", "state": "desired", "harness_state": harness_state,
+            "silent_since": "2026-10-12T09:30:00.000Z",
+            "current_work": [{"id": "step-run/one/build", "state": "claimed"}],
+        })
+    }
+
+    #[test]
+    fn a_declared_seat_with_no_session_past_its_launch_window_is_down_since_it_began_waiting() {
+        let started = 1_790_000_000_000_u64;
+        let mut card = sessionless_card(Value::Null);
+        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS + 1);
+        assert_eq!(card["state"], "down");
+        assert_eq!(card["down_since"], client_timestamp(u128::from(started)));
+        assert_eq!(card["silent_since"], Value::Null, "a dead holder's activity is not shown as activity");
+        assert_eq!(card["harness_state"], "indeterminate", "a down seat never keeps a stale working report");
+        assert_eq!(card["current_work"][0]["holder_down_since"], card["down_since"]);
+    }
+
+    #[test]
+    fn a_seat_inside_its_launch_window_is_still_starting() {
+        let started = 1_790_000_000_000_u64;
+        let mut card = sessionless_card(Value::Null);
+        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS);
+        assert_eq!(card["state"], "desired");
+        assert!(card.get("down_since").is_none());
+        assert!(card["current_work"][0].get("holder_down_since").is_none());
+        let mut unknown = sessionless_card(Value::Null);
+        overlay_down(&mut unknown, None, "missing", started + 10 * LAUNCH_WINDOW_MS);
+        assert_eq!(unknown["state"], "desired", "no start time, no claim of how long");
+    }
+
+    #[test]
+    fn a_fresh_harness_report_beats_a_runtime_row_stuck_pending() {
+        let started = 1_790_000_000_000_u64;
+        for reported in ["ready", "idle", "working"] {
+            let mut card = sessionless_card(json!(reported));
+            overlay_down(&mut card, Some(started), "current", started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], "running", "{reported}");
+            assert!(card.get("down_since").is_none());
+        }
+        // A report that has gone stale proves nothing: the seat is down, not running.
+        let mut stale = sessionless_card(json!("indeterminate"));
+        overlay_down(&mut stale, Some(started), "stale", started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(stale["state"], "down");
+    }
+
+    #[test]
+    fn only_a_seat_without_a_session_can_be_down() {
+        let started = 1_790_000_000_000_u64;
+        for state in ["running", "waiting", "stopped", "failed", "suspended"] {
+            let mut card = sessionless_card(Value::Null);
+            card["state"] = json!(state);
+            overlay_down(&mut card, Some(started), "missing", started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], state);
+        }
+    }
+
+    #[test]
+    fn a_stale_working_report_stays_working_while_a_stale_idle_one_lapses() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-long-turn");
+        let append = |subject: &str, kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        for subject in ["agent/cedar", "agent/birch"] {
+            append(subject, "runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        }
+        append("agent/cedar", "harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
+        append("agent/birch", "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        let mut cards = client_agent_resources(&state.store, false, "", index).unwrap();
+        for card in &mut cards {
+            let subject = card["id"].as_str().unwrap().to_owned();
+            let mut harness = state.store.observed_harness_at(&subject, index).unwrap().unwrap();
+            harness.observed_at_unix_ms = client_now_ms() - 3_600_000;
+            card["_status_source"] = json!(harness);
+        }
+        overlay_agent_resources(&state.store, &mut cards, "").unwrap();
+        let cedar = cards.iter().find(|item| item["id"] == "agent/cedar").unwrap();
+        assert_eq!(cedar["observation"], "stale");
+        assert_eq!(cedar["harness_state"], "working", "a turn can outlast the freshness window");
+        assert_eq!(cedar["state"], "running");
+        let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
+        assert_eq!(birch["harness_state"], "indeterminate");
+        assert_eq!(birch["state"], "waiting");
+    }
+
+    #[test]
+    fn a_seat_whose_runtime_exits_mid_turn_stops_reading_working_with_its_row() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-died-mid-turn");
+        let subject = "agent/cedar";
+        let append = |kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append("harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
+        let running = client_agent_resources(&state.store, false, "", state.store.index().unwrap()).unwrap();
+        assert_eq!(running.iter().find(|item| item["id"] == subject).unwrap()["state"], "running");
+        // The reconciler on the owner host writes this when the pty or driver is gone.
+        append("runtime.observed", json!({"status":"exited", "runtime_id":"native", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        // This seat has no declaration, so the current roster drops it once its runtime ends;
+        // the history roster still carries the card.
+        let current = client_agent_resources(&state.store, false, "", index).unwrap();
+        assert!(current.iter().all(|item| item["id"] != subject), "an ended runtime is not a current seat");
+        let ended = client_agent_resources(&state.store, true, "", index).unwrap();
+        let ended = ended.iter().find(|item| item["id"] == subject).unwrap();
+        assert_eq!(ended["state"], "stopped", "{ended}");
+    }
+
     #[test]
     fn status_freshness_uses_cached_card_time_without_resetting_since() {
         let root = tempfile::tempdir().unwrap();

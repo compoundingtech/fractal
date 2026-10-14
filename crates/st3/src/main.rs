@@ -1313,6 +1313,10 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
     Ok(())
 }
 
+fn directory_is_empty(path: &Path) -> bool {
+    fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
 async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -1341,6 +1345,7 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         .flatten()
         .filter_map(|path| path.as_str().map(PathBuf::from))
         .collect::<Vec<_>>();
+    let work_root = config.work_root().ok();
     let st2_state = state_home.join("st2");
     let st2_only_hooks = fs::read_dir(&st2_state)
         .is_ok_and(|entries| entries.flatten().all(|entry| entry.file_name() == "hooks"));
@@ -1377,13 +1382,30 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
             root.display(),
             paths.iter().filter(|path| !path.starts_with(&root)).collect::<Vec<_>>()
         );
-        paths = vec![root];
+        // The work root can lie inside the instance but holds the person's work: everything
+        // else in the instance goes and the work root stays.
+        let work = work_root.clone().unwrap_or_else(|| instance.work_dir());
+        paths = fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| !work.starts_with(path))
+                    .collect()
+            })
+            .unwrap_or_default();
     }
     paths.sort();
     paths.dedup();
     if args.dry_run {
         for path in &paths {
             println!("remove\t{}", path.display());
+        }
+        if let Some(work) = work_root.as_ref().filter(|work| !directory_is_empty(work)) {
+            println!(
+                "keep\t{}\tthe work folder: what your agents made there stays",
+                work.display()
+            );
         }
         if let Some(instance) = &instance {
             println!(
@@ -1459,12 +1481,25 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
             eprintln!("could not remove {}: {error}", path.display());
         }
     }
+    // The work folder setup created goes only while nothing is in it; `remove_dir` refuses a
+    // folder that holds anything.
+    if let Some(work) = &work_root {
+        let _ = fs::remove_dir(work.join("agents"));
+        let _ = fs::remove_dir(work);
+    }
     if let Some(instance) = &instance {
         // The directory that holds instances goes with the last one; `remove_dir` leaves it alone
         // while another instance, or anything else, is inside.
+        let _ = fs::remove_dir(instance.root());
         if let Some(parent) = instance.root().parent() {
             let _ = fs::remove_dir(parent);
         }
+    }
+    if let Some(work) = work_root.as_ref().filter(|work| work.exists()) {
+        println!(
+            "kept\t{}\tthe work folder: what your agents made there stays; remove it yourself if you want it gone",
+            work.display()
+        );
     }
     let remaining = paths
         .iter()
@@ -6332,6 +6367,20 @@ mod private_gateway_tests {
     }
 }
 
+fn daemon_start_version(machine_version: &str) -> Result<&str> {
+    anyhow::ensure!(
+        machine_version.len() <= 128,
+        "daemon build identity exceeds 128 bytes; correct the compile-time build stamp"
+    );
+    Ok(
+        if machine_version == concat!(env!("CARGO_PKG_VERSION"), "+dev") {
+            env!("CARGO_PKG_VERSION")
+        } else {
+            machine_version
+        },
+    )
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let args_config = args.config.clone();
     let private_state = args.state_dir.is_some();
@@ -6488,7 +6537,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ("pid".into(), Value::from(std::process::id())),
             (
                 "version".into(),
-                Value::String(env!("CARGO_PKG_VERSION").into()),
+                Value::String(daemon_start_version(&st_drivers::version::machine_version())?.into()),
             ),
             (
                 "schema".into(),
@@ -6562,7 +6611,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_access_mode(config.active_access_mode()).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_access_mode(config.active_access_mode()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup.phase("start-services");
@@ -12605,6 +12654,13 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
         );
     }
     output.push_str(&format!("participants  {}\n", names(&status.participants)));
+    output.push_str("last daemon start (advertised build)\n");
+    for member in &status.participants {
+        output.push_str(&format!(
+            "  machine_version  {member}: {}\n",
+            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
+        ));
+    }
     if !status.excused.is_empty() {
         output.push_str(&format!("excused       {}\n", names(&status.excused)));
     }
@@ -12613,6 +12669,9 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
     }
     if let Some(pending) = &status.pending {
         output.push_str(&format!("pending       {}\n", pending.checkpoint));
+        for (member, build) in &pending.builds {
+            output.push_str(&format!("  seal build  {member}: {build}\n"));
+        }
         output.push_str(&format!("  sealed      {}\n", names(&pending.sealed)));
         output.push_str(&format!("  unsealed    {}\n", names(&pending.unsealed)));
         for (writer, difference) in &pending.disagreeing {
@@ -15372,7 +15431,14 @@ fn render_client_agent(
     let mut output = String::new();
     let _ = writeln!(output, "AGENT  {}", agent.header.id);
     let _ = writeln!(output, "NAME         {}", agent.name);
-    let _ = writeln!(output, "STATE        {}", agent.state);
+    match agent.down_since.as_deref().filter(|_| agent.state == "down") {
+        Some(since) => {
+            let _ = writeln!(output, "STATE        down · no session since {since}");
+        }
+        None => {
+            let _ = writeln!(output, "STATE        {}", agent.state);
+        }
+    }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
     let _ = writeln!(
         output,
@@ -15495,6 +15561,19 @@ fn render_client_agent(
     if let Some(incarnation) = &agent.incarnation_id {
         let _ = writeln!(output, "INCARNATION  {incarnation}");
     }
+    if let Some(operation) = agent.extra.get("runtime_start") {
+        let phase = operation["phase"].as_str().unwrap_or("unknown");
+        let id = operation["operation_id"].as_str().unwrap_or("unknown");
+        let running = operation["worker_running"] == true;
+        let _ = writeln!(output, "START        {phase} · {id}{}",
+            if running && phase == "revoked" { " · launch worker still running" } else { "" });
+        let _ = writeln!(output, "START JOBS   {} running · {} revoked and still running",
+            operation["running_jobs"].as_u64().unwrap_or(0),
+            operation["revoked_running_jobs"].as_u64().unwrap_or(0));
+        let _ = writeln!(output, "START OPEN   {} unresolved · {} revoked and unresolved",
+            operation["unresolved_jobs"].as_u64().unwrap_or(0),
+            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0));
+    }
     if let Some(owner) = &agent.owner_run_id {
         let _ = writeln!(output, "MISSION      {owner}");
     }
@@ -15516,9 +15595,16 @@ fn render_client_agent(
         let Some(step) = current_steps.iter().find(|step| step.subject == *current) else {
             continue;
         };
+        let held_down = agent
+            .current_work
+            .iter()
+            .find(|label| label.id == *current)
+            .and_then(|label| label.holder_down_since.as_deref())
+            .map(|since| format!(" · held by a seat with no session since {since}"))
+            .unwrap_or_default();
         let _ = writeln!(
             output,
-            "CURRENT STEP {} · {}",
+            "CURRENT STEP {} · {}{held_down}",
             step.title.as_deref().unwrap_or(&step.step),
             step.status
         );
@@ -26442,6 +26528,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
+        let unstamped = concat!(env!("CARGO_PKG_VERSION"), "+dev");
+        assert_eq!(
+            daemon_start_version(unstamped).unwrap(),
+            env!("CARGO_PKG_VERSION")
+        );
+        for version in ["0.1.0+abc1234-dirty", "0.1.0+local.abc1234.dirty"] {
+            assert_eq!(daemon_start_version(version).unwrap(), version);
+        }
+        assert!(daemon_start_version(&"x".repeat(128)).is_ok());
+        assert!(daemon_start_version(&"x".repeat(129)).is_err());
+        assert!(daemon_start_version(&"é".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
+        let status = st3::store::CheckpointStatusView {
+            node: "alder".into(),
+            newest_stable: None,
+            trimmed: None,
+            halted: false,
+            pending: None,
+            participants: ["alder".into(), "birch".into()].into(),
+            excused: Default::default(),
+            left: Default::default(),
+            machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
+        };
+        let output = render_checkpoint_status(&status);
+        assert!(output.contains("last daemon start (advertised build)"));
+        assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
+        assert!(output.contains("machine_version  birch: not advertised"));
+    }
+
+    #[test]
     fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
         let seats: Vec<String> = (0..120).map(|n| format!("agent/example/seat-{n}")).collect();
         let mut renewals_per_second = [0usize; 60];
@@ -27987,6 +28107,45 @@ mod tests {
              CURRENT STEP Write the guide · verifying\n\
              DONE         Published the guide\n"
         ));
+    }
+
+    #[test]
+    fn a_down_agent_card_says_since_when_and_marks_the_step_its_holder_cannot_work() {
+        let resource: st3_client::Resource = serde_json::from_value(serde_json::json!({
+            "kind": "agent", "id": "agent/worker", "revision": "one",
+            "updated_at": "2026-09-24T09:00:00Z", "name": "Worker",
+            "state": "down", "down_since": "2026-09-23T21:00:00.000Z",
+            "reachability": "reachable", "runtime_ids": [],
+            "current_work_ids": ["step-run/one/build"], "active_work_count": 1,
+            "current_work": [{
+                "id": "step-run/one/build", "mission_id": "mission/demo",
+                "mission_run_id": "mission-run/demo", "path": "build", "state": "claimed",
+                "since": "2026-09-23T20:00:00.000Z",
+                "holder_down_since": "2026-09-23T21:00:00.000Z"
+            }]
+        }))
+        .unwrap();
+        let st3_client::Resource::Agent(agent) = resource else {
+            panic!("agent resource")
+        };
+        let step = serde_json::from_value::<StepRunView>(serde_json::json!({
+            "subject": "step-run/one/build", "run": "mission-run/demo",
+            "generation": "run-generation/one", "step": "build", "definition_hash": "hash",
+            "status": "working", "attempt": 1, "assigned_to": "agent/worker",
+            "agentless": false, "title": "Build the parser", "worker_reported": false,
+            "claimant": "agent/worker", "claim_incarnation": "worker:1",
+            "claim_expires_at_unix_ms": 900_000, "readiness_epoch": 1,
+            "blocked_reason": null, "not_before_unix_ms": null,
+            "created_at_unix_ms": 0, "updated_at_unix_ms": 0,
+            "progress_summary": "Tests pass", "progress_at_unix_ms": 60_000,
+        }))
+        .unwrap();
+        let card = render_client_agent(&agent, &[step], 360_000);
+        assert!(card.contains("STATE        down · no session since 2026-09-23T21:00:00.000Z\n"), "{card}");
+        assert!(
+            card.contains("CURRENT STEP Build the parser · working · held by a seat with no session since 2026-09-23T21:00:00.000Z\n"),
+            "{card}"
+        );
     }
 
     #[test]

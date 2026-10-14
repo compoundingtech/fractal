@@ -1,4 +1,4 @@
-# Portable gate evidence v1
+# Gate evidence
 
 `st evidence put`, `show`, and `verify` run offline. They require Git with SSH
 signing support, OpenSSH, repository objects, and an operator-supplied allowed
@@ -94,10 +94,9 @@ must construct facts from its own execution; it must never expose this API as a
 service that signs arbitrary agent-authored JSON. Test keys are generated in
 temporary directories. No production key or key path is shipped here.
 
-Production signer provisioning and narrow observation adapters are required
-before intake or CI can write records. Preferred custody is a sekrets profile
-whose only granted command is a trusted observer. Hosts without sekrets need an
-explicitly documented cooperative interim. Custody and trace-receipt isolation
+The protected CI observer described below writes records from an operator-owned
+sekrets profile. An intake review observation adapter is not implemented. Custody
+uses a profile whose only granted command is the installed, pinned observer. Custody and trace-receipt isolation
 share an OS-account boundary; gate evidence does not claim native agent identity
 or reimplement that separate receipt protocol.
 
@@ -111,7 +110,7 @@ the old accepted policy. Missing base policy fails closed.
 These generic principals are provisioning targets; no key is trusted merely
 because repository policy names it. The caller must separately supply its
 operator-controlled trust list. Other risk classes require a later policy
-version. The file affects this verifier only; this change does not activate
+version. The file affects this verifier only; it does not activate
 curator enforcement or alter the merge queue.
 
 ```sh
@@ -128,12 +127,12 @@ tree and change ID, from permitted test signers. Every cited check must pass,
 and their union must contain every required check. Its successful result reports `tier: full`. Otherwise the command exits
 nonzero and blocks the stage. Test tier never satisfies production policy.
 The initial daemon policy also rejects degraded records, even with passing
-checks; there is no low-risk exception in this slice. Invalid or untrusted individual records cannot
+checks; there is no low-risk exception. Invalid or untrusted individual records cannot
 satisfy a gate, and are ignored when selecting usable evidence; malformed or
 rewritten namespace refs fail the transport integrity check.
 
-Production is fail-soft: the later runner adapter must use `record_degraded`
-when the protected signer is unavailable and continue CI. It preserves the
+The CI observer uses `record_degraded` when the protected signer is unavailable.
+CI runs independently of the post-completion observer. It preserves the
 measured facts in a separate explicitly degraded record; production verification
 remains fail-closed under the selected policy. Low-risk policy allowances and
 re-attestation deadlines require the gate step and its policy decision. A fresh
@@ -142,12 +141,9 @@ subject, change ID, check names/commands, opaque input keys, and time against th
 It never changes the original tier. Observing the same old bytes without running
 the check again cannot qualify as a re-attestation.
 
-The production adapters will measure full-trust record share, time from degraded
-observation to fresh full re-attestation, and wall-clock signing latency added
-to CI. Those numbers are not measured by this offline format slice. A future
-short-lived throwaway-key test service always emits test tier, never full tier.
-A second fixture signer proves opt-in trust, role restrictions, and revocation;
-the gate step adds the actual spot-check mismatch drill.
+The CI observer reports full-trust record share, signing latency and linked fresh
+re-attestation timing as described below. Its throwaway-key test mode emits only
+test tier and expires within 15 minutes. Test tier never satisfies production policy.
 
 A rebase that preserves the reviewed paths, their blobs, and the cited test
 records keeps the GO. A new unreviewed path, changed blob, deletion, different
@@ -158,6 +154,181 @@ test input equivalence belongs to affected-set evidence and must not be inferred
 from unchanged review blobs alone. Executable modes are covered by the exact
 tested tree even though the review map records blob identities.
 
-This format slice does not wire the later 14-day comment fallback, dual-writing
-intake and CI adapters, exact-head review gates/typed waits, or the wait clock.
-Those steps consume this format. The merge queue remains the landing path.
+Observation scheduling, evidence publication, intake signing and typed review-gate
+waits require separate integration. The merge queue remains the landing path.
+
+## CI source receipt
+
+Workspace CI retains a source receipt in the non-required `evidence-source` job.
+It runs alongside existing checks, has only read permission, and holds no signing
+key. Failure to produce or upload the receipt leaves the required checks running.
+The actual failed step remains visible; no check result is inferred from a receipt.
+
+For a pull request, GitHub's workflow and check-run `head_sha` identify the author
+head. CI's checkout can instead be the synthetic merge `GITHUB_SHA`. The receipt
+records `git rev-parse HEAD` and its tree and requires that HEAD equals the
+effective `GITHUB_SHA`. Later evidence observers must use this source rather than
+guess the tested tree from run metadata.
+
+The artifact `ci-evidence-source-RUN_ATTEMPT` contains exactly:
+
+- `receipt.json`: schema version, repository, event, run ID, attempt, complete
+  source and tree IDs, object format, change placeholder, producer script SHA-256,
+  and the pack's byte length and SHA-256.
+- `source.pack`: the observed commit and its complete tree and blob objects.
+  It carries no refs, repository configuration, executable observer or signing key.
+  Commit history is excluded, so a depth-one checkout suffices. Gitlinks retain
+  their commit IDs without copying submodule repositories.
+
+The workflow embeds its producer in a temporary file outside the checkout. The
+receipt measures those actual script bytes. The artifact is retained for 14 days,
+including source objects whose synthetic merge ref has since moved or disappeared.
+
+`change_id` is `github:OWNER/REPO#NUMBER` for a PR or merge queue entry, pending the
+changes-in-git format. A queue entry can contain additional changes: its source
+and tree still identify the whole tested checkout. A manual run uses
+`github:OWNER/REPO@SOURCE`, without inventing a PR identity.
+
+This receipt supplies source provenance for the record adapter; it is not a signed
+evidence record and authorizes no gate. The protected observer must independently
+authenticate artifact size/digest and repository/run/attempt identity, validate
+the producer against its pinned recipe, and derive the tree from the imported Git
+objects. It must observe completed check results separately and refuse mismatches.
+Our cooperative v1 runner boundary does not prove process identity against a
+hostile workflow author; native observer identity is a separate prerequisite.
+
+Run `python3 scripts/ci-evidence-source-test` to exercise real Git merges, shallow
+checkouts, object import, replacement-object resistance and provenance mismatches.
+
+## Protected CI observer
+
+The internal `st3 evidence observe-ci --run RUN --attempt ATTEMPT --artifact ID`
+command accepts numeric selectors only. It reads its operator-owned configuration
+from the profile's private HOME at `.config/st/evidence-ci.json`. A sekrets grant
+must allow only that installed command prefix, after review and binary pinning.
+The caller cannot supply a statement, repository, check result, signer or key.
+
+The private configuration names the repository, absolute private bare
+`scratch_repo`, operator-selected immutable `accepted_base`, pinned
+`recipe_sha256` for `scripts/ci-evidence-source`, pinned `workflow_sha256` for
+`.github/workflows/fleet.yml`, and `required_checks`. It sets `tier` to `full`, `degraded` or `test`. Full mode also
+names `signer` and the absolute private `ssh_key`; degraded mode has neither.
+Test mode requires a throwaway key and `expires_at`, no more than 15 minutes
+ahead. Use a separate scratch repository for the test service. Production key
+files and configuration are never stored in a change checkout or this repository.
+
+The protected PATH supplies operator-installed st3, Git, OpenSSH, gh, Python and
+GNU timeout. gh receives only the profile's read-only GitHub credential. The
+observer fetches attempt-specific run metadata and every page of jobs; it checks
+the configured repository, Workspace CI workflow, completed state and required
+check names. Missing, duplicate or incomplete jobs are refused. It checks the
+source producer's actual steps, including upload, even when the optional job's
+overall result is softened by `continue-on-error`.
+
+Artifact identity, byte length and SHA-256 come from authenticated GitHub
+metadata. The complete ZIP must match before extraction. Exactly two regular
+files are allowed, with bounded sizes: receipt JSON and the Git object pack.
+The receipt must bind the run/attempt and pinned recipe, and its pack digest
+must match. The observer fetches the accepted baseline and authenticated platform
+head (plus fixed main history for PR merge parents) from its configured public
+repository, with fsck enabled, then imports the bounded source pack with
+`index-pack --strict`. Git independently derives the source tree and producer
+script digest; neither the artifact nor its self-reported producer hash proves
+what executed.
+
+Full trust is limited to `merge_group` and `workflow_dispatch`: their retained
+source must equal the platform's authenticated `run.head_sha`. Both the workflow
+and producer recipe must exactly match the operator-selected accepted base and
+its pins. A workflow change is refused for full trust until separately reviewed
+and accepted by the operator. `pull_request` cannot prove the effective tested
+merge: its author controls the artifact while run metadata names the author head.
+Production PR observations are always degraded, even with a pinned recipe; test
+services may emit test tier. A PR observation never satisfies production policy.
+The response explicitly reports full eligibility and any trust limitation. The
+core producer API refuses a request to sign ineligible source at full tier.
+
+Each required check gets one record, including failures. The command descriptor
+identifies the GitHub workflow/check, while `runner` retains run, attempt and job
+provenance. `output_sha256` hashes the serialized observed job JSON, rather than
+claiming the observer ran cargo or captured its stdout. Skipped, neutral, cancelled
+and failed jobs all have a failing exit code.
+
+When signing fails, the same measured facts become explicitly unsigned degraded
+records. A local per-job reference retains that result: retrying the same job
+after the key returns does not promote it. A fresh keyed rerun is required.
+The full record and observation reference are created in one Git transaction.
+Test services emit test tier; production policy rejects those records even when
+their signatures verify. An expired test service refuses to produce records.
+
+The response contains record IDs, explicit tiers, and an object-only base64 pack
+with source and evidence objects. The caller imports it with `git index-pack --stdin`, then uses `st evidence put` with its external allowed-signers file.
+No key, configuration, ref or executable is exported. The caller retains/fetches
+source parent history before pushing evidence refs to peers.
+
+Batch metrics count newly recorded jobs only: full records / fresh records,
+full-trust share (null with a zero denominator), and signing wall time. Original
+CI receives zero signing wait because this adapter runs after check completion.
+Re-attestation elapsed time remains null until a separately observed rerun is
+explicitly linked; it is not reported as zero. The controller that schedules
+observations and outage fallback is a separate integration.
+
+The cooperative v1 receipt boundary trusts our runner agents. Pinning recipes
+and isolating the key does not prove native process-to-agent identity against a
+hostile workflow author. These limits are why full tier requires a platform-bound
+queue/manual source and an accepted workflow pin. Native receipts remain separate
+work; this does not certify the behavior of all target code or runtime identity.
+
+## Fresh CI re-attestation
+
+The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors
+alongside its run, attempt and artifact selectors. These are immutable degraded
+check records, never caller statements. Configuration, repository, roles, keys,
+workflow and recipe pins still come from the private operator profile.
+
+The observer fetches predecessor refs from the fixed repository and verifies
+that each contains one explicitly unsigned degraded CI check. It derives the
+old repository/run/attempt/job identity from that record, then reads the original
+attempt's run metadata and job objects from authenticated GitHub. The run must
+belong to the configured repository and completed Workspace CI workflow path;
+an unrelated workflow with the same check name cannot supply a predecessor.
+It requires an exact job ID,
+check name, conclusion, serialized job digest and completion timestamp match.
+One run/job read pair per distinct old attempt supplies all its selected jobs.
+
+The current run must independently pass the existing source and workflow trust
+boundary. A link needs identical change identity, whole-tree digest, check name,
+command and opaque input map. It also needs a different run or attempt and job,
+with the fresh job starting after the old check completed. Reusing the original
+job, changing an input, or inventing an old result cannot produce a link. There
+is at most one predecessor per current required check. All links are validated
+before any new observation is written.
+
+Only a newly produced Full record gets `re_attests`. Signing failure preserves
+the fresh facts at degraded tier with no completed re-attestation link. Replay
+retains the original result and never promotes it. An already recorded Full job
+cannot acquire a different link; request the link on its first observation or
+run a fresh check. Test-tier services never produce Full re-attestations.
+
+The data-only export includes linked predecessor notes and their source commits
+so offline verification can validate the chain. The predecessor stays degraded;
+its record is never modified. This is an explicit selector API, not automatic
+rerun scheduling or shared fallback coordination. Production controllers still
+need to publish refs and provide the correct predecessor selectors.
+
+The response adds `re_attestations` samples and `re_attested_records`. Each sample
+measures from the authenticated degraded check's completion to the signed Full
+note's issuance time. This includes scheduling delay after the rerun completed;
+using rerun completion alone would understate time to trusted evidence. Git note
+issuance has one-second precision; elapsed values are expressed in milliseconds.
+The batch's `re_attestation_elapsed_ms` is the maximum new sample, or null when
+none exists. Replays contribute no new samples. Full-trust share and signing
+latency keep their existing fresh-record denominators. Production aggregation,
+risk-class deadlines and their enforcing policy remain separate work.
+
+A predecessor's conclusion may be failed. A passing rerun still links to it: the
+link says the rerun re-checks the same tree, not that the verdict is the same.
+Consumers must read the new record's own result, never infer it from the link.
+If the observer clock reads earlier than the degraded completion, the sample has
+`elapsed_ms` null and `skewed` true; the signed record stays valid and the sample
+is left out of `re_attestation_elapsed_ms`. That value is a measurement only, not
+a policy input, until deadlines and the production controller are decided.

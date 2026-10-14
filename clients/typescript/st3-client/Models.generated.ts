@@ -37,6 +37,7 @@ export type Agent = ResourceHeader & {
   current_work?: Array<WorkLabel>;
   current_work_ids?: Array<StepRunId>;
   delivery?: (AgentDelivery | null);
+  down_since?: (Timestamp | null);
   driver?: string | null;
   fault?: string | null;
   handoff?: (AgentHandoff | null);
@@ -202,7 +203,7 @@ export type AgentStartParameters = {
   agent: Id;
 };
 
-export type AgentState = ("desired" | "starting" | "running" | "waiting" | "stopped" | "failed" | "suspended" | string);
+export type AgentState = ("desired" | "starting" | "running" | "waiting" | "down" | "stopped" | "failed" | "suspended" | string);
 
 export type AgentStopParameters = {
   agent: Id;
@@ -2562,6 +2563,7 @@ export type Work = ResourceHeader & {
 
 export type WorkLabel = {
   goal?: string | null;
+  holder_down_since?: (Timestamp | null);
   id: Id;
   mission_id: MissionId;
   mission_run_id: MissionRunId;
