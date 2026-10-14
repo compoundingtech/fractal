@@ -133,6 +133,7 @@ pub async fn run(
     let mut diagnostics = BTreeMap::<String, DiagnosticReport>::new();
     let mut preparation_errors = BTreeMap::<String, String>::new();
     let mut preparation_reports = BTreeMap::<String, PreparationReport>::new();
+    let mut preparation_recovery_pending = None::<BTreeSet<String>>;
     loop {
         tokio::select! {
             result = &mut initialization, if state.initialized && initialization_pending => {
@@ -178,7 +179,8 @@ pub async fn run(
                 if state.initialized && replayed {
                     // The stream grants eligibility only to live mail. Retained handoffs can
                     // still acquire missing receipts from native proof, without another offer.
-                    let live: BTreeSet<_> = messages.iter().map(|message| message.subject.clone()).collect();
+                    let live: BTreeSet<_> = messages.iter().filter(|message| matches!(message.status.as_str(), "sent" | "staged" | "delivered"))
+                        .map(|message| message.subject.clone()).collect();
                     let mut tracked = messages.clone();
                     let mut dirty = false;
                     let pending: BTreeSet<_> = state.attempted.iter().chain(&state.accepted).chain(&state.confirmed).cloned().collect();
@@ -239,15 +241,28 @@ pub async fn run(
                         }
                     }
                     let head = unprepared_fifo_head(&messages, &content, &state.attempted);
+                    // Query durable waiting reports only for the initial mail snapshot:
+                    // reconnects must clear old failures without reporting every healthy arrival.
+                    let recovery_pending = preparation_recovery_pending.get_or_insert_with(|| {
+                        messages.iter().filter(|message| matches!(message.status.as_str(), "sent" | "staged")
+                            && !state.attempted.contains(&message.subject))
+                            .map(|message| message.subject.clone()).collect()
+                    });
+                    recovery_pending.retain(|message| live.contains(message));
+                    preparation_errors.retain(|message, _| live.contains(message));
+                    preparation_reports.retain(|message, _| live.contains(message));
                     for (index, message) in messages.iter().enumerate() {
+                        if !matches!(message.status.as_str(), "sent" | "staged" | "delivered") { continue; }
                         let reason = head.filter(|head| index >= *head).map(|head| {
                                 format!("{} is queued behind FIFO head {}; {}; later mail cannot overtake it",
                                     message.subject, messages[head].subject,
                                     preparation_errors.get(&messages[head].subject)
                                         .map_or("waiting for preparation", String::as_str))
                         }).or_else(|| preparation_errors.get(&message.subject).cloned());
-                        preparation_diagnostic(client, &state.fence, &message.subject, reason.as_deref(),
-                            &mut preparation_reports).await;
+                        if preparation_diagnostic(client, &state.fence, &message.subject, reason.as_deref(),
+                            recovery_pending.contains(&message.subject), &mut preparation_reports).await {
+                            recovery_pending.remove(&message.subject);
+                        }
                     }
                     // User meta records and explicit mid-turn absorption are native
                     // consumption proof. An enqueue or writing stdout is not a receipt.
@@ -463,30 +478,45 @@ fn unprepared_fifo_head(
     attempted: &BTreeSet<String>,
 ) -> Option<usize> {
     messages.iter().position(|message| {
-        !attempted.contains(&message.subject) && !content.contains_key(&message.subject)
+        matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+            && !attempted.contains(&message.subject) && !content.contains_key(&message.subject)
     })
 }
 
+
+pub(crate) const PREPARATION_WAIT_REASON: &str =
+    "waiting for Claude to prepare this message or an earlier FIFO head; body or attachment preparation is unavailable, and durable mail is retained and retried in arrival order";
 async fn preparation_diagnostic(
     client: &Client,
     fence: &Fence,
     message: &str,
     reason: Option<&str>,
+    recover_waiting: bool,
     reports: &mut BTreeMap<String, PreparationReport>,
-) {
+) -> bool {
     // Finish a lost acknowledgement before changing the diagnostic, so a late
     // retry cannot reinstate an old blocker after the successful preparation.
     if let Some(report) = reports.get_mut(message) {
         if !report.recorded {
-            if client.post::<_, ClaimRecord>("/v1/claims", &report.input).await.is_err() { return; }
+            if client.post::<_, ClaimRecord>("/v1/claims", &report.input).await.is_err() { return true; }
             report.recorded = true;
         }
-        if report.input.fields.get("reason").and_then(Value::as_str) == Some(reason.unwrap_or("preparation succeeded; FIFO blocker cleared")) {
-            return;
+        if reason.is_none() && report.input.fields.get("status").and_then(Value::as_str) == Some("ready") {
+            reports.remove(message);
+            return true;
+        }
+        if report.input.fields.get("reason").and_then(Value::as_str) == reason {
+            return true;
+        }
+    } else if reason.is_none() {
+        if !recover_waiting { return true; }
+        let Ok(delivery) = client.get::<Value>(&format!("/v1/messages/delivery/{message}")).await else {
+            return false;
+        };
+        if delivery["reason"].as_str() != Some(PREPARATION_WAIT_REASON) {
+            return true;
         }
     }
-    // Publish a clear even after channel restart: a durable failure from
-    // this incarnation must not outlive successfully prepared content.
     let input = ClaimInput {
         subject: fence.subject.clone(),
         kind: "harness.diagnostic".into(),
@@ -503,7 +533,12 @@ async fn preparation_diagnostic(
         idempotency_key: Some(format!("claude-preparation:{}", uuid::Uuid::now_v7())),
     };
     let recorded = client.post::<_, ClaimRecord>("/v1/claims", &input).await.is_ok();
-    reports.insert(message.into(), PreparationReport { input, recorded });
+    if reason.is_none() && recorded {
+        reports.remove(message);
+    } else {
+        reports.insert(message.into(), PreparationReport { input, recorded });
+    }
+    true
 }
 async fn diagnostic(
     client: &Client,
@@ -824,23 +859,40 @@ mod tests {
 
     #[tokio::test]
     async fn claude_preparation_diagnostic_retries_lost_ack_before_clearing_recovered_body() {
-        use axum::{Json, Router, http::StatusCode, routing::post};
+        use axum::{Json, Router, http::StatusCode, routing::{get, post}};
         use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
         let store = Arc::new(crate::store::Store::open_memory("claude-preparation-ack").unwrap());
         let fail_ack = Arc::new(AtomicBool::new(true));
+        let fail_clear_ack = Arc::new(AtomicBool::new(true));
         let app = Router::new().route("/v1/claims", post({
             let store = Arc::clone(&store);
+            let fail_clear_ack = Arc::clone(&fail_clear_ack);
             move |Json(input): Json<ClaimInput>| {
                 let store = Arc::clone(&store);
                 let fail_ack = Arc::clone(&fail_ack);
+                let fail_clear_ack = Arc::clone(&fail_clear_ack);
                 async move {
                     let claim = store.append_client_claim(&input).unwrap();
-                    if fail_ack.swap(false, Ordering::SeqCst) {
+                    let clear = input.fields["status"] == "ready";
+                    if fail_ack.swap(false, Ordering::SeqCst)
+                        || clear && fail_clear_ack.swap(false, Ordering::SeqCst) {
                         Err(StatusCode::INTERNAL_SERVER_ERROR)
                     } else {
                         Ok(Json(json!({"api_version":"st3.v1", "value":claim})))
                     }
+                }
+            }
+        })).route("/v1/messages/delivery/{*subject}", get({
+            let store = Arc::clone(&store);
+            move |axum::extract::Path(subject): axum::extract::Path<String>| {
+                let store = Arc::clone(&store);
+                async move {
+                    let waiting = store.claude_preparation_diagnostic("agent/worker", &subject, "current")
+                        .unwrap().is_some_and(|(body, _)| body["fields"]["status"] == "waiting");
+                    Json(json!({"api_version":"st3.v1", "value":{
+                        "reason": if waiting { PREPARATION_WAIT_REASON } else { "waiting for native handoff" }
+                    }}))
                 }
             }
         }));
@@ -857,27 +909,44 @@ mod tests {
         let error = body(&client, &message).await.unwrap_err();
         let reason = format!("FIFO head preparation failed; retrying: {error:#}");
         let mut reports = BTreeMap::new();
-        preparation_diagnostic(&client, &fence, &message.subject, Some(&reason), &mut reports).await;
+        preparation_diagnostic(&client, &fence, &message.subject, None, true, &mut reports).await;
+        assert!(reports.is_empty());
+        assert!(store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap().is_empty(),
+            "healthy initial mail must not append a ready claim");
+        preparation_diagnostic(&client, &fence, &message.subject, Some(&reason), false, &mut reports).await;
         assert!(!reports[&message.subject].recorded);
         let failure_key = reports[&message.subject].input.idempotency_key.clone();
         message.content = "recovered body".into();
         assert_eq!(body(&client, &message).await.unwrap(), "recovered body");
-        preparation_diagnostic(&client, &fence, &message.subject, None, &mut reports).await;
-        assert!(reports[&message.subject].recorded);
+        preparation_diagnostic(&client, &fence, &message.subject, None, false, &mut reports).await;
+        assert!(!reports[&message.subject].recorded, "the clear acknowledgement was lost");
         assert_ne!(reports[&message.subject].input.idempotency_key, failure_key);
         let claims = store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap();
         assert_eq!(claims.len(), 2, "lost acknowledgement retries the identical failure claim");
         assert_eq!(claims[0].body["fields"]["status"], "waiting");
         assert_eq!(claims[1].body["fields"]["status"], "ready");
         assert!(claims.iter().all(|claim| claim.body["evidence"] == json!(["message/head"])));
-        preparation_diagnostic(&client, &fence, &message.subject, None, &mut reports).await;
+        for _ in 0..100 {
+            preparation_diagnostic(&client, &fence, &message.subject, None, false, &mut reports).await;
+        }
+        assert!(reports.is_empty(), "acknowledged clears must be pruned");
         assert_eq!(store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap().len(), 2);
+        // A channel reconnect must clear a durable waiting report in this incarnation,
+        // but may not manufacture clears for healthy mail in its initial snapshot.
+        preparation_diagnostic(&client, &fence, &message.subject, Some(&reason), false, &mut reports).await;
+        reports.clear();
+        preparation_diagnostic(&client, &fence, &message.subject, None, true, &mut reports).await;
+        assert!(reports.is_empty());
+        let claims = store.claims_for(&fence.subject, Some("harness.diagnostic")).unwrap();
+        assert_eq!(claims.len(), 4);
+        assert_eq!(claims[2].body["fields"]["status"], "waiting");
+        assert_eq!(claims[3].body["fields"]["status"], "ready");
         server.abort();
     }
 
     #[test]
     fn claude_unprepared_fifo_head_preserves_later_mail_until_recovery() {
-        let messages: Vec<MessageView> = ["head", "later", "last"].into_iter().enumerate().map(|(index, name)| MessageView {
+        let mut messages: Vec<MessageView> = ["head", "later", "last"].into_iter().enumerate().map(|(index, name)| MessageView {
             subject: format!("message/{name}"), from: "person/sender".into(), to: "agent/worker".into(),
             content: name.into(), status: "staged".into(), title: None, in_reply_to: None,
             tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
@@ -889,6 +958,16 @@ mod tests {
         ]);
         let mut attempted = BTreeSet::new();
         assert_eq!(unprepared_fifo_head(&messages, &content, &attempted), Some(0));
+        for status in ["read", "closed", "unknown"] {
+            messages[0].status = status.into();
+            assert_eq!(unprepared_fifo_head(&messages, &content, &attempted), None,
+                "{status} mail must not become a permanent FIFO head");
+        }
+        for status in ["sent", "staged", "delivered"] {
+            messages[0].status = status.into();
+            assert_eq!(unprepared_fifo_head(&messages, &content, &attempted), Some(0));
+        }
+        messages[0].status = "staged".into();
         // Repeated permanent body/attachment errors neither consume nor reorder mail.
         for _ in 0..40 {
             let offers: Vec<_> = messages.iter().take(unprepared_fifo_head(&messages, &content, &attempted).unwrap())

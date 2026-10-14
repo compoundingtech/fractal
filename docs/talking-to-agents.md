@@ -90,8 +90,10 @@ or a dismissal between screen polls. A box shown while Claude is working is not
 idle evidence, and an unreadable screen cannot release the hold.
 
 A body or attachment preparation failure also holds that message and later mail
-in mailbox order. The sender's existing delivery reason names the failed head;
-st retains and retries the mail, clearing that reason when preparation succeeds.
+in mailbox order. The sender's existing delivery reason explains the preparation
+blocker without exposing raw errors or internal paths. st retains and retries
+the mail, clearing that reason when preparation succeeds, including after a
+channel reconnect. Healthy mail does not add preparation diagnostics.
 
 Attach an existing image (up to four). PNG, JPEG, GIF and WebP up to 10 MiB are sent as they are;
 the CLI renders an SVG to PNG, converts a BMP, and scales a larger still image down until it fits,

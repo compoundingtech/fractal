@@ -4038,10 +4038,10 @@ fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now
     if let Some((body, _)) = diagnostic {
         let fields = body.get("fields").unwrap_or(&body);
         if fields.get("status").and_then(Value::as_str) == Some("waiting") {
-            if let Some(reason) = fields.get("reason").and_then(Value::as_str) {
-                delivery["state"] = json!("waiting");
-                delivery["reason"] = json!(reason);
-            }
+            delivery["state"] = json!("waiting");
+            // Diagnostics retain operator detail; delivery exposes only the safe
+            // preparation/FIFO condition, never error strings or filesystem paths.
+            delivery["reason"] = json!(crate::claude_channel::PREPARATION_WAIT_REASON);
         }
     }
     Ok(delivery)
@@ -18273,16 +18273,18 @@ mission "expiring-work" state="ready" {
             }), vec![message.subject.clone()])
         };
         diagnostic(&messages[0].0, "first", "waiting",
-            "FIFO head preparation failed: body unavailable; retrying with backoff up to 30s");
+            "FIFO head preparation failed: /private/internal/body.txt unavailable; token=private-detail");
         for (message, _) in &messages[1..] {
             diagnostic(message, "first", "waiting",
                 "queued behind FIFO head message/claude-preparation-head: body unavailable; later mail cannot overtake it");
         }
-        for (index, (message, sent_at)) in messages.iter().enumerate() {
+        for (message, sent_at) in &messages {
             let delivery = message_delivery_for(&store, message, *sent_at, *sent_at).unwrap();
             assert_eq!(delivery["state"], "waiting");
             assert_eq!(delivery["phase"], "sent");
-            assert!(delivery["reason"].as_str().unwrap().contains(if index == 0 { "preparation failed" } else { "queued behind FIFO head" }));
+            assert_eq!(delivery["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
+            assert!(!delivery["reason"].as_str().unwrap().contains("/private/"));
+            assert!(!delivery["reason"].as_str().unwrap().contains("private-detail"));
             let mut accepted = message.clone();
             accepted.status = "delivered".into();
             assert!(!message_delivery_for(&store, &accepted, *sent_at, *sent_at).unwrap()["reason"]
@@ -18294,7 +18296,7 @@ mission "expiring-work" state="ready" {
         // A different message's clear cannot release the head or its queued successors.
         diagnostic(&messages[2].0, "first", "ready", "preparation succeeded; FIFO blocker cleared");
         assert!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
-            .unwrap()["reason"].as_str().unwrap().contains("preparation failed"));
+            .unwrap()["reason"].as_str().unwrap().contains("preparation is unavailable"));
         // Recovery clears each message. Late previous-incarnation reports cannot undo it.
         for (message, sent_at) in &messages {
             diagnostic(message, "first", "ready", "preparation succeeded; FIFO blocker cleared");
@@ -18309,9 +18311,9 @@ mission "expiring-work" state="ready" {
         diagnostic(&messages[0].0, "second", "waiting", "current attachment preparation failed");
         diagnostic(&messages[0].0, "first", "ready", "old incarnation clear");
         assert_eq!(message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1)
-            .unwrap()["reason"], "current attachment preparation failed");
+            .unwrap()["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
         let stale = message_delivery_for(&store, &messages[0].0, messages[0].1, messages[0].1 + 90_001).unwrap();
-        assert_eq!(stale["reason"], "current attachment preparation failed");
+        assert_eq!(stale["reason"], crate::claude_channel::PREPARATION_WAIT_REASON);
         assert_eq!(messages.iter().map(|(message, _)| store.message(&message.subject).unwrap().unwrap().content)
             .collect::<Vec<_>>(), ["head", "later", "last"]);
     }
