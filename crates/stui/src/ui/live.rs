@@ -45,10 +45,17 @@ struct Pending {
     effect: Effect,
     /// The exact request last sent; a retry repeats it so st can answer with the first result.
     sent: Arc<Mutex<Option<Sent>>>,
+
+    /// The conversation drew it, noted once for the quality counters.
+    echoed: bool,
     /// When it was last sent (or sent again): one st has not answered for a while is said to be
     /// unconfirmed, so it can be sent again or cleared rather than wait forever.
     since: Instant,
 }
+
+/// How often st is asked how long a message it takes, and how soon again after it did not answer.
+const MESSAGE_LIMIT_REREAD: Duration = Duration::from_secs(600);
+const MESSAGE_LIMIT_RETRY: Duration = Duration::from_secs(30);
 
 /// How long a message waits for st's answer before it says st has not confirmed it.
 /// A draw slower than this, or a whole turn of the main loop (everything it did before waiting for
@@ -329,6 +336,8 @@ enum Fetched {
     /// A send finished: the pending token and st's message id, or why it failed and whether st's
     /// answer is unknown.
     Sent(String, Result<Option<String>, (String, bool)>),
+    /// The longest message st says it takes, in UTF-8 bytes; None when it does not say.
+    MessageLimit(Result<Option<usize>, ()>),
     /// st started an agent asked for here.
     /// st started a shell asked for here.
     TerminalStarted(String),
@@ -499,6 +508,9 @@ pub fn run(context: Context) -> Result<()> {
     terminal.hide_cursor()?;
     let started = Instant::now();
     let mut changed = true;
+    // When st is next asked how long a message it takes: on connecting, then now and then, since
+    // a daemon that is upgraded changes it.
+    let mut limit_next = Instant::now();
     let stopping = super::stop_flag()?;
     let mut attached: Option<Following> = None;
     // The runtimes of the agent whose terminal view is open, to follow it again after a pause.
@@ -565,6 +577,19 @@ pub fn run(context: Context) -> Result<()> {
         {
             view.stale = Some(connecting_text(started.elapsed()));
         }
+        if extras.live && Instant::now() >= limit_next {
+            limit_next = Instant::now() + MESSAGE_LIMIT_RETRY;
+            let client = client.clone();
+            let tx = fetched_tx.clone();
+            runtime.spawn(async move {
+                let limit = client
+                    .capabilities()
+                    .await
+                    .map(|found| found.value.limits.max_message_bytes)
+                    .map_err(|_| ());
+                let _ = tx.send(Fetched::MessageLimit(limit));
+            });
+        }
         while let Ok(update) = incoming.try_recv() {
             match update {
                 feed::Update::GlassesVersion(version) => {
@@ -572,6 +597,7 @@ pub fn run(context: Context) -> Result<()> {
                     glasses_ready = ui.glasses.is_none();
                 }
                 feed::Update::Connected(member) => {
+                    limit_next = Instant::now();
                     ui.quality.live(false);
                     agents_live = false;
                     glasses_ready = true;
@@ -757,11 +783,16 @@ pub fn run(context: Context) -> Result<()> {
                         });
                     // A message sent from here is done once st shows it in the conversation.
                     pending.retain(|pending| {
-                        pending.message_id.as_ref().is_none_or(|id| {
-                            !timelines.values().flat_map(|timeline| &timeline.items).any(|entry| {
-                                matches!(&entry.body, TimelineBody::Message(message) if &message.message_id == id)
-                            })
-                        })
+                        let Some(id) = pending.message_id.as_ref() else {
+                            return true;
+                        };
+                        let shown = timelines.values().flat_map(|timeline| &timeline.items).any(|entry| {
+                            matches!(&entry.body, TimelineBody::Message(message) if &message.message_id == id)
+                        });
+                        if shown {
+                            super::slo::METRICS.observe("send_visible_ms", pending.since.elapsed());
+                        }
+                        !shown
                     });
                     changed = true;
                 }
@@ -897,31 +928,82 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
                 }
+                Fetched::MessageLimit(limit) => match limit {
+                    Ok(limit) => {
+                        ui.message_limit = limit;
+                        limit_next = Instant::now() + MESSAGE_LIMIT_REREAD;
+                    }
+                    // Asked again soon; the last answer stands meanwhile.
+                    Err(()) => limit_next = Instant::now() + MESSAGE_LIMIT_RETRY,
+                },
                 Fetched::Sent(token, outcome) => {
+                    let mut restored = false;
                     if let Some(entry) = pending.iter_mut().find(|entry| entry.token == token) {
                         match outcome {
                             Ok(id) => {
+                                super::slo::METRICS.observe("send_ack_ms", entry.since.elapsed());
                                 entry.message_id = id;
                                 entry.failed = None;
                                 entry.unconfirmed = false;
                             }
                             Err((error, unconfirmed)) => {
+                                // st said no, or never took it: the text goes back to the box
+                                // for the person to change, unless something newer is there. A
+                                // send whose answer was lost stays here as unconfirmed, so it is
+                                // never sent twice.
+                                if !unconfirmed
+                                    && let Effect::Send {
+                                        agent,
+                                        text,
+                                        in_reply_to,
+                                        tags,
+                                        images,
+                                    } = &entry.effect
+                                {
+                                    restored = ui.restore_refused(
+                                        agent,
+                                        text,
+                                        in_reply_to.clone(),
+                                        tags,
+                                        images,
+                                    );
+                                }
+                                if restored {
+                                    ui.flash_for(
+                                        format!("Not sent: {error}. Your message is back in the box"),
+                                        super::FLASH_REFUSAL,
+                                    );
+                                } else {
+                                    ui.flash_for(
+                                        format!("Not sent: {error}"),
+                                        super::FLASH_REFUSAL,
+                                    );
+                                }
                                 entry.failed = Some(error);
                                 entry.unconfirmed = unconfirmed;
                             }
                         }
                     }
+                    if restored {
+                        pending.retain(|entry| entry.token != token);
+                    }
                     // st took it. The copy here gives way once the conversation shows it, which
                     // may already have happened; with no id to look for, at once.
                     pending.retain(|entry| {
-                        entry.token != token
-                            || entry.failed.is_some()
-                            || entry.message_id.as_ref().is_some_and(|id| {
-                                !timelines
-                                    .values()
-                                    .flat_map(|timeline| &timeline.items)
-                                    .any(|item| matches!(&item.body, TimelineBody::Message(message) if &message.message_id == id))
-                            })
+                        if entry.token != token || entry.failed.is_some() {
+                            return true;
+                        }
+                        // Already in the conversation when st answered: visible as sent now.
+                        let waiting = entry.message_id.as_ref().is_some_and(|id| {
+                            !timelines
+                                .values()
+                                .flat_map(|timeline| &timeline.items)
+                                .any(|item| matches!(&item.body, TimelineBody::Message(message) if &message.message_id == id))
+                        });
+                        if !waiting {
+                            super::slo::METRICS.observe("send_visible_ms", entry.since.elapsed());
+                        }
+                        waiting
                     });
                 }
                 Fetched::Preview(id, preview) => {
@@ -1582,6 +1664,7 @@ pub fn run(context: Context) -> Result<()> {
                         unconfirmed: false,
                         effect: effect.clone(),
                         sent: sent.clone(),
+                        echoed: false,
                         since: Instant::now(),
                     });
                     changed = true;
@@ -1598,6 +1681,7 @@ pub fn run(context: Context) -> Result<()> {
             let tx = fetched_tx.clone();
             let person = person.clone();
             let model = model.clone();
+            let sends_message = token.is_some();
             runtime.spawn(async move {
                 let outcome =
                     perform_steadily(&client, &person, &model, effect, sent.as_deref()).await;
@@ -1620,10 +1704,17 @@ pub fn run(context: Context) -> Result<()> {
                 if shell && let Ok((_, Some(terminal))) = &outcome {
                     let _ = tx.send(Fetched::TerminalStarted(terminal.clone()));
                 }
-                let _ = tx.send(Fetched::Notice(match outcome {
-                    Ok((notice, _)) => notice,
-                    Err(error) => format!("Not done: {}", plain(&error)),
-                }));
+                match outcome {
+                    Ok((notice, _)) => {
+                        let _ = tx.send(Fetched::Notice(notice));
+                    }
+                    // A message's refusal is said, and its text put back, where its answer is
+                    // handled (`Fetched::Sent`).
+                    Err(_) if sends_message => {}
+                    Err(error) => {
+                        let _ = tx.send(Fetched::Notice(format!("Not done: {}", plain(&error))));
+                    }
+                }
             });
         }
 
@@ -1677,6 +1768,11 @@ pub fn run(context: Context) -> Result<()> {
                 links = ui.link_cells(frame.buffer_mut());
             }
         })?;
+        // A message just sent is on screen from this draw on: the time from pressing send to it.
+        for entry in pending.iter_mut().filter(|entry| !entry.echoed) {
+            entry.echoed = true;
+            super::slo::METRICS.observe("send_echo_ms", entry.since.elapsed());
+        }
         // A slow draw, or a whole turn that took long before it waited for input, is written
         // down with what was on screen, so that "it was slow" can be explained afterwards.
         let (drew, turn) = (draw_started.elapsed(), turn_started.elapsed());
@@ -3994,6 +4090,7 @@ mod tests {
                 images: Vec::new(),
             },
             sent: Arc::new(Mutex::new(None)),
+            echoed: false,
             since,
         };
         let mut fresh = [pending(Instant::now())];
