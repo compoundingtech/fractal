@@ -71,7 +71,12 @@ fn states_follow_their_precedence() {
         ),
         (json!({"state": "desired"}), State::Starting),
         (json!({"state": "stopped"}), State::Stopped),
-        (json!({"state": "retired"}), State::Unknown),
+        (json!({"state": "retired"}), State::Retired),
+        // Retired is final, whatever else st still says of the seat.
+        (
+            json!({"state": "retired", "fault": "its runtime failed"}),
+            State::Retired,
+        ),
     ] {
         assert_eq!(state(&agent(fields.clone())), expected, "{fields}");
     }

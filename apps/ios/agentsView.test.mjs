@@ -27,6 +27,10 @@ assert.equal(agentRows([{ ...agent('example/old'), presentation: undefined }], [
 assert.equal(agentState(served('something-new')), 'unknown');
 assert.equal(agentWord('compacting'), 'compacting');
 assert.equal(agentWord('needs-you'), 'alert');
+// A retired seat is retired as st serves it, in its own section.
+assert.equal(agentState(served('retired')), 'retired');
+assert.equal(agentWord('retired'), 'retired');
+assert.deepEqual(agentSections(agentRows([agent('example/retired', {}, 'retired')], [], 'example-linux', now)).map(section => section.title), ['retired']);
 
 // Grouped and sorted like stui: waiting on you, broken, working, idle, stopped, and sessions st
 // found but did not start last, never first.
