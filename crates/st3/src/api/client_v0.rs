@@ -10,6 +10,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 struct FirstFrame {
     span: tracing::Span,
     read_pending: bool,
+    profile: Option<crate::profile::Op>,
+    total: Option<crate::profile::WallSpan>,
 }
 
 fn subscription_first_frame(
@@ -17,7 +19,10 @@ fn subscription_first_frame(
     id: &str,
     upgrade: Option<&opentelemetry::trace::SpanContext>,
 ) -> Option<FirstFrame> {
-    if !crate::otel::export_enabled() {
+    let profile = (collection == "conversation")
+        .then(|| crate::profile::Op::start("stream conversation/first-frame", None))
+        .flatten();
+    if !crate::otel::export_enabled() && profile.is_none() {
         return None;
     }
     let collection = match collection {
@@ -49,13 +54,36 @@ fn subscription_first_frame(
     if let Some(upgrade) = upgrade.filter(|context| context.is_valid()) {
         span.add_link(upgrade.clone());
     }
-    Some(FirstFrame { span, read_pending: true })
+    let total = profile.as_ref().map(|op| op.wall_span("conversation/first-frame-total"));
+    Some(FirstFrame { span, read_pending: true, profile, total })
 }
 
 async fn first_frame_work<F: Future>(span: Option<tracing::Span>, work: F) -> F::Output {
     match span {
         Some(span) => work.instrument(span).await,
         None => work.await,
+    }
+}
+
+/// Enter only while a future is polled: thread-local CPU/SQL ownership must never
+/// remain installed across suspension. Awaited stages use owned wall-only guards.
+async fn conversation_profile_work<F: Future>(
+    profile: Option<&crate::profile::Op>, stage: &'static str, work: F,
+) -> F::Output {
+    let _wall = profile.map(|op| op.wall_span(stage));
+    let mut work = std::pin::pin!(work);
+    std::future::poll_fn(|cx| {
+        let _entered = crate::profile::enter(profile);
+        work.as_mut().poll(cx)
+    }).await
+}
+
+impl FirstFrame {
+    fn delivered(&mut self) {
+        drop(self.total.take());
+        if let Some(profile) = self.profile.take() {
+            profile.finish();
+        }
     }
 }
 
@@ -903,6 +931,8 @@ fn collection_window_label(collection: &str) -> &'static str {
 }
 
 async fn send_collection(socket: &mut WebSocket, value: Value) -> bool {
+    let serialization = (value["collection"] == "conversation")
+        .then(|| crate::profile::span("conversation/serialization")).flatten();
     let encode = || serde_json::to_string(&value);
     // Only an agents subscription's first frame attributes its encoding to the roster.
     let encoded = if value["collection"] == "agents" && first_frame_current() {
@@ -910,6 +940,7 @@ async fn send_collection(socket: &mut WebSocket, value: Value) -> bool {
     } else {
         encode()
     };
+    drop(serialization);
     let Ok(payload) = encoded else {
         return false;
     };
@@ -917,6 +948,9 @@ async fn send_collection(socket: &mut WebSocket, value: Value) -> bool {
         return false;
     }
     record_subscription_page(&value, payload.len());
+    let profile = (value["collection"] == "conversation")
+        .then(crate::profile::current).flatten();
+    let _send = profile.as_ref().map(|op| op.wall_span("conversation/send"));
     send_collection_message(socket, WsMessage::Text(payload.into())).await
 }
 
@@ -1166,7 +1200,12 @@ async fn open_conversation_subscription(
     permits: ConversationAdmissionPermits,
 ) -> Result<(String, Option<String>), ApiError> {
     let subscription_store = state.store.clone();
+    let profile = crate::profile::current();
+    let queued = profile.as_ref().map(|op| op.wall_span("conversation/owner-read-queue"));
     super::read_deadline::store_read(&subscription_store, move || {
+        drop(queued);
+        let _entered = crate::profile::enter(profile.as_ref());
+        let _resolution = crate::profile::span("conversation/owner-read");
         let _permits = permits;
         crate::performance::task("conversation/admission", || {
             let target = request.conversation.as_deref().unwrap_or_default();
@@ -1285,6 +1324,8 @@ async fn conversation_open_value(
     remote: Option<&str>,
 ) -> Result<(Value, Value, Option<ConversationMark>), ApiError> {
     if remote.is_some() {
+        let profile = crate::profile::current();
+        let _relay = profile.as_ref().map(|op| op.wall_span("conversation/owner-relay"));
         // Existing owners relay the two public reads. Keep mixed-build relay compatibility.
         let start = conversation_changes_value(state, session, session_id, remote, None, 0, &mut None).await?;
         let page = conversation_page(state, session, session_id, remote).await?;
@@ -1292,7 +1333,12 @@ async fn conversation_open_value(
     }
     let (state, session, session_id) = (state.clone(), session.clone(), session_id.to_owned());
     let admission_store = state.store.clone();
+    let profile = crate::profile::current();
+    let queued = profile.as_ref().map(|op| op.wall_span("conversation/first-page-read-queue"));
     super::read_deadline::store_read(&admission_store, move || {
+        drop(queued);
+        let _entered = crate::profile::enter(profile.as_ref());
+        let _open = crate::profile::span("conversation/local-open");
         conversation_open_local_marked(&state, &session, &session_id)
             .map(|(start, page, mark)| (start, page, Some(mark)))
     }).await.map_err(ApiError::internal)?
@@ -1419,7 +1465,7 @@ async fn follow_conversation(
     ),
 ) {
     follow_conversation_since(
-        state, session, id, generation, session_id, remote, outbox, None, queue, first_frame,
+        state, session, id, generation, session_id, remote, outbox, None, queue, first_frame, None,
     )
     .await;
 }
@@ -1440,15 +1486,16 @@ async fn follow_conversation_since(
     (_upgrade, mut first_read): (
         Option<opentelemetry::trace::SpanContext>, Option<tracing::Span>,
     ),
+    mut profile: Option<crate::profile::Op>,
 ) {
     let remote = remote.as_deref();
     let failed = |error: &ApiError| conversation_stream_error(&id, error);
     let mut first_open = true;
     loop {
-        let mut opened = first_frame_work(
+        let mut opened = conversation_profile_work(profile.as_ref(), "conversation/first-page", first_frame_work(
             first_read.take(),
             conversation_open_value(&state, &session, &session_id, remote),
-        ).await;
+        )).await;
         if std::mem::take(&mut first_open) && remote.is_some()
             && matches!(&opened, Err(error) if error.code == "remote-unavailable")
         {
@@ -1461,7 +1508,8 @@ async fn follow_conversation_since(
                 if tokio::time::Instant::now() >= deadline { break; }
                 // Once admitted, preserve the owner's normal read deadline: a slow
                 // but successful page must not be canceled by the retry-start window.
-                opened = conversation_open_value(&state, &session, &session_id, remote).await;
+                opened = conversation_profile_work(profile.as_ref(), "conversation/first-page",
+                    conversation_open_value(&state, &session, &session_id, remote)).await;
             }
         }
         let (start, page, mut mark) = match opened {
@@ -1477,6 +1525,8 @@ async fn follow_conversation_since(
                 return;
             }
         };
+        let entered = crate::profile::enter(profile.as_ref());
+        let preparation = crate::profile::span("conversation/frame-preparation");
         let mut frame = json!({"kind":"conversation", "id":id, "collection":"conversation", "session_id":session_id, "replace":true, "items":page["items"], "has_more":page["page"]["has_more"]});
         if let Some(header) = page.get("header") {
             frame["header"] = header.clone();
@@ -1493,12 +1543,17 @@ async fn follow_conversation_since(
             items.drain(..drop);
             frame["has_more"] = Value::Bool(true);
         }
+        drop(preparation);
+        drop(entered);
         if queue.send(|| outbox.send((id.clone(), generation, frame))).is_err() {
             return;
         }
         if let Some(subscribed) = subscribed.take() {
             super::record_stream_latency("conversation", subscribed.elapsed(), remote.is_some());
         }
+        // The socket retains the operation until actual send success. The follower must
+        // release it before waiting for changes; long-poll idle is not first-frame work.
+        drop(profile.take());
         let mut after = start["next_cursor"].as_str().map(str::to_owned);
         loop {
             match conversation_changes_value(
@@ -1827,15 +1882,20 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             let opened = std::time::Instant::now();
                             let first_read = first_frames.get(&request.id).map(|first| first.span.clone());
                             let upgrade = upgrade.clone();
+                            let profile = first_frames.get(&request.id).and_then(|first| first.profile.clone());
                             let queue = conversation_queue.clone();
+                            // Start before spawn so scheduler delay belongs to admission.
+                            let admission = profile.as_ref().map(|op| op.wall_span("conversation/admission-queue"));
                             let follower = tokio::spawn(async move {
                                 let permits = ConversationAdmissionPermits {
                                     _socket: admission_slots.acquire_owned().await.expect("socket admission slots stay open"),
                                     _daemon: CONVERSATION_ADMISSION_SLOTS.clone().acquire_owned().await.expect("daemon admission slots stay open"),
                                 };
-                                match admit(state.clone(), session.clone(), request, permits).await {
+                                drop(admission);
+                                match conversation_profile_work(profile.as_ref(), "conversation/owner-resolution",
+                                    admit(state.clone(), session.clone(), request, permits)).await {
                                     Ok((session_id, remote)) => {
-                                        follow_conversation_since(state, session, id, generation, session_id, remote, outbox, Some(opened), queue, (upgrade, first_read)).await;
+                                        follow_conversation_since(state, session, id, generation, session_id, remote, outbox, Some(opened), queue, (upgrade, first_read), profile).await;
                                     }
                                     Err(error) => {
                                         let frame = json!({"kind":"error", "id":id, "collection":"conversation", "code":error.code, "message":error.message});
@@ -2101,7 +2161,10 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 if frame["kind"] == "error" { conversations.0.remove(&id); }
                 let data = frame["kind"] == "conversation";
                 let first_span = first_frames.get(&id).map(|first| first.span.clone());
-                if !first_frame_work(first_span, send_collection(&mut socket, frame)).await { return; }
+                let profile = first_frames.get(&id).and_then(|first| first.profile.clone());
+                if !conversation_profile_work(profile.as_ref(), "conversation/serialization-send",
+                    first_frame_work(first_span, send_collection(&mut socket, frame))).await { return; }
+                if data && let Some(first) = first_frames.get_mut(&id) { first.delivered(); }
                 if data || !conversations.0.contains_key(&id) { first_frames.remove(&id); }
                 continue;
             }
@@ -4083,7 +4146,16 @@ fn machine_summary_resources(
     snapshot: &ClientSnapshot,
     session: &ClientSession,
 ) -> anyhow::Result<Vec<Value>> {
-    machine_resources_with_work(state, false, snapshot, session, false)
+    Ok(machine_summary_resources_and_hosts(state, snapshot, session)?.0)
+}
+
+/// The summary's machines and the host each current runtime runs on, by runtime subject.
+fn machine_summary_resources_and_hosts(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+) -> anyhow::Result<(Vec<Value>, BTreeMap<String, String>)> {
+    machine_resources_and_hosts(state, false, snapshot, session, false)
 }
 
 fn machine_resources_with_work(
@@ -4093,6 +4165,16 @@ fn machine_resources_with_work(
     session: &ClientSession,
     include_work: bool,
 ) -> anyhow::Result<Vec<Value>> {
+    Ok(machine_resources_and_hosts(state, history, snapshot, session, include_work)?.0)
+}
+
+fn machine_resources_and_hosts(
+    state: &AppState,
+    history: bool,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    include_work: bool,
+) -> anyhow::Result<(Vec<Value>, BTreeMap<String, String>)> {
     let runtimes = runtime_resources(state, history, snapshot, session)?;
     let mut host_runtime_ids = BTreeMap::<String, BTreeSet<String>>::new();
     let mut host_running_runtimes = BTreeMap::<String, usize>::new();
@@ -4380,7 +4462,7 @@ fn machine_resources_with_work(
         machines.push(machine);
     }
     machines.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    Ok(machines)
+    Ok((machines, runtime_owner_hosts))
 }
 
 /// How long page reads serve the daemon's last diagnostic report before one of them asks for a
@@ -5512,6 +5594,7 @@ fn conversation_page_header(
     if !session.conversation_blocks {
         return None;
     }
+    let _header = crate::profile::span("conversation/header");
     let derived = crate::conversation_header::derive(
         items,
         window_truncated || crate::conversation_header::window_truncated(items),
@@ -5749,6 +5832,7 @@ fn native_slice_page_at_generation(
     query: &ClientListQuery,
     source: &crate::external_sessions::ExternalSession,
 ) -> Result<(Json<Value>, u64), ApiError> {
+    let preparation = crate::profile::span("conversation/native-preparation");
     let cursor = query.cursor.as_deref().map(decode_native_page_cursor).transpose()?;
     let source_basis = conversation_blocks::basis(source)?;
     let order = native_timeline_order(state, snapshot, session_id)?;
@@ -5791,6 +5875,7 @@ fn native_slice_page_at_generation(
     } else {
         limit + 1
     };
+    drop(preparation);
     let mut native = conversation_blocks::read_slice(
         source, session, session_id, order, before, read_limit,
     )?;
@@ -5826,6 +5911,7 @@ fn native_slice_page_at_generation(
     };
     native.has_more |= native.items.len() > limit + 1;
     native.items.truncate(limit + 1);
+    let overlay = crate::profile::span("conversation/overlay");
     let messages = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
         native_session_messages(state, snapshot, session_id)?
     } else {
@@ -5858,6 +5944,8 @@ fn native_slice_page_at_generation(
     }
     let mut has_more = items.len() > limit || native.has_more;
     items.truncate(limit);
+    drop(overlay);
+    let _page_preparation = crate::profile::span("conversation/page-preparation");
     // A page never outgrows what a paired reader can take from a remote owner (its reads are
     // capped at 1 MiB): a seat with very large entries gets a shorter newest page and a cursor
     // for the rest, not a refusal that leaves its conversation unreadable.
@@ -13153,6 +13241,7 @@ mission "queue-parity" state="ready" {
     async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        let mut recorded = crate::api::roster_stage_recorded().subscribe();
         let subject = "agent/fresh-pause";
         let append = |fields: Value| {
             state.store.append_claim(&ClaimInput {
@@ -13225,10 +13314,16 @@ mission "queue-parity" state="ready" {
         assert_eq!(page.items[0]["harness_state"], "idle");
         assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the healthy attempt");
         // The fresh read's wait and page, and the refresher's folds, land in their stage rows.
-        let stages = crate::api::request_latency_snapshot().into_iter()
+        let stages = || crate::api::request_latency_snapshot().into_iter()
             .filter(|row| row["scope"] == "agents-roster")
             .filter_map(|row| row["stage"].as_str().map(str::to_owned))
             .collect::<BTreeSet<_>>();
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| {
+            let stages = stages();
+            ["fresh-wait", "fresh-page"].iter().all(|stage| stages.contains(*stage))
+                && (stages.contains("refresh") || stages.contains("refresh-cold"))
+        })).await.expect("the completed roster stages are recorded").unwrap();
+        let stages = stages();
         for stage in ["fresh-wait", "fresh-page"] {
             assert!(stages.contains(stage), "{stage} recorded: {stages:?}");
         }
@@ -13240,6 +13335,7 @@ mission "queue-parity" state="ready" {
     async fn forgotten_agent_roster_is_refolded_before_any_read_asks() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        let mut recorded = crate::api::roster_stage_recorded().subscribe();
         state.store.append_claim(&ClaimInput {
             subject: "agent/forgotten".into(), kind: "runtime.observed".into(), actor: None,
             fields: serde_json::from_value(json!({"status":"running",
@@ -13256,6 +13352,9 @@ mission "queue-parity" state="ready" {
             .await.expect("the refresher publishes the roster as it starts").unwrap();
         let plain = || client_agents(State(state.clone()),
             Extension(new_client_snapshot(&state)), Query(ClientListQuery::default()));
+        let cold_folds = || crate::api::request_latency_snapshot().into_iter()
+            .find(|row| row["scope"] == "agents-roster" && row["stage"] == "refresh-cold")
+            .map_or(0, |row| row["count"].as_u64().unwrap());
 
         // A chunked replication projection, a trim or a repair forgets every kept reduction,
         // the published roster with them. Where no agents list was read lately, the roster
@@ -13266,19 +13365,18 @@ mission "queue-parity" state="ready" {
                 .await.is_err(),
             "a forget on a node nobody reads must not refold the roster",
         );
+        let before = cold_folds();
         assert!(plain().await.is_err(), "the first read after that finds no roster yet");
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete.clone()))
+        // Settle this fold's timing before taking the next baseline: publication wakes first.
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| complete(&0) && cold_folds() > before))
             .await.expect("the read's request republishes the roster").unwrap();
 
         // Once agents are being read, the refresher folds it again on its own: no read asks,
         // so none finds the roster missing and waits for a fold from the log.
-        let cold_folds = || crate::api::request_latency_snapshot().into_iter()
-            .find(|row| row["scope"] == "agents-roster" && row["stage"] == "refresh-cold")
-            .map_or(0, |row| row["count"].as_u64().unwrap());
         let before = cold_folds();
         state.store.forget_current_views();
         assert!(state.store.published_agent_roster(state.store.index().unwrap(), false).is_none());
-        tokio::time::timeout(Duration::from_secs(5), published.wait_for(complete))
+        tokio::time::timeout(Duration::from_secs(5), recorded.wait_for(|_| complete(&0) && cold_folds() > before))
             .await.expect("the refresher republishes a forgotten roster unasked").unwrap();
         assert!(cold_folds() > before, "the refold from the log lands in the refresh-cold row");
         let (Extension(_), Json(page)) = plain().await.expect("a plain read after the refold finds a roster");
