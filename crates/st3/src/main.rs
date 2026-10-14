@@ -14289,6 +14289,18 @@ async fn run_agents(
                             anyhow::bail!("`{subject}` could not restart: {fault}");
                         }
                         if agent.state == "waiting"
+                            && agent.blocked_on.as_deref() == Some("channel")
+                            && agent
+                                .incarnation_id
+                                .as_deref()
+                                .is_some_and(|incarnation| incarnation != previous)
+                        {
+                            anyhow::bail!(
+                                "`{subject}` restarted but its message channel is blocked: {}; inspect it with `st agents show {subject}`",
+                                agent.reason.as_deref().unwrap_or("channel unavailable")
+                            );
+                        }
+                        if agent.state == "waiting"
                             && agent.blocked_on.as_deref() == Some("human")
                             && agent
                                 .incarnation_id

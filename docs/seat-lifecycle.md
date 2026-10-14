@@ -357,6 +357,8 @@ a running incarnation; a supplied stale incarnation is refused.
 If a running runtime cannot prove its incarnation, restart completes with a visible refusal
 instead of waiting indefinitely or issuing an unfenced stop. Correct the runtime identity
 before making a new restart request.
+The CLI also reports a replacement's blocked message channel promptly, without waiting
+for automatic recovery, so the caller can correct channel attachment while mail stays held.
 
 Ordinary relaunches also continue the harness's last native session: a changed launch, a harness
 that hung up or crashed, a daemon restart, and a stop followed by a start. Claude, Codex, pi, omp

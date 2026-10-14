@@ -732,6 +732,49 @@ async fn stale_incarnation_request_does_not_stop_the_current_seat() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_reports_a_replacement_channel_refusal_without_waiting_for_recovery() {
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "never").await;
+    let socket = fixture.root.path().join("st3.sock");
+    let target = subject.clone();
+    let command = tokio::spawn(async move {
+        cli(&socket, &target, "person/avery", "3s").await
+    });
+    let drive = fixture.drive();
+    wait_for_starts(&fixture, &subject, 2).await;
+    fixture.store.append_claim(&st3::model::ClaimInput {
+        subject: subject.clone(),
+        kind: "harness.diagnostic".into(),
+        actor: Some(subject.clone()),
+        fields: serde_json::from_value(json!({
+            "code": "claude-channel-unattached",
+            "status": "blocked",
+            "incarnation_id": "fixture:2",
+            "reason": "the replacement has no initialized channel",
+        })).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: Some("replacement-channel-refusal".into()),
+    }).unwrap();
+    fixture.store.append_claim(&st3::model::ClaimInput {
+        subject: subject.clone(),
+        kind: "harness.observed".into(),
+        actor: Some(subject),
+        fields: serde_json::from_value(json!({
+            "driver": "claude", "state": "idle", "incarnation_id": "fixture:2",
+        })).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: Some("replacement-idle-hook".into()),
+    }).unwrap();
+    let output = command.await.unwrap();
+    drive.abort();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("message channel is blocked"), "{stderr}");
+    assert!(!stderr.contains("timed out"), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_or_omitted_incarnation_cannot_restart_a_running_seat() {
     let (fixture, subject) = Fixture::new(false).await;
     for (key, incarnation) in [("empty", Some("")), ("omitted", None)] {
