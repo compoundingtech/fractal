@@ -118,12 +118,20 @@ def verify_full(verifier, repo, tree, check, keys):
 
 
 def fetch_parents(repo, remote, token, sources):
-    """Fetch the sources' missing parents, before any local ref names the sources: the fetch's
-    connectivity check walks every existing ref and would trip over the missing history."""
+    """Make the sources' missing parents available to the scratch repository.
+
+    They are fetched into a sibling history repository that only ever holds fetched history, and
+    the scratch repository borrows its objects (alternates). Fetching straight into the scratch
+    repository fails once any ref there names a commit whose parents are absent: the fetch's
+    connectivity check walks every ref. That is exactly the state a scratch repository is in after
+    a run without --remote, or after any earlier import.
+    """
     config = []
     if token:
         header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
         config = ['-c', f'http.extraheader=Authorization: Basic {header}']
+    repo = Path(repo)
+    history = repo.with_name(repo.name + '-history')
     parents = set()
     for source in sources:
         header = git(repo, 'cat-file', 'commit', source).stdout.decode().split('\n\n', 1)[0]
@@ -131,13 +139,21 @@ def fetch_parents(repo, remote, token, sources):
         parents.update(p for p in wanted if git(repo, 'cat-file', '-e', p, check=False).returncode != 0)
     if not parents:
         return
-    done = subprocess.run(['git', '-C', str(repo), *config, 'fetch', '--quiet', '--no-tags', remote, *sorted(parents)],
+    if not history.exists():
+        subprocess.run(['git', 'init', '--quiet', '--bare', str(history)], check=True)
+    done = subprocess.run(['git', '-C', str(history), *config, 'fetch', '--quiet', '--no-tags', remote, *sorted(parents)],
                           capture_output=True, timeout=1800, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
     if done.returncode != 0:
         text = done.stderr.decode(errors='replace')
         if token:
             text = text.replace(token, '***')
         raise Failure(f'fetching the source\'s history failed: {text.strip()[-2000:]}')
+    alternates = repo / 'objects/info/alternates'
+    line = str(history / 'objects') + '\n'
+    existing = alternates.read_text() if alternates.exists() else ''
+    if line not in existing:
+        alternates.parent.mkdir(parents=True, exist_ok=True)
+        alternates.write_text(existing + line)
 
 
 def publish(repo, remote, token, refs):
