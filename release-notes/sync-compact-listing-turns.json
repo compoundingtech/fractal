@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No replay or projection changes."},
   "schema": {"status": "none", "detail": "No database changes."},
   "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
-  "compatibility": {"status": "changed", "detail": "This build never sends a request without range digests, so it no longer asks a peer for its complete inventory. It still answers an older peer's full-inventory request with its complete inventory. Members may upgrade in any order safely, but convergence is assured only once every member runs this build: an older member answers with its first differing ranges in order, and this build no longer falls back to a full inventory when that listing stops on tombstone ranges. The large answers also stop once every member runs this build."},
+  "compatibility": {"status": "changed", "detail": "This build never sends a request without range digests, so it no longer asks a peer for its complete inventory. It still answers an older peer's full-inventory request with its complete inventory, so members may upgrade in any order; the large answers stop once every member runs this build."},
   "downtime": {"status": "none", "detail": "A daemon restart to install the build; no extra interruption."},
   "manual": {"status": "none", "detail": "Nothing to configure."},
   "recovery": {"status": "none", "detail": "Swap back to the previous binary freely; nothing is persisted."}
