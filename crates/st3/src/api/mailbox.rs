@@ -3075,7 +3075,7 @@ mod tests {
             exchange: source
                 .export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap())
                 .unwrap(),
-            // The native replication worker supplies this; it enables the worker's heal path.
+            // The native replication worker supplies this for its own dials.
             round_trip_ms: Some(1),
         };
         // Establish the remote incarnation before binding the live stream.

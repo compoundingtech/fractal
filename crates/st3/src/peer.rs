@@ -35,9 +35,7 @@ use crate::fleet::transport::{Fabric, LocalTransports, Route, local_addresses, p
 use crate::fleet::{FleetView, MemberKey};
 use crate::model::{
     ApiResponse, ReplicaEnvelopeId, ReplicationExchange, ReplicationExportRequest,
-    ReplicationExportResponse, ReplicationHealAnswer, ReplicationHealAnswerRequest,
-    ReplicationHealNextRequest, ReplicationHealQuery, ReplicationHealStep, ReplicationInventory,
-    ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
+    ReplicationExportResponse, ReplicationInventory, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
 };
 use crate::store::Store;
 use crate::relay_trace::{self, Outcome, Phase};
@@ -1557,40 +1555,6 @@ impl Backend for MainBackend {
             .await
     }
 
-    async fn heal_answer(
-        &self,
-        peer: &str,
-        fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> Result<ReplicationHealAnswer> {
-        self.client
-            .post(
-                "/v1/internal/replication/heal/answer",
-                &ReplicationHealAnswerRequest {
-                    peer: peer.to_owned(),
-                    fleet_id: fleet_id.to_owned(),
-                    query: query.clone(),
-                },
-            )
-            .await
-    }
-
-    async fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> Result<ReplicationHealStep> {
-        self.client
-            .post(
-                "/v1/internal/replication/heal/next",
-                &ReplicationHealNextRequest {
-                    peer: peer.to_owned(),
-                    answer,
-                },
-            )
-            .await
-    }
-
     async fn checkpoint_manifest(
         &self,
         request: &CheckpointManifestRequest,
@@ -1792,8 +1756,8 @@ mod tests {
     use sha2::{Digest as _, Sha256};
     use smallclaims::fleet::MemberKey;
     use smallclaims::sync::{
-        FleetContext, PeerState, exchange, fetch_checkpoint_manifest, heal,
-        peer_router, replication_http_client,
+        FleetContext, PeerState, exchange, fetch_checkpoint_manifest, peer_router,
+        replication_http_client,
     };
     use std::collections::BTreeSet;
     use std::os::unix::fs::PermissionsExt as _;
@@ -4176,8 +4140,7 @@ mod tests {
                 &dialer,
             )
             .await
-            .unwrap()
-            .0;
+            .unwrap();
             if !moved {
                 break;
             }
@@ -4203,10 +4166,11 @@ mod tests {
         server.abort();
     }
 
-    /// A first sync that ends with different graphs heals at once over the signed heal route:
-    /// the node that lost claims asks the peer that holds them and admits their envelopes again.
+    /// A first sync over the signed route ends once both nodes hold the same envelopes. It
+    /// settles on claims alone: a graph that differs there is not compared, replayed or repaired
+    /// from the peer, and no peer route offers a heal.
     #[tokio::test]
-    async fn a_first_sync_heals_a_node_that_lost_claims_over_the_signed_route() {
+    async fn a_first_sync_settles_on_claims_and_never_repairs_from_the_peer() {
         let fleet = "1f91ca65-7793-48cc-866e-ac15690130e1";
         let auth = FleetAuth::test(fleet, &[6; 32]);
         let root = tempfile::tempdir().unwrap();
@@ -4280,31 +4244,39 @@ mod tests {
         assert_ne!(graph(&target), graph(&source));
 
         // Transport observations move for an exchange or two before the envelopes match.
-        let mut heal_now = false;
         for _ in 0..4 {
-            heal_now = exchange(&http, &backend, "target", &peer, &auth, &context)
+            exchange(&http, &backend, "target", &peer, &auth, &context)
                 .await
-                .unwrap()
-                .1;
-            if heal_now {
-                break;
-            }
+                .unwrap();
         }
-        assert!(
-            heal_now,
-            "the first comparison of a first sync heals at once"
-        );
-        heal(&backend, "target", &peer, &auth, &context).await;
-
         let status = target
             .replication_status(true, Some(fleet), &["source".into()])
             .unwrap();
-        let report = status.peers[0].sync.as_ref().unwrap().heal.clone().unwrap();
-        assert!(report.healed, "{report:?}");
-        assert_eq!(graph(&target), graph(&source));
-        assert_eq!((report.refetched, report.pushed), (1, 0));
         let first = status.first_sync.unwrap();
-        assert_eq!((first.state.as_str(), first.healed), ("verified", true));
+        assert_eq!(first.state, "verified", "{first:?}");
+        assert_eq!(first.message, None, "{first:?}");
+        assert_ne!(
+            graph(&target),
+            graph(&source),
+            "the lost claim is not repaired from the peer"
+        );
+        let desired: u64 = target
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM claims WHERE kind='intent.desired'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(desired, 0, "no envelope is admitted again to restore the lost claim");
+        let heal = http
+            .post(format!("http://{address}/v1/peer/heal"))
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(heal.status(), reqwest::StatusCode::NOT_FOUND);
         server.abort();
     }
 

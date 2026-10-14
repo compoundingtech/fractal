@@ -10,11 +10,9 @@ pub use smallclaims::claim::{
 #[cfg(test)]
 pub use smallclaims::replication::{ReplicaRange, ReplicationBatch, ReplicationResponse};
 pub use smallclaims::replication::{
-    ClaimRange, ClaimRangeDigest, ClaimSubjectDigest, HealClaim, InventoryCheckpoint,
-    ReplicaRecordView, ReplicationExchange, ReplicationExportRequest, ReplicationExportResponse,
-    ReplicationFirstSync, ReplicationHealAnswer, ReplicationHealAnswerRequest,
-    ReplicationHealNextRequest, ReplicationHealQuery, ReplicationHealReport,
-    ReplicationHealRequest, ReplicationHealStep, ReplicationInventory, ReplicationInventoryBucket,
+    InventoryCheckpoint, ReplicaRecordView, ReplicationExchange, ReplicationExportRequest,
+    ReplicationExportResponse, ReplicationFirstSync, ReplicationInventory,
+    ReplicationInventoryBucket,
     ReplicationPeerFailureRequest, ReplicationPeerStatus, ReplicationPeerSync, ReplicationReceipt,
     ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest,
     ReplicationStatus, ReplicationTimings, UnhealthyProjection,

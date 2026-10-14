@@ -130,7 +130,7 @@ envelope hash commits its original payload and chain metadata. Thus members hold
 wire log agree on this digest even while their projections differ. Inventory equality does
 not prove signature admission; unsigned, fenced and invalid records retain their diagnostics.
 The graph and table digests describe this build's admitted projections and may differ until
-all members learn the same claim vocabulary. Automatic projection comparisons and heals run
+all members learn the same claim vocabulary. Automatic projection comparisons run
 only for matching registry digests with no locally waiting claims. A rolling upgrade clears
 old divergence measurements; comparisons resume after upgrade. A first sync between different
 builds verifies the equal wire log once every envelope passes admission, recording its
@@ -230,7 +230,7 @@ the test inventory and production registry to agree, and the fixture exercises e
 peer. `st replication diff PEER` and `st doctor` also name them. Table differences are meaningful
 only when inventories and claim registries agree, no claims wait for a newer build, projection
 is current and local committed batches are sealed. Old peers omit `projection_digests`;
-exchanges and heals then compare their unchanged six-table compatibility hash. Old peers cannot
+exchanges then compare their unchanged six-table compatibility hash. Old peers cannot
 verify full projection coverage. Modern peers compare complete maps. The transactional digest machinery derives creation/change dates from claim facts.
 New writer connections must register the projection functions, including isolated
 checkpoint proof connections.
@@ -404,7 +404,7 @@ worked or a replaced route keeps the long retry schedule. Graph wakes
 still leave intentionally absent peers alone. Transport life only schedules an exchange;
 the exchange still authenticates every claim and peer.
 
-`st replication status` shows each outbound worker's `exchange`, `overload`, `heal`, `backoff`
+`st replication status` shows each outbound worker's `exchange`, `overload`, `backoff`
 or `idle` phase, the last attempt time, and the next retry time during a wait. JSON carries
 these additive fields under each peer's `worker`. They are host-local memory and create no
 replicated claims; after a daemon restart they are absent until the worker reports again.
@@ -488,14 +488,20 @@ Each inventory says how many envelopes its sender takes in one exchange, 4,096 f
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
-exchanges list every differing range within the 512-identity listing. Live differences settle in
+exchanges list every differing range within the 512-identity listing. A store counts answers
+across all its peers, so the start steps by the golden ratio rather than by one: a peer answered
+every fourth time would otherwise see every fourth start and, with four differing ranges, only the
+first. Each peer reaches every range within about four times as many answers as there are ranges. Live differences settle in
 one two-phase exchange however many tombstone ranges differ, and no exchange carries a whole
 inventory. Builds before this one ran an extra full-inventory round whenever a compact round made
 no progress; on a fleet whose stores hold a million envelopes, each such round sent about 228 MB
 each way, and tombstone-only differences made it run on nearly every exchange. This build never
 asks for a full inventory. It still answers an older peer's request without range digests with
-its complete identity list, so members may upgrade in any order, and those answers stop once
-every member runs this build. A pair of members with only tombstone differences reports no
+its complete identity list. Members may upgrade in any order safely, but convergence is assured
+only once every member runs this build: an older member answers this build's request by listing
+its first differing ranges in order, and this build no longer falls back to a full inventory
+when that listing stops on tombstone ranges. The large answers also stop once every member runs
+this build. A pair of members with only tombstone differences reports no
 progress, so the worker rests rather than loops. Importing older or losing checkpoint lineages
 remains separate ([#1433](https://github.com/compoundingtech/smalltalk/issues/1433),
 [#1052](https://github.com/compoundingtech/smalltalk/issues/1052)); live-envelope convergence
@@ -589,11 +595,6 @@ prefix remain excluded. Base-stage progress counts those selected bodies, not th
 log. This bounds copied body count, not body bytes, SQLite work or the full replay transaction.
 The full replay still holds the writer through its commit.
 
-Heal request handlers compare a committed claim-index/graph-generation point to decide whether
-to notify readers. This point does not enumerate peers, envelopes or graph rows, and is an
-invalidation hint only. A replay may notify conservatively even when its final legacy digest
-matches. Heal equality, admission and completion continue to use their existing contracts.
-
 A replay from nothing is not the normal path. A projection extends the graph with the claims it
 admits. A claim that reaches part of the graph out of the replay's order rebuilds only that part
 from its own claims, in the replay's order and passes. The parts are:
@@ -617,7 +618,7 @@ The graph is replayed from nothing only in these cases:
   only the affected operation from its indexed claims and checkpoint tombstones;
 - an operation claim without a digest;
 - a work claim that carries an operation;
-- a heal;
+- a restore from a claim backup;
 - the first start of a build with the rule below.
 
 A rebuilt part costs what its own history costs, while a replay holds the store's only writer for
@@ -736,7 +737,7 @@ sync	diverged: node-b holds the same envelopes but projects a different graph, s
 peer	node-b	up
   last exchange 2s ago
   diverged: the same envelopes project different graphs since 3m ago (compared 2s ago; this node 0f3a9c21d4e8, node-b 7b21e05c9a44)
-  exchanges cannot fix this; the nodes heal by comparing the claims each projects, and views on one node are wrong until then
+  exchanges cannot fix this; one node projects the same claims wrongly, and its views are wrong until that is fixed
 ```
 
 While any peer has diverged, `st doctor` fails its replication check, every client page carries a
@@ -746,53 +747,24 @@ nothing. A comparison stands until the next exchange at which both nodes hold th
 the first one that finds equal graphs clears it. Like the envelope difference, comparisons live in
 memory and the first exchanges after a restart rebuild them.
 
-### Heal
+### No heal
 
-Diverged nodes heal without a person and without a reset. When the replication worker's own
-exchange with a peer finds the graphs still different after a minute, the worker starts a heal
-over the signed peer route `/v1/peer/heal`. The node that dials asks the questions, and the main
-daemon on each side answers from the claims it projects:
-
-1. **Ranges.** The digest of the claims each node projects from each writer range (the same
-   bucket ranges the envelope inventory uses).
-2. **Subjects.** For each range that differs, the digest of its claims about each subject.
-3. **Claims.** For each subject that differs, the claims themselves and the envelopes that carry
-   them.
-4. **Swap.** Each side sends the envelopes that carry claims the other lacks. The receiver checks
-   each envelope against its hash and admits it again through the usual validation, repair, and
-   projection. Claims move in both directions in one swap, and a heal repeats the narrowing while
-   swaps still move claims.
-
-When both nodes project the same claims but different graphs, their projections differ, and a
-replay from nothing decides the graph: first the asking node replays its own, then it asks the
-peer to replay. A replay holds the store for as long as it takes (about 40 seconds on a 2 GB
-store), so a node replays for heals at most once every 10 minutes, and backs off to once a day
-after replays that did not make the graphs agree. A heal that changed nothing waits twice as long
-before the next, up to an hour. A peer on a build without the heal route answers with an unsigned
-404, and the heal reports that.
-
-`st replication status` shows the last heal with each peer:
-
-```text
-peer	node-b	up
-  last exchange 2s ago
-  in sync: the same envelopes and the same graph (measured now)
-  healed 1m ago: admitted 14 claims node-b projects (1 ranges and 3 subjects differed); the graphs agree
-```
-
-A heal that could not make the graphs agree says why, for example `node-b cannot admit 2 claims:
-2 unknown (unknown-claim-kind) that this node projects`, and the pair stays `diverged` until a
-later heal succeeds.
+Sync has no heal. Projections are each member's own pure functions of the claims it holds, so
+sync moves claims and never compares, replays or repairs a projection from a peer. A divergence
+is reported as above, and it is a defect in the build of the node that projects its claims
+wrongly. That defect is fixed in the build, with a test that fails without the fix. Sync does not
+readmit envelopes a node already holds, does not replay its graph from nothing, and does not
+fetch a peer's projected rows. A member on an older build that still starts a heal gets an
+unsigned 404 from `/v1/peer/heal`, reports the heal as unavailable, and backs off.
 
 ### First sync
 
-A machine that joins with `st fleet join` records a first sync. It ends at the first exchange at
-which the new machine holds the same envelopes as a peer. That exchange compares the two graph
-digests at once, without the minute a running node allows a peer to finish projecting, and a
-difference starts a heal immediately. The first sync is then `verified`, possibly after a heal,
-or `failed` with the heal's reason. `join` waits for it by default and fails when it fails;
-`st fleet wait` waits for it later. A failed first sync fails `st doctor`'s replication check,
-and `st replication status` prints it as a `first-sync` line with both digests.
+A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first
+exchange at which the new machine holds the same envelopes as a peer and has admitted and
+projected them all. It settles on claims alone: it does not compare the two graphs. `join` waits
+for it by default; `st fleet wait` waits for it later. A first sync that an earlier build recorded
+as `failed` fails `st doctor`'s replication check until the next exchange at which both hold the
+same claims, which verifies it.
 
 A verified first sync says what was true then. `st fleet wait`, the gate after a restart or a
 deploy, also waits for an exchange since it began, with every peer that is up, at which this node
@@ -876,7 +848,7 @@ them, and every node deletes the same ones:
 A node that did not verify a stable checkpoint, such as one that joined later, adopts it. A peer
 lists the newest checkpoint it trimmed in its inventory. The node fetches the manifest of
 tombstones from that peer and checks the whole manifest against the verified drop digest before
-it stores anything. Then it trims to the same tombstones. A heal never fetches back what a
+it stores anything. Then it trims to the same tombstones. Sync never fetches back what a
 checkpoint dropped.
 
 A participant that does not seal holds up every checkpoint, whether it is away or runs a build
