@@ -189,6 +189,59 @@ impl Drop for Daemon {
 }
 
 #[tokio::test]
+async fn progress_eta_survives_replay_and_is_replaced_by_the_next_note() {
+    let root = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(root.path());
+    daemon.declare();
+    daemon.start().await;
+    let opened = daemon
+        .ok(&["work", "start", "ETA fixture", "--as", ALDER, "--idempotency-key", "eta-start"])
+        .await;
+    let step = opened["subject"].as_str().unwrap();
+    daemon
+        .ok(&["work", "claim", step, "--as", ALDER, "--incarnation", "alder-one"])
+        .await;
+    daemon
+        .fails(
+            &["work", "progress", step, "--as", ALDER, "--incarnation", "stale", "--eta", "2h"],
+            "not the current live incarnation",
+        )
+        .await;
+    daemon
+        .fails(
+            &["work", "progress", step, "--as", ALDER, "--incarnation", "alder-one", "--eta", "2000-01-01T00:00:00Z"],
+            "ETA must be in the future",
+        )
+        .await;
+    let updated = daemon
+        .ok(&[
+            "work", "progress", step, "--as", ALDER, "--incarnation", "alder-one",
+            "--summary", "Review in progress", "--eta", "2h",
+        ])
+        .await;
+    let summary = updated["progress_summary"].as_str().unwrap().to_owned();
+    assert!(summary.starts_with("Review in progress\nETA (self-reported): "));
+    assert!(summary.ends_with("Not a deadline."));
+    let eta = summary.split("ETA (self-reported): ").nth(1).unwrap()
+        .split(';').next().unwrap();
+    let reported = summary.split("reported at ").nth(1).unwrap()
+        .strip_suffix(". Not a deadline.").unwrap();
+    let eta = chrono::DateTime::parse_from_rfc3339(eta).unwrap();
+    let reported = chrono::DateTime::parse_from_rfc3339(reported).unwrap();
+    assert_eq!((eta - reported).num_seconds(), 7200);
+    daemon.restart().await;
+    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported)"));
+    assert!(daemon.ok(&["work", "ls", "--as", ALDER]).await.to_string().contains("ETA (self-reported)"));
+    daemon
+        .ok(&[
+            "work", "progress", step, "--as", ALDER, "--incarnation", "alder-one",
+            "--summary", "Estimate withdrawn",
+        ])
+        .await;
+    assert!(!daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported)"));
+}
+
+#[tokio::test]
 async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());

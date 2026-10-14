@@ -4378,7 +4378,7 @@ enum WorkCommand {
     ///
     /// Records progress in the graph without messaging another agent; people read it in stui.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
-    Progress(WorkActionArgs),
+    Progress(WorkProgressArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
     /// Stop the execution clock while claimed work waits for something outside this seat.
@@ -4624,6 +4624,18 @@ struct WorkWaitArgs {
     /// What the step waits for, such as "build slot" or "merge queue".
     #[arg(long)]
     reason: String,
+}
+
+#[derive(Args)]
+struct WorkProgressArgs {
+    #[command(flatten)]
+    action: WorkActionArgs,
+    /// Estimated finish: a positive duration from now or a future RFC3339 timestamp.
+    ///
+    /// Adds a self-reported ETA to this progress note, not an execution deadline.
+    /// The next progress note replaces it. Omit --eta to clear the estimate.
+    #[arg(long)]
+    eta: Option<String>,
 }
 
 #[derive(Args)]
@@ -6110,8 +6122,9 @@ fn guard_mutating_cli_actor(
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
-            WorkCommand::Claim(args) | WorkCommand::Renew(args) | WorkCommand::Progress(args)
+            WorkCommand::Claim(args) | WorkCommand::Renew(args)
             | WorkCommand::Complete(args) | WorkCommand::Fail(args) | WorkCommand::Release(args) => args.actor.as_deref(),
+            WorkCommand::Progress(args) => args.action.actor.as_deref(),
             WorkCommand::Wake(args) => args.actor.as_deref(),
             WorkCommand::PublishMission(args) => args.actor.as_deref(),
             WorkCommand::Revise(args) => args.actor.as_deref(),
@@ -11717,6 +11730,28 @@ fn outcome_time(value: &str, now: u128) -> Result<u128> {
     Ok(now.saturating_sub(ago.as_millis()))
 }
 
+/// Store an advisory estimate in the existing progress note. Older clients can read it too.
+fn progress_eta_summary(summary: Option<&str>, eta: &str, now: u128) -> Result<String> {
+    let at_ms = if let Ok(at) = chrono::DateTime::parse_from_rfc3339(eta) {
+        u128::try_from(at.timestamp_millis()).context("ETA must be after the Unix epoch")?
+    } else {
+        now.checked_add(u128::from(st3::graph::parse_duration(eta, true)?))
+            .context("ETA is outside the supported timestamp range")?
+    };
+    anyhow::ensure!(at_ms > now, "ETA must be in the future");
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(i64::try_from(at_ms)?)
+        .context("ETA is outside the supported timestamp range")?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let reported = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(i64::try_from(now)?)
+        .context("report time is outside the supported timestamp range")?
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let note = format!("ETA (self-reported): {at}; reported at {reported}. Not a deadline.");
+    Ok(match summary.filter(|summary| !summary.is_empty()) {
+        Some(summary) => format!("{summary}\n{note}"),
+        None => note,
+    })
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct OutcomeCursor {
     collection: String,
@@ -17139,7 +17174,16 @@ async fn run_work(
         }
         WorkCommand::Claim(args) => post_work(client, "claim", args, json_output).await,
         WorkCommand::Renew(args) => post_work(client, "renew", args, json_output).await,
-        WorkCommand::Progress(args) => post_work(client, "progress", args, json_output).await,
+        WorkCommand::Progress(mut args) => {
+            if let Some(eta) = args.eta {
+                args.action.summary = Some(progress_eta_summary(
+                    args.action.summary.as_deref(),
+                    &eta,
+                    current_unix_ms()?,
+                )?);
+            }
+            post_work(client, "progress", args.action, json_output).await
+        }
         WorkCommand::Complete(args) => post_work(client, "complete", args, json_output).await,
         WorkCommand::Fail(args) => post_work(client, "fail", args, json_output).await,
         WorkCommand::Release(args) => post_work(client, "release", args, json_output).await,
@@ -30906,6 +30950,37 @@ mod tests {
         assert_eq!(parse_timeout("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_timeout("0").unwrap(), Duration::ZERO);
         assert!(parse_timeout("forever").is_err());
+    }
+
+    #[test]
+    fn progress_eta_resolves_duration_and_normalizes_timestamp() {
+        let now = 1_800_000_000_000;
+        let duration = progress_eta_summary(Some("Review in progress"), "2h", now).unwrap();
+        let timestamp =
+            progress_eta_summary(Some("Review in progress"), "2027-01-15T12:00:00+02:00", now)
+                .unwrap();
+        assert_eq!(duration, timestamp);
+        assert_eq!(
+            duration,
+            "Review in progress\nETA (self-reported): 2027-01-15T10:00:00.000Z; reported at 2027-01-15T08:00:00.000Z. Not a deadline."
+        );
+        assert!(progress_eta_summary(None, "2h", now).unwrap().starts_with("ETA"));
+        for eta in ["0", "0h", "-1h", "forever", "2027-01-15T08:00:00Z"] {
+            assert!(progress_eta_summary(None, eta, now).is_err(), "{eta}");
+        }
+        assert!(progress_eta_summary(None, "1h", u128::MAX).is_err());
+    }
+
+    #[test]
+    fn progress_eta_flag_is_not_an_execution_action_flag() {
+        assert!(Cli::try_parse_from([
+            "st3", "work", "progress", "step-run/example", "--eta", "2h"
+        ]).is_ok());
+        for action in ["claim", "renew", "complete", "fail", "release", "resume"] {
+            assert!(Cli::try_parse_from([
+                "st3", "work", action, "step-run/example", "--eta", "2h"
+            ]).is_err(), "{action}");
+        }
     }
 
     #[test]

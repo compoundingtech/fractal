@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Report an advisory ETA in a work progress note",
+  "replay": {"status":"none","detail":"ETA uses the existing progress summary claim and its history. Replay behavior is unchanged."},
+  "schema": {"status":"none","detail":"No replicated vocabulary, database, projection or wire schema changes."},
+  "rules": {"status":"none","detail":"The current work progress authority and lease checks remain unchanged."},
+  "compatibility": {"status":"changed","detail":"work progress accepts --eta with a positive duration or future RFC3339 timestamp. It adds an absolute UTC ETA and report time to the summary, readable by existing clients. The next progress note replaces it; omitting --eta withdraws it."},
+  "downtime": {"status":"none","detail":"Only the reporting CLI needs the new flag. Existing daemons and readers accept the progress note."},
+  "manual": {"status":"none","detail":"No configuration or migration is needed. ETA is advisory and does not change execution budgets, waits or leases."},
+  "recovery": {"status":"none","detail":"The existing durable progress history and replay preserve the note. A missed estimate does not fail work."}
+}
