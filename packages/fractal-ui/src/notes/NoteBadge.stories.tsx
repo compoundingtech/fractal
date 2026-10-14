@@ -65,7 +65,8 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(single).toHaveFocus()
   await expect(await canvas.findByRole('tooltip', undefined, { timeout: 5000 })).toHaveTextContent(retireNote.text)
   await userEvent.keyboard('{Escape}')
-  await userEvent.click(long)
+  // Pointer focus intentionally does not open a RAC tooltip; reach the long badge by keyboard.
+  for (let index = 0; index < 4; index++) await userEvent.tab()
   await expect(long).toHaveFocus()
   await expect(await canvas.findByRole('tooltip', undefined, { timeout: 5000 })).toHaveTextContent(longNote.text.replace(/\s+/g, ' '))
   await userEvent.keyboard('{Escape}')

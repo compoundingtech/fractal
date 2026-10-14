@@ -85,9 +85,12 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(person.selected()).toBe('Only me')
   await expectVisibleAgentMarker(person.toggle)
   const agentOption = within(person.toggle).getByTestId('note-audience-agent')
-  // Selecting the agent option also focuses it; focus opens the kit Tooltip (hover is unchanged
-  // kit-wide behavior, not asserted here).
-  await userEvent.click(agentOption)
+  // RAC tooltips open on keyboard focus, not pointer focus. Navigate the audience group
+  // and select the agent option with the keyboard before returning to the draft.
+  await userEvent.tab()
+  await userEvent.keyboard('{ArrowRight}')
+  await expect(agentOption).toHaveFocus()
+  await userEvent.keyboard(' ')
   const audienceTip = await canvas.findByRole('tooltip', undefined, { timeout: 5000 })
   await expect(audienceTip).toHaveTextContent('The agent reads this note at its next turn.')
   await expect(audienceTip).toHaveTextContent('switches audience.')
@@ -95,6 +98,7 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull(), { timeout: 5000 })
   await expect(person.selected()).toBe('Shared with agent')
   await expect(person.input).toHaveValue('Wrap up and hand off\nthis session retires soon')
+  await userEvent.click(person.input)
   await userEvent.keyboard('{Enter}')
   const submitted = canvas.getByTestId('submitted')
   await waitFor(() => expect(submitted.querySelectorAll('li')).toHaveLength(1))
