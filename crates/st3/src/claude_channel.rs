@@ -513,7 +513,7 @@ async fn preparation_diagnostic(
         let Ok(delivery) = client.get::<Value>(&format!("/v1/messages/delivery/{message}")).await else {
             return false;
         };
-        if delivery["reason"].as_str() != Some(PREPARATION_WAIT_REASON) {
+        if delivery["delivery"]["reason"].as_str() != Some(PREPARATION_WAIT_REASON) {
             return true;
         }
     }
@@ -891,7 +891,8 @@ mod tests {
                     let waiting = store.claude_preparation_diagnostic("agent/worker", &subject, "current")
                         .unwrap().is_some_and(|(body, _)| body["fields"]["status"] == "waiting");
                     Json(json!({"api_version":"st3.v1", "value":{
-                        "reason": if waiting { PREPARATION_WAIT_REASON } else { "waiting for native handoff" }
+                        "id":subject, "from":"person/sender", "to":"agent/worker",
+                        "delivery":{"reason": if waiting { PREPARATION_WAIT_REASON } else { "waiting for native handoff" }}
                     }}))
                 }
             }
