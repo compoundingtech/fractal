@@ -2487,11 +2487,13 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
             .contains("admitted beyond high water"),
         "{admission}"
     );
-    // The first sync settles on claims: both sides hold the same envelopes, and what each
-    // admitted from them is an admission state that doctor and the diff report above, not
-    // something the wait repairs or compares.
+    // The wait compares no graphs; it refuses on the admissions themselves.
     assert!(
-        waited.status.success(),
+        !waited.status.success(),
+        "fleet wait accepted retained fenced history"
+    );
+    assert!(
+        String::from_utf8_lossy(&waited.stderr).contains("beyond the writer's high water"),
         "{}",
         String::from_utf8_lossy(&waited.stderr)
     );

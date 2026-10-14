@@ -821,6 +821,10 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
         .route("/v1/internal/fleet/membership", get(fleet_membership_view))
+        .route(
+            "/v1/internal/fleet/admission-residue",
+            get(fleet_admission_residue),
+        )
         .route("/v1/internal/fleet/status", get(fleet_status))
         .route(
             "/v1/internal/fleet/invites",
@@ -9634,6 +9638,17 @@ async fn fleet_membership_view(
 ) -> Result<Json<crate::fleet::FleetView>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || store.fleet_view_sealed())
+        .await
+        .map(Json)
+}
+
+/// What doctor's fleet-admission check reports as admitted before this node knew better, for
+/// `st fleet wait` to refuse on.
+async fn fleet_admission_residue(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<smallclaims::store::FleetAdmissionResidue>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.fleet_admission_residue())
         .await
         .map(Json)
 }
