@@ -35248,6 +35248,16 @@ mod tests {
     use crate::graph::parse_test_intent as parse_intent;
     use proptest::prelude::*;
 
+    mod resource_pending_receive_tests {
+        use super::*;
+        include!("store/resource_pending_receive_tests.rs");
+    }
+
+    mod terminal_projection_date_tests {
+        use super::*;
+        include!("store/terminal_projection_date_tests.rs");
+    }
+
     mod mission_eval_reuse_tests {
         include!("store/mission_eval_reuse_tests.rs");
     }
