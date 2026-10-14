@@ -32,11 +32,15 @@ export function NoteList({ notes, author, onArchive }: NoteListProps) {
   const archiveNote = async (note: SubjectNote) => {
     const current = archive.get(note.id)?._tag
     if (onArchive === undefined || current === 'pending' || current === 'accepted') return
+    // The archive control may unmount on the host's next publication. Announce plain text
+    // in our persistent status region, not RAC Button's ID-referencing pending announcer.
+    rootRef.current?.focus()
     mark(note.id, { _tag: 'pending' })
-    setAnnouncement('')
+    setAnnouncement('Archiving note.')
     try {
       await onArchive(note)
     } catch (error) {
+      setAnnouncement('')
       mark(note.id, { _tag: 'failed', detail: error instanceof Error && error.message.trim() !== '' ? error.message.trim() : undefined })
       return
     }
@@ -87,7 +91,7 @@ function NoteRow({ note, own, state, onArchive }: { readonly note: SubjectNote; 
       {Option.isSome(note.session) && <span data-testid="note-session" {...stylex.props(styles.chip)}>This session</span>}
       {expiresAt !== undefined && <HumanTime at={DateTime.toEpochMillis(expiresAt)} prefix="Expires " data-testid="note-expires" />}
       {own && onArchive !== undefined && <span {...stylex.props(styles.action)}>
-        <Button isPending={pending} isDisabled={accepted} aria-describedby={textId} onPress={onArchive}>{pending ? 'Archiving…' : accepted ? 'Archived' : 'Archive'}</Button>
+        <Button isDisabled={pending || accepted} aria-describedby={textId} onPress={onArchive}>{pending ? 'Archiving…' : accepted ? 'Archived' : 'Archive'}</Button>
       </span>}
     </div>
     <p id={textId} data-testid="note-text" {...stylex.props(styles.text)}>{note.text}</p>

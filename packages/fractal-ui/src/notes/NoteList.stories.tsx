@@ -89,6 +89,12 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await userEvent.click(canvas.getByTestId('deliver-update'))
   await waitFor(() => expect(main.querySelector(`[data-note-id="${diffNote.id}"]`)).toBeNull())
   await expect(main.querySelectorAll('[data-testid="note-row"]')).toHaveLength(4)
+  // Pending announcements must survive a host publication without naming removed DOM nodes.
+  for (const element of canvasElement.ownerDocument.querySelectorAll('[aria-labelledby]')) {
+    for (const id of element.getAttribute('aria-labelledby')!.trim().split(/\s+/)) {
+      await expect(canvasElement.ownerDocument.getElementById(id)).not.toBeNull()
+    }
+  }
 
   const readOnly = canvas.getByRole('region', { name: 'Read-only notes' })
   await expect(within(readOnly).getAllByTestId('note-row')).toHaveLength(2)

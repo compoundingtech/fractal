@@ -74,6 +74,8 @@ node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook
 
 `@smalltalk/fractal-ui/notes` exports presentational `NoteBadge({ notes })`, `NoteList({ notes, author?, onArchive? })` and `NoteComposer({ onSubmit, disabledReason?, autoFocus?, agentAuthor? })` over the generated `SubjectNote` type; the host owns data and mutations. `audiencePresentation` is the single audience label mapping (`self` → **Only me**, `agent` → **Shared with agent** with the `AgentMarker` SVG, anything else → **Other audience**). The composer uses the Embrace `composerChrome`/`density` geometry tokens, defaults to **Only me**, and explains each audience in a kit `Tooltip`; `Alt+A` (`⌥A` on macOS) switches audience, Enter adds and Shift+Enter starts a new line; `agentAuthor` fixes the audience to the agent and says why. Text is limited to 1024 UTF-8 bytes. A rejected `onSubmit` or `onArchive` keeps the draft or row and shows an alert that includes the rejection's `Error.message`. A resolved `onArchive` disables the row's action and announces acceptance; the row leaves only when the host's next `notes` omits it.
 
+Archiving moves focus to the persistent list region before disabling its control. Pending and accepted feedback is plain text in the list's status region, so a host publication can remove the archived row without leaving live announcements labelled by an unmounted button. The list play checks that every `aria-labelledby` reference still resolves after that publication.
+
 ## Families
 
 `kit.tsx` exports these families. Each is labeled, keyboard-reachable and token-driven:
