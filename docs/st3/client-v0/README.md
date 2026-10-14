@@ -57,11 +57,11 @@ do not consume that allowance. These observations never replicate desired state.
 Their Local retention is declared in `crates/st3-schema/retention.toml`, alongside
 the other node-local observations; schema registration reads that shared policy.
 
-
 Admission refusal returns HTTP 429 with public error code `rate-limited`.
 Phones honour `Retry-After` when supplied, otherwise use bounded backoff. Terminal
 4xx validation refusals discard the rejected batch so it cannot block later
 reports; 401/403 retain reports and pause that client until pairing changes.
+
 The existing OTLP exporter maps diagnostic severity and occurrence time to log
 severity and `timeUnixNano`, while `observedTimeUnixNano` is server acceptance time.
 Build/update IDs are log attributes, not metric labels. MetricKit reports explicitly
@@ -69,8 +69,8 @@ mark their interval-end occurrence approximation and synthetic interval launch I
 an unclean previous launch is an inferred breadcrumb, not proof of a crash.
 See [iOS diagnostics](../../../apps/ios/README.md) for capture, bounded offline
 retention, limitations and on-phone verification.
-### Person directive notes
 
+### Person directive notes
 
 `GET /v1/client/notes` requires `read.projections` and an identified person or
 agent. The response is `DirectiveNotes`, not a work item, message, private glass
