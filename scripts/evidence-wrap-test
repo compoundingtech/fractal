@@ -268,7 +268,7 @@ def main(argv):
                 for tool in ('git', 'ssh-keygen'):
                     (shm_tools / tool).symlink_to(next(str(Path(d) / tool) for d in tool_path().split(':') if (Path(d) / tool).exists()))
                 refused = sign_with_path(str(shm_tools), 'shm')
-                assert refused.returncode == 1 and b'writable by the user' in refused.stderr, refused.stderr
+                assert refused.returncode == 1 and (b'not owned by root' in refused.stderr or b'writable by group' in refused.stderr), refused.stderr
             finally:
                 for tool in ('git', 'ssh-keygen'):
                     (shm_tools / tool).unlink()
@@ -279,6 +279,36 @@ def main(argv):
         # An attacker-chosen path that merely mentions a good one is refused as a whole.
         mixed = sign_with_path(str(writable) + ':' + tool_path(), 'mixed')
         assert mixed.returncode == 1, 'one bad directory refuses the whole configured path'
+        # The path rules themselves, called directly: symlinks into writable places, roots unset in the
+        # caller's environment, names that only start like the Nix store, nonexistent directories, the default's skipping.
+        import runpy
+        sign = runpy.run_path(str(SIGN))
+        unsafe, checked = sign['unsafe_directory'], sign['checked_path']
+        good_dir = tool_path().split(':')[0]
+        assert unsafe(good_dir) is None, unsafe(good_dir)
+        link = Path('/dev/shm') / f'evidence-link-{os.getpid()}' if Path('/dev/shm').is_dir() else tmp / 'link'
+        link.symlink_to(writable)
+        try:
+            assert unsafe(str(link)) is not None, 'a symlink into a writable place is judged by its target'
+        finally:
+            link.unlink()
+        saved = {k: os.environ.pop(k, None) for k in ('RUNNER_TEMP', 'GITHUB_WORKSPACE', 'TMPDIR')}
+        try:
+            assert 'where code under test can write' in (unsafe(str(writable)) or ''), 'the hardcoded temporary roots hold when the environment names none'
+        finally:
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+        assert unsafe('/nix/store-evil/bin') is not None, 'only /nix/store/ itself is the store'
+        assert unsafe('/does/not/exist') == 'is not a directory'
+        assert checked('/does/not/exist:' + good_dir, strict=False) == good_dir, 'the default skips directories this host lacks'
+        try:
+            checked('/does/not/exist:' + good_dir, strict=True)
+            raise AssertionError('a configured path with a missing directory must be refused')
+        except sign['Refused']:
+            pass
+        assert unsafe(str(tmp / 'owned-by-the-test-user')) is not None
+        print('passed: the path rules judge symlinks by their target, hold with the environment roots unset, and treat the system default and a configured path differently')
         print('passed: the signer refuses a tool path that is relative, has . or .. or empty segments, lies under HOME or a temporary directory, or is writable by its user')
 
         print('passed: the signer accepts extra named inputs, and refuses extra keys, a wrong flake.lock hash, an unknown commit and malformed fields')

@@ -83,10 +83,21 @@ def unsafe_directory(directory):
             if real == str(base) or real.startswith(str(base).rstrip('/') + '/') or directory.startswith(str(base).rstrip('/') + '/'):
                 return f'is under {base}, where code under test can write'
     if real.startswith('/nix/store/'):
-        return None
-    if os.access(real, os.W_OK):
-        return 'is writable by the user running the signer'
-    return None
+        # Content-addressed and immutable: the store directory itself must have no write bit.
+        return 'has a write bit in the Nix store' if os.stat(real).st_mode & 0o222 else None
+    # Elsewhere the directory and every parent must belong to root and be closed to group and others.
+    # Mode bits, not os.access: as root os.access is always true, and a directory that only looks
+    # unwritable to this user is still one another user (or the job's own user) may replace.
+    current = real
+    while True:
+        status = os.stat(current)
+        if status.st_uid != 0:
+            return f'or its parent {current} is not owned by root'
+        if status.st_mode & 0o022:
+            return f'or its parent {current} is writable by group or others'
+        if current == '/':
+            return None
+        current = os.path.dirname(current)
 
 
 def checked_path(path, strict):
@@ -110,6 +121,10 @@ def trusted_tools(path, strict=False):
         found = shutil.which(name, path=path)
         if not found:
             raise Refused(f'{name} is not in the signer\'s own path ({path})')
+        # The tool itself, after symlinks, must also live where the same rules hold.
+        reason = unsafe_directory(os.path.dirname(os.path.realpath(found)))
+        if reason:
+            raise Refused(f'{name} resolves to {os.path.realpath(found)}, whose directory {reason}')
         TOOLS[name] = found
     TOOLS['PATH'] = path
 
