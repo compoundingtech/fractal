@@ -1,0 +1,445 @@
+#!/usr/bin/python3
+"""Source-only candidate for a two-instance, same-user, invented-document proof.
+
+Never run before exact source/testing review and an Operations-owned disposable job.
+The two st instances are separate local state, not a credential/security boundary.
+"""
+
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.parse
+
+
+BUILD = "21fd968d3c5534a1ebb33458e8ff25c6d4e2da90"
+BINARY_SHA = "eeae8c11562b4c048ce59c52dd0b75b543bb139e68caae274ad45da06d3f5938"
+BINARY = Path("/var/tmp/st3-ip-bin/st3")  # Candidate binding; Operations must pin it.
+ROOT = Path("/var/tmp/st3-ip")             # Fresh, job-owned, short Unix-socket path.
+NAMES = {"a": "proof-a", "b": "proof-b"}
+PORTS = {"a": 31313, "b": 31314}
+PREFIX = "doc/instance-pair-proof/"
+MAX_REPLY = 8 * 1024 * 1024
+MAX_CLAIMS = 500
+MAX_RECEIPT = 48 * 1024
+MAX_LOG = 65536
+MAX_REQUESTS = 2048
+MAX_WIRE_BYTES = 128 * 1024 * 1024
+REQUESTS = 0
+WIRE_BYTES = 0
+PARENT_ENVIRONMENT = {"HOME": "/var/tmp/st3-ip/launcher", "PATH": "/usr/bin:/bin",
+                      "LANG": "C", "TMPDIR": "/var/tmp/st3-ip/tmp",
+                      "PYTHONDONTWRITEBYTECODE": "1"}
+ADMISSION_FIELDS = ("pending_records", "unknown_records", "waiting_claims", "invalid_records",
+                    "repaired_records", "unsigned_envelopes", "fenced_envelopes",
+                    "unhealthy_projections")
+COMPARE_FIELDS = ("scope", "build", "fleet_id", "member_key_fingerprints", "input_sha256",
+                  "claim_count", "documents", "documents_sha256")
+REFUSAL_CODES = {
+    "request-width", "response-width", "http-status", "wire-budget", "child-exited",
+    "condition-not-reached", "document-count", "duplicate-document", "missing-document",
+    "document-hash", "document-size", "document-not-current", "binding-id",
+    "binding-not-in-cut", "binding-kind-or-subject", "binding-body-mismatch",
+    "binding-time-mismatch", "binding-physical-index-mismatch", "binding-owner-mismatch",
+    "unexpected-fleet-anchor", "unexpected-fleet-members", "unexpected-local-member",
+    "uncurrent-fleet-member", "local-member-key-mismatch", "duplicate-member-key",
+    "not-a-fleet", "fleet-status-mismatch", "wrong-running-build",
+    "claim-history-over-budget", "claim-count", "duplicate-claim", "document-page-incomplete",
+    "content-reference", "content-field-mismatch", "cut-changed", "build-changed",
+    "missing-fleet-id", "fleet-transport-format", "nonloopback-route", "wrong-sponsor-route",
+    "cli-failed", "cli-output-width", "fixed-argv-only", "own-user-required",
+    "state-not-fresh", "wrong-binary-path", "wrong-binary", "unexpected-environment",
+    "invite-shape",
+} | {"unready-admission-" + field for field in ADMISSION_FIELDS} | {
+    "member-field-mismatch-" + field for field in COMPARE_FIELDS}
+
+
+class Refused(Exception):
+    pass
+
+
+class CutMismatch(Refused):
+    def __init__(self, differences):
+        super().__init__("member-field-mismatch-input_sha256")
+        self.differences = differences
+
+
+def require(condition, code):
+    if not condition:
+        raise Refused(code)
+
+
+def encoded(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def digest(value):
+    return hashlib.sha256(encoded(value)).hexdigest()
+
+
+def document_bytes(number):
+    return f"invented instance fixture document {number:02d}\n".encode()
+
+
+def safe_error(error):
+    if isinstance(error, Refused):
+        code = str(error)
+        if code in REFUSAL_CODES:
+            return code
+    return "fixture-refused"
+
+
+class UnixHTTP(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__("local", timeout=15)
+        self.path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(self.path))
+
+
+def request(member, method, path, body=None):
+    global REQUESTS, WIRE_BYTES
+    connection = UnixHTTP(member.socket)
+    try:
+        payload = None if body is None else encoded(body)
+        require(payload is None or len(payload) <= MAX_REPLY, "request-width")
+        REQUESTS += 1
+        WIRE_BYTES += len(payload or b"")
+        require(REQUESTS <= MAX_REQUESTS and WIRE_BYTES <= MAX_WIRE_BYTES, "wire-budget")
+        connection.request(method, path, payload, {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        data = response.read(MAX_REPLY + 1)
+        WIRE_BYTES += len(data)
+        require(WIRE_BYTES <= MAX_WIRE_BYTES, "wire-budget")
+        require(len(data) <= MAX_REPLY, "response-width")
+        require(response.status == 200, "http-status")
+        return json.loads(data)
+    finally:
+        connection.close()
+
+
+def await_ready(check, children, seconds=120):
+    # Bounded observation of native asynchronous startup/sync, never a mutation retry.
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        require(all(child.poll() is None for child in children), "child-exited")
+        try:
+            if check():
+                return
+        except (ConnectionError, FileNotFoundError, socket.timeout):
+            pass
+        time.sleep(0.2)
+    raise Refused("condition-not-reached")
+
+
+def compare_documents(rows):
+    require(isinstance(rows, list) and len(rows) == 50, "document-count")
+    by_name = {row["name"]: row for row in rows}
+    require(len(by_name) == 50, "duplicate-document")
+    for number in range(50):
+        name = PREFIX + f"{number:02d}"
+        require(name in by_name, "missing-document")
+        row = by_name[name]
+        body = document_bytes(number)
+        require(row["hash"] == hashlib.sha256(body).hexdigest(), "document-hash")
+        require(row["size"] == len(body), "document-size")
+        require(row["latest"] is True, "document-not-current")
+        require(isinstance(row["binding_claim_id"], str) and row["binding_claim_id"], "binding-id")
+    return [by_name[PREFIX + f"{number:02d}"] for number in range(50)]
+
+
+def verify_binding(row, claims):
+    matches = [claim for claim in claims if claim["id"] == row["binding_claim_id"]]
+    require(len(matches) == 1, "binding-not-in-cut")
+    claim = matches[0]
+    require(claim["kind"] == "doc.bound" and claim["subject"] == row["name"], "binding-kind-or-subject")
+    for field in ("name", "hash", "size"):
+        require(claim["body"][field] == row[field], "binding-body-mismatch")
+    require(claim["accepted_at_unix_ms"] == row["created_at_unix_ms"], "binding-time-mismatch")
+    require(claim["store_index"] == row["created_index"], "binding-physical-index-mismatch")
+    require((claim["actor"] or claim["origin"]) == row["owner"], "binding-owner-mismatch")
+
+
+def fleet_members(fleet):
+    view = fleet["view"]
+    members = view["members"]
+    require(not view["legacy_removed"], "unexpected-fleet-anchor")
+    require(len(members) == 2 and {member["name"] for member in members} == set(NAMES),
+            "unexpected-fleet-members")
+    require(fleet["node"] in NAMES, "unexpected-local-member")
+    require(all(member["state"] == "current" and member["end"] is None and
+                isinstance(member["member_key"], str) and member["member_key"] for member in members),
+            "uncurrent-fleet-member")
+    own = next(member for member in members if member["name"] == fleet["node"])
+    require(own["member_key"] == fleet["member_key"], "local-member-key-mismatch")
+    require(len({member["member_key"] for member in members}) == 2, "duplicate-member-key")
+    require(view["anchor"] == next(member["member_key"] for member in members
+                                   if member["name"] == "a"), "unexpected-fleet-anchor")
+    return {member["name"]: hashlib.sha256(member["member_key"].encode()).hexdigest()
+            for member in members}
+
+
+def capture_cut(member):
+    """Bounded exhaustive fixture inputs, never a global Source/projection oracle."""
+    status = request(member, "GET", "/v1/replication/status")
+    require(status["configured"] is True and status["fleet_id"], "not-a-fleet")
+    fleet = request(member, "GET", "/v1/internal/fleet/status")
+    require(fleet["fleet_id"] == status["fleet_id"], "fleet-status-mismatch")
+    members = fleet_members(fleet)
+    for field in ADMISSION_FIELDS:
+        require(status[field] == 0, "unready-admission-" + field)
+    before = request(member, "GET", "/v1/health")
+    require(before["build"]["commit"] == BUILD, "wrong-running-build")
+    page = request(member, "GET", f"/v1/claims?after_index=0&limit={MAX_CLAIMS}")
+    require(page.get("next_cursor") is None, "claim-history-over-budget")
+    claims = page["claims"]
+    require(isinstance(claims, list) and len(claims) < MAX_CLAIMS, "claim-count")
+    require(len({claim["id"] for claim in claims}) == len(claims), "duplicate-claim")
+    listing = request(member, "GET", "/v1/documents?prefix=" + urllib.parse.quote(PREFIX, safe="") + "&limit=51")
+    require(listing.get("has_more") is False, "document-page-incomplete")
+    semantic = []
+    for row in compare_documents(listing["items"]):
+        reference = row["name"] + "@" + row["hash"]
+        content = request(member, "GET", "/v1/documents/content?reference=" + urllib.parse.quote(reference, safe=""))
+        require(content["reference"] == reference, "content-reference")
+        number = int(row["name"].removeprefix(PREFIX))
+        require(content["bytes"] == list(document_bytes(number)), "content-field-mismatch")
+        verify_binding(row, claims)
+        semantic.append({key: value for key, value in row.items() if key != "created_index"})
+    after = request(member, "GET", "/v1/health")
+    require(before["store_index"] == after["store_index"], "cut-changed")
+    require(after["build"]["commit"] == BUILD, "build-changed")
+    logical_claims = [{key: value for key, value in claim.items() if key != "store_index"}
+                      for claim in sorted(claims, key=lambda item: item["id"])]
+    return {
+        "scope": "exhaustive-fixture-documents-and-admitted-claims-v1",
+        "build": BUILD,
+        "fleet_id": status["fleet_id"],
+        "member_key_fingerprints": members,
+        "physical_store_index": after["store_index"],
+        "claim_count": len(claims),
+        "input_sha256": digest(logical_claims),
+        "_claim_refs": sorted((claim["id"], claim["kind"],
+                               digest({key: value for key, value in claim.items()
+                                       if key != "store_index"})) for claim in claims),
+        "documents": semantic,
+        "documents_sha256": digest(semantic),
+    }
+
+
+def claim_differences(left, right):
+    left_refs = {claim_id: (kind, claim_hash) for claim_id, kind, claim_hash in left["_claim_refs"]}
+    right_refs = {claim_id: (kind, claim_hash) for claim_id, kind, claim_hash in right["_claim_refs"]}
+    def safe_kind(kind):
+        return kind if isinstance(kind, str) and re.fullmatch(r"[a-z][a-z0-9.-]{0,63}", kind) else None
+    return [{"id": claim_id if re.fullmatch(r"[0-9a-f]{64}", claim_id) else "invalid-claim-id",
+             "a_kind": safe_kind(left_refs[claim_id][0]) if claim_id in left_refs else None,
+             "b_kind": safe_kind(right_refs[claim_id][0]) if claim_id in right_refs else None}
+            for claim_id in sorted(set(left_refs) | set(right_refs))
+            if left_refs.get(claim_id) != right_refs.get(claim_id)][:20]
+
+
+def compare_cuts(left, right):
+    for cut in (left, right):
+        require(isinstance(cut["fleet_id"], str) and cut["fleet_id"], "missing-fleet-id")
+        require(set(cut["member_key_fingerprints"]) == set(NAMES)
+                and len(set(cut["member_key_fingerprints"].values())) == 2,
+                "unexpected-fleet-members")
+    for key in COMPARE_FIELDS:
+        if key == "input_sha256" and left[key] != right[key]:
+            raise CutMismatch(claim_differences(left, right))
+        require(left[key] == right[key], "member-field-mismatch-" + key)
+
+
+class Member:
+    def __init__(self, role, actor):
+        self.role = role
+        self.name = NAMES[role]
+        self.home = ROOT / role
+        self.instance = self.home / ".st-instance" / self.name
+        self.socket = self.instance / "run/st3.sock"
+        self.fleet_file = self.instance / "state/st3/fleet/fleet.toml"
+        self.log = None
+        self.children = []
+        self.actor = actor
+
+    def environment(self):
+        # No parent environment, ST_AGENT, host XDG, token, credential, or host HOME reaches st.
+        return {"HOME": str(self.home), "PATH": "/usr/bin:/bin", "LANG": "C",
+                "TMPDIR": str(self.instance / "run"), "PYTHONDONTWRITEBYTECODE": "1"}
+
+    def prepare(self):
+        self.home.mkdir(mode=0o700)
+        config = self.instance / "config/st3"
+        config.mkdir(parents=True, mode=0o700)
+        (self.instance / "run").mkdir(mode=0o700)
+        (config / "config.toml").write_text(
+            f'node="{self.role}"\nperson="{self.actor}"\n'
+            f'peer_listen="127.0.0.1:{PORTS[self.role]}"\n')
+
+    def cli(self, *arguments):
+        # Fixed argv from this source; output files can contain invitation material and are never
+        # copied to the receipt. They stay inside this fresh private root until cleanup.
+        out = self.instance / "run/command-out"
+        err = self.instance / "run/command-err"
+        with out.open("w+b") as stdout, err.open("w+b") as stderr:
+            result = subprocess.run([str(BINARY), "--instance", self.name, "--daemon-wait", "0", *arguments],
+                                    env=self.environment(), stdin=subprocess.DEVNULL,
+                                    stdout=stdout, stderr=stderr, timeout=30, check=False)
+            require(result.returncode == 0, "cli-failed")
+            require(stdout.tell() <= MAX_LOG and stderr.tell() <= MAX_LOG, "cli-output-width")
+
+    def check_loopback_transport(self):
+        # Candidate source accepts a transport string and the worker enables auxiliaries only
+        # for exact "tailscale"/"fabric" names. "loopback" is not documented in CLI help:
+        # this source-derived spelling needs exact review and a native run before qualification.
+        text = self.fleet_file.read_text()
+        require(text.count('transports = ["loopback"]\n') == 1, "fleet-transport-format")
+        require('fabric://' not in text and 'tailscale://' not in text, "nonloopback-route")
+        if self.role == "b":
+            require(f'http://127.0.0.1:{PORTS["a"]}' in text, "wrong-sponsor-route")
+
+    def start(self, *arguments):
+        log_path = self.instance / "run" / f"child-{len(self.children)}.log"
+        log = log_path.open("xb")
+        child = subprocess.Popen([str(BINARY), "--instance", self.name, *arguments],
+                                 env=self.environment(), stdin=subprocess.DEVNULL,
+                                 stdout=log, stderr=log)
+        self.children.append((child, log))
+
+    def start_native(self):
+        self.start("up")
+        await_ready(lambda: request(self, "GET", "/v1/health")["status"] == "ready",
+                    [child for child, _ in self.children])
+        self.start("replication-worker")
+
+    def stop(self):
+        failed = False
+        for child, log in reversed(self.children):
+            try:
+                if child.poll() is None:
+                    child.terminate()
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=10)
+                log.close()
+            except Exception:
+                failed = True
+        return not failed and all(child.poll() is not None for child, _ in self.children)
+
+
+def preflight():
+    require(len(sys.argv) == 1, "fixed-argv-only")
+    require(os.geteuid() != 0 and os.getuid() == os.geteuid(), "own-user-required")
+    require(not ROOT.exists() and not ROOT.is_symlink(), "state-not-fresh")
+    require(BINARY.is_file() and not BINARY.is_symlink(), "wrong-binary-path")
+    require(hashlib.sha256(BINARY.read_bytes()).hexdigest() == BINARY_SHA, "wrong-binary")
+    require(dict(os.environ) == PARENT_ENVIRONMENT, "unexpected-environment")
+    os.umask(0o077)
+
+
+def copy_invite(source, target):
+    data = source.read_bytes()
+    require(0 < len(data) <= 8192 and data.startswith(b"stj1-"), "invite-shape")
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(data)
+
+
+def public_cut(cut):
+    return {key: cut[key] for key in ("scope", "build", "fleet_id", "member_key_fingerprints",
+                                     "physical_store_index", "claim_count", "input_sha256",
+                                     "documents_sha256")}
+
+
+def main():
+    receipt = {"kind": "interim-instance-pair-proof", "accepted": False,
+               "scope": "one-disposable-job-two-same-uid-instances", "controls_unqualified": True}
+    members = []
+    owned_root_created = False
+    try:
+        preflight()
+        ROOT.mkdir(mode=0o700)
+        owned_root_created = True
+        (ROOT / "launcher").mkdir(mode=0o700)
+        (ROOT / "tmp").mkdir(mode=0o700)
+        actor = "person/instance-proof-" + secrets.token_hex(8)
+        a, b = Member("a", actor), Member("b", actor)
+        members = [a, b]
+        a.prepare()
+        b.prepare()
+        a.cli("fleet", "create", "--name", "a", "--no-service", "--port", str(PORTS["a"]),
+              "--transports", "loopback", "--advertise-loopback")
+        a.check_loopback_transport()
+        a.start_native()
+        for number in range(50):
+            request(a, "POST", "/v1/documents", {"name": PREFIX + f"{number:02d}",
+                    "bytes": list(document_bytes(number)), "expected_document": None,
+                    "idempotency_key": f"fixed-instance-document-{number:02d}"})
+        invite_a = a.instance / "run/invite.code"
+        a.cli("fleet", "invite", "b", "--via", "loopback", "--expires", "15m",
+              "--code-file", str(invite_a))
+        invite_b = b.instance / "run/invite.code"
+        copy_invite(invite_a, invite_b)
+        b.cli("fleet", "join", "--name", "b", "--no-service", "--no-wait",
+              "--via", f"http://127.0.0.1:{PORTS['a']}", "--code-file", str(invite_b),
+              "--port", str(PORTS["b"]), "--transports", "loopback", "--advertise-loopback")
+        b.check_loopback_transport()
+        b.start_native()
+        children = [child for member in members for child, _ in member.children]
+        def fifty_on_b():
+            page = request(b, "GET", "/v1/documents?prefix=" + urllib.parse.quote(PREFIX, safe="") + "&limit=51")
+            return len(page["items"]) == 50 and page.get("has_more") is False
+        await_ready(fifty_on_b, children, seconds=600)
+        await_ready(lambda: request(a, "GET", "/v1/replication/status")["graph_digest"]
+                    == request(b, "GET", "/v1/replication/status")["graph_digest"], children,
+                    seconds=600)
+        cut_a = capture_cut(a)
+        cut_b = capture_cut(b)
+        compare_cuts(cut_a, cut_b)
+        compare_cuts(cut_a, capture_cut(a))
+        receipt["cuts"] = {"a": public_cut(cut_a), "b": public_cut(cut_b)}
+        receipt["documents_compared"] = 50
+        receipt["accepted"] = True
+    except Exception as error:
+        receipt["error"] = safe_error(error)
+        if isinstance(error, CutMismatch):
+            receipt["differing_claims"] = error.differences
+    finally:
+        stopped = [member.stop() for member in members]
+        receipt["children_reaped"] = all(stopped)
+        try:
+            # Preserve a failed child's state for the disposable-job owner to inspect and
+            # remove. Deleting a live child's root would make the receipt misleading.
+            if receipt["children_reaped"] and owned_root_created and ROOT.exists():
+                shutil.rmtree(ROOT)
+            receipt["owned_root_removed"] = None if not owned_root_created else not ROOT.exists()
+        except Exception:
+            receipt["owned_root_removed"] = False
+        if not receipt["children_reaped"] or not receipt["owned_root_removed"]:
+            receipt["accepted"] = False
+            receipt["cleanup_error"] = "owned-cleanup-failed"
+    output = encoded(receipt)
+    if len(output) > MAX_RECEIPT:
+        output = encoded({"kind": receipt["kind"], "accepted": False, "error": "receipt-width",
+                          "children_reaped": receipt["children_reaped"],
+                          "owned_root_removed": receipt["owned_root_removed"]})
+    print(output.decode(), flush=True)
+    return 0 if receipt["accepted"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
