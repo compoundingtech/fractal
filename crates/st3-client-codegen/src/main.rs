@@ -686,6 +686,9 @@ fn validate_surfaces(
         "ObservationReport",
         "ObservationAccepted",
         "ObservationResponse",
+        "PushRegistration",
+        "PushRegistrationStatus",
+        "PushRegistrationResponse",
         "PairingBegin",
         "PairingChallenge",
         "PairingComplete",
@@ -719,6 +722,8 @@ fn validate_surfaces(
     }
     for token in [
         "pub async fn observations_report",
+        "pub async fn push_register",
+        "pub async fn push_unregister",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
         "pub async fn terminal_stream",
@@ -736,6 +741,8 @@ fn validate_surfaces(
         "cursor: String?",
         "func events(",
         "func observationsReport(",
+        "func pushRegister(",
+        "func pushUnregister(",
         "func beginPairing(",
         "func completePairing(",
         "func terminalScreen(",

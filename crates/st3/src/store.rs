@@ -44,6 +44,7 @@ mod roster_controls;
 mod agents_window_deadline_tests;
 pub(crate) mod step_labels;
 mod operation_audit;
+pub(crate) mod push_registrations;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]

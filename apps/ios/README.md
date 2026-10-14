@@ -56,6 +56,44 @@ For screenshots without a real st, `node demoGateway.mjs 8791` serves invented d
 
 Generated `ios/`, build output, signing material, local configuration, and proof screenshots are ignored by Git. Do not commit Apple team/device IDs, credentials, machine paths, or private network addresses. Expo SDK 57 needs the `expo-build-properties` scene-lifecycle opt-in for Xcode 27/iOS 27.
 
+## Push registration, opt-in
+
+This slice registers a phone with its paired member; it does **not** send alerts, configure an
+Apple sender key, or handle notification taps. Under Fleet › this connection, **Notifications**
+is a native switch, off by default and saved only on this phone. Enabling requires a live paired
+session, the member's granted `push-registration` version 1 capability, and a push-enabled physical
+iPhone build. Only an intentional switch-on requests iOS notification permission. Launch and
+foreground refreshes read existing permission without prompting; authorized phones acquire a
+direct APNs device token and register again, and token changes replace that registration.
+There is no Expo push service.
+
+Ordinary prebuilds retain their previous signing requirements and do not gain `aps-environment`.
+Expo automatically applies installed notification plugins, so `plugins/withoutPush.js` reserves
+the notification plugin's run-once identity without changing native configuration. To opt in,
+run `ST_IOS_PUSH=1 pnpm exec expo prebuild --platform ios --clean --no-install`, then install pods
+and build as usual. The flag applies the real `expo-notifications` plugin and its development
+entitlement. Keep `ST_IOS_PUSH=1` set for subsequent prebuilds, Metro, bundle exports and Xcode build
+invocations for that target: its Expo runtime configuration also gates native token acquisition.
+A paid Apple Developer membership and Push Notifications enabled for the app's bundle identifier are required for
+physical-device APNs registration; retain signing material only in local configuration.
+
+The app obtains the actual APNs environment through SDK 57
+`expo-application.getIosPushNotificationServiceEnvironmentAsync()`, which reads `aps-environment`
+from the installed provisioning profile. It never guesses from Debug versus Release: a
+development-signed Release build can still use the development environment. Missing entitlement,
+unknown environment and the simulator fail closed. The native bundle identifier and application
+version accompany the token.
+
+Turning the switch off unregisters while connected; an offline opt-out stays saved and unregisters
+on the next capable connection. Forgetting this device fences native work and attempts unregister
+before deleting pairing credentials, even if that request fails. Pending native permission/token
+callbacks are canceled locally on opt-out or forget; push HTTP requests have an eight-second abort
+deadline so a stalled connection cannot keep Forget waiting indefinitely. The token is held only for native
+acquisition and the paired registration request: it is never persisted in phone preferences,
+projection caches, claims, observations, logs or displayed errors. Fleet device rows show only the
+member's safe registered/environment summary. Revocation or expiry also removes the registration
+on the paired member.
+
 ## Fabric, an opt-in carrier
 
 The app reaches its member over its saved gateway (Tailscale, the local network or HTTPS) unless the person turns on **Fabric** under Fleet › carrier. Fabric needs a build that links the native bridge: build with `ST3_FABRIC=1 pnpm run pods` after building the Rust framework (see [the module's README](modules/st-fabric/README.md)). A build without it is the ordinary app and shows no carrier setting.

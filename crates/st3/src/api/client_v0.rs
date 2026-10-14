@@ -136,6 +136,8 @@ pub(super) mod observer_subscription_detail_tests;
 mod launch_detail_tests;
 #[cfg(test)]
 mod agents_window_tests;
+#[cfg(test)]
+mod push_tests;
 
 const TERMINAL_SUBPROTOCOL: &str = "st3.client.terminal.v0";
 const CONVERSATION_SUBPROTOCOL: &str = "st3.client.conversation.v0";
@@ -2850,6 +2852,7 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_grant.is_some() && session.transport != "unix" {"granted"} else {"unavailable"}}));
     capabilities
 }
 
@@ -5227,6 +5230,8 @@ fn device_resources(
     // Pairing and revocation are fenced by the graph snapshot above. Expiration is
     // live state: its clock must advance even when no claim advances that snapshot.
     let at = client_now_ms();
+    let push = state.store.push_registration_statuses(person, at as u64)
+        .map_err(|_| ApiError::internal("local push registration status is unavailable"))?;
     let mut resources = paired
         .into_iter()
         .map(|(device_id, (completed, revoked))| {
@@ -5244,7 +5249,7 @@ fn device_resources(
             } else {
                 "active"
             };
-            json!({
+            let mut resource = json!({
                 "id": device_id,
                 "kind": "device",
                 "revision": selected.id,
@@ -5260,7 +5265,18 @@ fn device_resources(
                     "actionable": state_name == "active",
                     "reasons": if state_name == "active" { Vec::<&str>::new() } else { vec![state_name] }
                 }
-            })
+            });
+            if completed.origin == state.node {
+                resource["push"] = if state_name == "active" {
+                    push.get(&device_id).map_or_else(
+                        || json!({"registered":false}),
+                        |status| json!(status),
+                    )
+                } else {
+                    json!({"registered":false})
+                };
+            }
+            resource
         })
         .collect::<Vec<_>>();
     resources.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
@@ -11592,6 +11608,8 @@ async fn dispatch_action(
                     idempotency_key: Some(request.idempotency_key.clone()),
                 })
                 .map_err(ApiError::bad)?;
+            state.store.remove_push_pairing(&paired.subject)
+                .map_err(|_| ApiError::internal("local push registration cleanup is unavailable"))?;
             // A revoked device's key signs nothing more, on every member.
             let field = |name: &str| paired.body.pointer(&format!("/fields/{name}")).and_then(Value::as_str);
             if let (Some(key), Some(person)) = (field("device_public_key").and_then(device_signing_key), field("person_id")) {

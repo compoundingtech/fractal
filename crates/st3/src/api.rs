@@ -90,6 +90,8 @@ pub(crate) use published_attention::{published_attention_rows, refresh_attention
 mod directive_notes;
 mod request_latency;
 mod client_observations;
+mod client_push;
+pub use client_push::start_push_registration_cleanup;
 mod terminal_view;
 mod work_response;
 mod published_lists;
@@ -533,6 +535,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         )
         .route("/v1/client/observations", post(client_observations::report)
             .layer(DefaultBodyLimit::max(client_observations::MAX_BODY_BYTES)))
+        .route("/v1/client/push-registration", post(client_push::register)
+            .delete(client_push::unregister)
+            .layer(DefaultBodyLimit::max(client_push::MAX_BODY_BYTES)))
         .route("/v1/client/documents/content", get(client_v0::document_get))
         .route("/v1/client/usage", get(client_v0::usage_period))
         .route("/v1/client/mail-backlog", get(mail_backlog::get))
@@ -1040,7 +1045,7 @@ async fn response_envelope_unbounded(
         Some(caller.clone()),
     );
     let origin = smallclaims::sqlite::telemetry::route_origin(request_method.as_str(), &request_route);
-    let observation_report = request_route == "/v1/client/observations";
+    let local_only_response = matches!(request_route.as_str(), "/v1/client/observations" | "/v1/client/push-registration");
     // These point readers admit snapshot metadata inside their pinned read before
     // formatting it. Authentication still runs here; their response extension
     // supplies the envelope snapshot. All other routes keep admission snapshots.
@@ -1103,7 +1108,7 @@ async fn response_envelope_unbounded(
                 });
             let authenticate_ms = authenticate_started.elapsed().as_millis() as i64;
             drop(authentication_span);
-            let snapshot = (!defer_detail_snapshot && !observation_report).then(|| {
+            let snapshot = (!defer_detail_snapshot && !local_only_response).then(|| {
                 let snapshot_span = crate::profile::span("admission/snapshot");
                 let snapshot_started = Instant::now();
                 let snapshot = crate::relay_trace::work(crate::relay_trace::Phase::Snapshot, || {
@@ -1142,7 +1147,7 @@ async fn response_envelope_unbounded(
     let envelope_context = response_body::Context {
         state: state.clone(),
         client_request,
-        observation_report,
+        local_only_response,
         request_id: request_id.clone(),
         client_snapshot,
         server: otel.clone(),
@@ -1154,7 +1159,7 @@ async fn response_envelope_unbounded(
         // handler on a blocking thread so a busy projection or replication pass cannot
         // occupy an async worker needed to accept another call. Read workers are admitted
         // before taking store locks; nested work reuses the handler's reader.
-        (None, Ok(_)) if request_path == "/v1/health" || observation_report => {
+        (None, Ok(_)) if request_path == "/v1/health" || local_only_response => {
             let handler_started = Instant::now();
             let response = next.run(request).await;
             if let Some(server) = otel.as_ref() {
@@ -1250,7 +1255,7 @@ async fn response_envelope_unbounded(
             }
         }
     };
-    // Authentication errors and the small health/observation bypasses have no handler
+    // Authentication errors and the small health/local-only bypasses have no handler
     // worker. Ordinary handlers already framed their response on that worker.
     let mut response = if response.extensions().get::<response_body::Metrics>().is_some()
         || !response_body::is_json(&response)

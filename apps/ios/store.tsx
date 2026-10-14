@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
@@ -32,6 +32,8 @@ import { readSidebarResources } from './sidebarResources';
 import { sidebarArrangement, uuid7 } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
+import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
+import { nativePushPorts, pushFetch } from './pushNative';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -56,6 +58,8 @@ type PhoneSigning = DeviceKey & { handle?: string };
 type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string };
 // Simplified conversations: this phone's own choice, on unless turned off, never synced.
 const SIMPLE_KEY = 'st3.conversation.simple';
+// Notifications: off by default, stored only on this phone. APNs tokens are never persisted here.
+const PUSH_KEY = 'st3.push.enabled';
 // The carrier: the saved gateway (default) or fabric, an opt-in; the saved fabric target; and whether
 // a fabric that cannot be used falls back to the saved gateway.
 const OBSERVATIONS_KEY = 'st3.observations';
@@ -121,6 +125,7 @@ function useAppStore(proof?: FabricProfile) {
   const [feed, setFeed] = useState<Feed | null>(null), [connectionIssue, setConnectionIssue] = useState('');
   const [cachedHostId, setCachedHostId] = useState('');
   const [caps, setCaps] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const capsClient = useRef<St3Client | null>(null);
   const capsRef = useRef(caps);
   capsRef.current = caps;
   const [status, setStatus] = useState<Status>('setup');
@@ -239,6 +244,29 @@ function useAppStore(proof?: FabricProfile) {
   // faster than every thirty seconds: a retry that failed waits for the next measurement to ask again.
   const reporting = useRef<{ busy: boolean; last: number; send: () => void }>({ busy: false, last: 0, send: () => {} });
   const client = useMemo(() => connectUrl ? new St3Client({ baseUrl: connectUrl, credential: () => credential ?? undefined, fetchImpl: gatewayFetch(), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) }) : null, [connectUrl, credential]);
+  const pushRef = useRef<PushRegistrationLifecycle | null>(null);
+  if (!pushRef.current) pushRef.current = new PushRegistrationLifecycle(nativePushPorts({
+    readEnabled: async () => (await AsyncStorage.getItem(PUSH_KEY)) === '1',
+    writeEnabled: enabled => AsyncStorage.setItem(PUSH_KEY, enabled ? '1' : '0'),
+  }));
+  const push = pushRef.current;
+  const pushGranted = !proof && capsClient.current === client && !!caps?.capabilities.some(capability => capability.id === 'push-registration' && capability.version >= 1 && capability.state === 'granted');
+  const pushRemote = useMemo<PushRemote | undefined>(() => {
+    if (!connectUrl) return;
+    const remote = new St3Client({ baseUrl: connectUrl, credential: () => credential ?? undefined, fetchImpl: pushFetch(gatewayFetch()), client: clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_ST3_BUILD) });
+    return {
+      register: async request => (await remote.pushRegister(request)).value,
+      unregister: async () => (await remote.pushUnregister()).value,
+    };
+  }, [connectUrl, credential]);
+  const subscribePush = useCallback((changed: () => void) => {
+    const unsubscribe = push.subscribe(changed);
+    push.configure({ paired: !proof && !!credential, granted: pushGranted, remote: status === 'online' ? pushRemote : undefined });
+    if (!proof) void push.start();
+    const leaveForeground = foreground.current.subscribe(active => { if (active && !proof) void push.refresh(); });
+    return () => { unsubscribe(); leaveForeground(); push.stop(); };
+  }, [push, proof, credential, pushGranted, pushRemote, status]);
+  const pushState = useSyncExternalStore(subscribePush, push.snapshot);
   // Image bytes go up through Expo's fetch: React Native's cannot send a byte array as a body.
   useEffect(() => {
     if (proof || !client) { observations.ready = undefined; return; }
@@ -332,6 +360,7 @@ function useAppStore(proof?: FabricProfile) {
       if (!current()) return;
       if (cachedActor.current && cachedActor.current !== capability.value.session_actor) { clearCaches(); if (!proofRef.current) void AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
       cachedActor.current = capability.value.session_actor;
+      capsClient.current = client;
       setCaps(capability.value);
     } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
@@ -386,7 +415,7 @@ function useAppStore(proof?: FabricProfile) {
             if (state === 'reconnecting' && held.everLive && held.recover === null) held.recover = observations.begin('ios-recover');
           }
         }
-        if (state !== 'live') { connection++; setCaps(null); }
+        if (state !== 'live') { connection++; capsClient.current = null; setCaps(null); }
         if (state === 'live') {
           const epoch = connection;
           setError(''); void loadCapabilities(() => current() && epoch === connection);
@@ -610,7 +639,7 @@ function useAppStore(proof?: FabricProfile) {
       const gateway = pairDraft?.gateway ?? (url || fabricOnly);
       if (!gateway || !id.trim() || !code.trim()) return false;
       setBusy(true);
-      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
     },
     /** A Debug pairing link: the gateway, pairing id, and code all in one. */
     async pairFromLink(gatewayRaw: string, id: string, code: string) {
@@ -635,6 +664,7 @@ function useAppStore(proof?: FabricProfile) {
     async clearFabricTarget() { await AsyncStorage.removeItem(FABRIC_TARGET_KEY).catch(() => {}); setFabricTarget(null); },
     /** Whether a fabric that cannot be used falls back to the saved gateway. */
     async setFabricFallback(on: boolean) { await AsyncStorage.setItem(FABRIC_FALLBACK_KEY, on ? '1' : '0').catch(() => {}); setFallbackOn(on); },
+    setPushEnabled(on: boolean) { return push.setEnabled(on); },
     retryFabric() { carrier.retry(); },
     /** This phone's public fabric node ID, for the member's grant; created on first use. */
     async loadFabricNode() { if (!fabricBuilt) return; try { setFabricNode(await fabricIdentity()); } catch { setFabricNode(''); } },
@@ -642,6 +672,7 @@ function useAppStore(proof?: FabricProfile) {
     async refreshFabricPath() { setFabricPath(await fabricPathInUse()); },
     async forget() {
       if (proof) { proof.close(); return; }
+      await push.forget();
       const saved = await SecureStore.getItemAsync(PROFILE_KEY);
       const profile: PhoneProfile | undefined = saved ? JSON.parse(saved) : undefined;
       await SecureStore.deleteItemAsync(PROFILE_KEY);
@@ -901,6 +932,7 @@ function useAppStore(proof?: FabricProfile) {
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
+    pushInfo: { ...pushState, granted: pushGranted, canEnable: !proof && status === 'online' && !!credential && pushGranted && pushState.loaded && !!pushState.environment },
     carrierInfo: { choice: carrierChoice, built: fabricBuilt, target: fabricTarget, fallback: fallbackOn, route: selected.route, routeText: routeLabel(selected.route), pending: selected.pending, issue: selected.issue, fabric: fabricSnapshot, node: fabricNode, path: fabricPath },
     sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, watchSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources,
   };

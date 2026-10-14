@@ -1,0 +1,90 @@
+# Push registration
+
+A paired phone stores its APNs device token on st so a later sender can reach it. This slice
+only stores and removes the token. Nothing sends a push yet: there is no APNs sender, no alert
+trigger and no APNs key on any member.
+
+## Commands
+
+`push.register` posts `PushRegistration` to `POST /v1/client/push-registration`.
+`push.unregister` sends `DELETE /v1/client/push-registration` with no body.
+
+The generated methods are Rust `push_register` / `push_unregister`, Swift `pushRegister` /
+`pushUnregister` and TypeScript `pushRegister` / `pushUnregister`. Both return
+`PushRegistrationResponse`:
+
+```json
+{"api_version": "st3.client.v0", "request_id": "request/…", "value": {"registered": true, "environment": "development"}}
+```
+
+`value` is `PushRegistrationStatus`. `environment` is present exactly when `registered` is true.
+The response has no snapshot, fence, action receipt or replicated ACK.
+
+A registration body has exactly four fields:
+
+```json
+{
+  "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "environment": "development",
+  "bundle_id": "com.example.st",
+  "app_version": "1.4.0 (212)"
+}
+```
+
+- `token`: the APNs device token as hex, 2–512 characters in whole bytes.
+- `environment`: `development` (APNs sandbox) or `production`. The app reports which
+  environment its build's entitlement gave it; st does not guess.
+- `bundle_id`: 1–255 ASCII letters, digits, `.` or `-`. A sender uses it as the APNs topic.
+- `app_version`: 1–64 printable ASCII characters.
+
+Any other field is refused, including a person, device or session identity. The request body
+is at most 4096 bytes.
+
+## Who may register
+
+Only a current paired session may call either command. The person and device come from the
+session, never from the body. Read-only pairings may register: a registration grants nothing.
+Anonymous callers, unpaired local Unix sessions, and expired or revoked pairings are refused.
+
+`GET /v1/client/capabilities` advertises `{"id": "push-registration", "version": 1}`. It is
+`granted` for a paired session and `unavailable` for a local session. Older servers omit it; a
+client that does not see it granted must not call these commands.
+
+## Storage
+
+There is one registration per (person, device). Registering again replaces it in place, so the
+phone registers on every launch, as Apple asks, and a rotated token wins. `push.unregister`
+deletes it and returns `{"registered": false}`, also when nothing was registered.
+
+The registration lives in a local table on the member that issued the pairing. It is not a
+claim kind, so it is never written to the graph, never replicated to other members and never
+part of an export or snapshot. It survives a daemon restart.
+
+## Removal
+
+A registration never outlives its pairing:
+
+- `pairing.revoke` deletes the pairing's registration in the same step.
+- A revocation that reaches the member later by replication deletes it too.
+- An expired pairing's registration is deleted, and expired or revoked sessions cannot register.
+- "Forget this device" on the phone unregisters first, best effort, before deleting its
+  credentials.
+
+## The token is a secret
+
+The token addresses one phone. It never appears in claims, replication, resources, events,
+logs, traces or error messages. Validation errors name the field and the rule, never the value.
+The device resource exposes only a summary:
+
+```json
+"push": {"registered": true, "environment": "production"}
+```
+
+`Device.push` is present only on the member that issued the pairing, and is
+`{"registered": false}` there when the phone has not registered. Other members omit it.
+
+## Not yet
+
+A sender (APNs signing and delivery), the alert trigger and its deduplication, and the
+notification payload and tap handling come in later slices. Until then, a registration has no
+effect beyond the device summary above.

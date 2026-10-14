@@ -120,6 +120,7 @@ pub(crate) struct AgentResourcesEntry {
 impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
+        push_registrations::create_schema(connection)?;
         connection.execute_batch(git_changes::SCHEMA)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
