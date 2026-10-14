@@ -160,7 +160,9 @@ def trusted_tools(path, strict=False):
 REFUSED_ENVIRONMENT = ('LD_PRELOAD', 'LD_AUDIT', 'DYLD_INSERT_LIBRARIES', 'GCONV_PATH', 'NLSPATH',
                        'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME')
 # The only variables of the caller that reach git and ssh-keygen. Everything else (LD_LIBRARY_PATH, SSH_AUTH_SOCK,
-# GIT_*, PYTHON*, proxies, ...) is dropped, not inherited.
+# GIT_*, PYTHON*, proxies, ...) is dropped, not inherited. HOME and TMPDIR are passed through as given: for a
+# privileged integration they must be supplied by the fixed trusted launcher or profile that starts the signer. Passing
+# them is not evidence that an arbitrary inherited HOME or TMPDIR is safe, and this script does not check them.
 PASSED_ENVIRONMENT = ('HOME', 'TMPDIR')
 
 
