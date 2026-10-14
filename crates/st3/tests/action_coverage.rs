@@ -120,6 +120,7 @@ mission "cli-git-stage" state="ready" {
                 reason: None,
                 evidence: vec![],
                 idempotency_key: "cli-git-stage-claim".into(),
+                wait_ms: None,
             },
         )
         .unwrap();
