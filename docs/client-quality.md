@@ -1,7 +1,7 @@
 # Device-local client quality
 
 stui records client experience in `$XDG_CACHE_HOME/st3/stui/slo` (otherwise
-`~/.cache/st3/stui/slo`). `stui --slo` prints the retained hours and exits before
+`~/.cache/st3/stui/slo`). `st ui --slo` prints the retained hours and exits before
 configuration, connections or terminal setup. It creates no directory. These
 measurements never leave the device. The summary contains no person, conversation
 text, resource identifiers or paths. Its only identifying fields are host and build.
@@ -74,3 +74,70 @@ recording. The renderer's existing allocations must be identical, so the new
 input and presentation accounting adds zero. Histogram boundary, fixed line
 shape, unavailable directory, same-hour merging and fourteen-day rotation tests
 run alongside it.
+
+## Phone
+
+The iOS app writes the same version-1 line with shared bucket and target definitions
+in `clients/typescript/st3-views/slo.ts`. A test compares its complete empty summary
+against stui's golden JSON fixture. `host` is the generic device class `ios`; `build`
+is the app version and build. Member names and gateway addresses never enter a
+quality line. Quality has its own recorder and storage ports, separate from the
+existing observations reporter; it has no network, client or graph port.
+
+AsyncStorage key `st3.quality.hours.v1` contains hourly JSON lines, with at most 336
+rows and a 2 MiB input limit. Startup parses each retained line once, checks its fixed
+shape, and merges partial hours. Writes run on hour boundaries and when the app
+leaves the foreground. A rejected storage operation is ignored. Timers are cancelled
+in the background; the next foreground schedules its next local hour boundary.
+Fleet's Quality section subscribes while focused to new hourly history and shows
+only the previous clock hour and the last 24 completed clock hours. An hour without
+samples displays a dash. Green meets the stored target, red misses it. Daily totals
+use the last contributing hour's targets. There is no Quality poll or remote read.
+
+The phone uses single-thread JavaScript callbacks and fixed typed numeric arrays
+for counters, histogram buckets, 64 pending keys, 128 received windows and 256
+landed answers. Hot input and presentation methods create no arrays, strings, objects or
+closures. JSON serialization, history merging and draft persistence happen outside
+these methods. The React integration uses a reusable animation callback, two
+animation frames after a commit, as a native paint opportunity. This is a presentation
+estimate, not a native compositor acknowledgment; no simulator/device measurement
+was performed by this change.
+
+Startup uses React Native's `performance.rnStartupTiming.startTime`, in the same
+monotonic clock as input and receipt measurements. Missing native startup metadata
+omits startup latency samples and increments `measurement_overflow`. It does not
+substitute a later startup clock. Real state requires both fresh attention and agent
+windows from st and an online presentation. Conversation success requires a native
+list viewability callback for an actual entry, call or bundle; a loading/empty row
+is not success. Conversation and terminal intent clocks begin on focus, including a wait for the
+feed to become available. Terminals require a visible, nonzero viewport and confirmed attach.
+Receipt time is captured before feed view maintenance; only windows represented
+by rows, an agent strip or the visible native alert badge yield freshness samples.
+A frame received after a React commit waits for a commit containing that frame.
+
+Direct terminal counters apply only when the selected Fabric path is known to be
+direct at attach time. An unknown path is not claimed as direct. Other confirmed
+attaches, including the saved gateway used after Fabric fails, count as
+`gateway_attach`. Normal background suspension and intentional terminal closes do
+not count as dead tabs; unexpected stream loss counts once per attached transition.
+The existing content-free `onTiming` diagnostic remains separate from visible
+conversation/terminal SLO samples. Alert landing requires successful action
+confirmation and a complete attention window showing the card gone or resolved,
+then an alert or badge presentation; truncated windows and failed actions are not
+successes.
+
+`st3.quality.run.v1` holds only a foreground/clean/panic marker. Foreground time,
+non-live time and pending presentation samples stop in the background. A stale
+foreground marker counts a silent exit on the next run. Fatal JS errors count
+panics and preserve a panic marker; an uncatchable native crash or OS termination
+is inferred as a silent exit. The unfinished hour and a fatal error whose storage
+write could not finish can be lost, as with other best-effort device diagnostics.
+
+Unsent text uses the separate `st3.drafts.local.v1` key, at most 24 drafts and 2 MiB.
+It includes the actor and draft targets for recovery; neither that content nor its
+identifiers enter a Quality summary. Only matching actors recover it; a changed
+actor cancels an in-flight restore. Newly typed drafts are preserved, and leaving
+the actor clears stored drafts. Serialization runs after composer changes and on
+background events, outside the key handler. One write is in flight; further edits
+maintain one latest pending view instead of queuing full draft snapshots. `drafts_restored_unclean` counts the
+saved drafts actually hydrated after a stale foreground or panic marker.

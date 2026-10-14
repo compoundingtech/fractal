@@ -3,14 +3,16 @@
 set -eu
 base=${ST_INSTALL_RELEASE_BASE_URL:-https://github.com/compoundingtech/smalltalk/releases}
 tag=
+edge=false
 bin_dir=${HOME:?HOME is required}/.local/bin
 run=true
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --tag) tag=${2:?--tag needs a release tag}; shift 2 ;;
+        --edge) edge=true; shift ;;
         --bin-dir) bin_dir=${2:?--bin-dir needs a directory}; shift 2 ;;
         --no-run) run=false; shift ;;
-        -h|--help) printf 'Usage: install.sh [--tag TAG] [--bin-dir DIRECTORY] [--no-run]\n'; exit 0 ;;
+        -h|--help) printf 'Usage: install.sh [--tag TAG | --edge] [--bin-dir DIRECTORY] [--no-run]\n'; exit 0 ;;
         *) printf 'install: unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
@@ -19,6 +21,11 @@ case "$(uname -s):$(uname -m)" in
     Darwin:arm64) target=aarch64-apple-darwin ;;
     *) printf 'install: supported platforms are Linux x86_64 and Apple Silicon macOS\n' >&2; exit 1 ;;
 esac
+# --edge selects the rolling pre-release built from the newest green main commit.
+if "$edge"; then
+    [ -z "$tag" ] || { printf 'install: choose either --edge or --tag\n' >&2; exit 2; }
+    tag=edge
+fi
 case "$tag" in *[!A-Za-z0-9._-]*) printf 'install: invalid release tag\n' >&2; exit 2 ;; esac
 case "$base" in
     https://*) protocol=https ;;

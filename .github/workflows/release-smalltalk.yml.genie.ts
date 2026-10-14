@@ -1,5 +1,5 @@
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig, readOnlyBinaryCaches } from './workspace-ci.ts'
+import { linuxActionlintConfig, readOnlyBinaryCaches, priorityRunnerJob } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
@@ -10,6 +10,8 @@ const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-vers
 // Preserve release triggers, source verification and publishing permissions. Every commit on main
 // also builds and verifies both archives and keeps them as short-lived artifacts, so release
 // breakage fails on main instead of at tag time (the daily release publishes those artifacts).
+// After a green main run, one rolling `edge` pre-release is moved to that commit. It is excluded from
+// the tag trigger above, and a tag made with the workflow token starts no workflow in any case.
 export default githubWorkflow(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Smalltalk tag release",
@@ -19,7 +21,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         "main"
       ],
       "tags": [
-        "**"
+        "**",
+        "!edge"
       ]
     },
     "workflow_dispatch": null,
@@ -29,7 +32,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
         ".gitignore",
-        "build.rs",
+        "crates/st-drivers/build.rs",
         "crates/st-drivers/src/version.rs",
         "install.sh",
         "scripts/download-install-test",
@@ -47,6 +50,8 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         "scripts/install-release*",
         "scripts/install-macos*",
         "docs/st3/binary-releases.md",
+        ".github/workflows/workspace-ci.ts",
+        "scripts/ci-pick-runner",
         "flake.lock"
       ]
     }
@@ -60,6 +65,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
+    "pick-runner": priorityRunnerJob,
     "installer": {
       "name": "installer (${{ matrix.runner }})",
       "strategy": {
@@ -82,12 +88,13 @@ export default githubWorkflow(readyPRJobs(auditCaches({
         },
         {
           "name": "Test install entry points and isolated app transactions",
-          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\n"
+          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-smalltalk-edge-test\n"
         }
       ]
     },
     "build": {
-      "if": "${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request' }}",
+      "needs": ["pick-runner"],
+      "if": "${{ !cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request') }}",
       "name": "release-build (${{ matrix.target }})",
       "strategy": {
         "fail-fast": false,
@@ -104,7 +111,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
           ]
         }
       },
-      "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && 'ci1-priority' || matrix.runner }}",
+      "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1 && fromJSON(needs['pick-runner'].outputs.ci1)[0] || 'ci1-priority') || matrix.runner }}",
       "timeout-minutes": 90,
       "env": {
         "MACOSX_DEPLOYMENT_TARGET": "15.0",
@@ -218,6 +225,47 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         }
       ]
     },
+    "publishEdge": {
+      "name": "release-publish-edge",
+      "if": "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      "needs": "assemble",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 15,
+      // One edge at a time; a superseded pending run is dropped, and the script never moves edge backwards.
+      "concurrency": {
+        "group": "smalltalk-edge-publish",
+        "cancel-in-progress": false
+      },
+      "permissions": {
+        "contents": "write"
+      },
+      "env": {
+        "GH_TOKEN": "${{ github.token }}",
+        "GH_REPO": "${{ github.repository }}",
+        "SOURCE_SHA": "${{ github.sha }}",
+        "RUN_URL": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "fetch-depth": 0,
+            "persist-credentials": false
+          }
+        },
+        {
+          "uses": "actions/download-artifact@v4",
+          "with": {
+            "name": "smalltalk-release",
+            "path": "dist"
+          }
+        },
+        {
+          "name": "Move the rolling edge pre-release to this verified commit",
+          "run": "scripts/release-smalltalk-edge --source \"$SOURCE_SHA\" --dist dist --run-url \"$RUN_URL\""
+        }
+      ]
+    },
     "publish": {
       "name": "release-publish",
       "if": "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
@@ -253,4 +301,4 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       ]
     }
   }
-}, {"installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))
+}, {"pick-runner": "Only reads organization runner metadata; checks out and builds nothing.", "installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publishEdge": "Moves the rolling edge pre-release to a verified main commit; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))

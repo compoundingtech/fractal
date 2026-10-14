@@ -3,6 +3,9 @@
 
 export const API_VERSION = 'st3.client.v0' as const;
 
+/** Each person's one Sidebar arrangement is arrangement/person/NAME/<this UUID> (#2043). */
+export const SIDEBAR_ARRANGEMENT_UUID = "00000000-0000-7000-8000-000000000001" as const;
+
 export type ActionCommon = {
   api_version: "st3.client.v0";
   fence: Fence;
@@ -37,6 +40,7 @@ export type Agent = ResourceHeader & {
   current_work?: Array<WorkLabel>;
   current_work_ids?: Array<StepRunId>;
   delivery?: (AgentDelivery | null);
+  down_since?: (Timestamp | null);
   driver?: string | null;
   fault?: string | null;
   handoff?: (AgentHandoff | null);
@@ -202,7 +206,7 @@ export type AgentStartParameters = {
   agent: Id;
 };
 
-export type AgentState = ("desired" | "starting" | "running" | "waiting" | "stopped" | "failed" | "suspended" | string);
+export type AgentState = ("desired" | "starting" | "running" | "waiting" | "down" | "stopped" | "failed" | "suspended" | string);
 
 export type AgentStopParameters = {
   agent: Id;
@@ -2448,6 +2452,7 @@ export type Work = ResourceHeader & {
 
 export type WorkLabel = {
   goal?: string | null;
+  holder_down_since?: (Timestamp | null);
   id: Id;
   mission_id: MissionId;
   mission_run_id: MissionRunId;
