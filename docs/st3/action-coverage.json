@@ -448,6 +448,23 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st agents handoff show",
+      "description": "Print a seat's latest handoff document",
+      "tests": [
+        "crates/st3/tests/agents_restart.rs::a_seat_writes_and_reads_its_handoff_through_the_cli"
+      ],
+      "verification": "real CLI over a private Unix socket; the second write keeps the first version"
+    },
+    {
+      "command": "st agents handoff write",
+      "description": "Replace this seat's handoff document from a file or standard input",
+      "tests": [
+        "crates/st3/tests/agents_restart.rs::a_seat_writes_and_reads_its_handoff_through_the_cli",
+        "crates/st3/src/api.rs::a_seat_writes_only_its_own_handoff"
+      ],
+      "verification": "real CLI over a private Unix socket; the daemon refuses another seat's handoff"
+    },
+    {
       "command": "st agents hold",
       "description": "Inspect, set, or release a Codex/OpenCode delivery hold; the provider keeps running",
       "tests": [

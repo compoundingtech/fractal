@@ -3213,6 +3213,29 @@ enum BlobCommand {
 }
 
 #[derive(Subcommand)]
+#[command(after_help = "A seat keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
+st restarts a seat for an account or model change, a declaration change, or an operator's or agent's \
+request; every session that starts after a restart is given the handoff and the live state of the \
+seat's work as its first message. Write what the graph does not hold: what you were in the middle of, \
+the branches and pull requests you own, what you wait on, what to do next, and anything running \
+that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.")]
+enum HandoffCommand {
+    /// Replace this seat's handoff with FILE, or with standard input when FILE is `-` or absent.
+    Write {
+        file: Option<PathBuf>,
+        /// The seat whose handoff to write; only that seat may write it.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
+    },
+    /// Print a seat's latest handoff (this seat's by default).
+    Show {
+        /// The seat to read, such as agent/garden/worker.
+        #[arg(value_parser = parse_actor_subject)]
+        agent: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum DocCommand {
     /// Store a regular file as one immutable named document version.
     Put {
@@ -3337,6 +3360,11 @@ enum AgentsCommand {
     },
     /// Print one seat's declared workspace directory on its owning host, even when stopped.
     Workspace { subject: String },
+    /// Write or read the handoff a seat leaves for the session that follows it.
+    Handoff {
+        #[command(subcommand)]
+        command: HandoffCommand,
+    },
     /// Declare one new agent seat, start its harness, and wait until it is ready.
     ///
     /// The declaration is the one a person writes by hand, with the harness defaults of the
@@ -13290,6 +13318,100 @@ fn render_document(bytes: &[u8], width: usize) -> Option<String> {
     )
 }
 
+async fn run_handoff(
+    client: &Client,
+    configured_person: Option<&str>,
+    command: HandoffCommand,
+    json_output: bool,
+) -> Result<()> {
+    use std::io::Read as _;
+    let document = |agent: &str| {
+        st3::handoff::document_name(agent)
+            .with_context(|| format!("`{agent}` is not an agent; only a seat has a handoff"))
+    };
+    match command {
+        HandoffCommand::Write { file, actor } => {
+            let agent = configured_actor(actor.as_deref(), configured_person, "handoff write")?;
+            let name = document(&agent)?;
+            let bytes = match file.as_deref() {
+                Some(path) if path != Path::new("-") => {
+                    fs::read(path).with_context(|| format!("read handoff {}", path.display()))?
+                }
+                _ => {
+                    let mut bytes = Vec::new();
+                    std::io::stdin().read_to_end(&mut bytes)?;
+                    bytes
+                }
+            };
+            anyhow::ensure!(
+                !String::from_utf8_lossy(&bytes).trim().is_empty(),
+                "a handoff cannot be empty"
+            );
+            let hash = hex::encode(Sha256::digest(&bytes));
+            let versions: DocumentListResponse = client
+                .get(&format!("/v1/documents?name={}", urlencoding::encode(&name)))
+                .await?;
+            let selected = versions.items.iter().find(|version| version.latest);
+            let response: DocumentVersion = client
+                .post(
+                    "/v1/documents",
+                    &DocumentPutRequest {
+                        idempotency_key: format!("document:{name}:{hash}"),
+                        name,
+                        bytes,
+                        expected_document: selected.map(|version| version.binding_claim_id.clone()),
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&response, true)
+            } else {
+                println!("{}@{}", response.name, response.hash);
+                Ok(())
+            }
+        }
+        HandoffCommand::Show { agent } => {
+            let agent = configured_actor(agent.as_deref(), configured_person, "handoff show")?;
+            let name = document(&agent)?;
+            let versions: DocumentListResponse = client
+                .get(&format!(
+                    "/v1/documents?name={}&limit=1",
+                    urlencoding::encode(&name)
+                ))
+                .await?;
+            let Some(selected) = versions.items.into_iter().find(|version| version.latest) else {
+                anyhow::bail!("{agent} has written no handoff");
+            };
+            let response: Value = client
+                .get(&format!(
+                    "/v1/documents/content?reference={}",
+                    urlencoding::encode(&format!("{}@{}", selected.name, selected.hash))
+                ))
+                .await?;
+            let bytes = serde_json::from_value::<Vec<u8>>(
+                response
+                    .get("bytes")
+                    .cloned()
+                    .context("document response lacks bytes")?,
+            )?;
+            if json_output {
+                print_value(
+                    &json!({
+                        "agent": agent,
+                        "document": selected,
+                        "text": String::from_utf8_lossy(&bytes),
+                    }),
+                    true,
+                )
+            } else {
+                use std::io::Write as _;
+                cli_output::stdout().write_all(&bytes)?;
+                Ok(())
+            }
+        }
+    }
+}
+
 async fn run_doc(client: &Client, command: DocCommand, json_output: bool) -> Result<()> {
     match command {
         DocCommand::Put { file, name } => {
@@ -13750,6 +13872,9 @@ async fn run_agents(
                 println!("{}\t{}", repository.path, repository.agent_ids.join(", "));
             }
             Ok(())
+        }
+        AgentsCommand::Handoff { command } => {
+            run_handoff(&cli_client(endpoint), configured_person, command, json_output).await
         }
         AgentsCommand::Workspace { subject } => {
             let response = generated_client(endpoint, None)?
@@ -14773,6 +14898,7 @@ async fn run_agent_inspection(
         }
         AgentsCommand::New(_)
         | AgentsCommand::Workspace { .. }
+        | AgentsCommand::Handoff { .. }
         | AgentsCommand::Repos { .. }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         | AgentsCommand::Apply(_)

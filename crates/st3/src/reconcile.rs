@@ -61,6 +61,9 @@ struct OwnershipErrorLog {
     suppressed: u64,
 }
 const HARNESS_READINESS_DEADLINE_MS: u128 = 60_000;
+/// A new incarnation is told where its seat was only while it is new: one the daemon first finds
+/// running much later (a daemon that was down, an upgrade) already has its context.
+const SESSION_START_WINDOW_MS: u128 = 10 * 60 * 1000;
 const WORK_WAKE_RETRY_MS: u128 = 15_000;
 // A mechanical gate may run for minutes. Each poll reruns the entire host reconciliation
 // pass, including PTY snapshots. Ten seconds bounds result recognition without keeping a
@@ -981,6 +984,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Skip items nothing changed for, between periodic full passes. Off in test reconcilers,
     /// whose every pass checks what an incremental pass would have missed.
     skip_unneeded: bool,
+    /// The latest incarnation of each seat whose start has been looked at, so a pass does no work for
+    /// an incarnation it has already handled.
+    session_starts: Arc<Mutex<HashMap<String, String>>>,
     /// The wake each running step has armed for its timeout or lease expiry, by step subject.
     step_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
@@ -1150,6 +1156,7 @@ impl Reconciler<NativeRuntime> {
             incremental: Default::default(),
             strict_incremental: false,
             skip_unneeded: std::env::var("ST3_INCREMENTAL").as_deref() != Ok("off"),
+            session_starts: Arc::new(Mutex::new(HashMap::new())),
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
@@ -1251,6 +1258,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             incremental: Default::default(),
             strict_incremental: true,
             skip_unneeded: false,
+            session_starts: Arc::new(Mutex::new(HashMap::new())),
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
@@ -3599,6 +3607,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &attention_key,
                 "the same runtime incarnation became ready",
             )?;
+            self.deliver_session_start(&subject.subject, incarnation)?;
             return Ok(());
         }
 
@@ -3702,6 +3711,92 @@ impl<R: RuntimeControl> Reconciler<R> {
         if changed {
             self.signal_changed();
         }
+        Ok(())
+    }
+
+    /// Give a seat's new incarnation the handoff its last session left and the live state of its
+    /// work, as the first message it sees. Only an incarnation that replaced another, and that is
+    /// still new, is told anything: a seat's first incarnation has no predecessor, and one found
+    /// running long after it started already has its context. An incarnation is looked at once, so
+    /// a pass over a settled fleet reads and writes nothing for it.
+    fn deliver_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
+        if self
+            .session_starts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(subject)
+            .map(String::as_str)
+            == Some(incarnation)
+        {
+            return Ok(());
+        }
+        // Only a final outcome marks the incarnation handled: an error (a busy database, say)
+        // leaves it for the next pass.
+        self.decide_session_start(subject, incarnation)?;
+        self.session_starts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(subject.to_owned(), incarnation.to_owned());
+        Ok(())
+    }
+
+    /// Decide whether to tell `incarnation` where its seat was, and tell it. Every `Ok` is final:
+    /// the message was sent, was sent before, or should not be sent.
+    fn decide_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
+        let mut started = None;
+        let mut replaced = false;
+        for claim in self.store.claims_for(subject, Some("runtime.observed"))? {
+            if claim.body.pointer("/fields/status").and_then(Value::as_str) != Some("running") {
+                continue;
+            }
+            if claim_incarnation(&claim) == Some(incarnation) {
+                started.get_or_insert(claim.accepted_at_unix_ms);
+            } else {
+                replaced = true;
+            }
+        }
+        let now = now_ms();
+        if !replaced
+            || started.is_none_or(|started| now.saturating_sub(started) > SESSION_START_WINDOW_MS)
+        {
+            return Ok(());
+        }
+        let done = format!("session-start:{subject}:{incarnation}");
+        if self.store.operation_claim(&done)?.is_some() {
+            return Ok(());
+        }
+        let context = crate::handoff::gather(&self.store, subject)?;
+        let Some(text) = crate::handoff::render(&context, now) else {
+            return Ok(());
+        };
+        let message_id = &hex::encode(sha2::Sha256::digest(done.as_bytes()))[..16];
+        self.store.append_claim(&ClaimInput {
+            subject: format!("message/{message_id}"),
+            kind: "message.sent".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("from".into(), Value::String("daemon/runtime".into())),
+                ("to".into(), Value::String(subject.into())),
+                ("content".into(), Value::String(text)),
+                ("status".into(), Value::String("sent".into())),
+                (
+                    "title".into(),
+                    Value::String("Session restarted: where you were".into()),
+                ),
+                ("in_reply_to".into(), Value::Null),
+                (
+                    "tags".into(),
+                    Value::Array(vec![Value::String(format!(
+                        "{}{incarnation}",
+                        crate::handoff::SESSION_START_TAG_PREFIX
+                    ))]),
+                ),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(done),
+        })?;
+        self.signal_changed();
         Ok(())
     }
 
@@ -38116,6 +38211,163 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_new_incarnation_is_first_sent_the_handoff_its_seat_left() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        apply_source(&store, &source, "session-start");
+        let desired = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let member = desired.member.as_ref().unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let observe = |incarnation: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: desired.subject.clone(),
+                    kind: "runtime.observed".into(),
+                    actor: None,
+                    fields: member_fields(member, "running", Some(incarnation), true),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("runtime-{incarnation}")),
+                })
+                .unwrap();
+            store
+                .append_claim(&harness_claim(&desired.subject, "ready", incarnation))
+                .unwrap();
+        };
+        let ready = |incarnation: &str| {
+            observe(incarnation);
+            let observation = RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation.into()),
+            };
+            reconciler
+                .reconcile_driver_readiness(&desired, member, &observation, now_ms())
+                .unwrap();
+        };
+        let inbox = || store.messages(Some(&desired.subject), true).unwrap();
+
+        // A seat's first incarnation has no predecessor, so it is told nothing, and neither is a
+        // seat with nothing to carry over.
+        store
+            .put_document(
+                "doc/agents/node.worker/handoff",
+                b"Branch agent/widget has PR 12 open; wait for review.",
+                &None,
+                "handoff-one",
+            )
+            .unwrap();
+        ready("worker-one");
+        assert!(inbox().is_empty());
+
+        // Its replacement is sent the handoff, once, as a message that wakes the seat.
+        ready("worker-two");
+        ready("worker-two");
+        let messages = inbox();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        let message = &messages[0];
+        assert_eq!(message.from, "daemon/runtime");
+        assert_eq!(message.title.as_deref(), Some("Session restarted: where you were"));
+        assert!(message.content.contains("Branch agent/widget has PR 12 open"));
+        assert!(message.content.contains("doc/agents/node.worker/handoff@"));
+        assert_eq!(
+            message.tags,
+            vec![format!("{}worker-two", crate::handoff::SESSION_START_TAG_PREFIX)]
+        );
+        assert!(!crate::silent::is_held(message));
+        assert!(crate::silent::always_wakes(&message.from, &message.tags));
+
+        // A pass that fails after the message was due leaves the incarnation for the next pass,
+        // instead of marking it handled and never telling it.
+        observe("worker-three");
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_session_start BEFORE INSERT ON claims
+                 WHEN NEW.kind='message.sent'
+                 BEGIN SELECT RAISE(ABORT, 'injected session-start failure'); END;",
+            )
+            .unwrap();
+        assert!(
+            reconciler
+                .deliver_session_start(&desired.subject, "worker-three")
+                .is_err()
+        );
+        assert_eq!(inbox().len(), 1, "nothing was sent for worker-three");
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_session_start")
+            .unwrap();
+        reconciler
+            .deliver_session_start(&desired.subject, "worker-three")
+            .unwrap();
+        assert_eq!(inbox().len(), 2, "the next pass sent it");
+        assert!(
+            inbox()
+                .iter()
+                .any(|message| message.tags
+                    == vec![format!("{}worker-three", crate::handoff::SESSION_START_TAG_PREFIX)])
+        );
+
+        // A seat that has written nothing and holds no work is sent nothing at all.
+        let quiet = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&quiet, &source, "session-start-quiet");
+        let quiet_desired = quiet
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let quiet_reconciler = Reconciler::new(
+            quiet.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let quiet_member = quiet_desired.member.as_ref().unwrap();
+        for incarnation in ["quiet-one", "quiet-two"] {
+            quiet
+                .append_claim(&ClaimInput {
+                    subject: quiet_desired.subject.clone(),
+                    kind: "runtime.observed".into(),
+                    actor: None,
+                    fields: member_fields(quiet_member, "running", Some(incarnation), true),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("runtime-{incarnation}")),
+                })
+                .unwrap();
+            quiet
+                .append_claim(&harness_claim(&quiet_desired.subject, "ready", incarnation))
+                .unwrap();
+            quiet_reconciler
+                .deliver_session_start(&quiet_desired.subject, incarnation)
+                .unwrap();
+        }
+        assert!(quiet.messages(Some(&quiet_desired.subject), true).unwrap().is_empty());
     }
 
     #[test]
