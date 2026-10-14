@@ -156,6 +156,16 @@ pub fn verify_installed() -> Result<()> {
 }
 
 pub fn verify_st3_installed() -> Result<()> {
+    verify_st3_plugin()?;
+    anyhow::ensure!(
+        st3_policy_available(),
+        "the st Claude channel policy is not installed"
+    );
+    Ok(())
+}
+
+/// User-owned assets are usable with Claude's development channel admission.
+pub fn verify_st3_plugin() -> Result<()> {
     let marketplace = st3_marketplace_root()?;
     verify_st3_marketplace_at(&marketplace)?;
     if !st3_marketplace_is_registered_at(&marketplace)? {
@@ -164,11 +174,11 @@ pub fn verify_st3_installed() -> Result<()> {
     if !st3_plugin_is_installed()? {
         bail!("the st Claude channel plugin is not installed; run `st claude-channel install`");
     }
-    let policy = st3_policy_path()?;
-    if !st3_policy_is_current_at(&policy) {
-        bail!("the st Claude channel policy is not installed; run `st claude-channel install`");
-    }
     Ok(())
+}
+
+pub fn st3_policy_available() -> bool {
+    st3_policy_path().is_ok_and(|path| st3_policy_is_current_at(&path))
 }
 
 /// Install the ST3-owned Claude channel under an ST3 marketplace identity. This is deliberately
@@ -212,7 +222,15 @@ pub fn status_st3() -> Result<()> {
     println!("marketplace\t{}", state(marketplace_ready));
     println!("plugin\t{}", state(plugin_ready));
     println!("policy\t{}", state(policy_ready));
-    if assets && marketplace_ready && plugin_ready && policy_ready {
+    println!(
+        "admission\t{}",
+        if policy_ready {
+            "approved"
+        } else {
+            "development"
+        }
+    );
+    if assets && marketplace_ready && plugin_ready {
         Ok(())
     } else {
         bail!("the st Claude channel installation is incomplete")
@@ -220,7 +238,23 @@ pub fn status_st3() -> Result<()> {
 }
 
 pub fn uninstall_st3(keep_policy: bool) -> Result<()> {
+    remove_st3_channel(keep_policy)?;
+    println!("uninstalled");
+    Ok(())
+}
+
+/// Unregister st's Claude plugin and marketplace and delete the marketplace files, saying nothing.
+pub fn remove_st3_channel(keep_policy: bool) -> Result<()> {
     let marketplace = st3_marketplace_root()?;
+    // Asking Claude about its plugins creates its own state files, so a machine that has never
+    // registered st's channel (no marketplace files and no Claude user config) is not asked.
+    if !marketplace.exists() && !claude_user_config_exists() {
+        let policy = st3_policy_path()?;
+        if !keep_policy && policy.exists() {
+            remove_st3_policy_with_elevation(&policy)?;
+        }
+        return Ok(());
+    }
     let owns_marketplace = st3_marketplace_registration()?
         .is_some_and(|entry| marketplace_entry_matches(&entry, &marketplace));
     if st3_plugin_is_installed()? {
@@ -248,8 +282,16 @@ pub fn uninstall_st3(keep_policy: bool) -> Result<()> {
     if !keep_policy && policy.exists() {
         remove_st3_policy_with_elevation(&policy)?;
     }
-    println!("uninstalled");
     Ok(())
+}
+
+/// Claude's user config file, which exists once Claude has run for this account.
+fn claude_user_config_exists() -> bool {
+    let directory = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    directory.is_some_and(|directory| directory.join(".claude.json").exists())
 }
 
 pub fn install_st3_policy() -> Result<PathBuf> {
@@ -282,7 +324,7 @@ fn marketplace_root() -> Result<PathBuf> {
     Ok(data_home()?.join("st2/claude-channel/marketplace"))
 }
 
-fn st3_marketplace_root() -> Result<PathBuf> {
+pub fn st3_marketplace_root() -> Result<PathBuf> {
     Ok(data_home()?.join("st/plugins/claude/marketplace"))
 }
 

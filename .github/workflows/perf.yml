@@ -13,9 +13,10 @@ on:
       - opened
       - synchronize
       - reopened
+      - ready_for_review
+      - converted_to_draft
       - labeled
       - unlabeled
-      - ready_for_review
   workflow_dispatch: {}
 
 permissions:
@@ -30,7 +31,7 @@ concurrency:
 jobs:
   scope:
     name: Performance scope
-    if: "!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')"
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -55,7 +56,7 @@ jobs:
           import time
 
           PATHS = (
-              'crates/**', 'vendor/**', 'nix/**', 'build.rs', 'scripts/ci-test-paths.rs',
+              'crates/**', 'vendor/**', 'nix/**', 'scripts/ci-test-paths.rs',
               'Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'flake.nix', 'flake.lock',
               'docs/st3/schema.md', 'scripts/ci-perf*', 'scripts/ci-nix-cache',
               '.github/workflows/perf.yml*',
@@ -126,10 +127,10 @@ jobs:
   perf-load:
     name: perf-load
     needs: [scope]
-    if: "!cancelled() && (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')"
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (!(github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf')) && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')) }}
     runs-on:
       [
-        nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=2,
+        nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3,
         "namespace-features:github.run-id=${{ github.run_id }}",
       ]
     timeout-minutes: 30

@@ -151,7 +151,7 @@ fn handshake(socket: &Path, line: &str, protocol: &str) -> Result<StdUnixStream,
         match stream.read(&mut byte) {
             Ok(0) => {
                 return Err(RouteError::Unreachable(format!(
-                    "the owner closed the tunnel without answering; its Fabric may not serve `{protocol}` to this machine"
+                    "the owner closed the tunnel without answering; its Fabric may not serve `{protocol}` to this machine, or its st daemon may not be running"
                 )));
             }
             Ok(_) if byte[0] == b'\n' => break,
