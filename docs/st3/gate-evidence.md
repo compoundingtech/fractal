@@ -397,3 +397,34 @@ be ordered against each other.
 
 This slice verifies SSH-signed `tests` records. The raw Nix output-path signature
 check for the typed `nix` observation is a later slice, agreed with the Nix producer.
+
+## Shadow evidence gate
+
+Five non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
+`typescript-client`, `isolation-vm`, `genie-freshness`, `mail-redelivery-canaries`), ask
+whether a trusted note already exists for the run's tree. **They never skip a check and
+never fail**: nothing `needs` them, and every problem becomes the outcome `unavailable`.
+Skipping is a separate decision, taken only after a day of clean numbers and only for a
+tree with a verified full-trust note.
+
+`scripts/ci-evidence-gate` fetches the accepted base (the pull request base or the merge
+group base) and the `refs/notes/evidence/*` refs, takes the verifier from that base commit
+(never from the change under test), and runs it with `--kinds observed` and `--command`
+naming the repository, workflow and job. Keys come from `.st/evidence-keys` at the base; if
+the base has none yet, an empty list is used, so nothing signed is trusted but an unsigned
+degraded note can still be counted. Fork pull requests run the same job; since it only
+reports, a fork editing it gains nothing.
+
+Each job ends with exactly one of these steps running, which is how a collector reads the
+outcome from the jobs API without extra calls:
+
+| Step name | Meaning |
+| --- | --- |
+| `evidence satisfied by existing note` | a trusted full-tier note from the central observer exists |
+| `evidence existing note is degraded` | only an unsigned degraded note exists (the signer was unreachable) |
+| `evidence no note` | nothing usable for this tree and check |
+| `evidence note rejected` | a note exists but was refused (signature, signer, failed check, other command) |
+| `evidence verifier unavailable` | the verifier or the notes could not be obtained |
+
+A note made for a pull request is reused by the merge queue's run only when the tree is
+identical, that is, when main has not moved in between; expect small shares at first.

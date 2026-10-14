@@ -296,6 +296,206 @@ jobs:
           CACHE_REASON: Retains Git source objects only; builds nothing and has no signing key.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-linux-gate:
+    name: evidence-gate-linux-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: linux-gate
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/ci-evidence-gate
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-typescript-client:
+    name: evidence-gate-typescript-client
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: typescript-client
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/ci-evidence-gate
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-isolation-vm:
+    name: evidence-gate-isolation-vm
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: isolation-vm
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/ci-evidence-gate
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-genie-freshness:
+    name: evidence-gate-genie-freshness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: genie-freshness
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/ci-evidence-gate
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  evidence-gate-mail-redelivery-canaries:
+    name: evidence-gate-mail-redelivery-canaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Look for an existing evidence note
+        id: gate
+        env:
+          CHECK: mail-redelivery-canaries
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: python3 scripts/ci-evidence-gate
+      - name: evidence satisfied by existing note
+        if: steps.gate.outputs.outcome == 'satisfied'
+        run: echo evidence satisfied by existing note
+      - name: evidence existing note is degraded
+        if: steps.gate.outputs.outcome == 'degraded'
+        run: echo evidence existing note is degraded
+      - name: evidence no note
+        if: steps.gate.outputs.outcome == 'no_note'
+        run: echo evidence no note
+      - name: evidence note rejected
+        if: steps.gate.outputs.outcome == 'rejected'
+        run: echo evidence note rejected
+      - name: evidence verifier unavailable
+        if: steps.gate.outputs.outcome == 'unavailable'
+        run: echo evidence verifier unavailable
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   upgrade-impact:
     name: upgrade-impact
     runs-on: ubuntu-latest
@@ -566,7 +766,7 @@ jobs:
         run: python3 scripts/ci-fractal-web-licenses-test && python3 scripts/ci-fractal-web-licenses --check-lockfile
       - name: Check runner selection and generated files
         shell: bash
-        run: "nix develop '.#genie' -c bash -c 'python3 scripts/ci-ready-pr-test && python3 scripts/ci-draft-admission-test && python3 scripts/ci-workflow-concurrency-test && python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/evidence-verify-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'"
+        run: "nix develop '.#genie' -c bash -c 'python3 scripts/ci-ready-pr-test && python3 scripts/ci-draft-admission-test && python3 scripts/ci-workflow-concurrency-test && python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/evidence-verify-test && python3 scripts/ci-evidence-gate-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'"
       - name: Save Nix outputs
         if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
         run: bash scripts/ci-nix-cache save

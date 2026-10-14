@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Exercise the shadow evidence gate against a real origin and a real depth-1 clone."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(ROOT / path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+gate = load('ci_evidence_gate', 'scripts/ci-evidence-gate')
+fixtures = load('evidence_verify_test', 'scripts/evidence-verify-test')
+REPOSITORY = 'org/repo'
+CHECK = 'linux-gate'
+COMMAND = ('github-actions', REPOSITORY, '.github/workflows/fleet.yml', CHECK)
+RUNNER = f'github:{REPOSITORY}/actions/runs/7/attempts/1/jobs/9'
+
+
+class Classify(unittest.TestCase):
+    def test_each_verifier_answer_has_one_outcome(self):
+        cases = [
+            ((0, {'satisfied': True, 'tier': 'full'}), 'satisfied'),
+            ((0, {'satisfied': True, 'tier': 'test'}), 'rejected'),
+            ((1, {'satisfied': False, 'reason': 'degraded'}), 'degraded'),
+            ((1, {'satisfied': False, 'reason': 'no_record'}), 'no_note'),
+            ((1, {'satisfied': False, 'reason': 'stale_tree'}), 'no_note'),
+            ((1, {'satisfied': False, 'reason': 'wrong_check'}), 'no_note'),
+            ((1, {'satisfied': False, 'reason': 'bad_signature'}), 'rejected'),
+            ((1, {'satisfied': False, 'reason': 'untrusted_signer'}), 'rejected'),
+            ((1, {'satisfied': False, 'reason': 'check_failed'}), 'rejected'),
+            ((1, {'satisfied': False, 'reason': 'error'}), 'unavailable'),
+            ((2, None), 'unavailable'),
+        ]
+        for (code, result), outcome in cases:
+            self.assertEqual(gate.classify(code, result), outcome, (code, result))
+
+
+class EndToEnd(unittest.TestCase):
+    def setUp(self):
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.ci = self.f.key('ci', 'machine/ci1')
+        self.stranger = self.f.key('stranger')
+        self.work_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.work_dir.cleanup)
+
+    def commit_base(self, with_script=True, with_keys=True):
+        repo = self.f.repo
+        if with_script:
+            (repo / 'scripts').mkdir(exist_ok=True)
+            shutil.copy(ROOT / 'scripts/evidence-verify', repo / 'scripts/evidence-verify')
+        if with_keys:
+            (repo / '.st').mkdir(exist_ok=True)
+            (repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '--allow-empty', '-m', 'base')
+        return self.f.git('rev-parse', 'HEAD')
+
+    def note(self, head, tree, **kwargs):
+        defaults = dict(check=CHECK, command=COMMAND, runner=RUNNER)
+        defaults.update(kwargs)
+        return self.f.note(head, tree, **defaults)
+
+    def run_gate(self, base, check=CHECK):
+        work = Path(self.work_dir.name) / 'work'
+        if work.exists():
+            shutil.rmtree(work)
+        subprocess.run(['git', 'clone', '-q', '--depth=1', 'file://' + str(self.f.repo), str(work)], check=True,
+                       capture_output=True)
+        output = Path(self.work_dir.name) / 'output'
+        summary = Path(self.work_dir.name) / 'summary'
+        output.write_text('')
+        env = dict(os.environ, CHECK=check, REPOSITORY=REPOSITORY, BASE_SHA=base,
+                   GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(summary))
+        done = subprocess.run([sys.executable, str(ROOT / 'scripts/ci-evidence-gate')], cwd=work, env=env,
+                              capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr.decode())
+        return output.read_text().strip(), summary.read_text()
+
+    def head(self):
+        return self.f.commit('head')
+
+    def test_no_note_then_degraded_then_satisfied_then_rejected(self):
+        base = self.commit_base()
+        commit, tree = self.head()
+        self.assertEqual(self.run_gate(base)[0], 'outcome=no_note')
+        self.note(commit, tree, key=self.ci, signer=None, tier='degraded', sign=False)
+        self.assertEqual(self.run_gate(base)[0], 'outcome=degraded')
+        full = self.note(commit, tree, key=self.ci, signer='machine/ci1', seconds=1)
+        outcome, summary = self.run_gate(base)
+        self.assertEqual(outcome, 'outcome=satisfied')
+        self.assertIn('never skips', summary)
+        # A later record signed by a key that is not on the list is rejected, not skipped over.
+        self.f.git('update-ref', '-d', f'refs/notes/evidence/{full}')
+        self.note(commit, tree, key=self.stranger, signer='machine/ci1', seconds=2)
+        self.assertEqual(self.run_gate(base)[0], 'outcome=rejected')
+
+    def test_a_note_for_another_check_or_workflow_is_not_this_checks_note(self):
+        base = self.commit_base()
+        commit, tree = self.head()
+        self.note(commit, tree, key=self.ci, signer='machine/ci1', check='typescript-client',
+                  command=('github-actions', REPOSITORY, '.github/workflows/fleet.yml', 'typescript-client'))
+        self.assertEqual(self.run_gate(base)[0], 'outcome=no_note')
+        self.note(commit, tree, key=self.ci, signer='machine/ci1', seconds=1,
+                  command=('github-actions', 'org/other', '.github/workflows/fleet.yml', CHECK))
+        self.assertEqual(self.run_gate(base)[0], 'outcome=rejected')
+
+    def test_without_keys_at_the_base_a_degraded_note_is_still_counted_and_a_signed_one_is_not_trusted(self):
+        base = self.commit_base(with_keys=False)
+        commit, tree = self.head()
+        self.note(commit, tree, key=self.ci, signer='machine/ci1')
+        self.assertEqual(self.run_gate(base)[0], 'outcome=rejected')
+
+    def test_everything_that_can_go_wrong_is_unavailable_and_never_fails_the_job(self):
+        base = self.commit_base(with_script=False)
+        self.head()
+        self.assertEqual(self.run_gate(base)[0], 'outcome=unavailable')  # base has no verifier yet
+        self.assertEqual(self.run_gate('')[0], 'outcome=unavailable')  # no base for this event
+        self.assertEqual(self.run_gate('f' * 40)[0], 'outcome=unavailable')  # base cannot be fetched
+        self.assertEqual(self.run_gate(base, check='')[0], 'outcome=unavailable')  # no check named
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Shadow-mode evidence gate for one required check.
+
+Asks the verifier from the accepted base whether a trusted note exists for this run's
+tree and check, and records the outcome for the workflow. It never skips anything and
+never fails the job: every problem becomes the outcome `unavailable`.
+
+Outcomes (each has a fixed step name in the workflow so a collector can count them):
+  satisfied    a trusted full-tier note from the central observer exists
+  degraded     only an unsigned degraded note exists (the observer's signer was unreachable)
+  no_note      nothing usable was found for this tree and check
+  rejected     a note exists but was refused (bad signature, untrusted signer, failed check ...)
+  unavailable  the verifier or the notes could not be obtained
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+
+NOTES = 'refs/notes/evidence/*:refs/notes/evidence/*'
+VERIFIER = 'scripts/evidence-verify'
+KEYS = '.st/evidence-keys'
+MISSING = ('no_record', 'stale_tree', 'wrong_check')
+
+
+def classify(code, result):
+    """Outcome name for a verifier exit code and JSON document."""
+    if not isinstance(result, dict):
+        return 'unavailable'
+    if code == 0 and result.get('satisfied') is True:
+        return 'satisfied' if result.get('tier') == 'full' else 'rejected'
+    reason = result.get('reason')
+    if reason == 'degraded':
+        return 'degraded'
+    if reason in MISSING:
+        return 'no_note'
+    if reason == 'error' or reason is None:
+        return 'unavailable'
+    return 'rejected'
+
+
+def run(*command, stdin=None):
+    return subprocess.run(command, input=stdin, capture_output=True, timeout=120, check=False)
+
+
+def observe(check, repository, base):
+    """(outcome, detail) without ever raising."""
+    if not base:
+        return 'unavailable', 'no accepted base commit for this event'
+    if run('git', 'fetch', '--no-tags', '--depth=1', '-q', 'origin', base).returncode != 0:
+        return 'unavailable', 'could not fetch the accepted base'
+    run('git', 'fetch', '--no-tags', '--depth=1', '-q', 'origin', NOTES)
+    script = run('git', 'show', f'{base}:{VERIFIER}')
+    if script.returncode != 0:
+        return 'unavailable', 'the accepted base has no verifier yet'
+    with tempfile.TemporaryDirectory() as scratch:
+        path = os.path.join(scratch, 'evidence-verify')
+        with open(path, 'wb') as handle:
+            handle.write(script.stdout)
+        if run('git', 'cat-file', '-e', f'{base}:{KEYS}').returncode == 0:
+            keys = ['--keys-from', base]
+        else:
+            # No trusted keys yet: nothing signed can be trusted, but a degraded note can still be counted.
+            empty = os.path.join(scratch, 'empty-keys')
+            open(empty, 'w').close()
+            keys = ['--keys', empty]
+        command = json.dumps(['github-actions', repository, '.github/workflows/fleet.yml', check])
+        done = run(sys.executable, path, '--repo', '.', '--revision', 'HEAD', '--check', check,
+                   '--kinds', 'observed', '--command', command, *keys)
+    try:
+        result = json.loads(done.stdout)
+    except ValueError:
+        return 'unavailable', f'verifier exit {done.returncode} without a JSON result'
+    return classify(done.returncode, result), result.get('reason') or 'satisfied'
+
+
+def main():
+    check = os.environ.get('CHECK', '')
+    outcome, detail = 'unavailable', 'not run'
+    try:
+        if not check:
+            detail = 'no check named'
+        else:
+            outcome, detail = observe(check, os.environ.get('REPOSITORY', ''), os.environ.get('BASE_SHA', ''))
+    except Exception as error:  # shadow mode must never fail the job
+        outcome, detail = 'unavailable', f'{type(error).__name__}: {error}'
+    line = f'evidence gate (shadow, never skips): check={check} outcome={outcome} detail={detail}'
+    print(line)
+    for variable, text in (('GITHUB_OUTPUT', f'outcome={outcome}\n'), ('GITHUB_STEP_SUMMARY', line + '\n')):
+        target = os.environ.get(variable)
+        if target:
+            with open(target, 'a') as handle:
+                handle.write(text)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
