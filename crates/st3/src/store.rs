@@ -1340,6 +1340,8 @@ pub(crate) struct SubjectCache {
     conflicts: u64,
     views: HashMap<String, ViewEntry>,
     statuses: HashMap<String, StatusEntry>,
+    summary_statuses: HashMap<String, StatusEntry>,
+    runtime_statuses: HashMap<String, StatusEntry>,
     // Summary and full statuses never share entries: their provenance/harness fields differ.
     card_statuses: HashMap<String, StatusEntry>,
 }
@@ -1574,6 +1576,8 @@ fn runtime_only_authority(
 pub enum ClaimsReduction {
     Full,
     Summary,
+    /// Runtime resources do not consume claim ids, counts, or session boundaries.
+    Runtime,
     AgentCard,
 }
 /// One subject's status at `at_index`, and the action it asks of its host when it is current and
@@ -1585,6 +1589,12 @@ fn subject_status_at(
     owner_filter: Option<&str>,
     claims: ClaimsReduction,
 ) -> Result<Option<(SubjectStatus, Option<PlannedAction>)>> {
+    let _profile = crate::profile::span(match claims {
+        ClaimsReduction::Full => "status/reduction-full",
+        ClaimsReduction::Summary => "status/reduction-summary",
+        ClaimsReduction::Runtime => "status/reduction-runtime",
+        ClaimsReduction::AgentCard => "status/reduction-agent-card",
+    });
     #[cfg(test)]
     SUBJECT_REDUCTIONS.with(|reductions| reductions.set(reductions.get() + 1));
     if subject.starts_with("arrangement/") {
@@ -1647,6 +1657,12 @@ fn subject_status_at(
                 desired.as_ref().map(|row| row.claim_id.as_str()),
                 at_index,
             )?,
+        ),
+        ClaimsReduction::Runtime => (
+            current_harness_at(connection, subject, at_index)?,
+            Vec::new(),
+            ClaimsSummary::default(),
+            desired_conflicts_at(connection, subject, desired.as_ref().map(|row| row.id.as_str()), at_index)?,
         ),
         ClaimsReduction::AgentCard => {
             let latest = if desired.is_some() {
@@ -12270,9 +12286,13 @@ impl Store {
             if conflicts != cache.conflicts {
                 cache.views.clear();
                 cache.statuses.clear();
+                cache.summary_statuses.clear();
+                cache.runtime_statuses.clear();
                 cache.card_statuses.clear();
                 cache.conflicts = conflicts;
-            } else if !cache.views.is_empty() || !cache.statuses.is_empty() || !cache.card_statuses.is_empty() {
+            } else if !cache.views.is_empty() || !cache.statuses.is_empty()
+                || !cache.summary_statuses.is_empty() || !cache.runtime_statuses.is_empty()
+                || !cache.card_statuses.is_empty() {
                 // The subjects and actors of the claims that arrived.
                 let mut statement = connection.prepare_cached(
                     "SELECT subject, actor FROM claims WHERE store_index>?1 AND store_index<=?2",
@@ -12295,6 +12315,8 @@ impl Store {
                 cache
                     .statuses
                     .retain(|subject, entry| !stale(subject, &entry.owners));
+                cache.summary_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
+                cache.runtime_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
                 cache.card_statuses.retain(|subject, entry| !stale(subject, &entry.owners));
             }
             cache.through = store_index;
@@ -12336,7 +12358,9 @@ impl Store {
         // A summary and a full reduction of one subject are kept side by side; a public
         // response must never be served a summary.
         let entries = match claims {
-            ClaimsReduction::Full | ClaimsReduction::Summary => &cache.statuses,
+            ClaimsReduction::Full => &cache.statuses,
+            ClaimsReduction::Summary => &cache.summary_statuses,
+            ClaimsReduction::Runtime => &cache.runtime_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
         };
         entries.get(subject)
@@ -12369,7 +12393,9 @@ impl Store {
             .cloned()
             .collect();
         let entries = match claims {
-            ClaimsReduction::Full | ClaimsReduction::Summary => &mut cache.statuses,
+            ClaimsReduction::Full => &mut cache.statuses,
+            ClaimsReduction::Summary => &mut cache.summary_statuses,
+            ClaimsReduction::Runtime => &mut cache.runtime_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
         };
         // At capacity, a cold summary remains correct and uncached. Invalidation
@@ -39853,7 +39879,8 @@ observer "ordered/file" {
             cache.card_statuses.clear();
             for n in 0..AGENT_CARD_STATUS_LIMIT {
                 cache.card_statuses.insert(format!("agent/fill/{n}"), StatusEntry {
-                    read_at: cut, owners: Vec::new(), status: first.subjects[0].clone(), action: None,
+                    read_at: cut, owners: Vec::new(), claims: ClaimsReduction::AgentCard,
+                    status: first.subjects[0].clone(), action: None,
                 });
             }
         }
@@ -58708,6 +58735,7 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             public.claims,
             full_canonical_claim_id_oracle(&store.readers.get(), subject, Some(index))
         );
+        SUBJECT_REDUCTIONS.with(|count| count.set(0));
         let back = store
             .status_for_subject_prefix_at(
                 "agent/",
@@ -58720,6 +58748,9 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             .remove(0);
         assert!(back.claims.is_empty());
         assert_eq!(back.claims_summary.latest, public.claims.last().cloned());
+        assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0);
+        store.status_at(Some(subject), None, Some(index)).unwrap();
+        assert_eq!(SUBJECT_REDUCTIONS.with(std::cell::Cell::get), 0);
     }
 
 
