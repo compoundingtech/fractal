@@ -303,6 +303,9 @@ jobs:
     continue-on-error: true
     permissions:
       contents: read
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      record: ${{ steps.gate.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -352,6 +355,9 @@ jobs:
     continue-on-error: true
     permissions:
       contents: read
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      record: ${{ steps.gate.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -401,6 +407,9 @@ jobs:
     continue-on-error: true
     permissions:
       contents: read
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      record: ${{ steps.gate.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -450,6 +459,9 @@ jobs:
     continue-on-error: true
     permissions:
       contents: read
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      record: ${{ steps.gate.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -499,6 +511,9 @@ jobs:
     continue-on-error: true
     permissions:
       contents: read
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      record: ${{ steps.gate.outputs.record }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -593,7 +608,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner"],"typescript-client":["pick-runner","genie-freshness"],"linux-test-build":["pick-runner"],"linux-tests":["pick-runner","linux-test-build"],"linux-tests-shard-2":["pick-runner","linux-test-build"],"linux-tests-shard-3":["pick-runner","linux-test-build"],"linux-tests-shard-4":["pick-runner","linux-test-build"],"linux-clippy":["pick-runner"],"linux-fleet-compat":["pick-runner"],"mail-redelivery-canaries":["pick-runner","linux-test-build"],"linux-gate":["pick-runner","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries"],"perf-cost":[],"isolation-vm":["pick-runner","linux-test-build"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-typescript-client":[],"evidence-gate-isolation-vm":[],"evidence-gate-genie-freshness":[],"evidence-gate-mail-redelivery-canaries":[],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"linux-test-build":["pick-runner"],"linux-tests":["pick-runner","linux-test-build"],"linux-tests-shard-2":["pick-runner","linux-test-build"],"linux-tests-shard-3":["pick-runner","linux-test-build"],"linux-tests-shard-4":["pick-runner","linux-test-build"],"linux-clippy":["pick-runner"],"linux-fleet-compat":["pick-runner"],"mail-redelivery-canaries":["pick-runner","linux-test-build"],"linux-gate":["pick-runner","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","mail-redelivery-canaries"],"perf-cost":[],"isolation-vm":["pick-runner","linux-test-build"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness"],"fractal-web":["fractal-web-changes","fractal-web-execution"]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -761,7 +776,7 @@ jobs:
     name: genie-freshness
     env:
       CI_CACHE_DEV_SHELL: genie
-    needs: [pick-runner]
+    needs: [pick-runner, evidence-gate-genie-freshness]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -774,9 +789,10 @@ jobs:
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
           printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Restore the local Nix cache
         id: nix-cache
-        if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
+        if: (env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1') && needs.evidence-gate-genie-freshness.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/st-ci-cache"
@@ -796,6 +812,7 @@ jobs:
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
           summarize: true
+        if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Isolate test home and XDG state
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
@@ -804,17 +821,25 @@ jobs:
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
+        if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Use the cached Nix outputs
-        if: env.CI_LOCAL_CACHES != '1'
+        if: (env.CI_LOCAL_CACHES != '1') && needs.evidence-gate-genie-freshness.outputs.skip != 'true'
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Check frozen workspace dependency license coverage
         run: python3 scripts/ci-fractal-web-licenses-test && python3 scripts/ci-fractal-web-licenses --check-lockfile
+        if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Check runner selection and generated files
         shell: bash
         run: "nix develop '.#genie' -c bash -c 'python3 scripts/ci-ready-pr-test && python3 scripts/ci-draft-admission-test && python3 scripts/ci-workflow-concurrency-test && python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/evidence-verify-test && python3 scripts/ci-evidence-gate-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'"
+        if: needs.evidence-gate-genie-freshness.outputs.skip != 'true'
       - name: Save Nix outputs
-        if: success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')
+        if: (success() && env.CI_LOCAL_CACHES != '1' && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')) && needs.evidence-gate-genie-freshness.outputs.skip != 'true'
         run: bash scripts/ci-nix-cache save
+      - name: evidence covered by a trusted note
+        if: needs.evidence-gate-genie-freshness.outputs.skip == 'true'
+        env:
+          RECORD: ${{ needs.evidence-gate-genie-freshness.outputs.record }}
+        run: echo "covered by trusted evidence note $RECORD" >> "$GITHUB_STEP_SUMMARY"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -823,7 +848,7 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   typescript-client:
     name: typescript-client
-    needs: [pick-runner, genie-freshness]
+    needs: [pick-runner, genie-freshness, evidence-gate-typescript-client]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs.genie-freshness.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -839,25 +864,35 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.18.0
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Fingerprint the locked dependencies
         id: lockfiles
         run: |
           lockfiles_hash=$(sha256sum pnpm-lock.yaml | cut -d ' ' -f1)
           printf 'hash=%s\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Cache the locked TypeScript and Effect toolchain
         id: typescript-cache
         uses: actions/cache@v5
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Install the frozen workspace
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
         run: |
           corepack enable
           pnpm install --frozen-lockfile
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Check the client, shared views and iOS consumers
         run: bash scripts/ci-typescript-client
+        if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
+      - name: evidence covered by a trusted note
+        if: needs.evidence-gate-typescript-client.outputs.skip == 'true'
+        env:
+          RECORD: ${{ needs.evidence-gate-typescript-client.outputs.record }}
+        run: echo "covered by trusted evidence note $RECORD" >> "$GITHUB_STEP_SUMMARY"
       - name: Report job cache coverage
         if: always()
         shell: bash

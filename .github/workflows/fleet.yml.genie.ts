@@ -105,6 +105,25 @@ const linuxStageJob = ({
 })
 
 // Required gate. Label events belong to macos.yml so they never restart or cancel this workflow.
+// Skip a check's heavy steps when its evidence gate decided to skip (docs/st3/gate-evidence.md). The job
+// itself still runs and ends in success, so the check keeps its name and every `needs` on it keeps working.
+// The checkout is never skipped (the job's own cache-coverage report reads the repository), and a gate job
+// that failed, was skipped or never started has no output, so the steps run exactly as before.
+const skipIfCovered = (check: string, steps: readonly any[]) => {
+  const covered = `needs.evidence-gate-${check}.outputs.skip != 'true'`
+  return [
+    ...steps.map((step) =>
+      String(step.uses ?? '').startsWith('actions/checkout') ? step : { ...step, if: step.if == null ? covered : `(${step.if}) && ${covered}` },
+    ),
+    {
+      name: 'evidence covered by a trusted note',
+      if: `needs.evidence-gate-${check}.outputs.skip == 'true'`,
+      env: { RECORD: `\${{ needs.evidence-gate-${check}.outputs.record }}` },
+      run: 'echo "covered by trusted evidence note $RECORD" >> "$GITHUB_STEP_SUMMARY"',
+    },
+  ]
+}
+
 // Shadow mode: for each required check, ask the verifier from the accepted base whether a trusted note
 // exists for this run's tree and record the outcome in a fixed step name a collector can count.
 // It never skips a check, never fails, and is not itself a required check.
@@ -122,6 +141,7 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
   'timeout-minutes': 5,
   'continue-on-error': true,
   permissions: { contents: 'read' },
+  outputs: { skip: '${{ steps.gate.outputs.skip }}', record: '${{ steps.gate.outputs.record }}' },
   steps: [
     { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
     {
@@ -281,26 +301,27 @@ printf '\\n\\x60\\x60\\x60\\n' >> "$GITHUB_STEP_SUMMARY"`,
       name: 'genie-freshness',
       env: { CI_CACHE_DEV_SHELL: 'genie' },
       ...afterPickRunner,
+      needs: [...afterPickRunner.needs, 'evidence-gate-genie-freshness'],
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
-      steps: [
+      steps: skipIfCovered('genie-freshness', [
         ...commonSetupSteps.filter((step) => !('id' in step && step.id === 'cargo-cache') && step !== buildSnapshotPrepare && step !== buildSnapshotRestore),
         { name: 'Check frozen workspace dependency license coverage', run: 'python3 scripts/ci-fractal-web-licenses-test && python3 scripts/ci-fractal-web-licenses --check-lockfile' },
         nixDevelopStep({ name: 'Check runner selection and generated files', flake: '.#genie', command: ['bash', '-c', 'python3 scripts/ci-ready-pr-test && python3 scripts/ci-draft-admission-test && python3 scripts/ci-workflow-concurrency-test && python3 scripts/check-ci-runner-test && python3 scripts/ci-namespace-usage-test && python3 scripts/ci-mail-redelivery-canaries-test && python3 scripts/ci-test-partitions-test && python3 scripts/ci-test-archive-test && python3 scripts/ci-evidence-source-test && python3 scripts/evidence-verify-test && python3 scripts/ci-evidence-gate-test && python3 scripts/check-ci-test-paths && python3 scripts/ci-queue-watch-test && python3 scripts/check-main-ci-test && python3 scripts/ci-perf-cache-test && python3 scripts/ci-perf-slot-test && python3 scripts/ci-perf-scope-test && python3 scripts/ci-cache-audit-test && python3 scripts/ci-fractal-web-test && genie --check'] }),
         { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
-      ],
+      ]),
     },
     // Check the shared client and its iOS consumer before merge.
     'typescript-client': {
       name: 'typescript-client',
       // Keep generated-file validation ahead of its consumers.
-      needs: ['pick-runner', 'genie-freshness'],
+      needs: ['pick-runner', 'genie-freshness', 'evidence-gate-typescript-client'],
       if: "${{ !cancelled() && needs.genie-freshness.result == 'success' }}",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 10,
       defaults: { run: { shell: 'bash' } },
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
-      steps: [
+      steps: skipIfCovered('typescript-client', [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
         // Node 24, as in the workspace shell; schema tests use its native TypeScript loading.
         { uses: 'actions/setup-node@v4', with: { 'node-version': '24.18.0' } },
@@ -323,7 +344,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         // Corepack provisions the root manifest's pnpm@12.7.0; the workspace forbids install scripts.
         { name: 'Install the frozen workspace', env: pnpmStoreEnv, run: 'corepack enable\npnpm install --frozen-lockfile' },
         { name: 'Check the client, shared views and iOS consumers', run: 'bash scripts/ci-typescript-client' },
-      ],
+      ]),
     },
     'linux-test-build': {
       name: 'linux-test-build',
