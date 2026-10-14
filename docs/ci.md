@@ -531,7 +531,7 @@ The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Nod
 After the root frozen install, `bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
 `tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
-6.0.3 and Effect 4.0.0-rc.118. The iOS project allows explicit TypeScript import extensions
+6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
 ### Fractal web
@@ -550,9 +550,10 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
-  without a changed generated client file; root flake-only changes also do not trigger it.
+  without a changed generated client file; root `flake.nix` changes also do not trigger it.
   Other relevant paths are
   root `package.json*`, `pnpm-workspace.yaml*`, `pnpm-lock.yaml`,
+  `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
   `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
@@ -857,6 +858,36 @@ cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads
 ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
 
+#### The daemon beside a seat-priority hog
+
+`daemon_load::a_seat_priority_hog_leaves_the_request_latency_targets_reported` runs the steady load
+twice on one generated store: alone, then beside a CPU and disk hog at the priority seats get by
+default. On Linux that is nice 10 and best-effort IO priority 7; on macOS, `taskpolicy -b`
+(background QoS). The test process may itself run niced (cargo's tests run in `builds.slice` on
+hetz2, which a host timer renices to 10), so the hog runs 10 nice levels below the test process, at
+most 19, and the report names both. The hog is twice the online CPUs in busy loops and two writers
+that `fsync` 128 MiB files; the timed load starts once the 1-minute load average is past the
+core count (`ST_LOAD_HOG_RAMP_SECONDS`, 180 by default), and the run fails if the load average was
+not past it at the start, at its lowest 5-second sample or at the end.
+
+Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
+agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
+every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
+`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
+not, until `ST_LOAD_HOG_STRICT=1`.
+
+```sh
+ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo test --release \
+  -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
+```
+
+It is a step of its own and no required check until its numbers are stable. "Without the hog" is
+the host's load as it was: on a shared host that is not an idle machine, and the report gives the
+load average. Keep a Mac's load average under 10 outside the test window.
+
 #### Measuring a change on hetz2: the perf slot
 
 A builder measures a change with `nix develop .#perf -c bash scripts/ci-perf load`. Outside CI on
@@ -875,7 +906,7 @@ the machine.
 - A run past its timeout is stopped (SIGTERM, then SIGKILL after 10 s) and frees the slot. The
   timeout is two hours unless the run asks for less with `--timeout`; time in line does not
   count. A run stopped by it exits 124.
-- Only `load` is slotted, and only on hetz2. Anywhere else nothing shares the machine.
+- Only `load` and `load-hog` are slotted, and only on hetz2. Anywhere else nothing shares the machine.
   `scripts/ci-perf-slot-test` proves turns, order, kill, signals and timeout.
 
 The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
