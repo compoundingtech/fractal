@@ -206,3 +206,75 @@ message "cursor-legacy-2" { from "requester"; to "cursor-legacy"; content "two" 
     let store = Arc::downgrade(&state.store);
     assert!(!CLIENT_MESSAGE_CUTS.lock().iter().any(|cut|cut.store.ptr_eq(&store) && cut.cut_epoch==epoch));
 }
+
+#[tokio::test]
+async fn message_cursor_keeps_declared_fields_across_admission_then_same_index_projection() {
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    fn declare_pair(store: &Store, content: &str, key: &str) {
+        let kdl = format!("version 2\nagent \"cursor-lag\" {{ workspace \"/tmp\"; command \"true\" }}\nmessage \"cursor-lag-0\" {{ from \"requester\"; to \"cursor-lag\"; content \"{content} zero\" }}\nmessage \"cursor-lag-1\" {{ from \"requester\"; to \"cursor-lag\"; content \"{content} one\" }}\n");
+        let intent = crate::graph::parse_test_intent(&kdl, "cursor-source").unwrap();
+        let mission = store.mission(&intent, crate::model::IntentInput { kdl, source_name: None }).unwrap();
+        store.apply(&intent, &mission.subject_tokens, key).unwrap();
+    }
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    let source = Store::open_memory("cursor-source").unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    state.store.bind_fleet(FLEET).unwrap();
+    let now = client_now_ms();
+    source.set_write_clock_at(now.saturating_sub(60_000)).unwrap();
+    declare_pair(&source, "old", "old-cursor-pair");
+    let exchange = source.export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap()).unwrap();
+    state.store.receive_replication_exchange("cursor-source", FLEET, &exchange).unwrap();
+    let admission = state.store.validate_replication_backlog().unwrap();
+    assert_eq!((admission.invalid, admission.unknown), (0, 0));
+    assert!(state.store.project_replication_backlog().unwrap());
+    while state.store.maintain_client_message_selectors().unwrap() {}
+    let published = state.store.index().unwrap();
+    let expected = client_message_resources_at(&state.store, None, true, None, now).unwrap();
+    assert_eq!(expected.len(), 2);
+    source.set_write_clock_at(now.saturating_sub(30_000)).unwrap();
+    declare_pair(&source, "new", "new-cursor-pair");
+    let exchange = source.export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap()).unwrap();
+    state.store.receive_replication_exchange("cursor-source", FLEET, &exchange).unwrap();
+    let admission = state.store.validate_replication_backlog().unwrap();
+    assert_eq!((admission.invalid, admission.unknown), (0, 0));
+    let admitted = state.store.index().unwrap();
+    assert!(admitted > published);
+    assert!(state.store.client_message_selectors_pending().unwrap());
+    assert!(!state.store.maintain_client_message_selectors().unwrap());
+    assert_eq!(state.store.client_messages_page_cut(admitted).unwrap(), published);
+    let query = ClientListQuery { history: true, limit: Some(1), ..Default::default() };
+    let (Extension(snapshot), Json(page)) = client_messages_sql_page_at(
+        &state, new_client_snapshot(&state), &query, now,
+    ).await.unwrap();
+    assert_eq!(page.items, expected[..1]);
+    let cursor = page.page.next_cursor.expect("two declarations must span pages");
+    assert_eq!(decode_client_cursor(&cursor).unwrap().before_index, Some(published));
+    let epoch = state.store.client_messages_cut_epoch().unwrap();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let (events, _) = tokio::sync::watch::channel(0);
+    let (waiting, mut waits) = tokio::sync::mpsc::unbounded_channel();
+    let worker = tokio::spawn(crate::maintenance::run_client_message_selectors_observed(
+        Arc::downgrade(&state.store), notify.clone(), events,
+        move |active| { if !active { let _ = waiting.send(()); } },
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), waits.recv()).await.unwrap().unwrap();
+    smallclaims::store::FULL_REPLAYS.with(|count| count.set(0));
+    assert!(state.store.project_replication_backlog().unwrap());
+    assert_eq!(smallclaims::store::FULL_REPLAYS.with(std::cell::Cell::get), 0,
+        "incremental projection must not invalidate via replay DELETE");
+    assert_eq!(state.store.index().unwrap(), admitted);
+    tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified()).await.unwrap();
+    assert!(!state.store.client_message_selectors_pending().unwrap());
+    assert_eq!(state.store.client_messages_cut_epoch().unwrap(), epoch);
+    let continuation = ClientListQuery { cursor: Some(cursor), ..query };
+    let (_, Json(page)) = client_messages_sql_page_at(&state, snapshot, &continuation, now)
+        .await.unwrap();
+    assert_eq!(page.items, expected[1..]);
+    assert!(page.page.next_cursor.is_none());
+    let weak = Arc::downgrade(&state.store);
+    drop(state);
+    tokio::time::timeout(std::time::Duration::from_secs(3), worker).await.unwrap().unwrap();
+    assert!(weak.upgrade().is_none(), "idle selector worker must not own the Store");
+}

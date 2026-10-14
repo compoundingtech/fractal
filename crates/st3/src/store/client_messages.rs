@@ -645,12 +645,22 @@ fn fold_incomplete(connection: &Connection) -> Result<bool> {
     )?)
 }
 
+fn backfill_incomplete(connection: &Connection) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [BACKFILL_MARKER], |row| row.get(0),
+    )?)
+}
+
 /// One restart-safe transaction. `None` means a populated reopen did no work.
 /// Progress, headers, reminder winners and pending removal always commit together.
 fn backfill_chunk(connection: &mut Connection, reset: bool) -> Result<Option<(usize, bool, FoldBudget)>> {
     #[cfg(test)]
     let started = std::time::Instant::now();
     let transaction = connection.transaction()?;
+    // A reopened replica can have admitted declarations whose projection has
+    // not committed. Preserve the resume marker and let projection proceed;
+    // the source-driven worker resumes this same bounded driver afterwards.
+    if projection_blocks_selectors(&transaction, None)? { return Ok(None); }
     let saved: Option<String> = transaction.prepare_cached("SELECT value FROM meta WHERE key=?1")?
         .query_row([BACKFILL_MARKER], |row| row.get(0)).optional()?;
     let mut progress = if reset {
@@ -835,7 +845,11 @@ pub(super) fn finalize_commit(transaction: &Transaction<'_>) -> Result<FoldBudge
     if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(FoldBudget::default()); }
     // Startup/rebuild owns this queue until every header is available. Ordinary
     // replay hooks must not publish an incomplete selector projection.
-    let ready: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [MARKER], |row| row.get(0))?;
+    let ready: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)
+         AND NOT EXISTS(SELECT 1 FROM meta WHERE key=?2)",
+        params![MARKER, BACKFILL_MARKER], |row| row.get(0),
+    )?;
     if !ready { return Ok(FoldBudget::default()); }
     let budget = flush_pending(transaction, true)?;
     #[cfg(test)]
@@ -850,15 +864,34 @@ fn malformed_count(connection: &Connection) -> Result<u64> {
         .optional()?.map(|value| value.parse()).transpose()?.unwrap_or(0))
 }
 
+/// Admission and projection commit separately. Do not publish declaration-derived
+/// headers until the canonical projection covers the admitted remote declarations:
+/// otherwise projection can replace a header at an already issued store-index cut.
+fn projection_blocks_selectors(connection: &Connection, subject: Option<&str>) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+         WHERE subject=COALESCE(?1,(SELECT subject FROM local_client_message_selectors_v1
+           INDEXED BY client_selector_pending WHERE born_index=-1 ORDER BY subject LIMIT 1))
+           AND kind='intent.desired'
+           AND store_index>COALESCE((SELECT last_good_store_index
+             FROM projection_health WHERE aggregate='graph' AND status='healthy'),0)
+           AND EXISTS(SELECT 1 FROM replica_records
+             WHERE claim_id=claims.id AND state='valid'))",
+        [subject], |row| row.get(0),
+    )?)
+}
+
 /// One allowance per outer transaction: managed writers call only from their
 /// finalizer; startup calls once in each independently committed backfill chunk.
 /// Unfinished work survives COMMIT for the next worker loan.
 fn flush_pending(transaction: &Transaction<'_>, publish: bool) -> Result<FoldBudget> {
     let started = std::time::Instant::now();
     let mut budget = FoldBudget::default();
+    if projection_blocks_selectors(transaction, None)? { return Ok(budget); }
     let saved: Option<String> = transaction.query_row("SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0)).optional()?;
     let mut active = saved.map(|saved| serde_json::from_str::<FoldWork>(&saved)).transpose()?;
     while budget.subjects < BACKFILL_SUBJECTS && budget.claims < FOLD_CLAIMS && started.elapsed() < BACKFILL_WORK_BUDGET {
+        if projection_blocks_selectors(transaction, active.as_ref().map(|work| work.subject.as_str()))? { break; }
         let pending: Option<(String,u8,u64,Option<String>,String)> = if let Some(work) = &active {
             transaction.prepare_cached("SELECT subject,dirty_flags,created_index,reminder,recipient FROM local_client_message_selectors_v1 WHERE subject=?1 AND born_index=-1")?
                 .query_row([&work.subject], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?
@@ -1046,16 +1079,22 @@ impl Store {
     }
 
     pub fn client_message_selectors_pending(&self) -> Result<bool> {
-        has_pending(&self.readers.get())
+        let connection = self.readers.get();
+        Ok(has_pending(&connection)? || backfill_incomplete(&connection)?)
     }
 
     /// One bounded writer transaction; true requests another independent loan.
     pub fn maintain_client_message_selectors(&self) -> Result<bool> {
         {
             let connection = self.readers.get();
-            if !has_pending(&connection)? && !fold_incomplete(&connection)? && !has_selector_cleanup(&connection)? { return Ok(false); }
+            if projection_blocks_selectors(&connection, None)? { return Ok(false); }
+            if !has_pending(&connection)? && !backfill_incomplete(&connection)? && !fold_incomplete(&connection)? && !has_selector_cleanup(&connection)? { return Ok(false); }
         }
-        let mut connection = self.connection.write();
+        let mut connection = self.connection.write_background();
+        if backfill_incomplete(&connection)? {
+            backfill_chunk(&mut connection, false)?;
+            return Ok(backfill_incomplete(&connection)? || has_pending(&connection)?);
+        }
         let transaction = connection.transaction()?;
         let ready: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [MARKER], |row| row.get(0))?;
         if !ready { return Ok(false); }
@@ -1863,6 +1902,218 @@ mod tests {
         assert_eq!(rows[0]["message"]["to"],"person/blair");
     }
 
+    fn desired_row_snapshot(row: &Option<DesiredRow>) -> Value {
+        row.as_ref().map_or(Value::Null, |row| json!({
+            "kind": row.kind, "revision": row.revision, "claim_id": row.claim_id,
+            "body": row.body, "member": row.member, "owner_run": row.owner_run,
+            "owner_generation": row.owner_generation,
+        }))
+    }
+
+    fn assert_desired_parity(
+        connection: &mut Connection, subject: &str, cut: u64, fast: bool,
+    ) -> Value {
+        thread_local! {
+            static QUERIES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        fn capture(sql: &str) { QUERIES.with(|queries| queries.borrow_mut().push(sql.into())); }
+        QUERIES.with(|queries| queries.borrow_mut().clear());
+        connection.trace(Some(capture));
+        let production = desired_row_at(connection, subject, Some(cut)).unwrap();
+        connection.trace(None);
+        let queries = QUERIES.with(|queries| std::mem::take(&mut *queries.borrow_mut()));
+        let folded = queries.iter().any(|sql| sql.contains("SELECT id, body, predecessors FROM claims"));
+        assert_eq!(folded, !fast, "must exercise the intended declaration branch: {queries:?}");
+        let canonical = canonical_desired_row_at(connection, subject, cut).unwrap();
+        let snapshot = desired_row_snapshot(&production);
+        assert_eq!(snapshot, desired_row_snapshot(&canonical), "full desired-row parity at {cut}");
+        let created_index: u64 = connection.query_row(
+            "SELECT created_index FROM message_index WHERE subject=?1", [subject], |row| row.get(0),
+        ).unwrap();
+        let message = message_view_at(connection, subject, created_index, Some(cut)).unwrap();
+        let canonical_message = message_view_at_with_desired(
+            connection, subject, created_index, Some(cut),
+            || canonical_desired_row_at(connection, subject, cut),
+        ).unwrap();
+        assert_eq!(serde_json::to_value(message).unwrap(), serde_json::to_value(canonical_message).unwrap(),
+            "full message parity at {cut}, including projection deletion's non-resurrection rule");
+        snapshot
+    }
+    #[tokio::test]
+    async fn reopened_unprojected_declarations_resume_incomplete_backfill_on_projection_wake() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        let source = Store::open_memory("source").unwrap();
+        declare_message(&source);
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("admission-before-reopen.sqlite");
+        let target = Store::open(&path, "target").unwrap();
+        let exchange = super::super::tests::exchange_from(&source, &ReplicationInventory::default());
+        super::super::tests::receive_and_project(&target, "source", &exchange);
+        {
+            let mut connection = target.connection.write();
+            assert!(!backfill_chunk(&mut connection, true).unwrap().unwrap().1);
+        }
+        let kdl = "version 2\nagent \"keyed\" { workspace \"/tmp\"; command \"true\" }\nmessage \"keyed\" { from \"requester\"; to \"keyed\"; content \"projected after reopen\" }\n";
+        let intent = crate::graph::parse_test_intent(kdl, "source").unwrap();
+        let mission = source.mission(&intent, crate::model::IntentInput { kdl: kdl.into(), source_name: None }).unwrap();
+        source.apply(&intent, &mission.subject_tokens, "reopen-new-declaration").unwrap();
+        let exchange = super::super::tests::exchange_from(&source, &target.replication_inventory().unwrap());
+        target.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+        let admission = target.validate_replication_backlog().unwrap();
+        assert_eq!((admission.invalid, admission.unknown), (0, 0));
+        let admitted = target.index().unwrap();
+        drop(target);
+        let reopened = Arc::new(Store::open(&path, "target").unwrap());
+        assert_eq!(reopened.index().unwrap(), admitted);
+        assert!(backfill_incomplete(&reopened.readers.get()).unwrap());
+        assert!(reopened.client_messages_page_cut(admitted).is_err(), "incomplete startup has no invented cut zero");
+        assert!(reopened.client_message_selectors_pending().unwrap());
+        assert!(!reopened.maintain_client_message_selectors().unwrap());
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (events, _) = tokio::sync::watch::channel(0);
+        let (waiting, mut waits) = tokio::sync::mpsc::unbounded_channel();
+        let worker = tokio::spawn(crate::maintenance::run_client_message_selectors_observed(
+            Arc::downgrade(&reopened), notify.clone(), events,
+            move |active| { if !active { let _ = waiting.send(()); } },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), waits.recv()).await.unwrap().unwrap();
+        FULL_REPLAYS.with(|count| count.set(0));
+        assert!(reopened.project_replication_backlog().unwrap());
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+        assert_eq!(reopened.index().unwrap(), admitted);
+        tokio::time::timeout(std::time::Duration::from_secs(5), notify.notified()).await.unwrap();
+        assert!(!backfill_incomplete(&reopened.readers.get()).unwrap());
+        assert!(!reopened.client_message_selectors_pending().unwrap());
+        assert_eq!(reopened.client_messages_page_cut(admitted).unwrap(), admitted);
+        let rows = reopened.client_messages_page(None, None, true, admitted, None, 1).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.content, "projected after reopen");
+        let weak = Arc::downgrade(&reopened);
+        drop(reopened);
+        tokio::time::timeout(std::time::Duration::from_secs(3), worker).await.unwrap().unwrap();
+        assert!(weak.upgrade().is_none());
+    }
+
+
+    #[test]
+    fn admitted_declarations_defer_publication_until_same_index_incremental_projection() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        fn declare_pair(store: &Store, content: &str, key: &str) {
+            let kdl = format!("version 2\nagent \"lag\" {{ workspace \"/tmp\"; command \"true\" }}\nmessage \"lag-0\" {{ from \"requester\"; to \"lag\"; content \"{content} zero\" }}\nmessage \"lag-1\" {{ from \"requester\"; to \"lag\"; content \"{content} one\" }}\n");
+            let intent = crate::graph::parse_test_intent(&kdl, "source").unwrap();
+            let mission = store.mission(&intent, crate::model::IntentInput { kdl, source_name: None }).unwrap();
+            store.apply(&intent, &mission.subject_tokens, key).unwrap();
+        }
+        let source = Store::open_memory("source").unwrap();
+        let target = Store::open_memory("target").unwrap();
+        declare_pair(&source, "old", "old-pair");
+        let exchange = super::super::tests::exchange_from(&source, &ReplicationInventory::default());
+        super::super::tests::receive_and_project(&target, "source", &exchange);
+        while target.maintain_client_message_selectors().unwrap() {}
+        let published = target.index().unwrap();
+        let expected = target.client_messages_page(None, None, true, published, None, 10).unwrap();
+        assert_eq!(expected.len(), 2);
+        declare_pair(&source, "new", "new-pair");
+        let exchange = super::super::tests::exchange_from(&source, &target.replication_inventory().unwrap());
+        target.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+        let admission = target.validate_replication_backlog().unwrap();
+        assert_eq!((admission.invalid, admission.unknown), (0, 0));
+        let admitted = target.index().unwrap();
+        assert!(admitted > published);
+        assert!(target.client_message_selectors_pending().unwrap());
+        assert!(!target.maintain_client_message_selectors().unwrap(), "blocked loans await projection, not another busy-loop loan");
+        assert_eq!(target.client_messages_page_cut(admitted).unwrap(), published);
+        {
+            let mut connection = target.connection.write();
+            for subject in ["message/lag-0", "message/lag-1"] {
+                let selected = assert_desired_parity(&mut connection, subject, admitted, false);
+                assert!(selected["body"].as_str().unwrap().contains("new"));
+            }
+        }
+        let first = target.client_messages_page(None, None, true, published, None, 0).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(serde_json::to_value(&first[0]).unwrap(), serde_json::to_value(&expected[0]).unwrap());
+        FULL_REPLAYS.with(|count| count.set(0));
+        assert!(target.project_replication_backlog().unwrap());
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "the control must not use replay DELETE invalidation");
+        assert_eq!(target.index().unwrap(), admitted, "projection adds no claims");
+        while target.maintain_client_message_selectors().unwrap() {}
+        let after = (
+            first[0].1["sent_at"].as_str().unwrap().parse::<u128>().unwrap(),
+            first[0].0.subject.clone(),
+        );
+        let continuation = target.client_messages_page(None, None, true, published, Some(&after), 10).unwrap();
+        assert_eq!(serde_json::to_value(&continuation).unwrap(), serde_json::to_value(&expected[1..]).unwrap());
+        let mut connection = target.connection.write();
+        for subject in ["message/lag-0", "message/lag-1"] {
+            assert_desired_parity(&mut connection, subject, admitted, true);
+            assert_desired_parity(&mut connection, subject, published, false);
+        }
+    }
+
+    #[test]
+    fn historical_desired_fast_path_matches_canonical_retained_repair_and_removal() {
+        let source = Store::open_memory("source").unwrap();
+        declare_message(&source);
+        let replacement = source.selected_desired_token("message/keyed").unwrap().unwrap();
+        let kdl = "version 2\nagent \"keyed\" { workspace \"/tmp\"; command \"true\" }\nmessage \"keyed\" { from \"requester\"; to \"keyed\"; content \"replacement candidate\" }\n";
+        let intent = crate::graph::parse_test_intent(kdl, "source").unwrap();
+        let mission = source.mission(&intent, crate::model::IntentInput { kdl: kdl.into(), source_name: None }).unwrap();
+        source.apply(&intent, &mission.subject_tokens, "later-declaration").unwrap();
+        let original = source.selected_desired_token("message/keyed").unwrap().unwrap();
+        assert_ne!(original, replacement);
+        let reference = Store::open_memory("reference").unwrap();
+        let exchange = super::super::tests::exchange_from(&source, &ReplicationInventory::default());
+        super::super::tests::receive_and_project(&reference, "source", &exchange);
+        let record = reference.replica_records(false).unwrap().into_iter()
+            .find(|record| record.claim_id.as_deref() == Some(original.as_str())).unwrap();
+        reference.connection.write().execute(
+            "UPDATE replica_records SET state='unknown' WHERE record_ref=?1", [&record.record_ref],
+        ).unwrap();
+        reference.repair_replica_record(
+            &record.record_ref, &replacement, "restore retained declaration",
+            "person/alex", "historical-desired-repair",
+        ).unwrap();
+        let receiver = Store::open_memory("receiver").unwrap();
+        let exchange = super::super::tests::exchange_from(&reference, &ReplicationInventory::default());
+        super::super::tests::receive_and_project(&receiver, "reference", &exchange);
+        assert!(receiver.claim_by_id(&original).unwrap().is_some());
+        let cut = receiver.index().unwrap();
+        // An unrelated later claim makes this a genuinely historical cut without
+        // disabling the subject-local primary-key shortcut.
+        {
+            let mut connection = receiver.connection.write();
+            let transaction = connection.transaction().unwrap();
+            smallclaims::store::append_claim_record_tx(
+                &transaction, "receiver", "custom/historical-cut", "custom.test.recorded",
+                None, &json!({"fields":{"note":"later"}}), &[], None,
+            ).unwrap();
+            transaction.commit().unwrap();
+        }
+        let fresh_cut = receiver.index().unwrap();
+        assert!(fresh_cut > cut);
+        let mut connection = receiver.connection.write();
+        let expected = assert_desired_parity(&mut connection, "message/keyed", cut, true);
+        assert_eq!(expected["claim_id"], replacement);
+        assert_eq!(expected["kind"], "message");
+        assert!(expected["body"].as_str().unwrap().contains("keyed lookup"));
+        assert_eq!(assert_desired_parity(&mut connection, "message/keyed", fresh_cut, true), expected);
+        connection.execute("DELETE FROM replica_records WHERE claim_id=?1", [&original]).unwrap();
+        assert_eq!(assert_desired_parity(&mut connection, "message/keyed", cut, true), expected);
+        // Supported projection deletion invalidates cursor metadata, but the
+        // historical fallback must still reconstruct the canonical declaration.
+        connection.execute("DELETE FROM desired WHERE subject='message/keyed'", []).unwrap();
+        assert_eq!(assert_desired_parity(&mut connection, "message/keyed", cut, false), expected);
+        assert_eq!(assert_desired_parity(&mut connection, "message/keyed", fresh_cut, false), expected);
+        let created: u64 = connection.query_row(
+            "SELECT created_index FROM message_index WHERE subject='message/keyed'", [], |row| row.get(0),
+        ).unwrap();
+        assert!(message_view_at(&connection, "message/keyed", created, Some(fresh_cut)).unwrap().content.is_empty(),
+            "fresh message reads must not resurrect the removed projection");
+        connection.execute("DELETE FROM claims WHERE id=?1", [&original]).unwrap();
+        assert_eq!(assert_desired_parity(&mut connection, "message/keyed", cut, false), expected);
+    }
+
     #[test]
     fn historical_desired_selection_rejects_current_leaf_that_won_only_after_the_cut() {
         let store = Store::open_memory("node").unwrap();
@@ -1908,6 +2159,11 @@ mod tests {
         assert_eq!(historical.revision,revision_a);
         assert_eq!(serde_json::from_str::<Value>(&historical.body).unwrap(),a.desired);
         transaction.commit().unwrap();
+        let historical = assert_desired_parity(&mut connection, "message/keyed", through, false);
+        assert_eq!(historical["claim_id"], claim_a.id);
+        let fresh_cut = current_index_tx(&connection).unwrap();
+        let fresh = assert_desired_parity(&mut connection, "message/keyed", fresh_cut, true);
+        assert_eq!(fresh["claim_id"], claim_b.id);
     }
 
     #[test]
@@ -2069,6 +2325,7 @@ mod tests {
                 Some("agent/sender"), &json!({"fields": {
                     "from": "agent/sender", "to": recipient,
                     "content": "repair actual routing", "status": "sent",
+                    "tags": ["reminder:retained", if recipient == "agent/old" { "version:1" } else { "version:99" }],
                 }}), &[], None,
             ).unwrap();
             transaction.commit().unwrap();
@@ -2104,6 +2361,50 @@ mod tests {
         assert_eq!(rows[0]["message"]["to"], "agent/old");
         let unfiltered = paged_backfill_rows(&target, None, None, true);
         assert_eq!(unfiltered, rows, "selectors and the folded body must agree after repair");
+        // Import the repaired graph into another native replica. Unlike repairing
+        // in place, this keeps the authenticated original claim in its history.
+        let repaired_exchange = super::super::tests::exchange_from(&target, &ReplicationInventory::default());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("retained-message-repair.sqlite");
+        let receiver = Store::open(&path, "receiver").unwrap();
+        super::super::tests::receive_and_project(&receiver, "target", &repaired_exchange);
+        assert!(receiver.claim_by_id(&repaired).unwrap().is_some());
+        let assert_live = |store: &Store| {
+            while store.maintain_client_message_selectors().unwrap() {}
+            let (_, header) = current_header(&store.readers.get(), "message/repair-actual-route").unwrap().unwrap();
+            assert_eq!(header.recipient, "agent/old");
+            assert_eq!(header.reminder.as_deref(), Some("retained"));
+            assert_eq!(header.version, "00000000000000000001",
+                "a retained repaired version must not win reminder selection");
+            for history in [false, true] {
+                assert!(paged_backfill_rows(store, Some("agent/new"), None, history).is_empty());
+                let routed = paged_backfill_rows(store, Some("agent/old"), None, history);
+                assert_eq!(routed.len(), 1);
+                assert_eq!(routed[0]["message"]["to"], "agent/old");
+                assert_eq!(paged_backfill_rows(store, None, None, history), routed);
+                assert_eq!(routed[0]["message"]["tags"], json!(["reminder:retained", "version:1"]));
+            }
+        };
+        assert_live(&receiver);
+        receiver.connection.write().execute(
+            "DELETE FROM replica_records WHERE claim_id=?1", [&repaired],
+        ).unwrap();
+        assert!(receiver.claim_by_id(&repaired).unwrap().is_some());
+        assert_live(&receiver);
+        receiver.replay_replication_graph().unwrap();
+        assert_live(&receiver);
+        drop(receiver);
+        let receiver = Store::open(&path, "receiver").unwrap();
+        assert!(receiver.claim_by_id(&repaired).unwrap().is_some());
+        assert_live(&receiver);
+        receiver.connection.write().execute("DELETE FROM claims WHERE id=?1", [&repaired]).unwrap();
+        assert!(receiver.claim_by_id(&repaired).unwrap().is_none());
+        assert_live(&receiver);
+        receiver.replay_replication_graph().unwrap();
+        assert_live(&receiver);
+        drop(receiver);
+        let reopened = Store::open(&path, "receiver").unwrap();
+        assert_live(&reopened);
     }
 
     #[test]

@@ -1327,8 +1327,22 @@ headers; changed ordering or eligibility creates a temporal header, but body-onl
 not copy bodies or churn header versions. Initial selector backfill completes before readers
 are exposed. While later selector maintenance lags, pages and issued cursors pin the last fully
 published frontier; pending rows are invisible rather than making message lists fail.
+Admitted remote declarations do not advance that frontier until the durable graph projection
+covers them. An interrupted initial backfill retains its resume state and exposes no initial
+message-page cut until projection and bounded backfill complete.
+Selector maintenance wakes from committed source-writer notifications, including projection-only
+changes, rather than polling while idle. It drains independently bounded background writer loans;
+its own maintenance commits do not schedule another idle pass.
 Recipient delivery presence is live process evidence, not graph state: each page reassesses
 `recipient_delivery`, including its observation age, rather than retaining a stale report.
+
+Successful message-list responses fit the advertised `max_bytes` ceiling (1,048,576 bytes),
+including JSON escaping, attachments, the response envelope and any continuation cursor.
+The byte ceiling can return fewer resources than the requested count; the continuation starts
+after the last resource actually returned, so the remaining resources are not skipped.
+A single resource that cannot fit returns HTTP 422 with `response-too-large`, rather than an
+empty page or a silently omitted resource. A relayed response whose final local envelope cannot
+fit is refused with the same error.
 
 A read that no peer can carry fails with `remote-unavailable`, and its `details` say why, so a
 client can tell a host nobody reaches from a slow or refusing one: `reason` is `no-route` (this node

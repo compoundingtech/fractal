@@ -65,7 +65,27 @@ fn distribution(samples: &mut [Duration]) -> Value {
     assert!(!samples.is_empty());
     samples.sort_unstable();
     let percentile = |p: usize| samples[(samples.len() * p).div_ceil(100) - 1].as_secs_f64() * 1_000.0;
-    json!({"samples": samples.len(), "p50_ms": percentile(50), "p95_ms": percentile(95)})
+    json!({"samples": samples.len(), "p50_ms": percentile(50), "p95_ms": percentile(95),
+        "max_ms": samples.last().unwrap().as_secs_f64() * 1_000.0,
+        "samples_at_or_over_100ms": samples.iter().filter(|sample| **sample >= Duration::from_millis(100)).count()})
+}
+
+fn measured_checkpoint(store: &Store, path: &Path, scope: &str) -> Value {
+    let before = storage(path);
+    let start = Instant::now();
+    let (busy, log_frames, checkpointed_frames): (u64, i64, i64) = store.connection.write()
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+    let elapsed = start.elapsed();
+    let after = storage(path);
+    let result = json!({"scope": scope, "mode": "TRUNCATE",
+        "writer_admission_and_checkpoint_wall_ms": elapsed.as_secs_f64() * 1_000.0,
+        "busy": busy, "log_frames": log_frames, "checkpointed_frames": checkpointed_frames,
+        "before_storage": before, "after_storage": after});
+    eprintln!("{}", json!({"benchmark": "client_messages_selector_checkpoint", "checkpoint": result}));
+    assert_eq!(busy, 0, "isolated checkpoint must complete: {result}");
+    assert_eq!(after["wal_bytes"].as_u64().unwrap(), 0, "WAL segment must start at zero: {result}");
+    result
 }
 
 
@@ -157,6 +177,17 @@ fn seed_bulk(store: &Store, count: usize, closed: usize, metadata_per_message: u
         assert_eq!(claims.len(), metadata_per_message + 1 + usize::from(index < closed));
         assert!(claims.iter().all(|claim| claim_id_is_content_hash(claim).unwrap()));
     }
+    let measurement = backfill.benchmark_measurement();
+    eprintln!("{}", json!({"benchmark": "client_messages_selector_maintenance",
+        "messages": count, "closed_messages": closed,
+        "metadata_claims_per_message": metadata_per_message,
+        "selector_backfill_transactions": measurement,
+        "scope": "every explicit rebuild chunk, BEGIN through durable COMMIT; checkpoint outside transactions",
+        "transaction_target_ms": 100, "target_kind": "max", "target_met": backfill.longest_transaction < Duration::from_millis(100),
+        "scheduler_and_fsync_included": true}));
+    assert!(backfill.transactions > 0 && backfill.subjects > 0, "fixture must perform real maintenance: {backfill:?}");
+    assert!(backfill.longest_transaction < Duration::from_millis(100),
+        "selector maintenance transaction exceeded 100ms (not page p95): {backfill:?}");
     json!({"bulk_append_single_transaction_ms": append.as_secs_f64() * 1_000.0,
         "final_real_append_index_publication_ms": projection.as_secs_f64() * 1_000.0,
         "explicit_selector_header_backfill_ms": selectors.as_secs_f64() * 1_000.0,
@@ -316,6 +347,7 @@ fn commit_claim(store: &Store, index: usize, kind: &str, clock: usize) -> Durati
 #[ignore = "isolated real send/close commit and WAL comparison against source-only baseline"]
 fn benchmark_client_messages_selector_write_bursts() {
     const BURST: usize = 128;
+    let mut within_target = true;
     // Reverse the order on round two to expose warm-machine/order bias. Each
     // design has a fresh store; selector disabling is per Store, never global.
     for (round, designs) in [[false, true], [true, false]].into_iter().enumerate() {
@@ -327,6 +359,15 @@ fn benchmark_client_messages_selector_write_bursts() {
             store.client_messages_selector_benchmark_set_enabled(enabled).unwrap();
             store.client_messages_benchmark_prepare_io().unwrap();
             let before = storage(&path);
+            let io_policy = {
+                let writer = store.connection.write();
+                let synchronous: u32 = writer.pragma_query_value(None, "synchronous", |row| row.get(0)).unwrap();
+                let automatic: u32 = writer.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0)).unwrap();
+                let page_size: u64 = writer.pragma_query_value(None, "page_size", |row| row.get(0)).unwrap();
+                assert_eq!(synchronous, 2, "cost proof must retain FULL durability");
+                assert_eq!(automatic, 0, "isolated WAL comparison must not checkpoint inside commits");
+                json!({"synchronous": synchronous, "wal_autocheckpoint": automatic, "page_size": page_size})
+            };
             let mut classes = serde_json::Map::new();
             let mut final_views = Vec::new();
             for (kind, phase) in [("message.sent", 0), ("message.closed", 1)] {
@@ -338,16 +379,31 @@ fn benchmark_client_messages_selector_write_bursts() {
                         commit_claim(&store,index,"message.read",BURST+index*2+1);
                     }
                 }
-                store.client_messages_benchmark_checkpoint().unwrap();
+                let segment_start = measured_checkpoint(&store, &path, kind);
                 let mut samples = Vec::with_capacity(BURST);
+                let mut commits = Vec::with_capacity(BURST);
+                let burst_started = Instant::now();
                 for index in 0..BURST {
-                    samples.push(commit_claim(&store, index, kind, if phase==0 {index} else {3*BURST+index}));
+                    let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+                    let elapsed = commit_claim(&store, index, kind, if phase==0 {index} else {3*BURST+index});
+                    let finished_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+                    samples.push(elapsed);
+                    commits.push(json!({"commit": index, "append_claim_wall_ms": elapsed.as_secs_f64() * 1_000.0,
+                        "started_at_unix_us": started_at, "finished_at_unix_us": finished_at}));
                 }
+                let burst_wall = burst_started.elapsed();
                 let total = samples.iter().copied().sum::<Duration>();
-                let wal = storage(&path)["wal_bytes"].as_u64().unwrap();
+                let after = storage(&path);
+                let wal = after["wal_bytes"].as_u64().unwrap();
+                within_target &= samples.iter().all(|sample| *sample < Duration::from_millis(100));
                 let timing = distribution(&mut samples);
+                let checkpoint = measured_checkpoint(&store, &path, kind);
                 classes.insert(kind.into(), json!({"commit_inclusive": timing,
+                    "duration_scope": "append_claim call including writer admission, native append/projection, selector finalizer and durable COMMIT; not isolated SQL transaction timing",
+                    "commit_samples": commits, "burst_loop_wall_ms": burst_wall.as_secs_f64() * 1_000.0,
                     "burst_commits_wall_ms": total.as_secs_f64() * 1_000.0,
+                    "segment_start_checkpoint": segment_start, "post_burst_live_storage": after,
+                    "post_burst_checkpoint": checkpoint,
                     "wal_bytes": wal, "wal_bytes_per_commit": wal as f64 / BURST as f64}));
                 for index in 0..BURST {
                     let view = store.message(&subject(index)).unwrap().unwrap();
@@ -358,12 +414,15 @@ fn benchmark_client_messages_selector_write_bursts() {
             }
             let claims: usize = store.readers.get().query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0)).unwrap();
             assert_eq!(claims, BURST * 4);
-            store.client_messages_benchmark_checkpoint().unwrap();
+            let final_checkpoint = measured_checkpoint(&store, &path, "complete workload");
             let result = json!({"benchmark": "client_messages_selector_write", "round": round,
                 "selector_maintenance": enabled, "commits_per_burst": BURST, "classes": classes,
                 "before_storage": before, "checkpointed_storage": storage(&path),
-                "unmeasured_delivered_read_setup_commits": BURST*2,
-                "automatic_checkpoint_disabled": true, "synchronous": "Store production default"});
+                "delivered_read_setup_commits_excluded_from_class_distributions": BURST*2,
+                "final_checkpoint": final_checkpoint, "io_policy": io_policy,
+                "automatic_checkpoint_disabled": true, "synchronous": "FULL",
+                "transaction_target_ms": 100, "target_kind": "max",
+                "wal_scope": "physical WAL bytes after identical 128-commit bursts from verified TRUNCATE; includes WAL header, not daily database growth"});
             eprintln!("{result}");
             results.insert(enabled, (result, final_views));
         }
@@ -371,13 +430,84 @@ fn benchmark_client_messages_selector_write_bursts() {
         for kind in ["message.sent", "message.closed"] {
             let baseline = &results[&false].0["classes"][kind];
             let selectors = &results[&true].0["classes"][kind];
+            let baseline_wal = baseline["wal_bytes"].as_u64().unwrap();
+            let selector_wal = selectors["wal_bytes"].as_u64().unwrap();
+            assert!(baseline_wal > 0, "real source-only workload must write a WAL");
             eprintln!("{}", json!({"benchmark": "client_messages_selector_write_delta", "round": round,
                 "kind": kind,
                 "p95_ms_delta": selectors["commit_inclusive"]["p95_ms"].as_f64().unwrap() - baseline["commit_inclusive"]["p95_ms"].as_f64().unwrap(),
+                "max_ms_delta": selectors["commit_inclusive"]["max_ms"].as_f64().unwrap() - baseline["commit_inclusive"]["max_ms"].as_f64().unwrap(),
+                "wal_growth_percent": 100.0 * (selector_wal as f64 / baseline_wal as f64 - 1.0),
+                "baseline_wal_bytes": baseline_wal, "selector_wal_bytes": selector_wal,
                 "burst_wall_ms_delta": selectors["burst_commits_wall_ms"].as_f64().unwrap() - baseline["burst_commits_wall_ms"].as_f64().unwrap(),
                 "wal_bytes_delta": i128::from(selectors["wal_bytes"].as_u64().unwrap()) - i128::from(baseline["wal_bytes"].as_u64().unwrap())}));
         }
     }
+    assert!(within_target, "real append call exceeded 100ms; preserve every baseline/selector sample and investigate COMMIT, admission and scheduler/fsync tail");
+}
+
+#[test]
+#[ignore = "isolated real deferred selector maintenance loans, including durable COMMIT"]
+fn benchmark_client_messages_selector_deferred_maintenance() {
+    const COUNT: usize = 128;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("selector-maintenance.sqlite");
+    let store = Store::open(&path, "selector-benchmark").unwrap();
+    store.client_messages_benchmark_prepare_io().unwrap();
+    let fixture = seed_bulk(&store, COUNT, 0, METADATA);
+    measured_checkpoint(&store, &path, "deferred maintenance fixture");
+    store.set_write_clock_at(BASE_TIME + 1).unwrap();
+    let start = Instant::now();
+    {
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        for index in 0..COUNT {
+            let claim = append_claim_record_tx(&tx, "selector-benchmark", &subject(index),
+                "message.delivered", Some(parties(index).1),
+                &json!({"fields": {"status": "delivered"}}), &[], None).unwrap();
+            assert!(claim_id_is_content_hash(&claim).unwrap());
+        }
+        tx.commit().unwrap();
+    }
+    let source_append = start.elapsed();
+    assert!(store.client_message_selectors_pending().unwrap(),
+        "source batch must leave real deferred selector work after its bounded finalizer");
+    let before = storage(&path);
+    let mut samples = Vec::new();
+    let mut loans = Vec::new();
+    loop {
+        let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        let start = Instant::now();
+        let more = store.maintain_client_message_selectors().unwrap();
+        let elapsed = start.elapsed();
+        let finished_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        samples.push(elapsed);
+        loans.push(json!({"loan": loans.len(), "wall_ms": elapsed.as_secs_f64() * 1_000.0,
+            "started_at_unix_us": started_at, "finished_at_unix_us": finished_at, "more": more}));
+        if !more { break; }
+    }
+    let within_target = samples.iter().all(|sample| *sample < Duration::from_millis(100));
+    let live = storage(&path);
+    let checkpoint = measured_checkpoint(&store, &path, "deferred maintenance drained");
+    eprintln!("{}", json!({"benchmark": "client_messages_selector_deferred_maintenance",
+        "fixture": fixture, "source_batch_append_including_commit_ms": source_append.as_secs_f64() * 1_000.0,
+        "maintenance_call_wall": distribution(&mut samples), "loans": loans,
+        "duration_scope": "maintain_client_message_selectors call: preflight read, writer admission, BEGIN, finalizer, durable COMMIT and remaining-work check; conservative transaction envelope, not isolated step/COMMIT timing",
+        "automatic_checkpoint_disabled": true, "transaction_target_ms": 100, "target_kind": "max",
+        "before_maintenance_storage": before, "after_maintenance_live_storage": live,
+        "checkpoint": checkpoint, "target_met": within_target}));
+    assert!(!store.client_message_selectors_pending().unwrap(), "maintenance must drain native work");
+    let reader = store.readers.get();
+    let headers: usize = reader.query_row(
+        "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND global_current=1",
+        [], |row| row.get(0)).unwrap();
+    assert_eq!(headers, COUNT, "every real delivered message must have a complete current header");
+    for index in [0, COUNT / 2, COUNT - 1] {
+        assert_eq!(store.message(&subject(index)).unwrap().unwrap().status, "delivered");
+    }
+    drop(reader);
+    assert_complete_selector_pages_match_oracle(&store);
+    assert!(within_target, "deferred maintenance call exceeded 100ms including COMMIT: retain loan receipts and investigate");
 }
 
 fn offline_source_counts(path: &Path) -> (u64, u64) {
@@ -412,12 +542,12 @@ fn benchmark_client_messages_selector_migration_copy() {
     assert_eq!(counts, source_counts, "migration cannot alter claim authority or message coverage");
     // Explicit rebuild separately isolates selector/header work from other Store
     // startup migrations. Both costs and their WAL are reported, not conflated.
-    store.client_messages_benchmark_checkpoint().unwrap();
+    let pre_rebuild_checkpoint = measured_checkpoint(&store, &path, "offline before explicit rebuild");
     let start = Instant::now();
     let rebuild_backfill = store.client_messages_selector_benchmark_rebuild().unwrap();
     let rebuild = start.elapsed();
     let rebuilt_live = storage(&path);
-    store.client_messages_benchmark_checkpoint().unwrap();
+    let post_rebuild_checkpoint = measured_checkpoint(&store, &path, "offline after explicit rebuild");
     let checkpointed = storage(&path);
     let cut = store.index().unwrap();
     let case = CASES[1];
@@ -441,6 +571,10 @@ fn benchmark_client_messages_selector_migration_copy() {
         "populated_reopen_ms": reopen.as_secs_f64() * 1_000.0,
         "before_storage": before, "after_open_live_storage": live,
         "after_explicit_rebuild_live_storage": rebuilt_live, "checkpointed_storage": checkpointed,
+        "pre_rebuild_checkpoint": pre_rebuild_checkpoint, "post_rebuild_checkpoint": post_rebuild_checkpoint,
+        "transaction_target_ms": 100, "target_kind": "max",
+        "transaction_scope": "every startup/rebuild chunk BEGIN through durable COMMIT, checkpoint separately; not total Store open or writer admission",
+        "wal_scope": "physical file sizes; backfill performs PASSIVE checkpoint before returning, so after-open/rebuild WAL is not cumulative bytes written",
         "source_open_flags": "READ_ONLY", "mutated_database": "fresh temporary copy only"}));
     assert!(startup_backfill.subjects > 0,
         "offline migration input must need selector backfill, not already contain a completed selector projection");

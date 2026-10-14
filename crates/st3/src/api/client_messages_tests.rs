@@ -122,6 +122,9 @@ async fn collect_sql_pages(
         assert_eq!(returned_snapshot.store_index, snapshot.store_index);
         assert_eq!(page.collection, "messages");
         assert_eq!(page.filters, client_page_filters("messages", &query));
+        assert!(client_message_envelope_size(
+            &returned_snapshot, &page, "request/00000000-0000-0000-0000-000000000000",
+        ).unwrap() <= CLIENT_MAX_RESPONSE_BYTES);
         assert!(page.items.len() <= page.page.limit);
         assert_eq!(page.page.has_more, page.page.next_cursor.is_some());
         let cursor = page.page.next_cursor;
@@ -204,6 +207,15 @@ async fn sql_message_pages_preserve_local_body_references_without_inlining_text(
     for (message, size) in messages {
         let resource = actual.iter().find(|item| item["id"] == message.subject).unwrap();
         assert_eq!(resource["content"], message.content);
+        let Json(detail) = client_messages_detail(
+            State(state.clone()),
+            Extension(client_v0::ClientSession::for_tests("person/alex", "person/alex", "unix")),
+            AxumPath(message.subject.clone()),
+            Query(ClientListQuery { history: true, ..Default::default() }),
+        ).await.unwrap();
+        assert_eq!(detail["body_ref"], resource["body_ref"]);
+        assert_eq!(detail["body_bytes"], resource["body_bytes"]);
+        assert_eq!(detail["content"], resource["content"]);
         if size > crate::message_body::INLINE_MAX_BYTES {
             assert_eq!(resource["body_ref"], message.body_ref.as_deref().unwrap());
             assert_eq!(resource["body_bytes"], size as u64);
@@ -214,6 +226,157 @@ async fn sql_message_pages_preserve_local_body_references_without_inlining_text(
             assert_eq!(resource["content"].as_str().unwrap().len(), size);
         }
     }
+}
+
+fn append_byte_budget_message(store: &Store, index: usize, content: &str, attachment_name: Option<&str>) {
+    let mut fields = BTreeMap::from([
+        ("from".into(), json!("person/alex")),
+        ("to".into(), json!("agent/byte-recipient")),
+        ("content".into(), json!(content)),
+        ("status".into(), json!("sent")),
+    ]);
+    if let Some(name) = attachment_name {
+        fields.insert("attachments".into(), json!([{
+            "sha256": "ab".repeat(32), "media_type": "image/png",
+            "name": name, "size": 42, "origin": "host/byte-fixture"
+        }]));
+    }
+    append_fixture_claim(
+        store, &format!("message/byte-{index:05}"), "message.sent", "person/alex", fields,
+    );
+}
+
+async fn wrapped_message_page(
+    state: &AppState,
+    snapshot: ClientSnapshot,
+    page: ClientResourcePage,
+    request_id: &str,
+) -> Vec<u8> {
+    let context = response_body::Context {
+        state: state.clone(), client_request: true, observation_report: false,
+        request_id: request_id.into(), client_snapshot: Some(snapshot),
+        server: None, roster: false,
+    };
+    let response = context.wrap(Json(page).into_response()).await.unwrap();
+    to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec()
+}
+
+#[tokio::test]
+async fn sql_message_pages_bound_complete_wire_bytes_and_traverse_maximum_content() {
+    for content in [
+        "a".repeat(crate::message_body::INLINE_MAX_BYTES),
+        "λ".repeat(crate::message_body::INLINE_MAX_BYTES / 2),
+        "\u{0001}\"\\\n".repeat(crate::message_body::INLINE_MAX_BYTES / 4),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::state(root.path());
+        for index in 0..201 {
+            append_byte_budget_message(&state.store, index, &content, Some("image \"λ\"\\\n.png"));
+        }
+        let now = client_now_ms();
+        let expected = client_message_resources_at(&state.store, None, true, None, now).unwrap();
+        let snapshot = new_client_snapshot(&state);
+        let request_id = "request/escaped-\"λ\"\\\n";
+        let mut query = ClientListQuery { history: true, limit: Some(200), ..Default::default() };
+        let mut actual = Vec::new();
+        let mut pages = 0;
+        loop {
+            let (Extension(returned), Json(page)) = client_messages_sql_page_with_envelope(
+                &state, snapshot.clone(), &query, now, request_id, None,
+            ).await.unwrap();
+            assert!(!page.items.is_empty());
+            let counted = client_message_envelope_size(&returned, &page, request_id).unwrap();
+            if pages == 0 {
+                assert!(page.items.len() < 200, "bytes, not item count, must truncate this page");
+            }
+            if let Some(encoded) = &page.page.next_cursor {
+                let cursor = decode_client_cursor(encoded).unwrap();
+                assert_eq!(cursor.after_key.as_ref().unwrap().1, page.items.last().unwrap()["id"].as_str().unwrap());
+                assert_eq!(cursor.offset, actual.len() + page.items.len());
+            }
+            let next = page.page.next_cursor.clone();
+            actual.extend(page.items.iter().cloned());
+            let bytes = wrapped_message_page(&state, returned, page, request_id).await;
+            assert_eq!(bytes.len(), counted);
+            assert!(bytes.len() <= CLIENT_MAX_RESPONSE_BYTES);
+            let wire: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(wire["request_id"], request_id);
+            pages += 1;
+            assert!(pages <= 201, "continuation must make progress");
+            let Some(next) = next else { break };
+            query.cursor = Some(next);
+        }
+        assert_eq!(actual, expected, "byte truncation must neither lose nor duplicate resources");
+        assert!(pages > 1);
+    }
+}
+
+#[tokio::test]
+async fn sql_message_page_counts_attachment_and_envelope_at_exact_boundary() {
+    let request_id = "request/boundary-\"λ\"";
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    // A supported folded attachment has no inline-body limit. Tune its ASCII
+    // name using the real serialized response, not a guessed metadata allowance.
+    append_byte_budget_message(&state.store, 0, "body", Some(""));
+    let query = ClientListQuery { history: true, limit: Some(1), ..Default::default() };
+    let now = client_now_ms();
+    let snapshot = new_client_snapshot(&state);
+    let (Extension(returned), Json(page)) = client_messages_sql_page_with_envelope(
+        &state, snapshot, &query, now, request_id, None,
+    ).await.unwrap();
+    let base = wrapped_message_page(&state, returned, page, request_id).await.len();
+    let padding = CLIENT_MAX_RESPONSE_BYTES - base;
+    // Same subject: preserve fixed-width timestamps/revisions and field shapes.
+    append_fixture_claim(
+        &state.store, "message/byte-00000", "message.sent", "person/alex",
+        BTreeMap::from([
+            ("from".into(), json!("person/alex")), ("to".into(), json!("agent/byte-recipient")),
+            ("content".into(), json!("body")), ("status".into(), json!("sent")),
+            ("attachments".into(), json!([{
+                "sha256": "ab".repeat(32), "media_type": "image/png",
+                "name": "x".repeat(padding), "size": 42, "origin": "host/byte-fixture"
+            }])),
+        ]),
+    );
+    let snapshot = new_client_snapshot(&state);
+    let (Extension(returned), Json(page)) = client_messages_sql_page_with_envelope(
+        &state, snapshot, &query, now, request_id, None,
+    ).await.unwrap();
+    let bytes = wrapped_message_page(&state, returned, page, request_id).await;
+    assert_eq!(bytes.len(), CLIENT_MAX_RESPONSE_BYTES);
+    append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(padding + 1)));
+    let error = client_messages_sql_page_with_envelope(
+        &state, new_client_snapshot(&state), &query, now, request_id, None,
+    ).await.expect_err("one encoded byte over the ceiling must be refused");
+    assert_eq!(error.code, "response-too-large");
+}
+
+#[tokio::test]
+async fn sql_message_page_refuses_oversized_single_item_without_skipping_it() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(CLIENT_MAX_RESPONSE_BYTES)));
+    let snapshot = new_client_snapshot(&state);
+    let error = client_messages_sql_page(
+        &state, snapshot,
+        &ClientListQuery { history: true, ..Default::default() },
+    ).await.expect_err("an oversized item must not become an empty page or be silently omitted");
+    assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error.code, "response-too-large");
+    assert!(error.message.contains("cannot omit"));
+    append_byte_budget_message(&state.store, 1, "small newer message", None);
+    let snapshot = new_client_snapshot(&state);
+    let query = ClientListQuery { history: true, ..Default::default() };
+    let (Extension(snapshot), Json(first)) =
+        client_messages_sql_page(&state, snapshot, &query).await.unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0]["id"], "message/byte-00001");
+    let error = client_messages_sql_page(
+        &state, snapshot,
+        &ClientListQuery { cursor: first.page.next_cursor, ..query },
+    ).await.expect_err("continuation must refuse the retained oversized candidate, not skip it");
+    assert_eq!(error.code, "response-too-large");
 }
 
 #[tokio::test]

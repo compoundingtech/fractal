@@ -81,16 +81,63 @@ pub async fn migrate_event_payloads(store: Arc<Store>) -> Result<EventMigrationR
     }
 }
 
-/// Source transactions do only one bounded fold. This weakly owned daemon worker
-/// completes queued folds in later writer loans, including queues left by trimming.
+thread_local! {
+    // Lent-writer observers run synchronously on the returning thread. Ignore only this
+    // worker's own loans, never another thread's concurrent source/projection transaction.
+    static SELECTOR_LOAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct SelectorLoan;
+
+impl SelectorLoan {
+    fn enter() -> Self {
+        SELECTOR_LOAN.with(|active| active.set(true));
+        Self
+    }
+}
+
+impl Drop for SelectorLoan {
+    fn drop(&mut self) {
+        SELECTOR_LOAN.with(|active| active.set(false));
+    }
+}
+
+/// Drain startup work and react to committed source changes, including projection-only
+/// commits, repair, trimming and rebuild. Each chunk has independent background admission.
+/// No Store owner or blocking task survives while waiting for a source change.
 pub async fn run_client_message_selectors(
     store: std::sync::Weak<Store>,
     notify: Arc<tokio::sync::Notify>,
     events: tokio::sync::watch::Sender<u64>,
 ) {
-    loop {
+    run_client_message_selectors_observed(store, notify, events, |_| {}).await;
+}
+
+pub(crate) async fn run_client_message_selectors_observed(
+    store: std::sync::Weak<Store>,
+    notify: Arc<tokio::sync::Notify>,
+    events: tokio::sync::watch::Sender<u64>,
+    mut on_turn: impl FnMut(bool) + Send,
+) {
+    let (source, mut changed) = tokio::sync::watch::channel(());
+    let observer = {
         let Some(current) = store.upgrade() else { return; };
+        // Subscribe before the initial durable read. The observer owns the sender, not
+        // this task, so dropping the Store closes the channel and ends an idle worker.
+        current.observe_commits(move |_| {
+            if !SELECTOR_LOAN.with(std::cell::Cell::get) {
+                source.send_replace(());
+            }
+        })
+    };
+    loop {
+        // Consume before draining, not after: a commit during the read/drain/wait
+        // registration remains unseen and changed() completes without losing the wake.
+        changed.borrow_and_update();
+        let Some(current) = store.upgrade() else { return; };
+        on_turn(true);
         let result = tokio::task::spawn_blocking(move || {
+            let _loan = SelectorLoan::enter();
             let pending = current.client_message_selectors_pending()?;
             let more = current.maintain_client_message_selectors()?;
             let remaining = current.client_message_selectors_pending()?;
@@ -105,16 +152,23 @@ pub async fn run_client_message_selectors(
                 more
             }
             Ok(Err(error)) => {
-                tracing::warn!(error = %error, "message selector maintenance deferred");
-                false
+                tracing::error!(error = %error, "message selector maintenance stopped");
+                return;
             }
             Err(error) => {
-                tracing::warn!(error = %error, "message selector maintenance task failed");
-                false
+                tracing::error!(error = %error, "message selector maintenance task failed; worker stopped");
+                return;
             }
         };
-        tokio::time::sleep(if more { Duration::from_millis(20) } else { Duration::from_secs(1) }).await;
+        if more {
+            // Active chunks release the writer and yield before requesting another loan.
+            tokio::task::yield_now().await;
+        } else {
+            on_turn(false);
+            if changed.changed().await.is_err() { break; }
+        }
     }
+    drop(observer);
 }
 
 fn contention(error: &anyhow::Error) -> bool {
@@ -269,16 +323,101 @@ mod tests {
         assert!(weak.upgrade().is_none(), "idle worker must not keep its store alive");
     }
 
-    #[test]
-    fn idle_selector_maintenance_never_borrows_or_commits_the_writer() {
-        let store = Store::open_memory("node").unwrap();
+    #[tokio::test]
+    async fn idle_selector_worker_does_no_new_reads_tasks_or_writer_work() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
         let commits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let count = commits.clone();
         let _observer = store.connection.observe_commits(move |_| {
-            count.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         });
-        assert!(!store.maintain_client_message_selectors().unwrap());
-        assert!(!store.maintain_client_message_selectors().unwrap());
-        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed),0);
+        let (turns, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let (events, _) = tokio::sync::watch::channel(0);
+        let weak = Arc::downgrade(&store);
+        let worker = tokio::spawn(run_client_message_selectors_observed(
+            weak.clone(), Arc::new(tokio::sync::Notify::new()), events,
+            move |working| { turns.send(working).unwrap(); },
+        ));
+        assert!(observed.recv().await.unwrap(), "one startup read task");
+        assert!(!observed.recv().await.unwrap(), "startup reached source wait");
+        // Longer than the old idle polling period. Every task/read phase is instrumented,
+        // not just commits: no new phase may run without a source transaction.
+        assert!(tokio::time::timeout(Duration::from_millis(1200), observed.recv()).await.is_err());
+        assert_eq!(commits.load(std::sync::atomic::Ordering::Relaxed), 0);
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
+        assert!(weak.upgrade().is_none());
+    }
+
+    fn queue_selectors(store: &Store, prefix: &str) {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        for index in 0..32 {
+            smallclaims::store::append_claim_record_tx(
+                &transaction, "node", &format!("message/{prefix}-{index:02}"),
+                "message.sent", Some("person/sender"),
+                &serde_json::json!({"fields":{"from":"person/sender","to":"person/recipient","content":"reactive","status":"sent","tags":[]}}),
+                &[], None,
+            ).unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+
+    #[tokio::test]
+    async fn selector_worker_reacts_to_source_commit_after_idle() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let (turns, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (events, received) = tokio::sync::watch::channel(0);
+        let worker = tokio::spawn(run_client_message_selectors_observed(
+            Arc::downgrade(&store), notify.clone(), events,
+            move |working| { turns.send(working).unwrap(); },
+        ));
+        assert!(observed.recv().await.unwrap());
+        assert!(!observed.recv().await.unwrap());
+        queue_selectors(&store, "after-idle");
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        assert!(!store.client_message_selectors_pending().unwrap());
+        assert_eq!(*received.borrow(), 1);
+        while observed.recv().await.unwrap() {}
+        assert!(tokio::time::timeout(Duration::from_millis(1200), observed.recv()).await.is_err(),
+            "the worker's own maintenance commits must not cause an idle self-wake");
+        // A destructive source transaction advances no admitted claim index. It must
+        // nevertheless wake and drain all the selectors dirtied by removal/trimming.
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute("DELETE FROM claims WHERE subject LIKE 'message/after-idle-%'", []).unwrap();
+            transaction.commit().unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        assert!(!store.client_message_selectors_pending().unwrap());
+        assert_eq!(*received.borrow(), 2);
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn selector_worker_retains_commit_during_wait_registration() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = Arc::downgrade(&store);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (events, received) = tokio::sync::watch::channel(0);
+        let mut injected = false;
+        let worker = tokio::spawn(run_client_message_selectors_observed(
+            Arc::downgrade(&store), notify.clone(), events,
+            move |working| {
+                if !working && !injected {
+                    injected = true;
+                    // Exactly between the empty drain and changed().await, not a timing guess.
+                    queue_selectors(&source.upgrade().unwrap(), "wait-race");
+                }
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(5), notify.notified()).await.unwrap();
+        assert!(!store.client_message_selectors_pending().unwrap());
+        assert_eq!(*received.borrow(), 1);
+        drop(store);
+        tokio::time::timeout(Duration::from_secs(3), worker).await.unwrap().unwrap();
     }
 }
