@@ -4301,7 +4301,10 @@ fn normalize_omp(
             push_omp_exit(items, sequence, &timestamp, &value["data"]);
             let block = &mut items.last_mut().expect("exit item just pushed")["body"]["blocks"][0];
             block["payload"] = json!({"body_ref": true, "raw": value});
-            if let Some((_, view, visibility)) = record_view {
+            if let Some((_, view, visibility)) = record_view
+                && view["kind"].is_string()
+                && view["reason"].is_string()
+            {
                 block["view"] = view;
                 if let Some(visibility) = visibility {
                     block["visibility"] = json!(visibility);
@@ -5869,6 +5872,11 @@ mod tests {
                 json!({"reason":"dispose"}),
                 Some("native_session_exit_unknown"),
             ),
+            (json!({"kind":"normal"}), None),
+            (
+                json!({"kind":null,"reason":{"future":true}}),
+                Some("native_session_exit_unknown"),
+            ),
         ] {
             let mut data = data;
             data["pendingToolCalls"] =
@@ -5887,6 +5895,13 @@ mod tests {
             let block = &entry["body"]["blocks"][0];
             assert_eq!(block["payload"]["body_ref"], true, "{data}");
             assert_eq!(block["payload"]["raw"]["data"], data);
+            if data["kind"].is_string() && data["reason"].is_string() {
+                assert_eq!(block["view"]["type"], "session_exit");
+                assert_eq!(block["view"]["kind"], data["kind"]);
+                assert_eq!(block["view"]["reason"], data["reason"]);
+            } else {
+                assert!(block.get("view").is_none(), "{data}");
+            }
             if let Some(code) = expected_code {
                 assert_eq!(entry["type"], "error", "{data}");
                 assert_eq!(entry["body"]["code"], code, "{data}");
