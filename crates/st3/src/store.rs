@@ -29465,12 +29465,16 @@ fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), S
                     .collect::<rusqlite::Result<Vec<_>>>()
                     .map_err(internal)?,
             );
-            found.extend(created.iter().filter_map(|(child, parent)| {
-                parent
-                    .as_deref()
-                    .is_some_and(|parent| parent.starts_with(&start))
-                    .then(|| child.clone())
-            }));
+            found.extend(
+                created
+                    .iter()
+                    .filter(|(_, parent)| {
+                        parent
+                            .as_deref()
+                            .is_some_and(|parent| parent.starts_with(&start))
+                    })
+                    .map(|(child, _)| child.clone()),
+            );
         }
         for run in found {
             if runs.insert(run.clone()) {
