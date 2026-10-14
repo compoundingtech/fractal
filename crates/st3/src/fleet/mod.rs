@@ -2,11 +2,11 @@
 //! from `fleet.toml` and the transports live in `smallclaims::fleet`. See `docs/fleet-join.md`
 //! for the design.
 
-pub use smallclaims::fleet::{code, file, handshake, join, keys, membership, transport, view};
 pub use smallclaims::fleet::{
     Acceptance, FleetClaim, FleetView, Incarnation, MemberKey, MemberState, MemberView, Membership,
     Refusal, Sender, Window, accept, envelope_signature_message, verify_signature,
 };
+pub use smallclaims::fleet::{code, file, handshake, join, keys, membership, transport, view};
 
 use anyhow::Result;
 
@@ -17,6 +17,14 @@ use crate::store::Store;
 pub fn activate(store: &Store, config: &Config) -> Result<()> {
     match &config.fleet {
         Some(file) => smallclaims::fleet::activate(store, &config.state_dir, file),
+        None => Ok(()),
+    }
+}
+
+/// Restore credentials before startup writes; history activation follows API binding.
+pub fn prepare(store: &Store, config: &Config) -> Result<()> {
+    match &config.fleet {
+        Some(file) => smallclaims::fleet::prepare(store, &config.state_dir, file),
         None => Ok(()),
     }
 }

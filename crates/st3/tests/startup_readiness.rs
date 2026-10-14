@@ -35,6 +35,115 @@ fn command(root: &Path) -> Command {
 }
 
 #[test]
+fn private_runtime_socket_refuses_shared_gateway_before_creating_state() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("run")).unwrap();
+    let alias = root.path().join("runtime-alias");
+    std::os::unix::fs::symlink(root.path().join("run"), &alias).unwrap();
+    for directory in [root.path().join("run"), alias] {
+        let output = command(root.path())
+            .arg("up")
+            .arg("--socket")
+            .arg(directory.join("private-st.sock"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("pass --client-gateway-socket; the derived private gateway"),
+            "{error}"
+        );
+        assert!(
+            error.contains("equals the shared default gateway"),
+            "{error}"
+        );
+        assert!(!root.path().join("home/.local/state").exists());
+        assert!(!root.path().join("run/private-st.sock").exists());
+        assert!(!root.path().join("run/st3-client.sock").exists());
+    }
+}
+
+#[test]
+fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_missing_runtime_directory()
+{
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let alias = root.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let output = command(root.path())
+        .env("XDG_RUNTIME_DIR", real.join("run"))
+        .arg("up")
+        .arg("--socket")
+        .arg(alias.join("run/private-st.sock"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("pass --client-gateway-socket; the derived private gateway"),
+        "{error}"
+    );
+    assert!(
+        error.contains("equals the shared default gateway"),
+        "{error}"
+    );
+    assert!(!root.path().join("home/.local/state").exists());
+    assert!(!real.join("run").exists());
+}
+
+#[test]
+fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_missing_parent_traversal()
+{
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    for above_ancestor in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let physical_ancestor = if above_ancestor {
+            real.join("deep")
+        } else {
+            real.clone()
+        };
+        std::fs::create_dir_all(&physical_ancestor).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&physical_ancestor, &alias).unwrap();
+        let suffix = if above_ancestor {
+            "./new/../../run/private-st.sock"
+        } else {
+            "./new/../run/private-st.sock"
+        };
+        let output = command(root.path())
+            .env("XDG_RUNTIME_DIR", real.join("run"))
+            .arg("up")
+            .arg("--socket")
+            .arg(alias.join(suffix))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("pass --client-gateway-socket; the derived private gateway"),
+            "{error}"
+        );
+        assert!(
+            error.contains("equals the shared default gateway"),
+            "{error}"
+        );
+        assert!(!root.path().join("home/.local/state").exists());
+        assert!(!physical_ancestor.join("new").exists());
+        assert!(!real.join("run").exists());
+    }
+}
+
+#[test]
 fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     if st3::test_support::supervise_test() {
         return;
@@ -106,9 +215,12 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     assert_eq!(readiness.frontier, Some(0));
     assert!(readiness.target.unwrap() >= 3);
     assert_eq!(readiness.processed, Some(0));
-    assert!(readiness.total.unwrap() >= 3);
+    // This fixture contains only harness observations. Base progress counts bodies with
+    // a base projection, while target still names the full uncommitted source frontier.
+    assert_eq!(readiness.total, Some(0));
     let early_log = std::fs::read_to_string(&log_path).unwrap();
     assert!(early_log.contains("st: projection full replay phase=startup/project-replication-backlog reason=missing-health"), "fallback must be logged before the replay finishes: {early_log}");
+    assert!(!early_log.contains("st3: startup phases "), "{early_log}");
     // Old clients receive an immediate kernel connection refusal, never an accepted but stalled
     // request. Their existing outage retry policy remains available to long-lived drivers.
     assert!(std::os::unix::net::UnixStream::connect(&socket).is_err());
@@ -119,6 +231,7 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(report["startup"]["phase"], "full-replay/base-claims");
     assert_eq!(report["startup"]["status"], "starting");
+    assert!(!String::from_utf8_lossy(&doctor.stderr).contains("st setup"), "{doctor:?}");
     let started = Instant::now();
     let ordinary = command(root).args(["agents", "ls"]).output().unwrap();
     assert!(
@@ -198,6 +311,32 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(report["startup"]["status"], "serving");
     let log = std::fs::read_to_string(&log_path).unwrap();
+    let timing_lines = log
+        .lines()
+        .filter_map(|line| line.strip_prefix("st3: startup phases "))
+        .collect::<Vec<_>>();
+    assert_eq!(timing_lines.len(), 1, "{log}");
+    let timings: Value = serde_json::from_str(timing_lines[0]).unwrap();
+    let keys = [
+        "configuration_ms", "install_hooks_ms", "open_store_ms", "judge_claims_ms",
+        "validate_replication_backlog_ms", "apply_replication_repairs_ms",
+        "settlement_projection_ms", "runtime_prelude_ms", "login_environment_ms",
+        "isolation_pty_ms", "recorder_ms", "app_state_ms", "reconciler_ms",
+        "background_tasks_ms", "bind_ms", "total_ms",
+    ];
+    assert_eq!(timings.as_object().unwrap().len(), keys.len());
+    let total_ms = timings["total_ms"].as_f64().unwrap();
+    let mut phase_sum_ms = 0.0;
+    for key in keys {
+        let milliseconds = timings[key].as_f64().unwrap();
+        assert!(milliseconds.is_finite() && milliseconds >= 0.0, "{key}: {timings}");
+        assert!(milliseconds <= total_ms, "{key}: {timings}");
+        if key != "total_ms" {
+            phase_sum_ms += milliseconds;
+        }
+    }
+    assert!((phase_sum_ms - total_ms).abs() < 0.001, "{timings}");
+    eprintln!("st3: startup phases {}", timing_lines[0]);
     let fallbacks = log
         .lines()
         .filter(|line| line.starts_with("st: projection full replay"))

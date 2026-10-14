@@ -1,17 +1,8 @@
 # Audit founder claim signatures
 
-The [v0.3.4 onboarding rehearsal](https://github.com/compoundingtech/smalltalk/issues/1228)
-found unsigned delegation grants after populated standalone work, restart and fleet founding.
-Later signed claims that rely on those grants fail with `delegation <claim-id> is unsigned`.
-Matching replication digests show that peers agree on history; they do not establish that its
-claim signatures verify. An envelope's member signature also does not supply a missing claim
-signature inside its immutable payload.
-
-The [prevention fix](https://github.com/compoundingtech/smalltalk/pull/1269), merged at
-`76fa81a9f0ea4ca222294136c0da93441f724fc6`, restores node and held signing keys before sealing
-and preserves the frontier of pending batches across store opening. It can sign preserved
-**unsealed** work when the original keys are available. It cannot add claim signatures to
-already-sealed payloads. These histories require different operator outcomes.
+Stores populated by v0.3.4 can hold delegation grants sealed without claim signatures; later claims
+that rely on them fail with `delegation <claim-id> is unsigned`. v0.3.5 and later sign preserved
+unsealed work but cannot repair sealed payloads.
 
 ## Preserve evidence before running diagnostics
 
@@ -98,32 +89,3 @@ delegation does not bypass that failure, and a new grant cannot authenticate ear
 If the necessary authority chain is affected, retain the old graph as evidence and request a
 separate operator decision about future setup or recovery. Do not reset identity, discard the
 graph, or rebuild it merely to make diagnostics green.
-
-The chosen historical outcome for #1228 is this evidence-preserving operator guidance. There is
-no automatic store repair or verifier-policy change. If an affected operator needs recovery,
-report the bounded audit and request a separately reviewed remedy. An opt-in operational rebuild
-and a protocol for person-approved superseding grants remain separate design choices.
-
-## Build identity and scope of the existing proof
-
-[v0.3.5](https://github.com/compoundingtech/smalltalk/releases/tag/v0.3.5) was published from
-`62f4b79c6cc4e1cb7ec8106f75b40f1bc913ca7e`, which contains the prevention merge. Verify archives
-and their source using [binary releases](binary-releases.md); a tag label alone is insufficient.
-The detailed real-seat Ubuntu rehearsal used private candidates from
-`762a9ddd54bf5febbe34ce19123923b0851b82ad`, rather than the exact v0.3.5 archive. It established:
-
-- Populated restart, founder/service restart, continued real-seat work and joined peers: captured
-  peers each had 126 signed/Verified claims, zero unsigned/waiting/invalid claims, and equal claim
-  IDs, bodies and signatures.
-- A preserved-unsealed v0.3.4 upgrade retained all 61 prior claim IDs/body bytes and held keys,
-  verified its original grant, and finished with 97 signed/Verified claims.
-- A distinct optimized same-source candidate met the ordinary installer deadline. Earlier dev-profile
-  candidate timeouts and partial schemas were preserved; single samples do not establish the
-  cause of the timing difference.
-
-Those captured counts are distinct from later read-only snapshots. Native authorization and
-other doctor warnings remained: continued work needed scoped prompting, one seat completed work
-without a claimed post-founder reply, and the overall doctor verdict was still `warn` despite
-`claim-signatures` passing. The proof does not establish unattended harness behavior, broad
-grants/rules acceptance, exact published-release onboarding acceptance, or repair of sealed
-affected history. An uninspected fleet has no acceptance claim.

@@ -1,5 +1,7 @@
 //! `st sekrets`: run any command through the gateway, and manage profiles, grants and locks.
 
+use crate::{cli_print as print, cli_println as println};
+
 use std::io::{IsTerminal as _, Read as _};
 use std::path::{Path, PathBuf};
 
