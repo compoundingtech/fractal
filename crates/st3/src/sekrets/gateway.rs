@@ -471,6 +471,12 @@ impl Gateway {
 
     fn connection(&self, stream: &UnixStream) -> Result<()> {
         let (pid, uid) = peer_credentials(stream)?;
+        self.connection_from_peer(stream, pid, uid)
+    }
+
+    // Production always obtains these values from SO_PEERCRED above. Keeping the protocol
+    // loop separate lets controls change kernel lifetime/placement between real frames.
+    fn connection_from_peer(&self, stream: &UnixStream, pid: i32, uid: u32) -> Result<()> {
         if Some(uid) == self.own_uid {
             bail!("the sekrets user cannot call its own gateway");
         }
@@ -1809,6 +1815,16 @@ mod program_tests {
         }
     }
 
+    struct ChangingKernel(Arc<Mutex<(Option<u64>, String)>>);
+    impl Kernel for ChangingKernel {
+        fn cgroup(&self, _: i32) -> Option<String> {
+            Some(self.0.lock().unwrap().1.clone())
+        }
+        fn start(&self, _: i32) -> Option<u64> {
+            self.0.lock().unwrap().0
+        }
+    }
+
     fn config(root: &Path) -> GatewayConfig {
         toml::from_str(&format!(
             r#"
@@ -1898,6 +1914,94 @@ command = ["evidence-sign"]
                 gateway.classify(1002, 7, "person/ada", None, "nonce"),
                 CallerView::Unidentified { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn program_hello_to_run_refuses_exited_reused_or_moved_peer() {
+        for (start, cgroup, expected) in [
+            (
+                None,
+                "/system.slice/ci-evidence.service",
+                "program process lifetime changed",
+            ),
+            (
+                Some(124),
+                "/system.slice/ci-evidence.service",
+                "program process lifetime changed",
+            ),
+            (
+                Some(123),
+                "/system.slice/other.service",
+                "not in enrolled system unit",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let state = Arc::new(Mutex::new((
+                Some(123),
+                "/system.slice/ci-evidence.service".into(),
+            )));
+            let gateway = Gateway::new(
+                config(root.path()),
+                1000,
+                None,
+                Box::new(ChangingKernel(state.clone())),
+            )
+            .unwrap();
+            let policy = Policy::build(&[], &["evidence-sign".into()], &[]).unwrap();
+            gateway
+                .store()
+                .create_profile("ada/evidence", "person/ada", None, &policy, false)
+                .unwrap();
+            gateway
+                .store()
+                .add_grant(
+                    "ada/evidence",
+                    "program/ci1/evidence",
+                    &policy,
+                    None,
+                    "person/ada",
+                )
+                .unwrap();
+            let (server, client) = UnixStream::pair().unwrap();
+            // Only the kernel identity input is simulated. The same production loop receives
+            // the real Hello/Run frames and SCM_RIGHTS descriptors; no command is spawned.
+            let worker = std::thread::spawn(move || gateway.connection_from_peer(&server, 7, 1001));
+            protocol::send(&client, &Request::Hello { attestation: None }, &[]).unwrap();
+            let (hello, _) = protocol::recv::<Reply>(&client).unwrap().unwrap();
+            assert!(matches!(
+                hello,
+                Reply::Hello {
+                    caller: CallerView::Program { .. },
+                    ..
+                }
+            ));
+            *state.lock().unwrap() = (start, cgroup.into());
+            let stdio = fs::File::open("/dev/null").unwrap();
+            let cwd = fs::File::open(root.path()).unwrap();
+            let run = RunRequest {
+                profile: Some("ada/evidence".into()),
+                argv: vec!["evidence-sign".into()],
+                directories: 1,
+                ..Default::default()
+            };
+            protocol::send(
+                &client,
+                &Request::Run(run),
+                &[
+                    stdio.as_raw_fd(),
+                    stdio.as_raw_fd(),
+                    stdio.as_raw_fd(),
+                    cwd.as_raw_fd(),
+                ],
+            )
+            .unwrap();
+            let (reply, _) = protocol::recv::<Reply>(&client).unwrap().unwrap();
+            let Reply::Refused { reason, .. } = reply else {
+                panic!("expected refusal, got {reply:?}")
+            };
+            assert!(reason.contains(expected), "{reason}");
+            worker.join().unwrap().unwrap();
         }
     }
 
