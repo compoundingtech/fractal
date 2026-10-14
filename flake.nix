@@ -512,6 +512,8 @@
           inherit version cargoDeps;
           src = self;
           cargoBuildFlags = [ "-p" "st-chatgpt" "--bin" "st-chatgpt" ];
+          # .cargo/config.toml links Linux targets with mold.
+          nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
           doCheck = false;
           meta = {
