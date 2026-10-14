@@ -7,6 +7,23 @@ It has two layers:
 - `.` (`kit.tsx`, `tokens.css`): token-driven component families. The workshop renders them in three switchable visual directions (**Folio**, **Relay**, **Orbit**), each with light and dark palettes and two densities.
 - `./assistant-ui` and its subpaths: the dark-first application surfaces the web app composes, built on assistant-ui 0.15.25. They cover the transcript, composer, tool calls and previews, the sidebar agent row and status glyph, the thread header, resizable splits, resource cards, the work log, the sync line and the workbench layout model, plus rich markdown with highlighted code, the thinking disclosure and the dismissible failure layer. Every surface is controlled: the host supplies data, clock and transport, and unknown values render as unknown.
 
+## Human-facing time
+
+Use `HumanTime` from `./human-time` for leaf-clock labels, and pure formatters from
+`./human-time/format` for clock-driven string projections. `kind="day"` represents
+date-only sources: today / yesterday / weekday within six calendar days / date.
+Its tooltip and accessible description contain only the exact date, never an invented
+time. Use `civilDate('2026-10-12', zone)` from `./human-time/format` with the same
+zone supplied to `HumanClockProvider` (for example `{ locale: 'en-GB', timeZone:
+'America/New_York' }`). It returns an instant inside the requested civil day, or
+`undefined` for unusable input; use it only with day formatters / `kind="day"`.
+Neither bare ISO-date parsing nor machine-local midnight respects a pinned zone.
+`aria-label` is a name prefix; `HumanTime` appends the complete visible text, including
+visible prefix/suffix, exactly once. Callers must not repeat the formatted value.
+String projections must receive a ticking `now`; the host may intentionally pause an
+observation clock while disconnected so retained facts do not imply that fresh
+observations are arriving.
+
 ## Run
 
 ```sh
@@ -17,12 +34,25 @@ pnpm --filter @smalltalk/fractal-ui typecheck
 pnpm --filter @smalltalk/fractal-ui build-storybook  # packages/fractal-ui/storybook-static/
 ```
 
-The package is an explicit member of the root pnpm workspace and uses its pinned toolchain, frozen lockfile and lifecycle-script suppression. `bash scripts/ci-fractal-web` runs its typecheck and the static Storybook build after the shared install.
+The package is an explicit member of the root pnpm workspace and uses its pinned toolchain, frozen lockfile and lifecycle-script suppression. `bash scripts/ci-fractal-web` runs its typecheck, static Storybook build and strict play gate after the shared install.
 The kit keeps TypeScript 6.0.3 and declares the Node types used by its Storybook configuration explicitly.
 
 The dev server binds to localhost on a fixed port (53705). To view it from another machine, forward the port, for example `ssh -L 53705:localhost:53705 <host>`, and open http://localhost:53705.
 
-Stories:
+## Strict play gate
+
+Every `ci-fractal-web` proof discovers every story from the built `index.json` and runs its play at 440×900 and 1440×900, each with dark and light browser color schemes. Each isolated page must report successful `storyFinished` evidence without play exceptions, page errors or unexpected console errors. Only the strict guard's two exact missing development/favicon resources are allowed; missing story assets still fail. The Nix web shell supplies Playwright and Chromium without npm dependencies. The gate serves the static build on an ephemeral localhost port and prints the complete JSON receipt (case evidence, failures and elapsed seconds) into the CI log, failing the proof if any case fails.
+The runner uses one Chromium with up to six concurrent isolated pages, bounded by the available CPU allowance. The receipt records the actual worker count; every indexed case is still required.
+Before selecting stories, the gate validates every index entry: its type must be `story` or `docs`, and both `id` and `importPath` must be nonempty strings. Unknown or malformed entries fail the gate instead of silently shrinking its required matrix. The CI index-contract test includes a malformed built-index fixture that must exit nonzero before browser execution.
+Navigation waits for DOM readiness, then the unchanged strict guard waits for the story's lifecycle completion; global network idleness is not substituted for a successful play.
+
+To run only the gate after building Storybook, inside `nix develop .#web`:
+
+```sh
+node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static /tmp/fractal-kit-play-receipt
+```
+
+## Stories
 
 - **Fractal UI / Visual language**: one working context rendered in the chosen direction. It contains a thread list, a conversation with a tool call and a diff, a terminal pane, a command palette and component specimens. `Explore` exposes direction, scheme and density as canvas controls and Storybook args. The `FolioLight` … `OrbitDark` and `Compact` stories are fixed comparison entries.
 - **Fractal UI / Component families**: every family on one canvas (`AllFamilies`, `FamiliesDark`), under the same three switches.
@@ -33,6 +63,7 @@ Stories:
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
 - **Fractal UI / Explore/SubagentSwitching**: one `Exploration` (default S2 · P1 · W1) with colocated S (S1 bottom switcher / S2 top tabs / S3 breadcrumb + thread drawer), P (P1 count tag after the name / P2 trailing badge beside the status disc), W (W1 240 / W2 320 sidebar), and scenario pickers. Each current pick has a one-line description; changes update URL args. The View row switches scheme and lane width, compares S1–S3 side by side, or shows light/dark at 1440/900; a single lane wider than the page is scaled to fit and says so. One shared fixture supplies the sidebar rows and every switcher: 0, 1, 3 and 14 active subagents, an unknown count for a harness that does not report subagents (OMP), and labelled samples — a failed subagent, one needing you, 14 with one failed and one needing you past the strip's edge, nested delegation, finished work — for child states st does not report until #2288. Counts include running and waiting subagents, never finished or failed ones; nothing shows at zero, and an unreported count is an outlined `? subagents` (P1; the visible word stays inside the spoken name) or `?` with the subagent glyph (P2), never 0. Reported counts are named in words ("3 active subagents", "1 active subagent") starting with their visible text; the unknown mark is named "Subagent count unavailable for <seat>: OMP does not report subagents", repeated in its tooltip and inline in the switcher. Pressing a count opens that agent's root thread and focuses S1's open-thread chip, S2's selected tab (also for the seat already open) or S3's drawer trigger; pressing the name opens without moving focus. Rail and tabs show what fits and keep the open thread visible; `+N more` opens the drawer and carries glyph + count cues for failed and needs-you threads past the edge. Only the Failed and Needs you status words show, in their status inks. Child threads carry a Sample notice with a real "Open <root>" action. Deep link: `/iframe.html?id=fractal-ui-explore-subagentswitching--exploration&args=switcher:S3;placement:badge;sidebarWidth:240;state:nested;scheme:light;width:900`. `Exploration` has no play; `SubagentSwitchingProbe` checks one-line rows, fixture counts and spoken names, the unknown count, focus handoff and selected-tab focus, overflow alert cues, cycling, nested ancestry and replies, each with a restored negative control. Composer drafts and sent messages are scoped to each thread.
 - Static Storybook uses a single preview-head stylesheet (`cssCodeSplit: false`) so StyleX rules are loaded independently of the first story visited.
+- **Fractal UI / Human time**: all four kinds and unreported time, pinned to New York, at 440/1440 in light/dark plus a host-theme tooltip and a fake-timer live tick.
 
 ## Families
 
@@ -155,7 +186,7 @@ The composer preserves kit send, cancellation, byte-limit and token-history cont
 
 The Workbench thread dock uses the reviewed route's composition composer policy, distinct from `ComposerSession`'s R3 choice: idle Enter sends immediately; during a run Enter queues and modified Enter explicitly steers. `IdleSample` seeds the route's exact `designItems('idle', 'sample')` messages with explicit idle host facts. `RunningQueueAndSteer` keeps the running case separate and asserts both actions without changing the queue. Neither fixture infers a runtime state from a header label.
 
-State and draft codecs use the workspace's single `effect@4.0.0-rc.118` runtime and the matching `@effect/atom-react@4.0.0-rc.118` binding. `react-aria@3.52.1` is declared explicitly for the separator and portal APIs already used by the kit. Performance counters and `RenderProfiler` stay internal rather than becoming package-root exports; internal counter increments use `incrDebug`.
+State and draft codecs use the workspace's single `effect@4.0.0` stable runtime and the matching `@effect/atom-react@4.0.0` binding. `react-aria@3.52.1` is declared explicitly for the separator and portal APIs already used by the kit. Performance counters and `RenderProfiler` stay internal rather than becoming package-root exports; internal counter increments use `incrDebug`.
 
 The codecs use native `Schema.optional`, preserving both absent fields and explicitly present `undefined` fields from the original Effect 3 contract. `OptionalSnapshotFields` exercises the real pane-key parser and snapshot encode/read path, including form-only, view-only and undefined-ratio inputs.
 

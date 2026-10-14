@@ -10,6 +10,9 @@ use super::view::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+/// What Home says when nothing needs the person; setup's first-run test waits for it.
+pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
+
 /// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
 /// only have invented data to show (Nathan, 2026-09-28).
 pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
@@ -70,6 +73,7 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
         AgentState::Compacting => ("◐", theme::SAPPHIRE),
         AgentState::Idle => ("●", theme::IDLE),
         AgentState::Starting => ("◌", theme::WAITING),
+        AgentState::Down => ("⊘", theme::FAULT),
         AgentState::Stopped => ("○", theme::QUIET),
         AgentState::Unknown => ("?", theme::QUIET),
     }
@@ -84,6 +88,7 @@ pub fn agent_word(state: AgentState) -> &'static str {
         AgentState::Compacting => "compacting",
         AgentState::Idle => "idle",
         AgentState::Starting => "starting",
+        AgentState::Down => "down",
         AgentState::Stopped => "stopped",
         AgentState::Unknown => "not managed",
     }
@@ -435,7 +440,8 @@ fn structured_request(
         card.section("choose one", None, inner);
     }
     for (index, answer) in request.answers.iter().enumerate() {
-        let chosen = drafts.answering == Some(index);
+        let chosen = drafts.answering == Some(index)
+            || drafts.needs_words.as_deref() == Some(answer.label.as_str());
         // A radio row: the dot says it is a choice, the filled one is the choice, and the chosen
         // row is lifted off the card so it cannot be missed.
         let fill = |style: Style| {
@@ -519,8 +525,34 @@ fn structured_request(
             ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
         ]);
     } else if drafts.answering.is_some() {
+        // An option that needs the person's words opens a box for them instead of sending.
+        let needs_words = drafts
+            .answering
+            .and_then(|index| request.answers.get(index))
+            .is_some_and(|answer| answer.outcome.as_deref() == Some("request_changes"));
+        // The box for them is on the card from the moment the option is chosen: typing starts it.
+        if needs_words {
+            let label = drafts
+                .answering
+                .and_then(|index| request.answers.get(index))
+                .map(|answer| answer.label.clone())
+                .unwrap_or_default();
+            card.section("in your own words", None, inner);
+            text_box(
+                card,
+                &format!("answer {from}"),
+                drafts,
+                &format!("what should change? Start typing; Enter sends it with “{label}”"),
+                inner,
+            );
+        }
         card.buttons(&[
-            ("enter", "Send this answer", Hit::Enter, theme::ACCENT),
+            (
+                "enter",
+                if needs_words { "Write your words" } else { "Send this answer" },
+                Hit::Enter,
+                theme::ACCENT,
+            ),
             ("↑↓", "Another", Hit::Key('a'), theme::OVERLAY1),
             ("esc", "Not now", Hit::Escape, theme::OVERLAY1),
         ]);
@@ -707,7 +739,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 doc.blank();
                 doc.line(Line::from(vec![
                     span("✓ ", theme::strong(theme::GREEN)),
-                    span("No alerts right now.", theme::bold()),
+                    span(HOME_IDLE_TEXT, theme::bold()),
                 ]));
                 doc.blank();
                 doc.wrap(
@@ -1481,7 +1513,7 @@ fn agent_group(agent: &Agent) -> &'static str {
     match agent.state {
         AgentState::NeedsYou => "waiting on you",
         AgentState::NeedsLogin => "needs login",
-        AgentState::Fault => "broken",
+        AgentState::Fault | AgentState::Down => "broken",
         AgentState::Working | AgentState::Compacting => "working",
         AgentState::Idle | AgentState::Starting => "idle",
         AgentState::Stopped | AgentState::Unknown => "stopped",
@@ -1520,6 +1552,9 @@ fn subagent_lines(agent: &Agent, indent: &str, width: usize) -> Vec<Line<'static
 pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_partial.iter().any(|name| name == "sessions") {
+        items.push(Item::Note(Line::from(span(" More native sessions exist beyond this inventory window.", theme::dim()))));
+    }
     let agents = agent_order(world);
     let mut current = "";
     for agent in &agents {
@@ -2294,6 +2329,12 @@ fn screens_word(state: AgentState) -> &'static str {
 pub fn fleet_list(world: &World) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_supported == Some(false) {
+        items.push(Item::Note(Line::from(span(" This member’s inventories are read, not followed.", theme::dim()))));
+    }
+    if world.inventory_partial.iter().any(|name| ["clients", "machines", "devices", "sessions"].contains(&name.as_str())) {
+        items.push(Item::Note(Line::from(span(" This view is partial; more inventory rows exist beyond its window.", theme::dim()))));
+    }
     for machine in world.machines.items() {
         let (glyph, color) = reach_style(machine.reach);
         let agents = world

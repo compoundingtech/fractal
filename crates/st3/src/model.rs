@@ -10,11 +10,9 @@ pub use smallclaims::claim::{
 #[cfg(test)]
 pub use smallclaims::replication::{ReplicaRange, ReplicationBatch, ReplicationResponse};
 pub use smallclaims::replication::{
-    ClaimRange, ClaimRangeDigest, ClaimSubjectDigest, HealClaim, InventoryCheckpoint,
-    ReplicaRecordView, ReplicationExchange, ReplicationExportRequest, ReplicationExportResponse,
-    ReplicationFirstSync, ReplicationHealAnswer, ReplicationHealAnswerRequest,
-    ReplicationHealNextRequest, ReplicationHealQuery, ReplicationHealReport,
-    ReplicationHealRequest, ReplicationHealStep, ReplicationInventory, ReplicationInventoryBucket,
+    InventoryCheckpoint, ReplicaRecordView, ReplicationExchange, ReplicationExportRequest,
+    ReplicationExportResponse, ReplicationFirstSync, ReplicationInventory,
+    ReplicationInventoryBucket,
     ReplicationPeerFailureRequest, ReplicationPeerStatus, ReplicationPeerSync, ReplicationReceipt,
     ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest,
     ReplicationStatus, ReplicationTimings, UnhealthyProjection,
@@ -36,6 +34,10 @@ pub fn refuse_person_recipient(recipient: &str) -> Result<(), St3Error> {
         return Err(St3Error::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
     }
     Ok(())
+}
+
+fn is_zero_u128(value: &u128) -> bool {
+    *value == 0
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -275,8 +277,11 @@ pub fn effective_agent_name<'a>(subject: &'a str, desired: Option<&'a Value>) ->
         .unwrap_or_else(|| subject.strip_prefix("agent/").unwrap_or(subject))
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct DesiredSubject {
+    /// Declared once on a person-authored root; used only by trace resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accountable: Option<String>,
     pub subject: String,
     pub kind: String,
     pub desired: Value,
@@ -288,6 +293,36 @@ pub struct DesiredSubject {
     pub owner_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_step: Option<String>,
+}
+
+// Accountable roots carry a fields envelope too: legacy admission reads that envelope
+// before decoding DesiredSubject, and therefore retains the new field as unknown.
+impl Serialize for DesiredSubject {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // Desired revisions hash CBOR directly. Preserve the derived struct's
+        // definite map length as well as its field order for existing declarations.
+        let len = 3 + usize::from(self.member.is_some())
+            + usize::from(self.owner_run.is_some())
+            + usize::from(self.owner_generation.is_some())
+            + usize::from(self.owner_step.is_some())
+            + 2 * usize::from(self.accountable.is_some());
+        let mut map = serializer.serialize_struct("DesiredSubject", len)?;
+        map.serialize_field("subject", &self.subject)?;
+        map.serialize_field("kind", &self.kind)?;
+        map.serialize_field("desired", &self.desired)?;
+        if let Some(member) = &self.member { map.serialize_field("member", member)?; }
+        if let Some(run) = &self.owner_run { map.serialize_field("owner_run", run)?; }
+        if let Some(generation) = &self.owner_generation { map.serialize_field("owner_generation", generation)?; }
+        if let Some(step) = &self.owner_step { map.serialize_field("owner_step", step)?; }
+        if let Some(person) = &self.accountable {
+            map.serialize_field("accountable", person)?;
+            map.serialize_field("fields", &serde_json::json!({
+                "kind": self.kind, "desired": self.desired, "accountable": person,
+            }))?;
+        }
+        map.end()
+    }
 }
 
 impl DesiredSubject {
@@ -439,6 +474,10 @@ pub struct LoopStopSpec {
     pub plateau_rounds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeated_failure: Option<u32>,
+    /// Stop when this many rounds in a row end with the same metrics and the same exit gate
+    /// results, so nothing a round did changed what the loop can see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
 }
@@ -2494,6 +2533,12 @@ pub struct StepRunView {
     pub carried_claimant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_started_at_unix_ms: Option<u128>,
+    /// While a declared wait has stopped the execution clock: when the wait ends on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_paused_until_unix_ms: Option<u128>,
+    /// What this attempt has spent in declared waits; a wait has a budget per attempt.
+    #[serde(default, skip_serializing_if = "is_zero_u128")]
+    pub execution_waited_ms: u128,
     #[serde(default)]
     pub execution_elapsed_ms: u128,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2691,6 +2736,10 @@ pub struct WorkRequest {
     pub reason: Option<String>,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// `work wait`: how long the execution clock stays stopped at most. Absent for every other
+    /// action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
     pub idempotency_key: String,
 }
 

@@ -1063,7 +1063,7 @@ fn repair_checkpoint_extrema_index_is_added_on_reopen_without_receipt_changes() 
             .get()
             .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .unwrap(),
-        18
+        CURRENT_SCHEMA_VERSION
     );
     assert!(reopened.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='checkpoint_claims_operation_digest')", [], |row| row.get::<_,bool>(0)).unwrap());
     drop(reopened);

@@ -22,8 +22,8 @@ final-status-level = "flaky"
 # The outbound-only real-network timing check also runs once in perf-cost. Its strict
 # convergence and redundant-connection windows stay separate from required deterministic
 # backoff and inbound/route interruption controls.
-# scripts/ci-nextest also omits entirely excluded st2 targets from Cargo's build selection;
-# keep its retained target list in sync when changing the binary-level exclusions below.
+# scripts/ci-nextest preserves the retained binary selection in one workspace invocation.
+# Its filters control execution; Cargo still compiles excluded workspace test targets.
 default-filter = '''
 not (
   (package(=st3) and test(/^messaging_faults::link_minutes$/))
@@ -48,7 +48,7 @@ priority = 100
 # A boot canary's race or a fresh-seat boundary violation must not disappear behind a retry.
 # Start these early too: five seats launch together in one case.
 [[profile.ci.overrides]]
-filter = 'package(st3) and (test(/^boot_canaries::/) or test(/^no_st2_seat::/) or test(/^codex_bootstrap::delayed_delivery_control_holds_visible_native_input_and_recovers_once$/))'
+filter = 'package(st3) and (test(/^boot_canaries::/) or test(/^no_st2_seat::/) or test(/^daemon_restart::claude_mcp_/) or test(/^codex_bootstrap::delayed_delivery_control_holds_visible_native_input_and_recovers_once$/))'
 retries = 0
 priority = 100
 

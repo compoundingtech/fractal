@@ -149,16 +149,16 @@ pub fn run_controlled_paths(
         "Claude driver '{runtime_id}' has no provider argv"
     );
     let mut claude_argv = claude_argv;
+    let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     if let Some(mode) = crate::access::AccessMode::from_environment()? {
         let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
         let explicit_permissions = claude_argv[1..boundary].iter().any(|arg| {
             matches!(arg.as_str(), "--dangerously-skip-permissions" | "--permission-mode")
                 || arg.starts_with("--permission-mode=")
         });
-        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions));
+        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions, &workspace));
     }
     let claude_argv = prepare_st3_channel_argv(&paths.root, &identity, claude_argv)?;
-    let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
     install_signal_handler();
@@ -233,8 +233,12 @@ fn prepare_st3_channel_argv(
     if !requires_st3_channel(&argv) {
         return Ok(argv);
     }
-    match crate::claude_channel::verify_st3_installed() {
-        Ok(()) => select_st3_channel_plugin(argv, true),
+    match crate::claude_channel::verify_st3_plugin() {
+        Ok(()) => {
+            let approved = crate::claude_channel::st3_policy_available();
+            let argv = select_st3_channel_plugin(argv, true)?;
+            Ok(st3_plugin_admission_argv(argv, approved))
+        }
         Err(error) => {
             eprintln!(
                 "warning: the approved st3 Claude channel plugin is unavailable: {error:#}\n\
@@ -247,6 +251,19 @@ fn prepare_st3_channel_argv(
         }
     }
 }
+
+fn st3_plugin_admission_argv(mut argv: Vec<String>, approved: bool) -> Vec<String> {
+    if !approved {
+        for index in 0..argv.len().saturating_sub(1) {
+            if argv[index] == "--channels" && argv[index + 1] == crate::claude_channel::ST3_CHANNEL
+            {
+                argv[index] = "--dangerously-load-development-channels".into();
+            }
+        }
+    }
+    argv
+}
+
 
 /// Only the selected channel may own this seat's mailbox fence. User/project settings and
 /// older fleet declarations can still enable the previous st3 plugins after an upgrade.
@@ -1384,11 +1401,17 @@ fn observe_payload(
         // Responses are read from the transcript at Stop, so the account is read here too: the
         // one this Claude config is signed in to when its responses are recorded.
         timeline.set_account(crate::account::claude_account_cached(agent_dir));
-        if let Some(home) = var("HOME") {
+        // The transcripts live in the config directory the session runs on, which a seat on a
+        // declared account's login sets itself.
+        let claude_config = var("CLAUDE_CONFIG_DIR")
+            .filter(|directory| !directory.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| var("HOME").map(|home| Path::new(&home).join(".claude")));
+        if let Some(claude_config) = claude_config {
             if let Err(error) = crate::harness_timeline::observe_claude_stop_transcript(
                 &mut timeline,
                 &payload,
-                Path::new(&home),
+                &claude_config,
             ) {
                 tracing::warn!("st claude-observe: native answer publication failed: {error:#}");
             }
@@ -1417,11 +1440,16 @@ fn observe_payload(
     if let Some(edge) = turn_failure_edge(event, &payload) {
         driver_diagnostic::publish_turn_failure(agent_dir, driver_diagnostic::Driver::Claude, edge);
     }
-    let Some(mut observation) = observe_hook_event(event, &payload) else {
+    let top = observe_hook_event(event, &payload).map(|mut observation| {
+        if let Some(edge) = provider_auth_edge(event, &payload) {
+            observation.provider_auth = Some(edge == ProviderAuthEdge::Accepted);
+        }
+        observation
+    });
+    // A subagent's event says nothing about top-level state, but its prompts and their answers
+    // do: the seat waits on a person while any agent in it does.
+    if top.is_none() && !crate::claude_prompts::concerns_prompts(event, &payload, agent_dir) {
         return Ok(());
-    };
-    if let Some(edge) = provider_auth_edge(event, &payload) {
-        observation.provider_auth = Some(edge == ProviderAuthEdge::Accepted);
     }
     let mut writer = observe_writer(
         agent_dir,
@@ -1432,7 +1460,7 @@ fn observe_payload(
         exported_session,
         exported_seq,
     );
-    if observation.provider_auth.is_some() {
+    if top.as_ref().is_some_and(|top| top.provider_auth.is_some()) {
         writer.interrupt();
     }
     if event == "SessionStart" {
@@ -1440,10 +1468,21 @@ fn observe_payload(
         // matches a fresh predecessor record, continuity must not be claimed across the restart.
         writer.interrupt();
     }
-    // A late hook finishing after the wrapper reaped Claude must not replace the terminal record
-    // with a live state: the wrapper's `ended` carries this same token and is the session's last
-    // word. (`false` = suppressed; the hook has nothing else to do with it.)
-    writer.observe_unless_ended(observation).map(|_wrote| ())
+    let record = crate::harness_state::harness_state_path(agent_dir);
+    crate::claude_prompts::observe(agent_dir, event, &payload, raw, top, |observation, new_prompt| {
+        if new_prompt {
+            // Each prompt is its own transition: its hook answers only that observation.
+            writer.interrupt();
+        }
+        // A late hook finishing after the wrapper reaped Claude must not replace the terminal
+        // record with a live state: the wrapper's `ended` carries this same token and is the
+        // session's last word.
+        if !writer.observe_unless_ended(observation)? {
+            return Ok(None);
+        }
+        Ok(crate::harness_state::read(&record, None)
+            .and_then(|observed| observed.ownership_sequence.zip(observed.transition_sequence)))
+    })
 }
 
 /// `transcript_path` is the file Claude says holds the session, which follows the seat's own
@@ -2062,6 +2101,58 @@ mod tests {
     use super::*;
     use crate::harness_state::harness_state_path;
     use crate::provider_session::run_provider;
+
+    #[test]
+    fn st3_plugin_admission_uses_development_without_policy_and_preserves_other_channels() {
+        let args = vec![
+            "claude".into(),
+            "--channels".into(),
+            crate::claude_channel::ST3_CHANNEL.into(),
+            "--channels".into(),
+            "plugin:other@other".into(),
+            "boot prompt".into(),
+        ];
+        assert_eq!(st3_plugin_admission_argv(args.clone(), true), args);
+        let development = st3_plugin_admission_argv(args, false);
+        assert_eq!(
+            &development[1..3],
+            &[
+                "--dangerously-load-development-channels",
+                crate::claude_channel::ST3_CHANNEL
+            ]
+        );
+        assert_eq!(
+            &development[3..],
+            &["--channels", "plugin:other@other", "boot prompt"]
+        );
+    }
+
+    #[test]
+    fn the_auto_read_rules_merge_with_authored_permission_settings() {
+        let argv = vec![
+            "claude".into(),
+            "--permission-mode".into(),
+            "auto".into(),
+            "--settings".into(),
+            crate::access::auto_read_settings(Path::new("/home/example/src/github.com/org/repo"), Some(Path::new("/home/example"))),
+            "--settings".into(),
+            serde_json::json!({"permissions":{"allow":["Bash(git status)"],"deny":["Read(./.env)"]}}).to_string(),
+            "boot".into(),
+        ];
+        let merged = merge_claude_json_settings(argv).unwrap();
+        let settings: Vec<serde_json::Value> = merged
+            .windows(2)
+            .filter(|pair| pair[0] == "--settings")
+            .map(|pair| serde_json::from_str(&pair[1]).unwrap())
+            .collect();
+        assert_eq!(settings.len(), 1, "{merged:?}");
+        assert_eq!(
+            settings[0]["permissions"]["allow"],
+            serde_json::json!(["Read(~/src/**)", "Read(//var/tmp/**)", "Read(//private/var/tmp/**)", "Read(//nix/store/**)", "Bash(git status)"])
+        );
+        let deny = settings[0]["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.contains(&serde_json::json!("Read(./.env)")) && deny.contains(&serde_json::json!("Read(~/.ssh/**)")), "{deny:?}");
+    }
 
     #[test]
     fn duplicate_json_settings_keep_lifecycle_hooks_and_authored_plugins() {
