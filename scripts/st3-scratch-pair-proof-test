@@ -72,7 +72,7 @@ class FixtureContract(unittest.TestCase):
             called.append(path)
             if path == "/v1/replication/status":
                 return dict(configured=True, fleet_id="fixture",
-                            **{key: 0 for key in ("pending_records", "unknown_records", "invalid_records",
+                            **{key: 0 for key in ("pending_records", "unknown_records", "waiting_claims", "invalid_records", "repaired_records",
                               "unsigned_envelopes", "fenced_envelopes", "unhealthy_projections")})
             if path == "/v1/health":
                 return {"build": {"commit": proof.BUILD}, "store_index": 50}

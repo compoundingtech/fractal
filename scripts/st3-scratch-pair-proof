@@ -134,7 +134,7 @@ def capture_cut():
     """
     status = local("GET", "/v1/replication/status")
     require(status["configured"] is True and status["fleet_id"], "not-a-fleet")
-    for field in ("pending_records", "unknown_records", "invalid_records", "unsigned_envelopes",
+    for field in ("pending_records", "unknown_records", "waiting_claims", "invalid_records", "repaired_records", "unsigned_envelopes",
                   "fenced_envelopes", "unhealthy_projections"):
         require(status[field] == 0, "unready-admission-" + field)
     before = local("GET", "/v1/health")
@@ -217,6 +217,7 @@ class Fixture:
         self.manifest = None
         self.code = None
         self.cut = None
+        self.protocol_error = None
         self.finished = threading.Event()
 
     def cli(self, *arguments):
@@ -332,7 +333,26 @@ def run_sponsor(fixture):
         def log_message(self, *arguments):
             pass
 
-        def do_GET(self):
+        def dispatch(self, method):
+            try:
+                require(self.client_address[0] == socket.gethostbyname("b"), "unexpected-control-peer")
+                if method == "GET":
+                    answer = self.get()
+                else:
+                    answer = self.post()
+                data = encoded(answer)
+                require(len(data) <= MAX_RECEIPT, "control-response-width")
+                self.send_response(200)
+            except Exception as error:
+                fixture.protocol_error = str(error) if isinstance(error, Refused) else type(error).__name__
+                fixture.finished.set()
+                data = encoded({"refused": fixture.protocol_error})
+                self.send_response(409)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def get(self):
             if self.path == "/invite":
                 answer = {"code": fixture.code}
             elif self.path == "/readiness":
@@ -341,30 +361,29 @@ def run_sponsor(fixture):
                 fixture.cut = capture_cut()
                 answer = fixture.cut
             else:
-                self.send_error(404)
-                return
-            data = encoded(answer)
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+                raise Refused("unknown-control")
+            return answer
 
-        def do_POST(self):
+        def post(self):
             require(self.path == "/done", "unknown-control")
             size = int(self.headers.get("Content-Length", "0"))
             require(0 < size <= MAX_RECEIPT, "control-width")
             remote = json.loads(self.rfile.read(size))
             compare_cuts(fixture.cut, capture_cut())
             compare_cuts(fixture.cut, remote)
-            self.send_response(200)
-            self.send_header("Content-Length", "2")
-            self.end_headers()
-            self.wfile.write(b"{}")
             fixture.finished.set()
+            return {}
+
+        def do_GET(self):
+            self.dispatch("GET")
+
+        def do_POST(self):
+            self.dispatch("POST")
     server = HTTPServer(("0.0.0.0", CONTROL), Handler)
     fixture.servers.append(server)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     require(fixture.finished.wait(600), "peer-proof-not-finished")
+    require(fixture.protocol_error is None, fixture.protocol_error)
 
 
 def run_joiner(fixture):
