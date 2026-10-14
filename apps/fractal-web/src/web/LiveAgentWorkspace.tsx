@@ -24,6 +24,7 @@ import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
 import { useGatewaySync } from '../data/react.tsx'
+import { matchesSidebarHost, parseSidebarQuery } from '../shell/sidebar/filter.ts'
 
 // A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
 // Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
@@ -188,7 +189,11 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   }
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
   const headerRow = agent === undefined ? undefined : sidebarRow({ agent, stale, now })
-  const filtered = agents.filter((row) => `${row.name} ${row.ref} ${row.host}`.toLowerCase().includes(search.toLowerCase()))
+  const parsedSearch = parseSidebarQuery(search)
+  const textSearch = parsedSearch.query.toLowerCase()
+  const filtered = agents.filter((row) =>
+    matchesSidebarHost(row.host, parsedSearch.machines) &&
+    `${row.name} ${row.ref} ${row.host}`.toLowerCase().includes(textSearch))
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const separator = selectedPane.lastIndexOf(':')
   const urlPresentation = selectedPane.slice(separator + 1)
@@ -232,7 +237,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                         </div>)}
                       </div> : null}
                       {filtered.map((row) => (
-                        <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={search} active={current === row.ref} onOpen={() => select(row.ref)} />
+                        <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={parsedSearch.query} active={current === row.ref} onOpen={() => select(row.ref)} />
                       ))}
                     </nav>
                     {fleet._tag !== 'Observed' ? (
@@ -391,7 +396,7 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
 /** Roster filter in the live sidebar. */
 export function LiveSidebarSearch({ value, onChange }: { readonly value: string; readonly onChange: (value: string) => void }) {
   return <Aria.SearchField aria-label="Search agents" value={value} onChange={onChange} {...stylex.props(styles.search)}>
-    <Aria.Input placeholder="Search agents" {...stylex.props(styles.searchInput)} />
+    <Aria.Input aria-description="Use machine:dev3 or host:dev3,dev5 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match. Combine with search text." placeholder="Search agents" {...stylex.props(styles.searchInput)} />
   </Aria.SearchField>
 }
 
