@@ -221,6 +221,16 @@ mod tests {
             .unwrap();
         assert!(appended);
         assert_eq!(receipt.body["fields"], json!({"status":"read"}));
+        // Local provenance cannot change the replicated/shared logical digest.
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            let before = projection_digest::tables(&tx).unwrap();
+            tx.execute("UPDATE local_native_delivery_receipts_v2 SET native_id='scope-only-fixture' WHERE claim_id=?1",[&receipt.id]).unwrap();
+            assert_eq!(before, projection_digest::tables(&tx).unwrap());
+            tx.rollback().unwrap();
+        }
+
         assert!(links(&store, before).is_empty());
         assert_eq!(
             links(&store, receipt.store_index)["native-one"],
