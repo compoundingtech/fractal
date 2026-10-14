@@ -37,15 +37,29 @@ for first, second in [(full, full), (set(), full), ({("workspace", "same")}, {("
     else:
         raise AssertionError("a broken partition proof passed")
 
+four = {("b", str(i)) for i in range(8)}
+shards = [{("b", str(i)), ("b", str(i+4))} for i in range(4)]
+module.verify(four, *shards)
+for wrong in [shards[:3], shards+[set()], [set(),*shards[1:]],
+              [*shards[:3],shards[3]|shards[0]],
+              [*shards[:3],shards[3]-{("b","7")}],
+              [*shards[:3],shards[3]|{("extra","x")}]]:
+    try:
+        module.verify(four,*wrong)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("four-shard omission/overlap/extra/count must fail")
+
 with tempfile.TemporaryDirectory() as temp:
     scratch = Path(temp)
     cargo = scratch / "cargo"
     cargo.write_text('#!/usr/bin/env python3\nimport json, os, sys\nwith open(os.environ["CALLS"], "a") as stream: stream.write(json.dumps(sys.argv[1:]) + "\\n")\nsys.exit(1 if "--workspace" in sys.argv else 0)\n')
     cargo.chmod(0o755)
-    for action, extra in [("run", []), ("run", ["--no-run"]), ("list", ["--message-format", "json"])]:
+    for action, extra, shard in [(action, extra, shard) for action,extra in [("run", []), ("run", ["--no-run"]), ("list", ["--message-format", "json"])] for shard in ("hash:2/2", "hash:1/4", "hash:2/4", "hash:3/4", "hash:4/4")]:
         calls = scratch / "calls"
         calls.unlink(missing_ok=True)
-        env = {**os.environ, "PATH": f"{scratch}:{os.environ['PATH']}", "CALLS": str(calls), "CI_TEST_PARTITION": "hash:2/2"}
+        env = {**os.environ, "PATH": f"{scratch}:{os.environ['PATH']}", "CALLS": str(calls), "CI_TEST_PARTITION": shard}
         result = subprocess.run(["bash", "scripts/ci-nextest", action, *extra], cwd=root, env=env, capture_output=True)
         assert result.returncode == 1, "workspace failure must survive a passing st2 group"
         commands = [json.loads(line) for line in calls.read_text().splitlines()]

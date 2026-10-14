@@ -36,6 +36,7 @@ struct Holder {
     span: tracing::Span,
     context: Mutex<opentelemetry::Context>,
     rebuilds: Mutex<Vec<opentelemetry::Context>>,
+    worker: std::sync::OnceLock<std::thread::ThreadId>,
 }
 
 pub(crate) struct AdmissionGuard {
@@ -106,6 +107,7 @@ impl AdmissionState {
                 }),
                 context: Mutex::new(span.context()), span: span.clone(),
                 rebuilds: Mutex::new(Vec::new()),
+                worker: std::sync::OnceLock::new(),
             })
         });
         self.holder = holder.clone();
@@ -116,6 +118,16 @@ impl AdmissionState {
 impl AdmissionGuard {
     pub(crate) fn waited(&self) -> std::time::Duration {
         self.waited
+    }
+
+    /// Called after moving this guard into its synchronous snapshot worker.
+    /// Other threads may build cold diagnostic rosters without owning this admission.
+    pub(crate) fn enter_worker(&self) {
+        if let Some(holder) = &self.holder {
+            let worker = std::thread::current().id();
+            let owner = holder.worker.get_or_init(|| worker);
+            debug_assert_eq!(*owner, worker);
+        }
     }
 
     fn record_admission(&self, class: &'static str) {
@@ -223,6 +235,9 @@ impl Store {
     pub(super) fn bind_roster_rebuild(&self, context: &opentelemetry::Context) -> bool {
         let state = self.smalltalk.agent_resources_admission_state.lock().expect("roster admission state poisoned");
         let Some(holder) = &state.holder else { return false };
+        if holder.worker.get() != Some(&std::thread::current().id()) {
+            return false;
+        }
         context.span().set_attributes([
             opentelemetry::KeyValue::new("st.roster.admission.id", holder.id as i64),
             opentelemetry::KeyValue::new("st.roster.admission.holder_class", holder.class),
@@ -273,5 +288,56 @@ impl Store {
         let admitted = self.bind_roster_rebuild(&context);
         let entered = context.clone().attach();
         Some(Rebuild { context, _entered: entered, admitted, _scope: scope })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unadmitted_worker_does_not_borrow_another_workers_roster_admission() {
+        use opentelemetry::trace::{Tracer as _, TracerProvider as _};
+
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = provider.tracer("roster-worker-ownership");
+        let store = Arc::new(Store::open_memory("roster-worker-ownership").unwrap());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let mut foreign_bound = false;
+        crate::otel::capture_test_spans(|| runtime.block_on(async {
+            let admission = store.admit_agent_resources("refresher").await;
+            admission.enter_worker();
+            let owned = opentelemetry::Context::new().with_span(tracer.start("owned-rebuild"));
+            assert!(store.bind_roster_rebuild(&owned));
+            let (bound, binding) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let reader = store.clone();
+            let tracer = tracer.clone();
+            let worker = std::thread::spawn(move || {
+                let foreign = opentelemetry::Context::new().with_span(tracer.start("foreign-rebuild"));
+                bound.send(reader.bind_roster_rebuild(&foreign)).unwrap();
+                released.recv().unwrap();
+                foreign.span().set_attribute(opentelemetry::KeyValue::new("st.roster.changed", 1_i64));
+                foreign.span().end();
+            });
+            foreign_bound = binding.recv().unwrap();
+            drop(admission);
+            release.send(()).unwrap();
+            worker.join().unwrap();
+        }));
+        let spans = exporter.get_finished_spans().unwrap();
+        let foreign = spans.iter().find(|span| span.name == "foreign-rebuild").unwrap();
+        assert!(!foreign_bound, "unadmitted worker borrowed the refresher's admission: {foreign:?}");
+        assert!(foreign.attributes.iter().any(|attribute|
+            attribute.key.as_str() == "st.roster.changed"
+                && attribute.value == opentelemetry::Value::I64(1)), "{foreign:?}");
+        assert!(!foreign.attributes.iter().any(|attribute|
+            attribute.key.as_str().starts_with("st.roster.admission.")), "{foreign:?}");
+        let owned = spans.iter().find(|span| span.name == "owned-rebuild").unwrap();
+        assert!(owned.attributes.iter().any(|attribute|
+            attribute.key.as_str() == "st.roster.admission.hold_ms"), "{owned:?}");
     }
 }

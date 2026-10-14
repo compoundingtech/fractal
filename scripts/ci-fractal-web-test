@@ -165,13 +165,13 @@ for block in (changes, execution, gate_job):
 assert "timeout-minutes: 1" in changes and "timeout-minutes: 1" in gate_job and "timeout-minutes: 25" in execution
 assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in changes
 assert "github.event.pull_request.head.sha || github.event.merge_group.head_sha" in changes
-assert not re.search(r"(?m)^    if:", changes) and "actions/checkout" not in changes, "detection always runs on embedded source"
+assert "github.event.pull_request.draft == false" in changes and "(success())" in changes and "actions/checkout" not in changes, "ready PR detection runs on embedded source"
 assert "needs: [fractal-web-changes, genie-freshness]" in execution
 assert "needs.fractal-web-changes.outputs.relevant == 'true'" in execution
 assert "needs.genie-freshness.result == 'success'" in execution
 assert "nix develop '.#web' -c bash scripts/ci-fractal-web" in execution
 assert "actions/cache/restore@" in execution and "actions/cache/save@" not in execution, "only main upkeep publishes caches"
-assert "if: always()" in gate_job and "needs: [fractal-web-changes, fractal-web-execution]" in gate_job
+assert "(always())" in gate_job and "needs: [fractal-web-changes, fractal-web-execution]" in gate_job
 assert "fractal-web" not in blocks["linux-gate"], "Rust-only gates never wait for web execution"
 settings = (root / ".github/repo-settings.json").read_text()
 assert '"fractal-web"' not in settings, "fractal-web becomes required only after PR and queue runs emit it"
@@ -189,3 +189,6 @@ sdk = root / "apps/fractal-web/packages/st3-sdk"
 assert "'src/**/*.perf.test.ts'" in (sdk / "vitest.config.ts").read_text()
 assert "include: ['src/**/*.perf.test.ts']" in (sdk / "vitest.perf.config.ts").read_text()
 print("passed: deterministic SDK tests and isolated frame CPU budgets have separate lanes")
+assert lanes.index('lane "CSS asset guard" node --test apps/fractal-web/scripts/vite-css-assets.node-test.mjs') < lanes.index('lane "App production build" production_build')
+assert "fractalCssAssets()" in (root / "apps/fractal-web/vite.config.ts").read_text()
+print("passed: the CSS asset guard proves its negatives before guarding the app production build")

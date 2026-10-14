@@ -612,10 +612,19 @@ fn a_usage_trim_keeps_lifetime_usage_and_the_proof_guards_it() {
     wrong.claims.push(claim_tombstone(newest));
     let copy = scratch.path().join("wrong.sqlite3");
     store.copy_store_to(&copy).unwrap();
-    let proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
+    let wrong_proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
     assert!(
-        !proof.passed,
+        !wrong_proof.passed,
         "dropping a series total changes lifetime usage"
+    );
+    // The daemon's proof commits its preparation on the scratch copy; prove_on_copy keeps it in
+    // the one transaction it rolls back. Both prove the same thing, passing or failing.
+    let copy = scratch.path().join("same.sqlite3");
+    store.copy_store_to(&copy).unwrap();
+    assert_eq!(prove_on_copy(&copy, &sealed, &plan).unwrap(), proof);
+    assert_eq!(
+        store.prove_checkpoint_plan(&sealed, &wrong, scratch.path()).unwrap(),
+        wrong_proof
     );
 }
 
@@ -1828,12 +1837,21 @@ fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
     let [after_trim, without_trim] =
         [&trimmed, &untrimmed].map(|store| store.checkpoint_sealed_set(second).unwrap());
     assert_eq!(sealed_digest(&after_trim), sealed_digest(&without_trim));
-    // A seal reads only the identities, and they give the same digest as the whole set.
+    // A seal reads only the identities, and they give the same digest as the whole set at
+    // every page size, though the trimmed node's identities alternate between its envelopes
+    // and its tombstones.
     for (store, set) in [(&trimmed, &after_trim), (&untrimmed, &without_trim)] {
         assert_eq!(
             store.checkpoint_sealed_identities(second, None).unwrap(),
             SealedIdentities::of(set)
         );
+        for page in [1, 2, 3, 5] {
+            assert_eq!(
+                store.checkpoint_sealed_identities_paged(second, None, page).unwrap(),
+                SealedIdentities::of(set),
+                "identities differ at page {page}"
+            );
+        }
     }
     assert_eq!(after_trim.envelope_tombstones.len(), plan.envelopes.len());
     assert!(after_trim.claims.len() < without_trim.claims.len());
@@ -1841,6 +1859,55 @@ fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
     assert!(after_trim.claims.is_empty(), "{:?}", after_trim.claims);
     assert_eq!(after_trim.drop_digest, plan.drop_digest);
     assert_eq!(without_trim.drop_digest, plan.drop_digest);
+}
+
+/// While a trim records its tombstones, a dropped envelope is both a row and a tombstone. A seal
+/// counts its identity once, at every page size.
+#[test]
+fn a_seal_counts_an_envelope_once_while_its_tombstone_is_recording() {
+    let store = Store::open_memory("alder").unwrap();
+    write_history(&store);
+    let first = now_ms() + 1_000;
+    let before = store.checkpoint_sealed_identities(first, None).unwrap();
+    let plan = plan_drops(&store.checkpoint_sealed_set(first).unwrap());
+    assert!(!plan.envelopes.is_empty());
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        record_checkpoint_tombstones_tx(&transaction, &checkpoint_name(first), &plan.envelopes, &plan.claims)
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    for page in [1, 2, 3, 64] {
+        assert_eq!(store.checkpoint_sealed_identities_paged(first, None, page).unwrap(), before, "page {page}");
+    }
+}
+
+/// Each identity page seeks the identity key and reads it in order: no table scan and no sort,
+/// so a page costs its rows, wherever it starts.
+#[test]
+fn seal_identity_pages_seek_the_identity_key() {
+    let store = Store::open_memory("alder").unwrap();
+    let connection = store.readers.get();
+    for (sql, parameters) in [
+        (SEALED_IDENTITY_ENVELOPES_SQL, 6),
+        (SEALED_IDENTITY_TOMBSTONES_SQL, 5),
+    ] {
+        let mut values: Vec<rusqlite::types::Value> =
+            vec![0_i64.into(), "alder".to_owned().into(), 1_i64.into(), "hash".to_owned().into()];
+        values.extend(std::iter::repeat_n(rusqlite::types::Value::from(64_i64), parameters - 4));
+        let plan: Vec<String> = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let outer = &plan[0];
+        assert!(outer.starts_with("SEARCH") && outer.contains("INDEX"), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.starts_with("SCAN")), "{plan:?}");
+    }
 }
 
 /// Nearly every claim cites the claim before it on its subject. A walk from a runtime's
@@ -1936,35 +2003,79 @@ fn ancestry_walks_through_a_dropped_claim() {
     );
 }
 
-/// Plans a checkpoint over a copy of a real store and prints the dry run:
+/// Free bytes on the filesystem that holds `path`.
+fn free_bytes(path: &Path) -> u64 {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stat` is written before it is read.
+    assert_eq!(unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) }, 0);
+    let stat = unsafe { stat.assume_init() };
+    // 32 bits on macOS, 64 on Linux.
+    #[allow(clippy::unnecessary_cast)]
+    let free = stat.f_bavail as u64 * stat.f_frsize as u64;
+    free
+}
+
+/// Run `work`, sampling the free space on `path`'s filesystem every 10 ms: its result and
+/// the most space it took at once.
+fn peak_use_while<T>(path: &Path, work: impl FnOnce() -> T) -> (T, u64) {
+    let before = free_bytes(path);
+    let least = std::sync::atomic::AtomicU64::new(before);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                least.fetch_min(free_bytes(path), std::sync::atomic::Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        let result = work();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        result
+    });
+    least.fetch_min(free_bytes(path), std::sync::atomic::Ordering::Relaxed);
+    (result, before.saturating_sub(least.into_inner()))
+}
+
+/// Plans a checkpoint over a copy of a real store and prints the dry run, with the most disk
+/// space opening the store (its schema upgrade) and the proof each took at once:
 /// `ST3_CHECKPOINT_STORE=/var/tmp/copy.sqlite3 ST3_CHECKPOINT_ORIGIN=example-linux
 /// ST3_CHECKPOINT_DAY=2026-09-27 cargo test -p st3 --lib plan_a_copy_of_a_real_store --
-/// --ignored --nocapture`. The copy is changed; the store it came from is not read.
+/// --ignored --nocapture`. Without `ST3_CHECKPOINT_DAY` it plans the newest due checkpoint.
+/// The copy is changed; the store it came from is not read.
 #[test]
 #[ignore = "reads the store copy named by ST3_CHECKPOINT_STORE"]
 fn plan_a_copy_of_a_real_store() {
     let path = PathBuf::from(std::env::var("ST3_CHECKPOINT_STORE").unwrap());
     let origin = std::env::var("ST3_CHECKPOINT_ORIGIN").unwrap_or_else(|_| "example-linux".into());
-    let day = std::env::var("ST3_CHECKPOINT_DAY").unwrap();
+    let cut = std::env::var("ST3_CHECKPOINT_DAY")
+        .map_or_else(|_| newest_due_cut(now_ms()), |day| checkpoint_cut(&day).unwrap());
+    let directory = path.parent().unwrap();
+    let mib = |bytes: u64| bytes / (1024 * 1024);
+    eprintln!("store {} MiB", mib(fs::metadata(&path).unwrap().len()));
     let started = std::time::Instant::now();
-    let store = Store::open(&path, origin).unwrap();
-    eprintln!("opened in {:?}", started.elapsed());
+    let (store, opening) = peak_use_while(directory, || Store::open(&path, origin).unwrap());
+    eprintln!("opened in {:?}, peak use {} MiB", started.elapsed(), mib(opening));
     let scratch = path.parent().unwrap().join("proof");
-    let plan = if std::env::var("ST3_CHECKPOINT_SKIP_PROOF").is_ok() {
-        None
-    } else {
-        Some(
-            store
-                .checkpoint_plan_view(checkpoint_cut(&day).unwrap(), &scratch)
-                .unwrap(),
-        )
-    };
+    fs::create_dir_all(&scratch).unwrap();
+    let probe = scratch.join("copy-probe.sqlite3");
+    let copying = std::time::Instant::now();
+    let method = store.copy_store_to(&probe).unwrap();
+    eprintln!("copied by {method:?} in {:?}", copying.elapsed());
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        let _ = fs::remove_file(format!("{}{suffix}", probe.display()));
+    }
+    let started = std::time::Instant::now();
+    let (plan, proving) = peak_use_while(directory, || {
+        (std::env::var("ST3_CHECKPOINT_SKIP_PROOF").is_err())
+            .then(|| store.checkpoint_plan_view(cut, &scratch).unwrap())
+    });
+    eprintln!("proof peak use {} MiB", mib(proving));
     eprintln!("planned and proved in {:?}", started.elapsed());
     println!("{}", serde_json::to_string_pretty(&plan).unwrap());
     if let Ok(subject) = std::env::var("ST3_CHECKPOINT_SUBJECT") {
-        let sealed = store
-            .checkpoint_sealed_set(checkpoint_cut(&day).unwrap())
-            .unwrap();
+        let sealed = store.checkpoint_sealed_set(cut).unwrap();
         let plan = plan_drops(&sealed);
         let dropped = dropped(&plan);
         for claim in sealed
@@ -2153,6 +2264,7 @@ fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
             }),
             profile: None,
             wait: None,
+            holder: smallclaims::windows::holds::Holder::current(),
             enqueued: std::time::Instant::now(),
             done: done.clone(),
         },

@@ -1,4 +1,4 @@
-//! Real CLI OTLP/HTTP-JSON export into the effect-utils otelite receiver.
+//! Real process OTLP/HTTP-JSON export into the effect-utils otelite receiver.
 //!
 //! `ST3_OTELITE_BIN` supplies the collector; `ST3_OTEL_REQUIRE=1` forbids a local skip.
 //! Like the st2 export test, `otelite run` owns the ephemeral receiver and flushes its
@@ -43,6 +43,7 @@ fn isolated_command(binary: &Path, root: &Path) -> Command {
         .env("OTEL_TRACES_EXPORTER", "otlp")
         .env("OTEL_METRICS_EXPORTER", "otlp")
         .env("OTEL_LOGS_EXPORTER", "otlp")
+        .env("ST3_STORAGE_PHASE_SPANS", "1")
         .current_dir(root)
         .stdin(Stdio::null());
     command
@@ -284,6 +285,22 @@ fn cli_success_exports_root_span() {
         Some(2),
         "successful command must not carry ERROR status: {span}"
     );
+    let metrics = std::fs::read_to_string(root.path().join("capture/metrics.ndjson"))
+        .unwrap_or_default();
+    for line in metrics.lines() {
+        let request: Value = serde_json::from_str(line).expect("valid OTLP metric request");
+        for batch in request["resourceMetrics"].as_array().into_iter().flatten() {
+            for scope in batch["scopeMetrics"].as_array().into_iter().flatten() {
+                for metric in scope["metrics"].as_array().into_iter().flatten() {
+                    let name = metric["name"].as_str().unwrap_or_default();
+                    assert!(
+                        !name.starts_with("st.allocator.") && name != "st.process.memory.rss",
+                        "CLI must not register daemon memory metrics: {metric}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -302,6 +319,126 @@ fn cli_without_endpoint_succeeds_without_export() {
             Err(error) => panic!("read {}: {error}", path.display()),
         }
     }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn daemon_memory_exported(metrics: &str) -> bool {
+    let states = ["allocated", "free", "mmapped", "arena", "releasable"];
+    let mut heap_snapshot = false;
+    let mut rss = false;
+    for line in metrics.split_inclusive('\n').filter(|line| line.ends_with('\n')) {
+        let request: Value = serde_json::from_str(line).expect("valid OTLP metric request");
+        for batch in request["resourceMetrics"].as_array().into_iter().flatten() {
+            if string_attribute(&batch["resource"], "service.name") != Some("st-daemon") {
+                continue;
+            }
+            for scope in batch["scopeMetrics"].as_array().into_iter().flatten() {
+                for metric in scope["metrics"].as_array().into_iter().flatten() {
+                    if metric["name"] == "st.allocator.heap" && metric["unit"] == "By" {
+                        let points = metric["gauge"]["dataPoints"].as_array()
+                            .expect("heap gauge points");
+                        assert_eq!(points.len(), states.len(), "exactly five heap states");
+                        let timestamp = &points[0]["timeUnixNano"];
+                        assert!(!timestamp.is_null(), "heap sample has a timestamp");
+                        for state in states {
+                            let matching: Vec<_> = points.iter()
+                                .filter(|point| string_attribute(point, "state") == Some(state))
+                                .collect();
+                            assert_eq!(matching.len(), 1, "one point per heap state: {state}");
+                            let point = matching[0];
+                            assert_eq!(&point["timeUnixNano"], timestamp,
+                                "all states belong to the same collection");
+                            assert_eq!(point["attributes"].as_array().unwrap().len(), 1,
+                                "state is the only heap attribute");
+                            let bytes = point["asInt"].as_u64().or_else(|| {
+                                point["asInt"].as_str().and_then(|value| value.parse().ok())
+                            }).expect("heap bytes are an unsigned integer");
+                            if state == "allocated" {
+                                heap_snapshot |= bytes > 0;
+                            }
+                        }
+                    }
+                    for point in metric["gauge"]["dataPoints"].as_array().into_iter().flatten() {
+                        let positive = point["asInt"].as_u64().or_else(|| {
+                            point["asInt"].as_str().and_then(|value| value.parse().ok())
+                        }).is_some_and(|value| value > 0);
+                        if metric["name"] == "st.process.memory.rss" && metric["unit"] == "By" {
+                            rss |= positive;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    heap_snapshot && rss
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn daemon_exports_allocator_heap_and_resident_memory() {
+    let Some(collector) = otelite("daemon_exports_allocator_heap_and_resident_memory") else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let pid_path = root.path().join("daemon.pid");
+    let metrics_path = root.path().join("capture/metrics.ndjson");
+    let mut command = isolated_command(&collector, root.path());
+    command
+        // The SDK supports this standard override; no product-only timer is needed.
+        .env("OTEL_METRIC_EXPORT_INTERVAL", "100")
+        .env("OTEL_TRACES_EXPORTER", "none")
+        .env("OTEL_LOGS_EXPORTER", "none")
+        .env("SHELL", std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
+        .args(["run", "--out"])
+        .arg(root.path().join("capture"))
+        .args(["--protocol", "http/json", "--", "sh", "-c",
+            "echo $$ > \"$1\"; shift; exec \"$@\"", "sh"])
+        .arg(&pid_path)
+        .arg(st3())
+        .args(["up", "--node", "memory-test", "--state-dir"])
+        .arg(root.path().join("daemon-state"))
+        .arg("--socket")
+        .arg(root.path().join("daemon.sock"))
+        .arg("--pty-binary")
+        // This empty daemon never starts seats; no PTY server is exercised here.
+        .arg("/bin/false")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut capture = command.spawn().expect("start isolated daemon under otelite");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut observed = false;
+    while Instant::now() < deadline {
+        let metrics = std::fs::read_to_string(&metrics_path).unwrap_or_default();
+        if root.path().join("daemon.sock").exists() && daemon_memory_exported(&metrics) {
+            observed = true;
+            break;
+        }
+        if capture.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    // Stop only the child recorded by our wrapper, never a discovered/live daemon.
+    if capture.try_wait().unwrap().is_none()
+        && let Ok(pid) = std::fs::read_to_string(&pid_path)
+    {
+        let _ = Command::new("kill").args(["-TERM", pid.trim()]).status();
+        // otelite run waits for its daemon child, so its exit also confirms
+        // the recorded child exited. Bound that wait before escalating.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while capture.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if capture.try_wait().unwrap().is_none() {
+            let _ = Command::new("kill").args(["-KILL", pid.trim()]).status();
+        }
+    }
+    // Always reap the collector too, including a stuck receiver or missing PID file.
+    let _ = capture.kill();
+    let output = capture.wait_with_output().expect("finish otelite capture");
+    let metrics = std::fs::read_to_string(&metrics_path).unwrap_or_default();
+    assert!(observed && daemon_memory_exported(&metrics),
+        "daemon must export all heap states and positive allocated heap and RSS:\n{metrics}\n{output:?}");
 }
 
 fn timed_cli(root: &Path, endpoint: &str, success: bool) -> Duration {
@@ -950,7 +1087,7 @@ fn daemon_write_request_exports_storage_metrics() {
                     && string_attribute(span, "http.route") == Some("/v1/claims")
                     && int_attribute(span, "st.writer.ops").is_some_and(|ops| ops >= 1)
                     && double_attribute(span, "st.writer.wait_ms")
-                        .is_some_and(|wait| wait >= 0.0)
+                        .is_none_or(|wait| wait >= 1.0)
             })
     });
 }
@@ -1076,6 +1213,36 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
     }
     assert!(pass_count > 0, "no reconcile pass exported:\n{traces}");
     assert!(api_count > 0, "write must export an API-woken reconcile pass:\n{traces}");
+    let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let passes: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile_pass")).collect();
+    for name in [
+        "st.reconcile.changes", "st.reconcile.gate-runners", "st.reconcile.desired",
+        "st.reconcile.pty-snapshot", "st.reconcile.render", "st.reconcile.members",
+        "st.reconcile.work-messages", "st.reconcile.stage.intake",
+        "st.reconcile.stage.observers", "st.reconcile.stage.schedules",
+        "st.reconcile.stage.scheduled-work", "st.reconcile.stage.subscriptions",
+        "st.reconcile.stage.provider-capacity-retries", "st.reconcile.stage.person-asks",
+        "st.reconcile.stage.disk-space", "st.reconcile.stage.faults",
+        "st.reconcile.stage.subagents",
+        "st.reconcile.stage.github-watches", "st.reconcile.stage.missions",
+    ] {
+        assert!(requests.iter().flat_map(|request| daemon_spans(request, name)).any(|child| {
+            passes.iter().any(|pass| child["parentSpanId"] == pass["spanId"] && child["traceId"] == pass["traceId"])
+        }), "missing reconcile child {name}: {traces}");
+    }
+    assert!(requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile.desired"))
+        .any(|span| int_attribute(span, "st.reconcile.items") == Some(0)), "{traces}");
+    for request in &requests {
+        assert!(daemon_spans(request, "st.reconcile.member-stop").is_empty(), "{traces}");
+        assert!(daemon_spans(request, "st.reconcile.member-live").is_empty(), "{traces}");
+        for span in daemon_spans(request, "st.reconcile.members") {
+            for kind in ["stop", "live"] {
+                assert_eq!(int_attribute(span, &format!("st.reconcile.members.{kind}.count")), Some(0));
+                assert_eq!(double_attribute(span, &format!("st.reconcile.members.{kind}.total_ms")), Some(0.));
+                assert_eq!(double_attribute(span, &format!("st.reconcile.members.{kind}.max_ms")), Some(0.));
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1287,6 +1454,171 @@ fn daemon_normal_request_exports_no_log_stream() {
     }
 }
 
+// Run the gate proof in its own process, so SDK globals cannot leak between tests.
+#[cfg(target_os = "linux")]
+#[test]
+fn storage_stage_gates_export_detached_roots() {
+    const CHILD: &str = "ST3_OTEL_STORAGE_STAGE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        use opentelemetry::trace::TraceContextExt as _;
+        let mut telemetry = st3::otel::Telemetry::init(st3::otel::Unit::Daemon, None);
+        assert!(telemetry.enabled());
+        assert!(std::env::var_os("ST3_PROFILE_DIR").is_none());
+        assert!(!smallclaims::profile::enabled());
+        for wait in [0.0, 0.999, 1.0, 1.001] {
+            let server = tracing::info_span!(
+                "writer gate", otel.kind = "server",
+                "st.writer.wait_ms" = tracing::field::Empty,
+                "st.writer.ops" = tracing::field::Empty,
+            );
+            st3::otel::record_writer_wait(&server, (wait, 2));
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        let store = st3::store::Store::open(&path, "otel-test").unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        // Real WAL frames with no reader pin deterministically take the TRUNCATE branch.
+        connection.execute_batch(
+            "CREATE TABLE otel_checkpoint_proof(value INTEGER); INSERT INTO otel_checkpoint_proof VALUES (1);"
+        ).unwrap();
+        let started = std::time::SystemTime::now();
+        let truncated = store.checkpoint_idle_wal_report(&connection).unwrap();
+        assert!(truncated.truncate_ms.is_some() && truncated.recycled);
+        st3::otel::record_wal_checkpoint(started, Some(&truncated), false);
+        let ordinary = store.checkpoint_idle_wal_report(&connection).unwrap();
+        assert!(ordinary.truncate_ms.is_none());
+        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), false);
+        let ambient = tracing::info_span!("ambient checkpoint");
+        let ambient_context = ambient.context();
+        let _entered = ambient.enter();
+        let _attached = ambient_context.attach();
+        // Repeat both gates under a tracing span and an attached OTel context.
+        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), false);
+        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&truncated), false);
+        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), true);
+        st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), None, true);
+        let writer_path = directory.path().join("writer.sqlite3");
+        let writer_connection = rusqlite::Connection::open(&writer_path).unwrap();
+        writer_connection.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE writer_proof(value INTEGER);"
+        ).unwrap();
+        let writer = smallclaims::sqlite::WriterConnection::new(
+            writer_connection,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        let origin = smallclaims::sqlite::telemetry::enter_origin(
+            smallclaims::sqlite::telemetry::route_origin("POST", "/v1/internal/replication/receive"));
+        let held = writer.write_background();
+        drop(origin);
+        let (done, answer) = std::sync::mpsc::sync_channel(1);
+        writer.send(smallclaims::sqlite::WriterJob::Batched {
+            run: Box::new(|_| true), profile: None, wait: None,
+            holder: smallclaims::windows::holds::Holder::current(),
+            enqueued: Instant::now(), done,
+        });
+        // Enqueue synchronously while the connection is lent; the wait has a fixed lower bound.
+        std::thread::sleep(Duration::from_millis(260));
+        drop(held);
+        answer.recv().unwrap().unwrap();
+        let checkpoint = rusqlite::Connection::open(&writer_path).unwrap();
+        smallclaims::profile::task("task checkpoint", || writer.batched(move |_| {
+            // A lower bound, not a race with a timeout: the operation itself exceeds 250 ms.
+            std::thread::sleep(Duration::from_millis(260));
+            smallclaims::sqlite::checkpoint_wal_report(&checkpoint)?;
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap());
+        // ACK precedes retrospective export; joining the writer guarantees its root is ended.
+        drop(writer);
+        let current = opentelemetry::Context::current();
+        assert!(current.span().span_context().is_valid());
+        drop(_attached);
+        drop(_entered);
+        drop(ambient);
+        telemetry.shutdown();
+        return;
+    }
+    let Some(collector) = otelite("storage_stage_gates_export_detached_roots") else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let output = isolated_command(&collector, root.path())
+        .env(CHILD, "1")
+        .args(["run", "--out"]).arg(root.path().join("capture"))
+        .args(["--protocol", "http/json", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["otel_export::storage_stage_gates_export_detached_roots", "--exact", "--nocapture"])
+        .output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let traces = std::fs::read_to_string(root.path().join("capture/traces.ndjson")).unwrap();
+    let spans: Vec<Value> = traces.lines().flat_map(|line| {
+        let request: Value = serde_json::from_str(line).unwrap();
+        request["resourceSpans"].as_array().unwrap().iter()
+            .flat_map(|batch| batch["scopeSpans"].as_array().unwrap())
+            .flat_map(|scope| scope["spans"].as_array().unwrap())
+            .cloned().collect::<Vec<_>>()
+    }).collect();
+    let writers: Vec<_> = spans.iter().filter(|span| span["name"] == "writer gate").collect();
+    assert_eq!(writers.len(), 4, "{traces}");
+    let waits: Vec<_> = writers.iter().filter_map(|span| double_attribute(span, "st.writer.wait_ms")).collect();
+    assert_eq!(waits.len(), 2, "{traces}");
+    assert!(waits.contains(&1.0) && waits.contains(&1.001), "{traces}");
+    assert!(writers.iter().all(|span| int_attribute(span, "st.writer.ops") == Some(2)));
+    let batches: Vec<_> = spans.iter().filter(|span| span["name"] == "st.db.writer.batch").collect();
+    let batch = batches.into_iter().find(|batch| {
+        int_attribute(batch, "st.db.writer.batch.ops") == Some(1)
+            && double_attribute(batch, "st.db.writer.batch.operations_ms").is_some_and(|ms| ms >= 250.)
+    }).unwrap_or_else(|| panic!("sleeping operation did not export a slow batch: {traces}"));
+    for attribute in [
+        "st.db.writer.batch.begin_ms", "st.db.writer.batch.operations_ms",
+        "st.db.writer.batch.finalizers_ms",
+        "st.db.writer.batch.commit_ms", "st.db.writer.batch.post_commit_ms",
+        "st.db.writer.batch.slowest_op_ms",
+        "st.db.writer.batch.checkpoint_overlap_ms", "st.writer.wait_ms",
+    ] {
+        assert!(double_attribute(batch, attribute).is_some_and(|ms| ms >= 0.), "{batch}");
+    }
+    assert!(double_attribute(batch, "st.db.writer.batch.operations_ms").unwrap() >= 250., "{batch}");
+    assert_eq!(int_attribute(batch, "st.db.writer.batch.ops"), Some(1));
+    assert_eq!(string_attribute(batch, "st.db.writer.batch.slowest_op_origin"), Some("task checkpoint"));
+    assert!(batch["parentSpanId"].as_str().is_none_or(|id| id.is_empty() || id == "0000000000000000"), "{batch}");
+    println!("slow writer batch example: {batch}");
+    assert!(double_attribute(batch, "st.db.writer.batch.checkpoint_overlap_ms").unwrap() > 0., "{batch}");
+    let waiting = spans.iter().find(|span| span["name"] == "st.db.writer.batch"
+        && double_attribute(span, "st.writer.wait_ms").is_some_and(|ms| ms >= 250.))
+        .unwrap_or_else(|| panic!("long writer wait did not export a batch: {traces}"));
+    assert_eq!(string_attribute(waiting, "st.writer.holder"), Some("POST /v1/internal/replication/receive"), "{waiting}");
+    println!("writer holder example: {waiting}");
+    let checkpoints: Vec<_> = spans.iter().filter(|span| span["name"] == "st.db.checkpoint").collect();
+    assert_eq!(checkpoints.len(), 4, "ordinary passes must emit none: {traces}");
+    assert_eq!(checkpoints.iter().filter(|span| span["status"]["code"] == 2).count(), 2, "{traces}");
+    assert_eq!(checkpoints.iter().filter(|span| string_attribute(span, "db.operation.name") == Some("checkpoint.truncate")).count(), 2);
+    let ambient = spans.iter().find(|span| span["name"] == "ambient checkpoint").unwrap();
+    assert_ne!(batch["traceId"], ambient["traceId"], "{batch}");
+    assert!(batch["links"].as_array().is_none_or(Vec::is_empty), "{batch}");
+    for span in checkpoints {
+        assert!(span["parentSpanId"].as_str().is_none_or(|id| id.is_empty() || id == "0000000000000000"), "{span}");
+        assert_ne!(span["traceId"], ambient["traceId"], "{span}");
+        assert!(span["links"].as_array().is_none_or(Vec::is_empty), "{span}");
+        assert_eq!(string_attribute(span, "db.system.name"), Some("sqlite"));
+    }
+    let disabled = tempfile::tempdir().unwrap();
+    let output = isolated_command(&collector, disabled.path())
+        .env(CHILD, "1").env_remove("ST3_STORAGE_PHASE_SPANS")
+        .args(["run", "--out"]).arg(disabled.path().join("capture"))
+        .args(["--protocol", "http/json", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["otel_export::storage_stage_gates_export_detached_roots", "--exact", "--nocapture"])
+        .output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let disabled_traces = std::fs::read_to_string(disabled.path().join("capture/traces.ndjson")).unwrap();
+    for line in disabled_traces.lines() {
+        let request: Value = serde_json::from_str(line).unwrap();
+        assert!(daemon_spans(&request, "st.db.writer.batch").is_empty(),
+            "storage phase instrumentation must be off by default: {line}");
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn exported_spans(request: &Value) -> impl Iterator<Item = &Value> {
     request["resourceSpans"].as_array().into_iter().flatten()
@@ -1447,8 +1779,15 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             assert!(published >= requested, "fresh read served an older cut: {span}");
         }
     }
+    // The seeded undeclared seat appears only in history. Await that one-card cold
+    // publication, not the startup diagnostic reader's unadmitted empty current roster.
+    let cold_publication = daemon.await_span(root.path(), |span| {
+        span["name"] == "st.roster.rebuild"
+            && string_attribute(span, "st.roster.invalidation") == Some("cold")
+            && int_attribute(span, "st.roster.covered") == Some(1)
+    });
     let spans = daemon.captured_spans(root.path());
-    // The refresher's first publication is a detached cold rebuild; it carries the closed
+    // The refresher's history publication is a detached cold rebuild; it carries the closed
     // invalidation reason, bounded counts and synchronous phase wall/CPU time on the root.
     let rebuilds: Vec<_> = spans.iter().filter(|span| span["name"] == "st.roster.rebuild").collect();
     assert!(!rebuilds.is_empty(), "published roster requires a rebuild root: {spans:?}");
@@ -1463,8 +1802,7 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             assert!(int_attribute(rebuild, count).is_some_and(|value| value >= 0), "{count}: {rebuild}");
         }
     }
-    let cold = rebuilds.iter().find(|span| string_attribute(span, "st.roster.invalidation") == Some("cold"))
-        .unwrap_or_else(|| panic!("first publication must be a cold rebuild: {rebuilds:?}"));
+    let cold = &cold_publication;
     // The refresher builds publications under admission; the root names that holder.
     assert_eq!(string_attribute(cold, "st.roster.admission.holder_class"), Some("refresher"), "{cold}");
     assert!(int_attribute(cold, "st.roster.admission.id").is_some(), "{cold}");

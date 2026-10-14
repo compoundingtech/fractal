@@ -443,6 +443,9 @@ It has a link only when its admission waited behind a holder with a valid existi
 A root started under roster admission ends when that admission is released.
 Its duration runs from cold-build start to release; `st.roster.admission.hold_ms`
 separately covers the full acquisition-to-release interval.
+Only the physical worker owning that admission may bind a rebuild to it. A concurrent
+internal reader without admission, including the startup diagnostic report, ends its
+own root at build completion and records no invented admission identity.
 Roster and page stage attributes on requests remain on the SERVER span, not children.
 
 `st.replication.projection` surrounds the post-receive projection attempt only when
@@ -528,8 +531,8 @@ because the waiter becomes the next holder. A holder without a span of its own t
 the context of a cold rebuild
 root it starts, so waiters can link to that root. Incremental refresher refolds have no
 existing span: they are attributed by class, admission id, wait duration, and holder age,
-not by a link. No root is added for those refolds. A cold root records the admission `id`
-and class, and retains any blocker link when it was itself a waiter.
+not by a link. No root is added for those refolds. An admitted cold root records its own
+admission `id` and class, and retains any blocker link when it was itself a waiter.
 The aggregate `roster/admission-wait` accounting is unchanged.
 Nonblocking try-admission uses the same holder registration and release contract, with
 zero `wait_ms` on success and no attributes on a miss. Collection readers retain their
@@ -564,6 +567,7 @@ values map to `other`; routes are matched templates, not raw paths.
 | Reconcile `task` | `pass`, `deadline` |
 | Wake `cause`, FIFO `queue`, startup `phase`, replication `result` | Closed registries |
 | Replication `peer` | Fleet node membership |
+| Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -622,11 +626,24 @@ Storage metrics are not sampled.
 A scoped thread-local `Option<Arc<WriterWait>>` shares a request accumulator across
 handler, store, action, and API blocking sections. Two relaxed atomics sum writer ACK
 wait in nanoseconds and count writer operations. Outer handler completion records
-`st.writer.wait_ms` (total ACK wait converted to milliseconds) and `st.writer.ops`
-(operation count) on the existing SERVER request span. Each scope restores the previous
-accumulator, including nested blocking sections; writer calls do not create child spans
+`st.writer.wait_ms` (total ACK wait converted to milliseconds, only when at least 1 ms)
+and `st.writer.ops` (operation count, including zero) on the existing SERVER request span.
+Each scope restores the previous accumulator, including nested blocking sections;
+writer calls do not create child spans
 or perform per-operation span-context lookup. This preserves the single-span request
 shape and adds no in-process sampling.
+
+The daemon idle-WAL worker emits a detached INTERNAL `st.db.checkpoint` root only
+when TRUNCATE was attempted or the result is abnormal. It uses the OTel API with
+an explicit empty parent context, retaining the attempt's start time without constructing
+a span for ordinary idle passes. `span.label` and `db.operation.name` are
+`checkpoint.truncate` for TRUNCATE attempts, otherwise `checkpoint.passive`;
+`db.system.name=sqlite`. A TRUNCATE result records `st.db.wal.checkpoint.duration`
+in seconds, reusing the existing instrument vocabulary without adding a metric.
+Failures, PASSIVE durations at least 1000 ms, writer waits or TRUNCATE durations
+at least 100 ms, and at least three consecutive no-progress pinned-WAL samples
+mark the root ERROR. Successful ordinary TRUNCATE leaves status UNSET.
+Span emission is independent of the diagnostic log buckets and has no links.
 
 ### Reconciler and FIFO telemetry (O11Y-R10, O11Y-R11, O11Y-R14, O11Y-R16, O11Y-R18)
 
@@ -681,15 +698,24 @@ as does an unknown source. These exported labels do not replace the existing
 in-memory wake labels used by `/v1/performance` and `doctor`; request/detail
 attribution also remains unchanged.
 
+`st.reconcile.passes_per_wake` records the number of completed passes when an
+outer wake rests or reaches its 64-pass continuation cap. It includes the
+quiet confirmation pass, uses the outer wake's cause (not `continuation`),
+and has count boundaries `1, 2, 4, 8, 16, 32, 64`. A wake rests when its
+pass makes no writes of its own; unrelated concurrent store writes do not
+request continuation. Writes completed on helper threads use their existing
+notifications to request another outer wake.
+
 | Instrument | Type | Unit | Complete attribute set |
 | --- | --- | --- | --- |
 | `st.reconcile.pass.duration` | Histogram | `s` | `task=pass` or `task=deadline` |
 | `st.reconcile.wakes` | Counter | `{wake}` | `cause` from the 17-value wake registry |
+| `st.reconcile.passes_per_wake` | Histogram | `{pass}` | `cause` from the 17-value wake registry |
 | `st.fifo.depth` | Observable u64 gauge | `{item}` | `queue=writer`, `conversation`, or `terminal_emulation` |
 | `st.fifo.oldest_age` | Observable f64 gauge | `s` | `queue=writer`, `conversation`, or `terminal_emulation` |
 
 Every metric attribute is a constant closed value, never an identity.
-These instruments contribute at most `17 + 2 + 3 + 3 = 25` attribute series;
+These instruments contribute at most `17 + 17 + 2 + 3 + 3 = 42` attribute series;
 histogram bucket count is separate. Duration uses the seconds buckets above,
 and metrics are independent of trace sampling.
 
@@ -861,6 +887,59 @@ There are no replication backlog or lag gauges: the worker has no
 `peer_only`/`local_only` counts and the store belongs to the daemon. This
 surface adds no store scans or queries to manufacture those observations.
 
+### Daemon process and allocator memory
+
+The `st-daemon` SDK meter registers these instruments only when metrics export is enabled.
+The CLI, hooks, and replication worker do not register them. The SDK's periodic reader
+samples them at export time (60 seconds by default; the standard
+`OTEL_METRIC_EXPORT_INTERVAL` override applies). They share the existing resource and
+have no point attributes except the heap gauge's closed `state` vocabulary.
+
+| Instrument | Type | Unit | Source / attributes |
+| --- | --- | --- | --- |
+| `st.process.memory.rss` | Observable gauge | `By` | Linux `/proc/self/statm` resident pages × system page size; no attributes |
+| `st.allocator.heap` | Observable gauge | `By` | Linux glibc `mallinfo2`; `state` = `allocated`, `free`, `mmapped`, `arena`, `releasable` |
+| `st.allocator.reclaim.count` | Observable counter | `{attempt}` | Process-lifetime checkpoint reclamation attempts; no attributes |
+| `st.allocator.reclaim.duration` | Observable counter | `s` | Cumulative checkpoint reclamation elapsed time; no attributes |
+
+One heap callback calls `mallinfo2` once and emits all five states. glibc visits
+arenas under their locks, not at an atomic all-arena instant. `allocated` is
+`uordblks`, allocated non-mmapped heap bytes including allocator overhead and
+tcache-retained chunks, not live application payload.
+`free` is `fordblks`, free bytes retained inside arenas; `mmapped` is `hblkhd`,
+separate mmapped allocations. `arena` is the total non-mmapped bytes obtained from
+the system and overlaps `allocated` and `free`. `releasable` is `keepcost`, an
+estimate of the main arena's top-most releasable block, not all free or reclaimable
+pages across arenas. These states are not a mutually exclusive partition.
+RSS also includes non-heap memory. The direct `mallinfo2` link requires glibc 2.33
+or newer for the Linux GNU binary even when metrics export is disabled; the documented
+Linux archive runtime floor is glibc 2.35+. RSS is registered only on Linux, and
+the heap gauge only on Linux GNU targets; unsupported targets do not report
+fabricated memory values. An unreadable RSS sample is omitted.
+
+The smallclaims public `allocator_reclaim_stats()` accessor reads relaxed atomic totals
+for attempts, actual native trim calls, and cumulative elapsed time without calling the
+allocator. An attempt occurs when an armed outermost checkpoint completion scope drops;
+nested work triggers one attempt, and skipped work triggers none. The exported count
+is attempts (including no-op unsupported platforms), not trim successes. The existing
+thread-local test counters remain isolated from concurrent completion proofs.
+The producer still takes the existing pair of clock readings and updates relaxed
+atomic totals when metrics export is disabled; only SDK registration and collection
+are opt-in. Observation adds no reclamation calls or changes to checkpoint cleanup.
+
+Proof: the completion-scope unit test checks production totals increase. Source
+review verifies the callback's single `mallinfo2` call. The Linux GNU `otel_export`
+integration test captures all five closed states with a common collection timestamp
+and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("st3")`;
+the timestamp proves a common SDK collection, not the number of native calls.
+A fresh-test-process proof initializes real daemon telemetry with traces enabled and
+metrics disabled, asserting no meter provider is created; it does not infer absence
+from elapsed time or daemon termination. A companion CLI proof checks non-daemon omission.
+The ignored `mallinfo2_fragmented_heap_cost` test measures
+101 snapshots after allocating and touching about 1 GiB in 4 KiB blocks and freeing
+alternate blocks; it reports median, p95, and maximum elapsed time without touching a
+live daemon.
+
 ### Attribute and context policy
 
 Agent, session, message, terminal, attachment, and lease ids are span attributes only:
@@ -909,6 +988,12 @@ The daemon request proof checks caller trace continuity, `service.name=st-daemon
 the single-span shape (phase attributes present, no admission/handler child spans), and
 that a healthy request exports no below-WARN log record. A unit test pins the batch queue
 bounds.
+The storage-stage receiver proof exports request totals at 0, 0.999, 1, and 1.001 ms,
+checks the 1 ms attribute boundary and unchanged operation counts, and forces a real
+TRUNCATE using unpinned WAL frames in an isolated store. It checks ordinary passes emit
+no root, abnormal/failure results are ERROR, and roots remain parentless even with
+both an entered tracing span and an attached OTel context.
+
 The stage-span receiver proof compares `st.request.id` with the HTTP envelope, checks
 roster/page stage values, and links first-frame roots to the exported upgrade trace/span
 ids. It asserts that repeated rereads or changes produce no additional first-frame

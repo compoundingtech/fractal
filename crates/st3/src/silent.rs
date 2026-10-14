@@ -45,6 +45,7 @@ pub fn reserved_event_tag(tag: &str) -> bool {
         || tag.starts_with("st3-run-report:")
         || tag == "st3-provider-capacity-retry"
         || tag.starts_with("st3-product-wait:")
+        || tag.starts_with(crate::handoff::SESSION_START_TAG_PREFIX)
 }
 
 /// A person's message (including one an adapter imports, such as from a chat bridge), anything
@@ -168,6 +169,9 @@ mod tests {
             in_reply_to: None,
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             attachments: Vec::new(),
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 0,
         }
     }

@@ -281,6 +281,7 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "write": series(StoreWork::WriteTransaction),
             "writer_hold": series(StoreWork::WriterHold),
         }),
+        writer_hold_row(),
         json!({
             "name": "cpu",
             "about": targets.cpu.about,
@@ -295,6 +296,98 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "size": database_size().map_or(Value::Null, |size| json!(size)),
         }),
     ]
+}
+
+/// Open read snapshots reported beside the writer's holds.
+const OPEN_READS: usize = 8;
+
+/// The writer-hold objective: each hold of the store's single writer against the transaction
+/// target, and who held it; each read transaction past that target, and who kept it open.
+fn writer_hold_row() -> Value {
+    let targets = targets();
+    let series = |work| smallclaims::windows::store_series(work).snapshot(std::time::Instant::now());
+    let mut row = json!({
+        "name": "writer-hold",
+        "about": "Each hold of the store's single writer, and each read transaction past the same target, by who held it: a request route or background task, its client, and the code that asked",
+        "max_ms": targets.transaction.max_ms,
+        "windows": series(StoreWork::WriterHold),
+        "read_windows": series(StoreWork::ReadTransaction),
+        "open_reads": smallclaims::sqlite::open_snapshots_over(targets.transaction_target(), OPEN_READS),
+        "threads": process_threads(),
+    });
+    if let (Value::Object(row), Value::Object(holds)) = (&mut row, smallclaims::windows::holds::report()) {
+        row.extend(holds);
+    }
+    row
+}
+
+/// Thread names reported beside the writer's holds, by how many threads have each.
+const THREAD_NAMES: usize = 8;
+
+/// This process's threads, in all and by name, from `/proc/self/task`; null where there is none.
+/// Callers waiting for the store run on blocking threads, so their count rises with the waits.
+fn process_threads() -> Value {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return Value::Null;
+    };
+    let mut names = std::collections::BTreeMap::<String, u64>::new();
+    for task in tasks.flatten() {
+        let name = std::fs::read_to_string(task.path().join("comm")).unwrap_or_default();
+        *names.entry(name.trim().to_owned()).or_default() += 1;
+    }
+    let total = names.values().sum::<u64>();
+    let mut names = names.into_iter().collect::<Vec<_>>();
+    names.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let by_name = names
+        .into_iter()
+        .take(THREAD_NAMES)
+        .map(|(name, count)| json!({"name": name, "count": count}))
+        .collect::<Vec<_>>();
+    json!({"total": total, "by_name": by_name})
+}
+
+/// `st doctor`'s line for the writer-hold objective: met when no hold or read transaction in any
+/// window passed the target and none in progress has. It names the holder of the most writer
+/// time in the hour and the oldest hold in progress past the target.
+fn writer_hold_line(target: &Value) -> (String, &'static str, String) {
+    let max = target["max_ms"].as_f64().unwrap_or_default();
+    let holds = verdict(&target["windows"], false);
+    let reads = verdict(&target["read_windows"], false);
+    let oldest = &target["in_progress"][0];
+    let held_now = oldest["held_ms"].as_f64().filter(|held| *held > max);
+    let open = target["open_reads"].as_array().map_or(0, Vec::len);
+    let mut message = format!("max ≤ {max} ms: {}", holds.message);
+    if let Some(top) = target["holders"].get(0) {
+        message.push_str(&format!(
+            "; most held by {} ({} holds, {} ms in all, max {} ms in 1h)",
+            top["holder"].as_str().unwrap_or_default(),
+            top["count"],
+            round(top["total_ms"].as_f64().unwrap_or_default()),
+            round(top["max_ms"].as_f64().unwrap_or_default()),
+        ));
+    }
+    if let Some(held) = held_now {
+        message.push_str(&format!(
+            "; held now by {} for {} ms",
+            oldest["holder"].as_str().unwrap_or_default(),
+            round(held)
+        ));
+    }
+    if !reads.met || open > 0 {
+        let longest = target["long_reads"].get(0).map_or(String::new(), |read| {
+            format!(", last by {}", read["holder"].as_str().unwrap_or_default())
+        });
+        message.push_str(&format!("; reads past target: {}{longest}; {open} open", reads.message));
+    }
+    let waiting = &target["waiting"];
+    if waiting["writer"].as_u64().is_some_and(|n| n > 0) || waiting["read"].as_u64().is_some_and(|n| n > 0) {
+        message.push_str(&format!("; waiting now: {} for the writer, {} for a read", waiting["writer"], waiting["read"]));
+    }
+    if let Some(total) = target["threads"]["total"].as_u64() {
+        message.push_str(&format!("; {total} threads"));
+    }
+    let met = holds.met && reads.met && held_now.is_none() && open == 0;
+    ("slo/writer-hold".into(), if met { "pass" } else { "info" }, message)
 }
 
 /// `st doctor`'s lines for the windows the request-latency read reports: one per target, and one
@@ -366,6 +459,7 @@ pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
                 ));
             }
             "database" => lines.push(database_line(target)),
+            "writer-hold" => lines.push(writer_hold_line(target)),
             _ => {
                 let own = verdict(&target["windows"], true);
                 lines.push((
@@ -519,6 +613,56 @@ mod tests {
             "live_bytes": 6e9, "file_bytes": 14e9, "growth_bytes_per_day": -2e9, "growth_span_ms": 86_400_000
         })));
         assert_eq!(shrinking.1, "pass");
+    }
+
+    #[test]
+    fn the_writer_hold_line_names_the_top_holder_and_a_hold_in_progress() {
+        let window = |count: u64, over: u64, max: f64| {
+            json!({"count": count, "over_target": over, "over_target_share": over as f64 / count.max(1) as f64,
+                "p50_ms": 1.0, "p99_ms": max, "max_ms": max})
+        };
+        let windows = |over, max| json!({"1m": window(10, over, max), "5m": window(10, over, max), "1h": window(10, over, max)});
+        let quiet = json!({"name": "writer-hold", "max_ms": 100, "windows": windows(0, 8.0),
+            "read_windows": windows(0, 3.0), "open_reads": [], "in_progress": [], "long_reads": [],
+            "holders": [{"holder": "/v1/messages", "count": 10, "total_ms": 40.0, "max_ms": 8.0}]});
+        let (name, status, message) = writer_hold_line(&quiet);
+        assert_eq!((name.as_str(), status), ("slo/writer-hold", "pass"));
+        assert!(message.contains("most held by /v1/messages (10 holds, 40 ms in all, max 8 ms in 1h)"), "{message}");
+        let mut busy = quiet.clone();
+        busy["windows"] = windows(1, 5750.0);
+        busy["holders"] = json!([{"holder": "/v1/internal/replication/export", "count": 3, "total_ms": 8000.0, "max_ms": 5750.0}]);
+        busy["in_progress"] = json!([{"holder": "/v1/internal/replication/receive", "held_ms": 1200.0}]);
+        busy["read_windows"] = windows(1, 2500.0);
+        busy["long_reads"] = json!([{"holder": "/v1/internal/replication/export"}]);
+        busy["waiting"] = json!({"writer": 12, "read": 0});
+        busy["threads"] = json!({"total": 118});
+        let (_, status, message) = writer_hold_line(&busy);
+        assert_eq!(status, "info");
+        assert!(message.contains("most held by /v1/internal/replication/export"), "{message}");
+        assert!(message.contains("held now by /v1/internal/replication/receive for 1200 ms"), "{message}");
+        assert!(message.contains("last by /v1/internal/replication/export; 0 open"), "{message}");
+        assert!(message.contains("waiting now: 12 for the writer, 0 for a read; 118 threads"), "{message}");
+        let mut open = quiet;
+        open["open_reads"] = json!([{"read_id": 1}]);
+        assert_eq!(writer_hold_line(&open).1, "info");
+    }
+
+    #[test]
+    fn the_request_latency_report_carries_the_writer_hold_objective() {
+        install();
+        let rows = store_report(json!({}));
+        let row = rows.iter().find(|row| row["name"] == "writer-hold").unwrap();
+        assert_eq!(row["max_ms"], targets().transaction.max_ms);
+        for field in ["windows", "read_windows", "open_reads", "holders", "long_holds", "long_reads", "in_progress", "waiting"] {
+            assert!(row.get(field).is_some(), "{field} missing from {row}");
+        }
+        if cfg!(target_os = "linux") {
+            let threads = &row["threads"];
+            assert!(threads["total"].as_u64().unwrap() >= 1, "{threads}");
+            let named = threads["by_name"].as_array().unwrap().iter().map(|n| n["count"].as_u64().unwrap()).sum::<u64>();
+            assert!(named <= threads["total"].as_u64().unwrap());
+        }
+        assert!(row["windows"]["1h"].is_object());
     }
 
     #[test]
