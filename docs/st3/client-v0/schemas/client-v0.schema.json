@@ -70,7 +70,7 @@
     "MissionState": {"anyOf": [{"enum": ["draft", "ready", "retired", "running", "standing", "completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Lifecycle state of a mission."},
     "MustAct": {"anyOf": [{"enum": ["you", "agent", "system", "blocked", "nobody"]}, {"type": "string"}], "description": "Who must act next on a mission or run."},
     "RunOutcomeStatus": {"anyOf": [{"enum": ["completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Terminal outcome of a finished run."},
-    "AgentState": {"anyOf": [{"enum": ["desired", "starting", "running", "waiting", "stopped", "failed", "suspended"]}, {"type": "string"}], "description": "Desired/observed agent seat state. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`."},
+    "AgentState": {"anyOf": [{"enum": ["desired", "starting", "running", "waiting", "down", "stopped", "failed", "suspended"]}, {"type": "string"}], "description": "Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`."},
     "AgentLifecycle": {"anyOf": [{"enum": ["standing", "owner", "bounded"]}, {"type": "string"}], "description": "Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown."},
     "AgentReachability": {"anyOf": [{"enum": ["local", "remote", "unreachable", "unknown", "reachable", "indeterminate"]}, {"type": "string"}], "description": "Whether the daemon can currently reach the agent runtime."},
     "TimelineStatus": {"anyOf": [{"enum": ["queued", "running", "waiting", "completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Run status reported in a timeline `status` entry."},
@@ -998,7 +998,8 @@
         "title": { "type": ["string", "null"] },
         "goal": { "type": ["string", "null"] },
         "state": { "$ref": "#/$defs/WorkState" },
-        "since": { "$ref": "#/$defs/Timestamp" }
+        "since": { "$ref": "#/$defs/Timestamp" },
+        "holder_down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "Set on a seat's current work when the seat is `down`: the step is claimed by a holder with no session, and its progress and activity predate that." }
       }
     },
     "Work": {
@@ -1080,6 +1081,7 @@
             "host_id": { "oneOf": [{ "$ref": "#/$defs/HostId" }, { "type": "null" }] },
             "last_activity_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
             "silent_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }] },
+            "down_since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When a `down` seat began waiting for a session; null in every other state." },
             "fault": { "type": ["string", "null"], "description": "Current member reconcile failure; cleared by a successful pass." },
             "incarnation_id": { "type": ["string", "null"] },
             "current_session_id": { "type": ["string", "null"] },

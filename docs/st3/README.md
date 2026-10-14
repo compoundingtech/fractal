@@ -27,6 +27,7 @@ Use these documents for implementation details:
 - [Founder signing audit](founder-signing-audit.md) explains read-only capture, preserved unsealed
   upgrades, and the remaining warnings for already-sealed unsigned delegations.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
+- [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
   are recorded and replicated.
 - [Checkpoints and trimming](checkpoints.md) explains how every node of a fleet agrees to delete old
@@ -55,6 +56,8 @@ Use these documents for implementation details:
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
+- [Instances](instances.md) explains `--instance NAME`: a second, fully separate st on one machine
+  with its own state, sockets, service names and harness accounts, and the uninstall that removes it.
 - [Sekrets](sekrets.md) explains the opt-in gateway that runs any CLI with a credential no seat
   can read: profiles, policies, grants, how it tells a seat from its person, and its sandbox.
 - [Command recorder](command-recorder.md) explains how every `git` and `gh` call st starts is

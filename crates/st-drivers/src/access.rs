@@ -5,6 +5,13 @@ use std::path::Path;
 
 pub const MODE_ENV: &str = "ST_ACCESS_MODE";
 pub const CODEX_PROFILE: &str = "st-managed";
+/// Set to `1` by the daemon when the setup screen's "Let Codex work without asking" box is
+/// unticked: Codex then keeps its own approval defaults instead of the install access mode's.
+pub const CODEX_ASKS_ENV: &str = "ST_CODEX_ASKS";
+
+pub fn codex_asks() -> bool {
+    std::env::var(CODEX_ASKS_ENV).as_deref() == Ok("1")
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]

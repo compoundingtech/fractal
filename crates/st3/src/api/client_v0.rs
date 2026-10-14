@@ -96,7 +96,7 @@ mod inventory;
 mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
-mod summary;
+pub(in crate::api) mod summary;
 
 #[cfg(test)]
 mod stream_start_tests;
@@ -644,6 +644,65 @@ async fn collection_items_with_windows(
                 }
                 // A window hit reuses rows an earlier exact fold computed at this cut.
                 let folded = std::cell::Cell::new(false);
+                // A daemon's windows never fold attention or read glasses and arrangements:
+                // they serve the newest published view under that view's own cut, and wake its
+                // refresher when it is older.
+                let published_rows = if store.published_view_serving(&collection) {
+                    use super::published_attention::{published_attention_rows, published_owner_rows};
+                    use crate::store::owner_lists::OwnerView;
+                    let rows = match collection.as_str() {
+                        "attention" => Some(published_attention_rows(
+                            &store, index, person.as_deref(), limit.saturating_add(1),
+                        )),
+                        "summary" => {
+                            use crate::store::summary_list::PublishedSummary;
+                            match store.published_summary(person.as_deref()) {
+                                PublishedSummary::Row(cut, at, row) => {
+                                    if cut < index {
+                                        store.request_attention_list_refresh();
+                                    }
+                                    Some(Some((cut, at, vec![row])))
+                                }
+                                // Not published yet: counted at once from the published
+                                // shared counts and attention rows, as the refresher will.
+                                PublishedSummary::Pending => {
+                                    store.request_attention_list_refresh();
+                                    Some(summary::published_row(&store, person.as_deref())
+                                        .map(|(cut, at, row)| (cut, at, vec![row])))
+                                }
+                                // A selection it does not serve: this window reads its own.
+                                PublishedSummary::Unserved => None,
+                            }
+                        }
+                        "glasses" => Some(published_owner_rows(
+                            &store, OwnerView::Glasses, index,
+                            person.as_deref().expect("authenticated glass owner"),
+                        )),
+                        "arrangements" => Some(published_owner_rows(
+                            &store, OwnerView::Arrangements, index,
+                            person.as_deref().expect("explicit arrangement owner"),
+                        ).map(|(cut, at, mut rows)| {
+                            if let Some(subject) = &subject {
+                                rows.retain(|row| row["id"] == subject.as_str());
+                            }
+                            (cut, at, rows)
+                        })),
+                        _ => None,
+                    };
+                    match rows {
+                        Some(Some((cut, at, rows))) => {
+                            published = Some(cut);
+                            published_at = Some(at);
+                            Some(rows)
+                        }
+                        Some(None) => {
+                            return Ok(Err(super::published_attention::published_view_not_ready(&collection)));
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let snapshot = match published_at {
                     Some(at) => super::roster_snapshot(&state, published.unwrap_or(index), at),
                     None => client_snapshot_at(&state, index),
@@ -652,6 +711,9 @@ async fn collection_items_with_windows(
                 let compute = || {
                     let mut items = match collection.as_str() {
                         "summary" => {
+                            if let Some(rows) = &published_rows {
+                                return Ok((rows.clone(), false));
+                            }
                             return Ok((summary::native(&state, &current, &request, &snapshot,
                                 now, windows.as_deref(), commits)?, false));
                         }
@@ -671,6 +733,9 @@ async fn collection_items_with_windows(
                             has_more |= bound_mission_cards(&mut items)?;
                             return Ok((items, has_more));
                         }
+                        "glasses" | "arrangements" if published_rows.is_some() => {
+                            published_rows.clone().expect("published rows")
+                        }
                         "glasses" => store.glasses(
                             person.as_deref().expect("authenticated glass owner"),
                             index,
@@ -685,9 +750,10 @@ async fn collection_items_with_windows(
                                 )?
                             }
                         }
-                        "attention" => {
-                            client_attention_resources_at(&store, person.as_deref(), false, now)?
-                        }
+                        "attention" => match &published_rows {
+                            Some(rows) => rows.clone(),
+                            None => client_attention_resources_at(&store, person.as_deref(), false, now)?,
+                        },
                         "agents" => {
                             // Published cards already exist; a cold unfiltered window folds
                             // only its visible cards and gets has_more from shallow membership.
@@ -1301,6 +1367,39 @@ fn conversation_stream_error(id: &str, error: &ApiError) -> Value {
         "retryable":client_error_retryable(error.status, Some(&error.code))})
 }
 
+/// Attribute re-OPENs without changing the frames or replay cursor clients receive.
+fn record_conversation_reopen(
+    id: &str, session_id: &str, remote: bool, reason: &str, code: &str, bytes: usize,
+) {
+    let _span = tracing::info_span!(
+        parent: None,
+        "st.conversation.reopen",
+        st.subscription.id = id,
+        st.session.id = session_id,
+        st.remote = remote,
+        st.conversation.reopen.reason = reason,
+        st.error.code = code,
+        st.page.bytes = bytes,
+    ).entered();
+}
+
+fn conversation_replay_gap(session_id: &str, reason: &str, message: &str) -> ApiError {
+    let _span = tracing::info_span!(
+        parent: None,
+        "st.conversation.replay_gap",
+        st.session.id = session_id,
+        st.conversation.gap.reason = reason,
+    ).entered();
+    ApiError {
+        status: StatusCode::GONE,
+        code: "cursor-gap".into(),
+        message: message.into(),
+        details: Box::new(serde_json::Map::from_iter([(
+            "full_resync".into(), Value::Bool(true),
+        )])),
+    }
+}
+
 /// Follow a conversation with no subscription time. The collections socket calls
 /// [`follow_conversation_since`]; this form is for the tests that exercise the follower itself.
 #[cfg(test)]
@@ -1421,7 +1520,9 @@ async fn follow_conversation_since(
                             frame["header"] = header.clone();
                         }
                         // Too much changed for one frame: send the newest page instead.
-                        if frame_bytes(&frame) > CLIENT_MAX_RESPONSE_BYTES {
+                        let bytes = frame_bytes(&frame);
+                        if bytes > CLIENT_MAX_RESPONSE_BYTES {
+                            record_conversation_reopen(&id, &session_id, remote.is_some(), "delta-oversize", "", bytes);
                             break;
                         }
                         if queue.send(|| outbox.send((id.clone(), generation, frame))).is_err() {
@@ -1433,9 +1534,11 @@ async fn follow_conversation_since(
                 Err(error)
                     if matches!(error.code.as_str(), "cursor-gap" | "page-cursor-expired") =>
                 {
+                    record_conversation_reopen(&id, &session_id, remote.is_some(), "replay-gap", &error.code, 0);
                     break;
                 }
                 Err(error) if client_error_retryable(error.status, Some(&error.code)) => {
+                    record_conversation_reopen(&id, &session_id, remote.is_some(), "retryable-error", &error.code, 0);
                     tokio::time::sleep(COLLECTION_REREAD_INTERVAL).await;
                     break;
                 }
@@ -6930,28 +7033,18 @@ fn conversation_read_now_unbounded(
             || position.local_position > local_latest
             || position.native_sequence > native_latest
         {
-            return Err(ApiError {
-                status: StatusCode::GONE,
-                code: "cursor-gap".into(),
-                message: "the conversation cursor is outside the bounded replay window".into(),
-                details: Box::new(serde_json::Map::from_iter([(
-                    "full_resync".into(),
-                    Value::Bool(true),
-                )])),
-            });
+            return Err(conversation_replay_gap(
+                session_id, "cursor-outside-window",
+                "the conversation cursor is outside the bounded replay window",
+            ));
         }
         if position.source_generation != source_generation {
             // Already-delivered entries changed in place under unchanged sequences, which a
             // sequence-filtered delta cannot carry: send the authoritative newest page.
-            return Err(ApiError {
-                status: StatusCode::GONE,
-                code: "cursor-gap".into(),
-                message: "the transcript was rewritten in place; refresh the newest conversation page".into(),
-                details: Box::new(serde_json::Map::from_iter([(
-                    "full_resync".into(),
-                    Value::Bool(true),
-                )])),
-            });
+            return Err(conversation_replay_gap(
+                session_id, "source-generation",
+                "the transcript was rewritten in place; refresh the newest conversation page",
+            ));
         }
     }
     let mut changed_indexes = BTreeSet::new();
@@ -7016,14 +7109,10 @@ fn conversation_read_now_unbounded(
     if retention_changed {
         // A covering interval can remove a projection-only availability notice.
         // The delta protocol cannot delete it: send an authoritative page instead.
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "cursor-gap".into(),
-            message: "transcript retention changed; refresh the newest conversation page".into(),
-            details: Box::new(serde_json::Map::from_iter([(
-                "full_resync".into(), Value::Bool(true),
-            )])),
-        });
+        return Err(conversation_replay_gap(
+            session_id, "retention-changed",
+            "transcript retention changed; refresh the newest conversation page",
+        ));
     }
     let mut items = all
         .iter()
@@ -7058,7 +7147,7 @@ fn conversation_read_now_unbounded(
             .cmp(&b["timestamp"].as_str())
             .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
     });
-    if message_indexes.iter().any(|index| {
+    let missing_message_pair = message_indexes.iter().any(|index| {
         ![
             index.saturating_mul(4),
             index.saturating_mul(4).saturating_add(1),
@@ -7069,23 +7158,20 @@ fn conversation_read_now_unbounded(
                 .iter()
                 .any(|item| item["sequence"].as_u64() == Some(*sequence))
         })
-    }) || explicit_ids
-        .iter()
-        .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)))
-        || (all.len() == 200
-            && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
-                native_oldest.is_some_and(|first| first > native)
-            }))
-    {
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "cursor-gap".into(),
-            message: "the conversation exceeded its bounded replay window".into(),
-            details: Box::new(serde_json::Map::from_iter([(
-                "full_resync".into(),
-                Value::Bool(true),
-            )])),
+    });
+    let missing_explicit_id = explicit_ids.iter()
+        .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)));
+    let native_window_gap = all.len() == 200
+        && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
+            native_oldest.is_some_and(|first| first > native)
         });
+    if missing_message_pair || missing_explicit_id || native_window_gap {
+        let reason = if missing_message_pair { "message-pair" }
+            else if missing_explicit_id { "explicit-id" }
+            else { "native-window" };
+        return Err(conversation_replay_gap(
+            session_id, reason, "the conversation exceeded its bounded replay window",
+        ));
     }
     let next_cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
@@ -7126,11 +7212,13 @@ const CONVERSATION_MARK_REUSE: Duration = Duration::from_secs(10);
 type HashMap<K, V> = std::collections::HashMap<K, V>;
 const ISSUED_CURSORS: usize = 4096;
 
-fn issued_cursors()
--> &'static std::sync::Mutex<(std::collections::VecDeque<String>, HashMap<String, TranscriptSeen>)> {
-    static ISSUED: std::sync::OnceLock<
-        std::sync::Mutex<(std::collections::VecDeque<String>, HashMap<String, TranscriptSeen>)>,
-    > = std::sync::OnceLock::new();
+type IssuedCursors = std::sync::Mutex<(
+    std::collections::VecDeque<String>,
+    HashMap<String, TranscriptSeen>,
+)>;
+
+fn issued_cursors() -> &'static IssuedCursors {
+    static ISSUED: std::sync::OnceLock<IssuedCursors> = std::sync::OnceLock::new();
     ISSUED.get_or_init(Default::default)
 }
 
@@ -7366,45 +7454,41 @@ pub(super) async fn conversation_changes(
         || {
             let session_id = conversation_session_id(&state, &id)?;
             let snapshot = new_client_snapshot(&state);
-            let owner = super::managed_session_owner_at(
-                &state.store, snapshot.store_index, &session_id,
-            ).map_err(ApiError::internal)?;
+            let owner =
+                super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+                    .map_err(ApiError::internal)?;
             Ok((session_id, owner))
         },
     )?;
     if let Some((_, _, Some(origin))) = owner
+        && origin != state.store.origin()
     {
-        if origin != state.store.origin() {
-            if !acting_party(&session) {
-                return Err(forbidden(
-                    "remote conversation changes require a concrete person or agent",
-                ));
-            }
-            let owner = client_host_id(&origin);
-            let relay = state
-                .client_relay
-                .as_ref()
-                .ok_or_else(|| conversation_blocks::availability(remote_unavailable_for_owner(&state, &owner)))?;
-            let mut value = relay
-                .read(
-                    &owner,
-                    &crate::peer::ClientReadRequest {
-                        authority_actor: session.authority_actor.clone(),
-                        relay: None,
-                        request: crate::peer::ClientReadOperation::ConversationChanges {
-                            session_id,
-                            after: query.after,
-                            wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
-                        },
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    conversation_blocks::availability(remote_read_error(&owner, error))
-                })?;
-            conversation_blocks::legacy(&mut value, &session);
-            return Ok(Json(value));
+        if !acting_party(&session) {
+            return Err(forbidden(
+                "remote conversation changes require a concrete person or agent",
+            ));
         }
+        let owner = client_host_id(&origin);
+        let relay = state.client_relay.as_ref().ok_or_else(|| {
+            conversation_blocks::availability(remote_unavailable_for_owner(&state, &owner))
+        })?;
+        let mut value = relay
+            .read(
+                &owner,
+                &crate::peer::ClientReadRequest {
+                    authority_actor: session.authority_actor.clone(),
+                    relay: None,
+                    request: crate::peer::ClientReadOperation::ConversationChanges {
+                        session_id,
+                        after: query.after,
+                        wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
+                    },
+                },
+            )
+            .await
+            .map_err(|error| conversation_blocks::availability(remote_read_error(&owner, error)))?;
+        conversation_blocks::legacy(&mut value, &session);
+        return Ok(Json(value));
     }
     conversation_changes_local(
         &state,
@@ -10880,6 +10964,7 @@ async fn dispatch_action(
                     &target,
                     action.trim_start_matches("work."),
                     &WorkRequest {
+                        wait_ms: None,
                         actor: Some(authority_actor.clone()),
                         incarnation: request.fence.runtime_incarnation.clone(),
                         summary: p.get("summary").and_then(Value::as_str).map(str::to_owned),
@@ -11836,6 +11921,10 @@ pub(super) async fn action(
     result["snapshot_id"] = Value::String(new_client_snapshot(&state).id);
     Ok(Json(result))
 }
+
+#[cfg(test)]
+#[path = "client_v0/published_attention_tests.rs"]
+mod published_attention_tests;
 
 #[cfg(test)]
 mod tests {
@@ -12931,7 +13020,7 @@ mission "queue-parity" state="ready" {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn fresh_agent_roster_read_cuts_the_refresh_pause_short_and_plain_reads_do_not() {
+    async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let subject = "agent/fresh-pause";
@@ -12980,21 +13069,41 @@ mission "queue-parity" state="ready" {
             "plain reads must not shorten the refresher's minimum pause",
         );
 
-        // Changed: a fresh read waits for one fold, not the rest of the pause (about 750 ms here).
+        // A healthy attempt is already in flight; a fresh read must wait for its result.
+        let _admission = state.store.admit_agent_resources("other").await;
+        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one",
+            "observed_at_ms":2}));
+        let store = state.store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || store.answer_agent_roster_requests(|| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            crate::api::refresh_agent_roster(&store, false)
+        }));
+        started_rx.await.unwrap();
         let started = std::time::Instant::now();
-        let (Extension(snapshot), Json(page)) = list(true).await.unwrap();
+        let read = list(true);
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+            "a fresh read must wait while a healthy attempt is in flight");
+        release_tx.send(()).unwrap();
+        let (Extension(snapshot), Json(page)) = read.await.unwrap();
+        worker.await.unwrap().unwrap();
         let waited = started.elapsed();
         assert!(snapshot.store_index >= idle, "a fresh read shows what was written before it");
         assert_eq!(page.items[0]["harness_state"], "idle");
-        assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the pause");
+        assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the healthy attempt");
         // The fresh read's wait and page, and the refresher's folds, land in their stage rows.
         let stages = crate::api::request_latency_snapshot().into_iter()
             .filter(|row| row["scope"] == "agents-roster")
             .filter_map(|row| row["stage"].as_str().map(str::to_owned))
             .collect::<BTreeSet<_>>();
-        for stage in ["fresh-wait", "fresh-page", "refresh"] {
+        for stage in ["fresh-wait", "fresh-page"] {
             assert!(stages.contains(stage), "{stage} recorded: {stages:?}");
         }
+        assert!(stages.contains("refresh") || stages.contains("refresh-cold"),
+            "a warm or cold refresher fold is recorded: {stages:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -13182,13 +13291,29 @@ mission "queue-parity" state="ready" {
         assert_eq!(index, cut, "the unchanged roster is served under its own cut");
         assert_eq!(page.items, before.items);
 
-        // A claim about the agent changes its card: the fresh read still waits for a roster
-        // at or after it, and shows it.
+        // A claim about the agent changes its card. Start a healthy attempt and hold it:
+        // the fresh read must wait for this attempt's publication, not answer early.
+        let _admission = state.store.admit_agent_resources("other").await;
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
         assert!(!state.store.published_agent_roster_unchanged_through(written, false).unwrap());
-        let (_, index, page) = fresh().await;
+        let store = state.store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || store.answer_agent_roster_requests(|| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            crate::api::refresh_agent_roster(&store, false)
+        }));
+        started_rx.await.unwrap();
+        let read = fresh();
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+            "a fresh read must wait while a healthy attempt is in flight");
+        release_tx.send(()).unwrap();
+        let (_, index, page) = read.await;
+        worker.await.unwrap().unwrap();
         assert_eq!(index, written);
         assert_ne!(page.items, before.items, "the fresh read shows the claim it waited for");
         assert!(*published.borrow_and_update() > revision);
@@ -16890,6 +17015,7 @@ mission "example/steps" state="ready" {
             // A seat holds one step at a time: the first run's is claimed and under way.
             if run == 0 {
                 let request = |summary: Option<&str>, key: &str| crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(builder.clone()),
                     incarnation: Some("builder-1".into()),
                     summary: summary.map(str::to_owned),
@@ -16995,6 +17121,7 @@ mission "example/steps" state="ready" {
         assert!(no_progress["steps"].as_array().unwrap().iter().all(|step| step["progress_at"].is_null()));
         // Renewing the operational lease does not prove the claimant made progress.
         state.store.work_action(&progressed.subject, "renew", &crate::model::WorkRequest {
+            wait_ms: None,
             actor: progressed.claimant.clone(),
             incarnation: Some("builder-1".into()),
             summary: None,
@@ -19042,11 +19169,19 @@ mission "example/zero-run" state="ready" {
                 &path,
                 format!("{header}\n{question}\n{}\n{reply}\n", failed(Some(retry))),
             ).unwrap();
-            let gap = conversation_read_now(&state, &session, &session_id, Some(&cursor))
-                .unwrap_err();
+            let mut gap = None;
+            let spans = crate::otel::capture_test_spans(|| {
+                gap = Some(conversation_read_now(&state, &session, &session_id, Some(&cursor))
+                    .unwrap_err());
+            });
+            let gap = gap.unwrap();
             assert_eq!(gap.status, StatusCode::GONE);
             assert_eq!(gap.code, "cursor-gap");
             assert_eq!(gap.details["full_resync"], true);
+            assert!(spans.iter().any(|span| span.name == "st.conversation.replay_gap"
+                && span.attributes.iter().any(|field|
+                    field.key.as_str() == "st.conversation.gap.reason"
+                        && field.value.as_str() == "source-generation")));
             // The follower's reload carries the updated presentation under the same sequence.
             let reloaded = newest_page();
             let (sequence, view) = error_view(&reloaded).expect("the settled turn keeps its error block");
@@ -21808,6 +21943,127 @@ mission "example/zero-run" state="ready" {
             runtime_resources(&owner, true, &snapshot, &session).unwrap(),
         );
     }
+    fn sessionless_card(harness_state: Value) -> Value {
+        json!({
+            "id": "agent/cedar", "state": "desired", "harness_state": harness_state,
+            "silent_since": "2026-10-12T09:30:00.000Z",
+            "current_work": [{"id": "step-run/one/build", "state": "claimed"}],
+        })
+    }
+
+    #[test]
+    fn a_declared_seat_with_no_session_past_its_launch_window_is_down_since_it_began_waiting() {
+        let started = 1_790_000_000_000_u64;
+        let mut card = sessionless_card(Value::Null);
+        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS + 1);
+        assert_eq!(card["state"], "down");
+        assert_eq!(card["down_since"], client_timestamp(u128::from(started)));
+        assert_eq!(card["silent_since"], Value::Null, "a dead holder's activity is not shown as activity");
+        assert_eq!(card["harness_state"], "indeterminate", "a down seat never keeps a stale working report");
+        assert_eq!(card["current_work"][0]["holder_down_since"], card["down_since"]);
+    }
+
+    #[test]
+    fn a_seat_inside_its_launch_window_is_still_starting() {
+        let started = 1_790_000_000_000_u64;
+        let mut card = sessionless_card(Value::Null);
+        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS);
+        assert_eq!(card["state"], "desired");
+        assert!(card.get("down_since").is_none());
+        assert!(card["current_work"][0].get("holder_down_since").is_none());
+        let mut unknown = sessionless_card(Value::Null);
+        overlay_down(&mut unknown, None, "missing", started + 10 * LAUNCH_WINDOW_MS);
+        assert_eq!(unknown["state"], "desired", "no start time, no claim of how long");
+    }
+
+    #[test]
+    fn a_fresh_harness_report_beats_a_runtime_row_stuck_pending() {
+        let started = 1_790_000_000_000_u64;
+        for reported in ["ready", "idle", "working"] {
+            let mut card = sessionless_card(json!(reported));
+            overlay_down(&mut card, Some(started), "current", started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], "running", "{reported}");
+            assert!(card.get("down_since").is_none());
+        }
+        // A report that has gone stale proves nothing: the seat is down, not running.
+        let mut stale = sessionless_card(json!("indeterminate"));
+        overlay_down(&mut stale, Some(started), "stale", started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(stale["state"], "down");
+    }
+
+    #[test]
+    fn only_a_seat_without_a_session_can_be_down() {
+        let started = 1_790_000_000_000_u64;
+        for state in ["running", "waiting", "stopped", "failed", "suspended"] {
+            let mut card = sessionless_card(Value::Null);
+            card["state"] = json!(state);
+            overlay_down(&mut card, Some(started), "missing", started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], state);
+        }
+    }
+
+    #[test]
+    fn a_stale_working_report_stays_working_while_a_stale_idle_one_lapses() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-long-turn");
+        let append = |subject: &str, kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        for subject in ["agent/cedar", "agent/birch"] {
+            append(subject, "runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        }
+        append("agent/cedar", "harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
+        append("agent/birch", "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        let mut cards = client_agent_resources(&state.store, false, "", index).unwrap();
+        for card in &mut cards {
+            let subject = card["id"].as_str().unwrap().to_owned();
+            let mut harness = state.store.observed_harness_at(&subject, index).unwrap().unwrap();
+            harness.observed_at_unix_ms = client_now_ms() - 3_600_000;
+            card["_status_source"] = json!(harness);
+        }
+        overlay_agent_resources(&state.store, &mut cards, "").unwrap();
+        let cedar = cards.iter().find(|item| item["id"] == "agent/cedar").unwrap();
+        assert_eq!(cedar["observation"], "stale");
+        assert_eq!(cedar["harness_state"], "working", "a turn can outlast the freshness window");
+        assert_eq!(cedar["state"], "running");
+        let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
+        assert_eq!(birch["harness_state"], "indeterminate");
+        assert_eq!(birch["state"], "waiting");
+    }
+
+    #[test]
+    fn a_seat_whose_runtime_exits_mid_turn_stops_reading_working_with_its_row() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-died-mid-turn");
+        let subject = "agent/cedar";
+        let append = |kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append("harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
+        let running = client_agent_resources(&state.store, false, "", state.store.index().unwrap()).unwrap();
+        assert_eq!(running.iter().find(|item| item["id"] == subject).unwrap()["state"], "running");
+        // The reconciler on the owner host writes this when the pty or driver is gone.
+        append("runtime.observed", json!({"status":"exited", "runtime_id":"native", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        // This seat has no declaration, so the current roster drops it once its runtime ends;
+        // the history roster still carries the card.
+        let current = client_agent_resources(&state.store, false, "", index).unwrap();
+        assert!(current.iter().all(|item| item["id"] != subject), "an ended runtime is not a current seat");
+        let ended = client_agent_resources(&state.store, true, "", index).unwrap();
+        let ended = ended.iter().find(|item| item["id"] == subject).unwrap();
+        assert_eq!(ended["state"], "stopped", "{ended}");
+    }
+
     #[test]
     fn status_freshness_uses_cached_card_time_without_resetting_since() {
         let root = tempfile::tempdir().unwrap();

@@ -730,7 +730,7 @@ pub const SCHEMA: &str = core_schema!("", "");
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
-pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 18;";
+pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
 /// `(host/NAME, key)` for every member incarnation fleet membership admits.
 pub type MemberRoots = BTreeSet<(String, String)>;
@@ -931,11 +931,16 @@ impl Store {
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
         connection.execute_batch(if fresh { FRESH_SCHEMA } else { SCHEMA })?;
-        connection.execute_batch(&fleet_generation_schema())?;
-        idempotency::initialize(connection)?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(&fleet_generation_schema())?;
+            idempotency::initialize(connection)
+        })?;
         events::initialize(connection)?;
-        inventory_generation::initialize(connection)?;
-        connection.execute_batch(principals::PRINCIPAL_SCHEMA)?;
+        install_schema_batch(connection, fresh, |connection| {
+            inventory_generation::initialize(connection)?;
+            connection.execute_batch(principals::PRINCIPAL_SCHEMA)?;
+            Ok(())
+        })?;
         if fresh {
             runtime.create_schema_for_fresh_store(connection)?;
         } else {
@@ -944,12 +949,14 @@ impl Store {
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 18 {
-            connection.execute_batch(SCHEMA_VERSION)?;
+        if version != CURRENT_SCHEMA_VERSION {
+            connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         }
         document_index::initialize(connection)?;
         connection.execute_batch(WRITE_CLOCK)?;
-        create_graph_generation_triggers(connection, runtime.legacy_digest_tables())?;
+        install_schema_batch(connection, fresh, |connection| {
+            create_graph_generation_triggers(connection, runtime.legacy_digest_tables())
+        })?;
         projection_digest::initialize(connection, runtime.digest_tables())?;
         checkpoint_capture_epoch::initialize(connection)?;
         Ok(())
@@ -1035,6 +1042,24 @@ impl Store {
     }
 }
 
+/// Batch auxiliary DDL only when opening began with an empty catalog. Existing stores
+/// retain their statement-by-statement upgrade progress and ordinary reopen behavior.
+/// Callers pass only installers that do not open their own transactions.
+fn install_schema_batch(
+    connection: &Connection,
+    fresh: bool,
+    install: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<()> {
+    if fresh {
+        let transaction = connection.unchecked_transaction()?;
+        install(&transaction)?;
+        transaction.commit()?;
+    } else {
+        install(connection)?;
+    }
+    Ok(())
+}
+
 /// The writer connection's clock offset. Only a simulation sets it; see `write_time`.
 pub const WRITE_CLOCK: &str =
     "CREATE TEMP TABLE IF NOT EXISTS write_clock(offset_ms INTEGER NOT NULL, at_ms INTEGER);";
@@ -1114,6 +1139,19 @@ impl Drop for StageTimer<'_> {
     }
 }
 
+/// How long a comparison made at an aligned exchange stays current. Envelopes keep arriving
+/// from the other peers, so the peer's last advertised inventory is almost always older than
+/// this node's own; the comparison made when the two matched is what it can report.
+pub const ALIGNED_COMPARISON_FRESH_MS: u128 = 5 * 60 * 1000;
+
+/// The comparison made at one exchange where the peer's inventory equalled this node's.
+#[derive(Clone, Debug, Default)]
+pub struct AlignedComparison {
+    pub at_unix_ms: u128,
+    pub schema_digest: String,
+    pub differing_tables: Vec<String>,
+}
+
 /// Live sync measurements for one peer. They are rebuilt by the first exchange after a restart,
 /// so they stay in memory rather than in the graph.
 #[derive(Clone, Debug, Default)]
@@ -1124,6 +1162,9 @@ pub struct PeerSyncProgress {
     pub window_received: u64,
     pub graph_compared_at_unix_ms: Option<u128>,
     pub graph_differs_since_unix_ms: Option<u128>,
+    /// The last exchange at which both nodes held the same envelopes and every projection was
+    /// settled, so the two projections were comparable.
+    pub aligned_comparison: Option<AlignedComparison>,
     /// When the last heal with this peer started, and how long until the next may.
     pub heal_started_at_unix_ms: Option<u128>,
     pub heal_backoff_ms: u128,
@@ -1531,11 +1572,11 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     anyhow::ensure!(
-        table_count == 0 || matches!(version, 10..=18),
+        table_count == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
         "this database uses an unsupported st schema; start with a new state directory"
     );
     anyhow::ensure!(
-        matches!(version, 0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18),
+        version == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
         "this database uses unsupported st schema version {version}"
     );
     Ok(())
@@ -3764,6 +3805,10 @@ pub const TRANSPORT_LINK_CLOCK_SKEW_MS: u128 = 5 * 60 * 1_000;
 /// one-way route while the peer still reaches this node.
 pub const PEER_QUIET_EXCHANGE_MS: u128 = 35_000;
 
+fn short_digest(digest: &str) -> &str {
+    digest.get(..12).unwrap_or(digest)
+}
+
 /// Whether a peer counts as up `now`, from its last exchange and whether an attempt failed since.
 pub fn peer_up(last_success_at: Option<u128>, failed_since: bool, now: u128) -> bool {
     last_success_at.is_some_and(|at| {
@@ -5085,9 +5130,7 @@ impl Store {
                 Some(connection) => Rc::new(connection),
                 None => guard.pinned.take().expect("a request loan holds its connection"),
             }),
-            transaction: Some(crate::windows::Timer::start(
-                crate::windows::StoreWork::ReadTransaction,
-            )),
+            transaction: Some(crate::windows::holds::ReadHold::start()),
         };
         drop(guard);
         let connection = pinned
@@ -6348,7 +6391,18 @@ impl Store {
             // Retire a comparison from before a rolling upgrade or a newly waiting claim.
             progress.graph_compared_at_unix_ms = None;
             progress.graph_differs_since_unix_ms = None;
+            progress.aligned_comparison = None;
             progress.heal = None;
+        }
+        if graph_equal.is_some() {
+            progress.aligned_comparison = Some(AlignedComparison {
+                at_unix_ms: now,
+                schema_digest: input.schema_digest.clone(),
+                differing_tables: projection_digest::differing(
+                    &snapshot.projection_digests,
+                    &input.projection_digests,
+                ),
+            });
         }
         let heal = match graph_equal {
             Some(equal) => {
@@ -6628,20 +6682,38 @@ impl Store {
     pub fn replay_replication_graph(&self) -> Result<()> {
         crate::profile::note("projection: full replay for a heal");
         let _replay = crate::profile::span("projection/heal-replay");
+        let started = std::time::Instant::now();
+        let started_unix_ms = now_ms();
         let mut connection = self.connection.write();
+        let acquired = std::time::Instant::now();
+        let writer_wait_ms = started.elapsed().as_millis();
         let _timing = time_stage(&self.replication_timers.projection);
-        let transaction = connection.transaction()?;
-        self.runtime.replay_from_nothing(&transaction)?;
-        self.runtime.after_projection(&transaction)?;
-        transaction.execute(
-            "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+        let result = (|| {
+            let transaction = connection.transaction()?;
+            self.runtime.replay_from_nothing(&transaction)?;
+            self.runtime.after_projection(&transaction)?;
+            transaction.execute(
+                "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, ?2)
              ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
                 error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
-            params![current_index_tx(&transaction)?, now_ms().to_string()],
-        )?;
-        transaction.commit()?;
+                params![current_index_tx(&transaction)?, now_ms().to_string()],
+            )?;
+            transaction.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })();
         drop(connection);
+        let writer_hold_ms = acquired.elapsed().as_millis();
+        eprintln!(
+            "st: projection heal-replay started_at_unix_ms={started_unix_ms} ended_at_unix_ms={} writer_wait_ms={writer_wait_ms} writer_hold_ms={writer_hold_ms} outcome={}",
+            now_ms(),
+            if result.is_ok() {
+                "committed"
+            } else {
+                "failed"
+            }
+        );
+        result?;
         self.runtime.forget_views();
         Ok(())
     }
@@ -7427,6 +7499,31 @@ impl Store {
         Ok((peer_up(last_success, failed_since, now_ms()), last_success))
     }
 
+    /// The comparison made at the last exchange where this peer's inventory equalled this
+    /// node's, while it is recent enough to report.
+    fn peer_aligned_comparison(&self, peer: &str, now: u128) -> Option<AlignedComparison> {
+        self.replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(peer)
+            .and_then(|progress| progress.aligned_comparison.clone())
+            .filter(|held| now.saturating_sub(held.at_unix_ms) <= ALIGNED_COMPARISON_FRESH_MS)
+    }
+
+    /// Age the comparison held for a peer, as if its aligned exchange happened earlier.
+    #[cfg(test)]
+    pub fn age_aligned_comparison(&self, peer: &str, by_ms: u128) {
+        if let Some(held) = self
+            .replication_sync
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(peer)
+            .and_then(|progress| progress.aligned_comparison.as_mut())
+        {
+            held.at_unix_ms = held.at_unix_ms.saturating_sub(by_ms);
+        }
+    }
+
     /// Whether any peer's latest measurement says this node is catching up with it.
     pub fn replication_catching_up(&self) -> bool {
         let now = now_ms();
@@ -7604,6 +7701,9 @@ impl Store {
                                 projection_digests: BTreeMap::new(),
                                 differing_tables: Vec::new(),
                                 projection_comparison_waiting: false,
+                                projection_comparison_waiting_reason: None,
+                                projection_graphs_equal: None,
+                                projection_compared_at_unix_ms: None,
                                 sync: None,
                                 last_failure_at_unix_ms: None,
                             },
@@ -7626,6 +7726,9 @@ impl Store {
                         projection_digests: BTreeMap::new(),
                         differing_tables: Vec::new(),
                         projection_comparison_waiting: false,
+                        projection_comparison_waiting_reason: None,
+                        projection_graphs_equal: None,
+                        projection_compared_at_unix_ms: None,
                         sync: None,
                         last_failure_at_unix_ms: None,
                     },
@@ -7698,27 +7801,90 @@ impl Store {
                     .optional()?;
                 inventory_aligned =
                     peer_inventory.as_deref() == Some(snapshot.inventory.digest.as_str());
-                if inventory_aligned
-                    && !projection_deferred
+                let live_settled = !projection_deferred
                     && !unsealed_local
                     && status.schema_digest.as_deref() == Some(registry_digest.as_str())
-                    && waiting_claims == 0
-                {
+                    && waiting_claims == 0;
+                if inventory_aligned && live_settled {
                     status.differing_tables = projection_digest::differing(
                         &snapshot.projection_digests,
                         &status.projection_digests,
                     );
                 }
             }
-            status.projection_comparison_waiting = waiting_claims != 0
-                || unsealed_local
-                || projection_deferred
-                || !inventory_aligned
-                || (!status.projection_digests.is_empty() && status.schema_digest.is_none())
-                || status
-                    .schema_digest
-                    .as_deref()
-                    .is_some_and(|digest| digest != registry_digest);
+            // The peer's advertised inventory is the one it held at the last exchange, and this
+            // node keeps receiving from its other peers, so the two rarely match now. An aligned
+            // comparison that found every projection equal still holds. One that found tables
+            // differing does not: the nodes held the same envelopes then, but whether the tables
+            // still differ is unknown while the latest inventories differ, and a difference is
+            // only named from an exchange that can identify it.
+            let aligned_before = if inventory_aligned || status.projection_digests.is_empty() {
+                None
+            } else {
+                self.peer_aligned_comparison(peer, now)
+                    .filter(|held| held.schema_digest == registry_digest)
+            };
+            let held = aligned_before
+                .clone()
+                .filter(|held| held.differing_tables.is_empty());
+            let reason = if waiting_claims != 0 {
+                Some(format!(
+                    "{waiting_claims} replicated claims wait for a build that knows their kinds"
+                ))
+            } else if unsealed_local {
+                Some("this node has written claims it has not sealed into envelopes yet".into())
+            } else if projection_deferred {
+                Some("this node has admitted claims whose projection is deferred".into())
+            } else if !status.projection_digests.is_empty() && status.schema_digest.is_none() {
+                Some("the peer has not reported its projection registry".into())
+            } else if let Some(digest) = status
+                .schema_digest
+                .as_deref()
+                .filter(|digest| *digest != registry_digest)
+            {
+                Some(format!(
+                    "the peer runs projection registry {} and this node runs {}; the builds differ",
+                    short_digest(digest),
+                    short_digest(&registry_digest)
+                ))
+            } else if let Some(before) = aligned_before
+                .as_ref()
+                .filter(|before| !before.differing_tables.is_empty() && !inventory_aligned)
+            {
+                Some(format!(
+                    "the last exchange with the same envelopes found {} differing; the latest exchange does not have the same envelopes, so they cannot be compared again yet",
+                    before.differing_tables.join(", ")
+                ))
+            } else if !inventory_aligned && held.is_none() {
+                let lag = status
+                    .sync
+                    .as_ref()
+                    .map(|sync| {
+                        format!(
+                            "; the last exchange found {} envelopes only on the peer and {} only here",
+                            sync.peer_only_envelopes, sync.local_only_envelopes
+                        )
+                    })
+                    .unwrap_or_default();
+                Some(format!(
+                    "no exchange in the last {} seconds found the same envelopes on both nodes{lag}",
+                    ALIGNED_COMPARISON_FRESH_MS / 1000
+                ))
+            } else {
+                None
+            };
+            status.projection_comparison_waiting = reason.is_some();
+            if !status.projection_digests.is_empty() && reason.is_none() {
+                let compared = if inventory_aligned {
+                    Some((status.differing_tables.is_empty(), now))
+                } else {
+                    held.as_ref()
+                        .map(|held| (held.differing_tables.is_empty(), held.at_unix_ms))
+                };
+                status.projection_graphs_equal = compared.map(|(equal, _)| equal);
+                status.projection_compared_at_unix_ms = compared.map(|(_, at)| at);
+            }
+            status.projection_comparison_waiting_reason = reason;
             peers.push(status);
         }
         Ok(ReplicationStatus {
@@ -8675,5 +8841,62 @@ mod replay_log_tests {
         assert!(!line.contains(['\n', '\r', '\t']));
         assert!(line.len() < 1200);
         assert!(line.contains(&format!("frontier={} target={}", u64::MAX, u64::MAX)));
+    }
+}
+
+#[cfg(test)]
+mod aligned_comparison_tests {
+    use super::runtime::Plain;
+    use super::*;
+
+    const FLEET: &str = "sample-fleet";
+
+    fn node(name: &str) -> Store {
+        Store::open_memory(name, Arc::new(Plain)).unwrap()
+    }
+
+    fn status(store: &Store) -> ReplicationStatus {
+        store
+            .replication_status_sealed(true, Some(FLEET), &["alder".into()])
+            .unwrap()
+    }
+
+    #[test]
+    fn a_pair_without_a_recent_aligned_exchange_names_why_it_waits() {
+        let source = node("alder");
+        let target = node("birch");
+        let mut summary = source.export_replication_summary(FLEET).unwrap();
+        let aligned_inventory = summary.inventory.digest.clone();
+        summary.inventory.digest = "older inventory".into();
+        target
+            .receive_replication_exchange("alder", FLEET, &summary)
+            .unwrap();
+        let reason = status(&target).peers[0]
+            .projection_comparison_waiting_reason
+            .clone()
+            .expect("a waiting pair names its reason");
+        assert!(reason.contains("found the same envelopes"), "{reason}");
+        summary.inventory.digest = aligned_inventory;
+        target
+            .receive_replication_exchange("alder", FLEET, &summary)
+            .unwrap();
+        // The aligned exchange stays current for a while, then expires if none follows.
+        summary.inventory.digest = "older inventory".into();
+        target
+            .receive_replication_exchange("alder", FLEET, &summary)
+            .unwrap();
+        assert!(!status(&target).peers[0].projection_comparison_waiting);
+        target.age_aligned_comparison("alder", 10 * 60 * 1000);
+        let view = status(&target);
+        assert!(view.peers[0].projection_comparison_waiting);
+        assert_eq!(view.peers[0].projection_graphs_equal, None);
+        assert_eq!(view.peers[0].projection_compared_at_unix_ms, None);
+        assert!(view.peers[0].differing_tables.is_empty());
+        assert!(
+            view.peers[0]
+                .projection_comparison_waiting_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("300 seconds"))
+        );
     }
 }

@@ -1,6 +1,6 @@
 # Talking to agents
 
-Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker from [getting started](getting-started.md), restarting it if you stopped it.
+Messages are durable conversation. Missions track work and its result; [human requests](#ask-for-a-human-answer) track a decision that only a person can make. Use the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat), starting it again if you stopped it.
 
 ## From the terminal UI or phone
 

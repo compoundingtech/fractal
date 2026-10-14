@@ -607,7 +607,8 @@ other kind only add events and operations, whose order does not matter.
 The graph is replayed from nothing only in these cases:
 
 - a stale or unhealthy projection;
-- an operation whose digests conflict;
+- an operation whose digests conflict, except `message.sent` receipts, which reconcile
+  only the affected operation from its indexed claims and checkpoint tombstones;
 - an operation claim without a digest;
 - a work claim that carries an operation;
 - a heal;

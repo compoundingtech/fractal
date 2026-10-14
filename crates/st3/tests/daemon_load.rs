@@ -1310,6 +1310,8 @@ fn run(
         st3::api::start_operation_report(&state);
         // As the daemon starts: it folds the roster once and keeps it published.
         st3::api::start_agent_roster(&state);
+        // And the attention, summary, glasses and arrangements views.
+        st3::api::start_attention_list(&state);
         st3::api::start_published_lists(&state);
         let server_socket = socket.clone();
         daemon.spawn(
@@ -2212,6 +2214,7 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             let (agent, step, incarnation) =
                 context.subjects.held[turn % context.subjects.held.len()].clone();
             let request = WorkRequest {
+                wait_ms: None,
                 actor: Some(agent),
                 incarnation: Some(incarnation),
                 summary: None,

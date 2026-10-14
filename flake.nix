@@ -120,8 +120,7 @@
             self.rev
           else
             "nix-dirty.${self.dirtyRev or self.dirtyShortRev or "unknown"}";
-        buildStamp = builtins.toJSON {
-          type = "nix";
+        buildStamp = import ./nix/build-stamp.nix {
           inherit version;
           rev = sourceRev;
           fullRev = self.rev or self.dirtyRev or sourceRev;
@@ -221,9 +220,6 @@
           "st2-pty-stats-component"
           "--exclude"
           "st2-vista-component"
-          # The standalone decision model has its own hermetic gate.
-          "--exclude"
-          "st-decision-fold"
           # `checks.st3` gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
@@ -789,8 +785,7 @@
           # `checks.hooks-replacement`. Its test suite is `checks.st2`'s, on source that differs
           # only by an appended hook comment, so running it again buys nothing.
           doCheck = false;
-          CLI_BUILD_STAMP = builtins.toJSON {
-            type = "nix";
+          CLI_BUILD_STAMP = import ./nix/build-stamp.nix {
             inherit version;
             rev = "hook-successor";
             commitTs = sourceCommitUnix;
@@ -801,6 +796,9 @@
       {
         packages.st2 = st2;
         packages.st = st3;
+        # Release runners need a host linker for Cargo build scripts and stamp tests.
+        # The release target still links through the pinned Zig/glibc-baseline wrapper.
+        packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
@@ -829,6 +827,9 @@
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
         checks.debug-assertions = st2DebugAssertions;
+        checks.build-stamp-bounds =
+          assert import ./nix/build-stamp-tests.nix;
+          pkgs.runCommand "build-stamp-bounds" { } ''touch $out'';
         checks.hm-module-eval =
           let
             rendered = hmModuleEval.config;
@@ -1199,6 +1200,9 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.git
+            # Git evidence fixtures sign observations and serve API responses with Python.
+            pkgs.openssh
+            pkgs.python3
             pkgs.sccache
             pkgs.cargo-nextest
             pkgs.pkg-config
@@ -1226,6 +1230,7 @@
           shellHook = ''
             source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              source ${./scripts/ci-cargo-tools-env} || exit $?
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
           '';

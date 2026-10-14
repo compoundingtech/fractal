@@ -181,8 +181,14 @@ and recent-outcome boundaries and reject backward clock reuse. Agent cards reuse
 keyed roster cache; live delivery overlays are checked on every read. Authority
 is revalidated before counting, including private person selection. Read failures
 send the existing `resync`/`error` frames, never inferred zero counts. Clients keep compatibility
-behavior on older daemons. The source may move to the shared IVM reactor later
-without changing this contract.
+behavior on older daemons.
+A daemon serves these counts from published rows. What no person changes (missions,
+working agents, machines) is computed once for every selection, at one cut, and again
+when the cut, the roster or the 30-second clock period changes. Each selection counts
+its alerts from the published attention rows, the same rows its
+attention window shows. The row carries the shared counts' cut. A window that opens a
+new selection is served at once. Before the first publication, the window gets a
+retryable `summary-not-ready` resync.
 Equal count membership produces no upsert, including agent progress/usage
 updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts
@@ -195,7 +201,7 @@ collections: `clients`, `usage`, `machines`, `devices`, `sessions`, and `termina
 Older daemons omit it; clients keep their existing HTTP reads for that member and
 say that the member is read, not followed. These subscriptions use the existing
 v0 `snapshot` then `changes` frames, including removals, complete order and fences.
-The row-delta transport is not yet merged. Each subscription consumes one of the
+Each subscription consumes one of the
 sixteen slots, including the terminals **list**, which is separate from a selected
 `terminal` screen.
 

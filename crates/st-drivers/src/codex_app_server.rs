@@ -2771,7 +2771,7 @@ pub fn run_controlled_paths(
         let workspace = std::env::current_dir().context("reading managed Codex workspace")?;
         let endpoint = std::env::var("ST3_ENDPOINT").ok();
         let permissions = crate::access::Permissions::from_environment()?;
-        managed_codex_argv_with(mode, endpoint.as_deref(), &workspace, codex_argv, permissions)?
+        managed_codex_argv_asking(mode, crate::access::codex_asks(), endpoint.as_deref(), &workspace, codex_argv, permissions)?
     } else {
         codex_argv
     };
@@ -2853,8 +2853,15 @@ fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, w
     managed_codex_argv_with(mode, endpoint, workspace, argv, crate::access::Permissions::default())
 }
 
-fn managed_codex_argv_with(
+#[cfg(test)]
+fn managed_codex_argv_with(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, argv: Vec<String>, permissions: crate::access::Permissions) -> Result<Vec<String>> {
+    managed_codex_argv_asking(mode, crate::access::codex_asks(), endpoint, workspace, argv, permissions)
+}
+
+/// `asks` is an unticked "Let Codex work without asking": Codex keeps its own approval defaults.
+fn managed_codex_argv_asking(
     mode: crate::access::AccessMode,
+    asks: bool,
     endpoint: Option<&str>,
     workspace: &Path,
     mut argv: Vec<String>,
@@ -2876,6 +2883,8 @@ fn managed_codex_argv_with(
         { explicit_permissions = true; }
         index += if matches!(arg, "-c" | "--config" | "--enable" | "--disable" | "--remote-auth-token-env" | "-m" | "--model" | "--local-provider" | "-p" | "--profile" | "-s" | "--sandbox" | "-C" | "--cd" | "--add-dir" | "-a" | "--ask-for-approval") { 2 } else { 1 };
     }
+    // An unticked "Let Codex work without asking" leaves Codex's own approval defaults in place.
+    explicit_permissions |= asks;
     let socket = if mode == crate::access::AccessMode::Auto && !explicit_permissions {
         let endpoint = endpoint.context("managed auto Codex needs ST3_ENDPOINT")?;
         Some(Path::new(endpoint.strip_prefix("unix://").unwrap_or(endpoint)))
@@ -3197,6 +3206,20 @@ fn run_controlled_owned(
     result
 }
 
+/// A preloaded resume that fails drops its completion sender, which reads as "channel is empty and
+/// sending half is closed". The control thread has already named the real cause (Codex rejected the
+/// declared settings, or the saved thread has no persisted rollout); report that one.
+fn preload_failure(events: &Receiver<ControlEvent>, closed: anyhow::Error) -> anyhow::Error {
+    while let Ok(event) = events.try_recv() {
+        if let ControlEvent::Failed(cause) = event {
+            return anyhow::anyhow!(
+                "Codex control could not preload the declared resume policy: {cause}"
+            );
+        }
+    }
+    closed
+}
+
 fn declared_codex_model(args: &[String]) -> Option<String> {
     let mut selected_config = None;
     let mut selected_direct = None;
@@ -3442,7 +3465,7 @@ fn run_connected(
             drop(resume_ready_tx);
             let _ = shutdown.shutdown(Shutdown::Both);
             let _ = event_thread.join();
-            return Err(error);
+            return Err(preload_failure(&events_rx, error));
         }
     }
     // A fresh initialized observer reads before this child can issue thread/start.
