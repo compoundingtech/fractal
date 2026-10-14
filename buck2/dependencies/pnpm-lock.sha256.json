@@ -1,0 +1,31 @@
+{
+  "schema": "effect-utils/buck2-pnpm-sha256/v2",
+  "lockfileFingerprint": "sha256:1fff77e53fdea9fdf083772cbea733d4c96da0df8ca112dc6f4cd49b1e49b592",
+  "source": "pnpm-lock.yaml",
+  "generator": "buck2/dependencies/pnpm-lock.sha256.json.genie.ts",
+  "regenerate": "devenv tasks run genie:run",
+  "packages": {
+    "effect@4.0.0-rc.118": {
+      "bins": {},
+      "classification": "public",
+      "integrity": "sha512-hxhpCd+swzrtu9lnyPpEFre2ODQzJ9qxgyL1oHIEY8NKnW4PxTbM1XzplMZXiAsLD62HO+KJc41Nqxr9T791ZQ==",
+      "packageIdentity": "effect@4.0.0-rc.118",
+      "registryUrl": "https://registry.npmjs.org/effect/-/effect-4.0.0-rc.118.tgz",
+      "sha256": "e1ccff11ed06bf4a6a1a74307fbb233090144990704b9322deb7cffd81f3aadd",
+      "sizeBytes": 8907110
+    },
+    "typescript@6.0.3": {
+      "bins": {
+        "tsc": "bin/tsc",
+        "tsserver": "bin/tsserver"
+      },
+      "classification": "public",
+      "integrity": "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==",
+      "packageIdentity": "typescript@6.0.3",
+      "registryUrl": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+      "sha256": "33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22a",
+      "sizeBytes": 4515854
+    }
+  },
+  "fingerprint": "sha256:734733632bd985f94fae77c984c7eb5d1797bb2207bb1996716e0b8748feb6e7"
+}
