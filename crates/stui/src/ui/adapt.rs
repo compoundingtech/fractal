@@ -159,6 +159,13 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         .filter(|peer| peer.diverged_since.is_some())
         .map(|peer| peer.host_id.trim_start_matches("host/").to_owned())
         .collect();
+    let behind = model
+        .sync_notice()
+        .into_iter()
+        .flat_map(|sync| &sync.peers)
+        .filter(|peer| peer.diverged_since.is_none() && peer.peer_only_envelopes > 0)
+        .map(|peer| peer.summary())
+        .collect();
     let loaded_windows = [
         ("Attention", model.now.snapshot.is_some()),
         ("Agents", model.agents.snapshot.is_some()),
@@ -183,6 +190,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         link,
         diverged,
         stale,
+        behind,
         missions_followed: extras.missions_followed,
         settled: extras.attention_live && extras.agents_live,
         active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
@@ -1778,6 +1786,39 @@ mod tests {
             truncated: false,
             sync: None,
         }
+    }
+
+    #[test]
+    fn a_peer_with_newer_records_is_behind_and_a_diverged_one_is_not() {
+        let peer = |host: &str, missing: u64, diverged: bool| st3_client::SyncPeer {
+            host_id: host.into(),
+            peer_only_envelopes: missing,
+            local_only_envelopes: 0,
+            last_exchange_at: None,
+            estimated_catch_up_seconds: Some(840),
+            diverged_since: diverged.then(|| "2026-09-29T10:00:00Z".into()),
+        };
+        let mut model = Model::default();
+        let mut attention = window(Vec::new());
+        attention.sync = Some(st3_client::SyncNotice {
+            state: "catching-up".into(),
+            peers: vec![peer("host/harbor", 26_820, false), peer("host/quay", 0, false)],
+        });
+        model.now = attention;
+        let shown = world(&model, "person/avery", &Extras::default());
+        assert_eq!(shown.behind.len(), 1, "{:?}", shown.behind);
+        assert!(shown.behind[0].starts_with("harbor has 26,820 envelopes"), "{:?}", shown.behind);
+        assert!(shown.diverged.is_empty());
+
+        let mut attention = window(Vec::new());
+        attention.sync = Some(st3_client::SyncNotice {
+            state: "diverged".into(),
+            peers: vec![peer("host/harbor", 5, true)],
+        });
+        model.now = attention;
+        let shown = world(&model, "person/avery", &Extras::default());
+        assert!(shown.behind.is_empty());
+        assert_eq!(shown.diverged, vec!["harbor".to_owned()]);
     }
 
     #[test]
