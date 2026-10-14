@@ -91,7 +91,7 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
     const request = ++reopenRequest.current
     window.setTimeout(() => { if (request === reopenRequest.current && Math.abs(closedAt - lastScroll.current) < scrollSettleMs && keyboardFocused()) setSettling(true) })
   }
-  return <ThemePortal><span ref={scope} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>
+  return <ThemePortal><span ref={scope} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut, styles.tooltipShortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>
 }
 export type TooltipSurfaceProps = Omit<AriaTooltipProps, 'className' | 'style'> & { style?: stylex.StyleXStyles }
 /** Use inside an existing TooltipTrigger and ThemePortal when its trigger is not a kit Button. */
@@ -116,6 +116,7 @@ const styles = stylex.create({
   checkboxOn: { backgroundColor: accent.primary, borderColor: accent.primary, color: accent.onPrimary },
   tooltipScope: { display: 'contents' },
   shortcut: { flexShrink: 0, color: text.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  tooltipShortcut: { color: 'inherit' },
   shortcutActive: { color: text.fgSoft },
   surfaceMotion: { transformOrigin: 'center', animationDuration: motion.fast, animationTimingFunction: motion.ease, ':is([data-entering])': { animationName: enterSurface }, ':is([data-exiting])': { animationName: exitSurface }, '@media (prefers-reduced-motion: reduce)': { animationName: 'none', animationDuration: '0s', transform: 'none', ':is([data-entering])': { animationName: 'none' }, ':is([data-exiting])': { animationName: 'none' } } },
 })
