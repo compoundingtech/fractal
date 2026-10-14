@@ -1141,6 +1141,7 @@ class WorkflowStructure(unittest.TestCase):
             self.assertNotIn('workflow_dispatch', base)
         for head in heads:
             self.assertIn("((github.event_name == 'merge_group' || github.event_name == 'push') && github.repository)", head)
+
     def test_the_linux_gate_wrapper_rule_is_the_argv_the_aggregate_job_records_from_its_needs(self):
         """The aggregate note records ['linux-gate', 'aggregate'] + its needed jobs sorted, gates left out.
         Derived here from the generated workflow so adding a needed job cannot silently disable skipping."""
