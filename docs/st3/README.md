@@ -45,6 +45,7 @@ Use these documents for implementation details:
 - [Attachments](attachments.md) defines the images a message carries between machines: where the
   bytes live (never in sync), the limits, upload and read, and delivery to a seat.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
+- [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
 - [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
 - [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
