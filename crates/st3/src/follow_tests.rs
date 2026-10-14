@@ -209,7 +209,14 @@ async fn trace_follow_refuses_an_endpoint_version_transition_without_entering_le
     assert_eq!(output.requests.len(), 2);
     assert!(output.stdout.is_empty());
     let message = output.result.unwrap_err().to_string();
-    assert!(message.contains("7fc261ed03280300b4acfca4c2d0521173b78520"));
+    assert!(message.contains("2026-10-16 13:50 UTC"));
+    assert!(
+        message.contains(
+            "https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh"
+        )
+    );
+    assert!(message.contains("--edge --no-run"));
+    assert!(message.contains("If the daemon just restarted"));
     assert!(message.contains("st service restart"));
     assert!(message.contains("rerun the original command"));
 }

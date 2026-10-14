@@ -11393,7 +11393,7 @@ impl LocalEventFeed {
             .map_err(|error| {
                 if st3::client::is_missing_route(&error) {
                     anyhow::anyhow!(
-                        "this daemon does not support bounded event continuation; upgrade the daemon to a build containing commit 7fc261ed03280300b4acfca4c2d0521173b78520 or newer, then rerun the original command. For a managed daemon, install that build on the daemon host and run `st service restart` first"
+                        "this daemon does not support bounded event continuation, required by this CLI from 2026-10-16 13:50 UTC. If the daemon just restarted, rerun the original command first. Otherwise, install rolling edge on the daemon host with `curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run`; for a managed daemon run `st service restart`, then rerun the original command"
                     )
                 } else {
                     event_cursor_error(error, query, self.trace)

@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The server wire is unchanged: GET /v1/events, its existing health feature and GET /v1/events/page remain available. A new following CLI no longer enters the legacy feed when a missing-page reply from an older daemon is followed by health from its replacement; it stops with upgrade-and-rerun guidance. Landing requires an explicit compatibility decision for older published upgrade sources."
+    "detail": "The server wire is unchanged in this client-only PR: GET /v1/events, its health feature and GET /v1/events/page remain available. A new following CLI refuses an older daemon without the bounded route instead of entering the legacy feed after an endpoint version transition. Nathan accepted rolling edge as the upgrade target with a two-day transition: this PR must not queue before 2026-10-16 13:50 UTC, two days after the replacement reached edge on 2026-10-14 at about 13:50 UTC. Server-route retirement is a separate dated follow-up requiring its own PR and compatibility decision; no API removal is included here."
   },
   "downtime": {
     "status": "none",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "If the daemon has no bounded event route, install a build containing commit 7fc261ed03280300b4acfca4c2d0521173b78520 or newer on the daemon host, restart the managed daemon with st service restart, and rerun the original command. Reinstalling latest v0.3.17 is insufficient because it predates that commit. No fleet roll is performed by this change."
+    "detail": "From 2026-10-16 13:50 UTC, new CLI follow commands require bounded event continuation. If a daemon just restarted, first rerun the original command. If the route is still missing, install rolling edge on the daemon host with curl --proto =https --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh -s -- --edge --no-run; restart a managed daemon with st service restart, then rerun the original command. No stable release number or source-only commit is the upgrade target. No install, daemon restart or fleet roll is performed by this PR."
   },
   "recovery": {
     "status": "none",
