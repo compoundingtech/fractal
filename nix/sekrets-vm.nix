@@ -163,7 +163,7 @@ pkgs.testers.runNixOSTest {
     assert "token=set" in login("ada", f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
 
     # A dedicated system UID + exact root-created unit, BEFORE any st daemon exists.
-    # It receives a command grant, never Ada's person/profile-management authority.
+    # It receives a command grant, never Ada's person authority or profile management.
     machine.succeed("install -d -m 0755 /var/cache/evidence /w && install -d -o evidence-caller -m 0700 /var/cache/evidence/work && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/smalltalk && printf private-runner-checkout > /var/cache/evidence/work/smalltalk/checkout-marker && setfacl -m u:sekrets:x /var/cache/evidence/work")
     login("ada", f"{st} sekrets grant ada/agent-gh --to program/ci1/evidence --allow 'gh pr view'")
     def program(command, unit="ci-evidence-caller.service", user="evidence-caller", succeed=True,
@@ -203,8 +203,10 @@ pkgs.testers.runNixOSTest {
     program(f"{st} sekrets log", succeed=False)
     program("cat /var/lib/st-sekrets/sekrets.db", succeed=False)
     program("ls /var/lib/st-sekrets/profiles/ada/agent-gh/home", succeed=False)
-    machine.succeed("printf throwaway > /var/lib/st-sekrets/profiles/ada/agent-gh/home/signing-key && chown sekrets:sekrets /var/lib/st-sekrets/profiles/ada/agent-gh/home/signing-key && chmod 0600 /var/lib/st-sekrets/profiles/ada/agent-gh/home/signing-key")
-    program("cat /var/lib/st-sekrets/profiles/ada/agent-gh/home/signing-key", succeed=False)
+    signing_home = "/var/lib/st-sekrets/profiles/ada/agent-gh/home"
+    signing_key = f"{signing_home}/signing-key"
+    machine.succeed(f"printf throwaway > {signing_key} && chown sekrets:sekrets {signing_key} && chmod 0600 {signing_key}")
+    program(f"cat {signing_key}", succeed=False)
     assert "denied by rule `gh auth token`" in login("ada", f"{st} sekrets -- gh auth token", succeed=False)
 
     # No one but the sekrets user reads the store; the token appears in no output or log.

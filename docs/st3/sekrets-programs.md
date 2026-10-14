@@ -5,7 +5,7 @@ seat or fleet membership. It authenticates the socket's kernel UID and the proce
 exact systemd unit, and rechecks its process birth and placement before a request.
 It reports a `program/HOST/NAME` caller, never the person who owns its grant.
 
-`setup --person person/nathan --uid RUNNER_UID` alone does **not** enable this.
+`setup --person person/ada --uid RUNNER_UID` alone does **not** enable this.
 A person mapping requires a logind login scope; a system runner is not a person.
 Do not map a runner UID as a person or give it profile management.
 
@@ -20,11 +20,11 @@ path = ["/nix/store/PYTHON-PIN/bin", "/nix/store/GIT-PIN/bin", "/nix/store/OPENS
 checkout_roots = ["/var/cache/ci1/work"]
 
 [people]
-"1000" = "person/nathan" # actual operator login UID
+"1000" = "person/ada" # actual operator login UID
 
 [programs."999"] # actual dedicated system UID, separate from every person
 principal = "program/ci1/ci1-1"
-person = "person/nathan"
+person = "person/ada"
 unit = "github-runner-ci1-1.service"
 command = ["python3", "/nix/store/SIGNER-PIN/evidence-sign"]
 
@@ -41,19 +41,19 @@ identities; no wildcard program enrollment/grant exists.
 
 `command` is the **entire** accepted argv. Added flags, another script, a shell,
 login or profile-management request is refused. An explicit profile grant is also
-required; mapping to Nathan does not give ownership of Nathan's profiles. Profile
+required; mapping to Ada does not give ownership of Nathan's profiles. Profile
 and grant policies both apply, including expiry, revocation and locks. Program
 callers cannot change profiles/keys/grants, make authorized HTTP requests or read
 the person's audit log. The human reads `st sekrets log` from their login session;
 allowed calls/refusals/exits retain the program identity in the gateway's local log,
 without needing a daemon to mirror it.
 
-From Nathan's actual login session after the reviewed installation:
+From the owner's actual login session after the reviewed installation:
 
 ```sh
-st sekrets profile create nathan/evidence-sign \
+st sekrets profile create ada/evidence-sign \
   --allow 'python3 /nix/store/SIGNER-PIN/evidence-sign'
-st sekrets grant nathan/evidence-sign --to program/ci1/ci1-1 \
+st sekrets grant ada/evidence-sign --to program/ci1/ci1-1 \
   --allow 'python3 /nix/store/SIGNER-PIN/evidence-sign'
 ```
 
@@ -68,7 +68,7 @@ be the hardened wrapper-owner implementation, not a caller-authored script.
 The existing wrapper interface stays unchanged:
 
 ```sh
-EVIDENCE_SIGNER='["st","sekrets","--profile","nathan/evidence-sign","--","python3","/nix/store/SIGNER-PIN/evidence-sign"]' \
+EVIDENCE_SIGNER='["st","sekrets","--profile","ada/evidence-sign","--","python3","/nix/store/SIGNER-PIN/evidence-sign"]' \
   scripts/evidence-wrap ...
 ```
 

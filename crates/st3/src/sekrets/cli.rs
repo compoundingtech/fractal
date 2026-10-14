@@ -157,7 +157,7 @@ enum ProfileCommand {
 #[derive(Args, Debug)]
 struct GrantArgs {
     profile: String,
-    /// Agent/person/host, or an exact root-enrolled program/HOST/NAME.
+    /// An agent, person, node, or exact root-enrolled program/HOST/NAME.
     #[arg(long)]
     to: String,
     #[command(flatten)]
