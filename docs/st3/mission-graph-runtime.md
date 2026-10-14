@@ -475,6 +475,26 @@ The embedded mission revision is immutable. A client cannot start it directly. T
 
 An agent declared inside `round` belongs to that child run. st removes it when the child run ends.
 
+Refine rounds conventionally name their review step `gate`. When that step has one
+assigned agent declared directly inside `round`, and no other step assigns or offers
+work to that agent, st makes the agent desired only after the step's dependencies and
+baseline predicates pass. The seat remains available through claims, releases and retries,
+and ordinary child-run cleanup removes it. A daemon restart or compatible revision
+derives admission from persisted step state and the current owned declaration. An
+already admitted seat is re-owned even during a pending retry, before a revision
+retires its predecessor generation. A round ending before admission creates
+neither a gate seat nor a stop declaration for it.
+
+This is a rule for the literal step name `gate`, not a DSL marker or an `until` exit
+gate. Other round agents, agents shared across steps, and `available-to` pools start
+with the round. Messages sent through conversations to a deferred agent wait in its
+mailbox until it starts; they do not make its work ready.
+
+KDL messages can also address that declared agent before admission. A step's message
+to its deferred gate satisfies the declaration once it is durably queued, so the
+builder can finish and make the gate ready. Messages to other agents retain their
+usual delivery requirement.
+
 An agent declared outside the loop belongs to the root run. A round can address it with `ST_ROOT_MISSION_RUN_ID`.
 
 `until` contains repeated gates. All exit gates must pass.
