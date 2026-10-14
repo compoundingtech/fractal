@@ -6,6 +6,7 @@ must end in `decision=run`, and every hostile or broken verifier must too.
 """
 import importlib.machinery
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
@@ -775,7 +776,7 @@ class WorkflowStructure(unittest.TestCase):
                 self.assertRegex(body, r'branches|tags', f'{path.name} has an unfiltered push trigger')
 
     WIRED = ('genie-freshness', 'typescript-client')
-    NOT_YET_WIRED = ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries')
+    NOT_YET_WIRED = ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries')  # not wired at the check-job level (see below)
 
     def job_text(self, name):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
@@ -821,11 +822,143 @@ class WorkflowStructure(unittest.TestCase):
             self.assertIn('      skip: ${{ steps.taken.outputs.skip }}\n      record: ${{ steps.taken.outputs.record }}\n',
                           self.job_text(f'evidence-gate-{check}'))
 
-    def test_the_other_required_checks_are_not_wired_to_skip_yet(self):
-        for check in self.NOT_YET_WIRED:
+    LINUX_JOB_LEVEL = ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
+                       'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat')
+    LINUX_STEP_LEVEL = ('mail-redelivery-canaries', 'isolation-vm')
+
+    def blocks(self):
+        workflow = (ROOT / '.github/workflows/fleet.yml').read_text()
+        return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split("\njobs:\n", 1)[1]))
+
+    @staticmethod
+    def needs_of(block):
+        found = re.search(r'^    needs:(.*?)(?=^    \S|\Z)', block, re.M | re.S)
+        return set(re.findall(r'[A-Za-z][A-Za-z0-9_-]*', found.group(1))) if found else set()
+
+    @staticmethod
+    def truth(expression, gates, event):
+        """Evaluate a generated job or step condition for the given gate decisions and event."""
+        expression = expression.strip()
+        if expression.startswith('"'):
+            expression = json.loads(expression)
+        if expression.startswith('${{'):
+            expression = expression[3:-2].strip()
+        for gate, value in gates.items():
+            expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.skip == 'true'", str(value))
+        expression = expression.replace("github.event_name != 'pull_request' || github.event.pull_request.draft == false", 'True')
+        expression = expression.replace('!cancelled()', 'True')
+        expression = expression.replace("github.event_name == 'merge_group'", str(event == 'merge_group'))
+        expression = expression.replace('!(', 'not (').replace('&&', ' and ').replace('||', ' or ')
+        return bool(eval(expression, {'__builtins__': {}}))
+
+    @staticmethod
+    def job_condition(block):
+        return re.search(r'^    if: (.*)$', block, re.M).group(1)
+
+    def first_gated_step_condition(self, block):
+        """The condition of the first step after the checkout: the one that decides whether the job's work runs."""
+        body = block.split('    steps:\n', 1)[1]
+        chunks = re.split(r'^      - ', body, flags=re.M)[1:]
+        seen_checkout = False
+        for chunk in chunks:
+            if chunk.startswith('uses: actions/checkout'):
+                seen_checkout = True
+                continue
+            condition = re.search(r'^        if: (.*)$', chunk, re.M)
+            return condition.group(1) if condition else None
+        return None
+
+    def test_the_linux_group_is_consistent_for_every_combination_of_gate_decisions(self):
+        blocks = self.blocks()
+        aggregate = blocks['linux-gate']
+        script = __import__('textwrap').dedent(aggregate.split('run: |\n', 1)[1].split('\n      - ', 1)[0])
+        stage_names = re.findall(r'needs\.([a-z0-9-]+)\.result', re.search(r'^          RESULTS: (.*)$', aggregate, re.M).group(1))
+        self.assertEqual(len(stage_names), 7)
+
+        def accepts(event, results, skip):
+            env = {**os.environ, 'EVENT': event, 'RESULTS': ' '.join(results[n] for n in stage_names),
+                   'MERGE_RESULTS': f"{results['linux-tests-shard-3']} {results['linux-tests-shard-4']}"}
+            env.pop('GATE_SKIP', None)
+            if skip is not None:
+                env['GATE_SKIP'] = skip
+            return subprocess.run(['bash', '-c', script], env=env, capture_output=True).returncode == 0
+
+        checked = 0
+        for event, lg, iv, mrc in itertools.product(('pull_request', 'merge_group'), (False, True), (False, True), (False, True)):
+            gates = {'linux-gate': lg, 'isolation-vm': iv, 'mail-redelivery-canaries': mrc}
+            runs = {job: self.truth(self.job_condition(blocks[job]), gates, event) for job in self.LINUX_JOB_LEVEL}
+            canaries_work = self.truth(self.first_gated_step_condition(blocks['mail-redelivery-canaries']), gates, event)
+            isolation_work = self.truth(self.first_gated_step_condition(blocks['isolation-vm']), gates, event)
+            label = (event, lg, iv, mrc)
+            # The build runs whenever any job that needs its output does real work.
+            dependents_work = runs['linux-tests'] or runs['linux-tests-shard-2'] or runs['linux-tests-shard-3'] \
+                or runs['linux-tests-shard-4'] or canaries_work or isolation_work
+            if dependents_work:
+                self.assertTrue(runs['linux-test-build'], label)
+            # ...and it is skipped exactly when everything that needs it is covered.
+            self.assertEqual(not runs['linux-test-build'], lg and (lg or mrc) and iv, label)
+            # Whatever the gate decided, nothing is skipped unless the aggregate's own gate said skip.
+            if not lg:
+                self.assertTrue(all(runs[j] for j in self.LINUX_JOB_LEVEL if j not in ('linux-test-build',)
+                                    and not (event == 'pull_request' and j in ('linux-tests-shard-3', 'linux-tests-shard-4'))), label)
+            # The required checks themselves never report skipped: their jobs always run.
+            self.assertEqual(canaries_work, not (lg or mrc), label)
+            self.assertEqual(isolation_work, not iv, label)
+            # The real aggregate accepts the consistent outcome...
+            results = {n: ('success' if runs.get(n, True) else 'skipped') for n in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']}
+            skip = 'true' if lg else None
+            self.assertTrue(accepts(event, results, skip), label)
+            # ...and rejects a failure in ANY job that ran, even under a skip.
+            for victim in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']:
+                if results[victim] == 'success':
+                    broken = {**results, victim: 'failure'}
+                    self.assertFalse(accepts(event, broken, skip), label + (victim,))
+            # ...and rejects skipped stages if its own gate had not said skip.
+            if any(v == 'skipped' for n, v in results.items() if n not in ('linux-tests-shard-3', 'linux-tests-shard-4')):
+                self.assertTrue(lg, label)  # a stage can only be skipped when the aggregate's gate decided skip
+                self.assertFalse(accepts(event, results, None), label)
+            checked += 1
+        self.assertEqual(checked, 16)
+
+    def test_the_required_checks_that_are_jobs_keep_running_and_skip_only_their_steps(self):
+        blocks = self.blocks()
+        for check, gates in (('mail-redelivery-canaries', ('linux-gate', 'mail-redelivery-canaries')), ('isolation-vm', ('isolation-vm',))):
             with self.subTest(check):
-                self.assertNotIn(f'needs.evidence-gate-{check}', self.job_text(check))
-                self.assertNotIn(f"evidence-gate-{check}", self.job_text(check).split('    steps:\n', 1)[0])
+                block = blocks[check]
+                self.assertTrue({f'evidence-gate-{g}' for g in gates} <= self.needs_of(block))
+                condition = self.job_condition(block)
+                self.assertIn('!cancelled()', condition)
+                self.assertNotIn('evidence-gate', condition)  # the job itself is never skipped: a required check never reports skipped
+                body = block.split('    steps:\n', 1)[1]
+                chunks = re.split(r'^      - ', body, flags=re.M)[1:]
+                self.assertTrue(chunks[0].startswith('name: Require the shared test producer'), 'the pre-check on the build is the first step')
+                saw_checkout = False
+                for chunk in chunks:
+                    label = chunk.split('\n')[0]
+                    condition = re.search(r'^        if: (.*)$', chunk, re.M)
+                    condition = condition.group(1) if condition else None
+                    if chunk.startswith('uses: actions/checkout'):
+                        saw_checkout = True
+                        self.assertIsNone(condition, 'the checkout is never skipped')
+                    elif label.startswith('name: evidence covered by a trusted note'):
+                        self.assertTrue(all(f"needs.evidence-gate-{g}.outputs.skip == 'true'" in condition for g in gates))
+                    elif label.startswith('name: Report job cache coverage'):
+                        self.assertEqual(condition, 'always()')
+                    else:
+                        self.assertIsNotNone(condition, f'{label} would run on a skip')
+                        self.assertIn('!(', condition, label)
+                        for g in gates:
+                            self.assertIn(f"needs.evidence-gate-{g}.outputs.skip == 'true'", condition, label)
+                self.assertTrue(saw_checkout)
+
+    def test_the_build_is_skipped_only_through_its_dependents_never_on_its_own_say(self):
+        block = self.blocks()['linux-test-build']
+        condition = self.job_condition(block)
+        # Derived from every dependent: the linux-gate gate, the canaries' either-gate rule and isolation-vm's gate.
+        for term in ("needs.evidence-gate-linux-gate.outputs.skip == 'true'", "needs.evidence-gate-isolation-vm.outputs.skip == 'true'"):
+            self.assertIn(term, condition)
+        self.assertTrue({'evidence-gate-linux-gate', 'evidence-gate-isolation-vm', 'evidence-gate-mail-redelivery-canaries'} <= self.needs_of(block))
+        self.assertIn('!cancelled()', condition)
 
     def test_the_skip_output_can_only_come_from_the_marker_step(self):
         """The decision the check jobs act on must not exist unless `evidence skip taken` already ran."""
