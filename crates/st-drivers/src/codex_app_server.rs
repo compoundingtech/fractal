@@ -997,7 +997,7 @@ impl CodexInboxDelivery {
     /// contradiction of the latest observation.
     #[cfg(test)]
     fn observe_harness(&mut self, observed: &CodexObservedState) {
-        self.publish_harness(observed.harness_observation());
+        self.publish_harness(observed, observed.harness_observation());
     }
 
     /// Publish the projection of the control state, as [`Self::observe_harness`] does, with the
@@ -1009,10 +1009,14 @@ impl CodexInboxDelivery {
             self.harness_writer.interrupt();
         }
         self.approval_request = request;
-        self.publish_harness(state.harness_observation());
+        self.publish_harness(&state.observed, state.harness_observation());
     }
 
-    fn publish_harness(&mut self, observation: Option<harness_state::Observation>) {
+    fn publish_harness(
+        &mut self,
+        observed: &CodexObservedState,
+        observation: Option<harness_state::Observation>,
+    ) {
         match observation {
             Some(mut observation) => {
                 if let Some(accepted) = self.provider_auth_edge.take() {
