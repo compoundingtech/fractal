@@ -92,6 +92,13 @@ mod client_observations;
 mod terminal_view;
 mod work_response;
 mod published_lists;
+#[cfg(target_os = "linux")]
+mod tile_endpoint;
+#[cfg(target_os = "linux")]
+pub use tile_endpoint::{
+    SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
+    spawn_from as spawn_tile_endpoints_from,
+};
 pub use published_lists::start_published_lists;
 mod changes;
 
@@ -11391,6 +11398,9 @@ struct AgentRestartRequest {
     subject: String,
     actor: String,
     idempotency_key: String,
+    /// Restart without first asking the seat for its handoff.
+    #[serde(default)]
+    now: bool,
 }
 
 async fn restart_agent(
@@ -11503,7 +11513,15 @@ async fn restart_agent(
                     Value::String(member.runtime_id.clone()),
                 ),
                 ("incarnation_id".into(), Value::String(incarnation.into())),
-            ]),
+            ])
+            .into_iter()
+            .chain(request.now.then(|| {
+                (
+                    "operation".to_owned(),
+                    Value::String(crate::handoff::RESTART_NOW_OPERATION.into()),
+                )
+            }))
+            .collect(),
             evidence: vec![token],
             expected_subject: None,
             idempotency_key: Some(key),

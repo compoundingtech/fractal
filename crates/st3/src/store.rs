@@ -138,7 +138,10 @@ mod roster_admission;
 pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
 mod attention_snapshot;
-pub(crate) use attention_snapshot::{NativePromptState, native_prompt_gone_key};
+pub(crate) use attention_snapshot::{
+    NativePromptState, native_prompt_gone_key, screen_prompt_delivered_key, screen_prompt_gone_key,
+    screen_prompt_undelivered_key,
+};
 pub(crate) mod attention_list;
 pub(crate) mod owner_lists;
 pub(crate) mod summary_list;
@@ -162,6 +165,7 @@ mod limits;
 mod database_size;
 pub use database_size::DatabaseSize;
 mod person_work;
+mod reconcile_work_context;
 pub(crate) mod work_summaries_ivm;
 mod subagents;
 mod watches;
@@ -8185,7 +8189,7 @@ impl Store {
     /// timing and wake annotations. Those annotations scan immutable history and
     /// are intentionally too expensive for the daemon's inner control loop.
     pub fn work_for_reconcile(&self, actor: &str) -> Result<Vec<StepRunView>> {
-        let work = self.work_at_snapshot_internal(Some(actor), true, now_ms(), false)?;
+        let work = reconcile_work_context::read(self, actor, now_ms())?;
         // A generation can add steps this seat has not read yet. Existing steps already
         // register their own subjects below; their state changes must not invalidate every
         // seat. Handoffs mark the new recipient's actor key in incremental::change_keys.
@@ -34140,6 +34144,17 @@ fn apply_effective_step_state(
             },
         )
         .optional()?;
+    apply_effective_step_state_with_owner(connection, view, snapshot_unix_ms, owner)
+}
+
+type EffectiveStepOwner = (String, String, String, String, String, String);
+
+fn apply_effective_step_state_with_owner(
+    connection: &Connection,
+    view: &mut StepRunView,
+    snapshot_unix_ms: u128,
+    owner: Option<EffectiveStepOwner>,
+) -> rusqlite::Result<()> {
     let Some((
         run_status,
         run_phase,

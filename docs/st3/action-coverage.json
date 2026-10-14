@@ -453,6 +453,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st agents handoff ready",
+      "description": "Say this seat's handoff is current so a waiting restart can go ahead",
+      "tests": [
+        "crates/st3/tests/agents_restart.rs::ready_acknowledges_a_handoff_that_is_already_current"
+      ],
+      "verification": "real CLI over a private Unix socket; the restart waits, then stops the seat"
+    },
+    {
       "command": "st agents handoff show",
       "description": "Print a seat's latest handoff document",
       "tests": [
@@ -2119,6 +2127,14 @@
         "crates/st3/tests/action_coverage.rs::cli_terminal_controls_and_stream_capabilities_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st tiles prepare",
+      "description": "Make a tile's directories, including the endpoint directory its supervisor serves, without starting it. Run as root, for example at boot",
+      "tests": [
+        "crates/st3/tests/tiles_root.rs::a_tile_acts_through_its_endpoint_only_as_its_own_agent"
+      ],
+      "verification": "root-only proofs on a real Linux host with disposable system users (ST_TILES_ROOT_TEST=1 tiles_root); not run in CI, which has no root"
     },
     {
       "command": "st tiles run",

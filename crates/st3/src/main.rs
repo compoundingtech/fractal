@@ -3245,12 +3245,21 @@ st restarts a seat for an account or model change, a declaration change, or an o
 request; every session that starts after a restart is given the handoff and the live state of the \
 seat's work as its first message. Write what the graph does not hold: what you were in the middle of, \
 the branches and pull requests you own, what you wait on, what to do next, and anything running \
-that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.")]
+that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.\n\n\
+Before a planned restart st sends the seat a \"Prepare for restart\" message with a deadline. Writing the \
+handoff acknowledges it; `ready` acknowledges a handoff that is already current. The restart goes ahead \
+at the acknowledgement or the deadline, whichever comes first.")]
 enum HandoffCommand {
     /// Replace this seat's handoff with FILE, or with standard input when FILE is `-` or absent.
     Write {
         file: Option<PathBuf>,
         /// The seat whose handoff to write; only that seat may write it.
+        #[arg(long = "as", value_parser = parse_actor_subject)]
+        actor: Option<String>,
+    },
+    /// Say this seat's handoff is current, so a restart that is waiting for it can go ahead.
+    Ready {
+        /// The seat that is ready; a readiness claim counts only when it names that seat as its actor.
         #[arg(long = "as", value_parser = parse_actor_subject)]
         actor: Option<String>,
     },
@@ -4043,6 +4052,10 @@ struct AgentRestartArgs {
     /// How long to wait for a new running incarnation.
     #[arg(long, default_value = "10m")]
     timeout: String,
+    /// Restart at once. By default a seat that is up and ready is first asked for its handoff and
+    /// restarted at its acknowledgement or after two minutes; use this for a seat that cannot answer.
+    #[arg(long)]
+    now: bool,
 }
 
 #[derive(Subcommand)]
@@ -6954,6 +6967,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
     };
+    // Tiles this daemon's user supervises reach it only through their restricted endpoint.
+    #[cfg(target_os = "linux")]
+    st3::api::spawn_tile_endpoints(state.clone());
     st3::gate_check::set_endpoint(config.socket.display().to_string());
     startup_phases.app_state_ms = phase_elapsed_ms();
     let reconciler = Arc::new(Reconciler::native(
@@ -13551,6 +13567,30 @@ async fn run_handoff(
                 Ok(())
             }
         }
+        HandoffCommand::Ready { actor } => {
+            let agent = configured_actor(actor.as_deref(), configured_person, "handoff ready")?;
+            document(&agent)?;
+            let claim: ClaimRecord = client
+                .post(
+                    "/v1/claims",
+                    &ClaimInput {
+                        subject: st3::handoff::ready_subject(&agent),
+                        kind: st3::handoff::READY_KIND.into(),
+                        actor: Some(agent.clone()),
+                        fields: std::collections::BTreeMap::from([("agent".into(), agent.clone().into())]),
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: Some(format!("restart-ready:{agent}:{}", uuid::Uuid::now_v7())),
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&claim, true)
+            } else {
+                println!("{agent} is ready to restart");
+                Ok(())
+            }
+        }
         HandoffCommand::Show { agent } => {
             let agent = configured_actor(agent.as_deref(), configured_person, "handoff show")?;
             let name = document(&agent)?;
@@ -14320,6 +14360,7 @@ async fn run_agents(
                         "subject": subject,
                         "actor": args.actor,
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
+                        "now": args.now,
                     }),
                 )
                 .await?;
