@@ -19,8 +19,20 @@ let
       cat
     fi
   '';
+  # VM-only barrier after the gateway verifies a directory and before bwrap mounts it.
+  # No production hook, environment flag or caller-controlled executable is introduced.
+  checkedBwrap = pkgs.writeShellScript "sekrets-checked-bwrap" ''
+    if test -e /run/st-sekrets/bind-control/watch; then
+      touch /run/st-sekrets/bind-control/invoked
+    fi
+    if test -e /run/st-sekrets/bind-control/pause; then
+      touch /run/st-sekrets/bind-control/ready
+      cat /run/st-sekrets/bind-control/resume >/dev/null
+    fi
+    exec ${pkgs.bubblewrap}/bin/bwrap "$@"
+  '';
   gatewayConfig = pkgs.writeText "gateway.toml" ''
-    bwrap = "${pkgs.bubblewrap}/bin/bwrap"
+    bwrap = "${checkedBwrap}"
     path = ["/run/current-system/sw/bin"]
     checkout_roots = ["/srv/people"]
 
@@ -173,17 +185,43 @@ pkgs.testers.runNixOSTest {
                 f"--property=BindPaths={backing}:/w -- /bin/sh -c " + shlex.quote(command) + " 2>&1")
         return machine.succeed(call) if succeed else machine.fail(call)
     assert "run-only system service" in program(f"{st} sekrets whoami")
-    assert "token=set" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
+    with subtest("Program first command binds its authorized private checkout"):
+        assert "token=set" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
     output = program(f"printf 'structured-stdin-only' | {st} sekrets --profile ada/agent-gh -- gh pr view 1")
     assert "checkout=/w/smalltalk:private-runner-checkout" in output
     assert "checkout-readonly" in output and "structured-stdin-only" in output
     machine.fail("test -e /var/cache/evidence/work/smalltalk/forbidden-checkout-write")
     machine.fail("test -e /w/smalltalk") # the gateway host has only the empty mount anchor
+
+    with subtest("Program bind retains the verified inode across caller path replacement"):
+        machine.succeed("install -d -o sekrets -m 0700 /run/st-sekrets/bind-control && mkfifo /run/st-sekrets/bind-control/resume && chown sekrets /run/st-sekrets/bind-control/resume && touch /run/st-sekrets/bind-control/pause && install -o evidence-caller -m 0600 /dev/null /var/cache/evidence/swap-output")
+        swap_command = (f"{st} sekrets --profile ada/agent-gh -- gh pr view 1 > /var/cache/evidence/swap-output 2>&1; "
+                        "result=$?; printf '\\nexit=%s\\n' \"$result\" >> /var/cache/evidence/swap-output; exit \"$result\"")
+        machine.succeed("systemd-run --quiet --no-block --unit ci-evidence-caller.service "
+                        "--property=Type=oneshot --property=RemainAfterExit=yes "
+                        "--property=User=evidence-caller --property=WorkingDirectory=/w/smalltalk "
+                        "--property=BindPaths=/var/cache/evidence/work:/w -- /bin/sh -c " + shlex.quote(swap_command))
+        machine.wait_for_file("/run/st-sekrets/bind-control/ready")
+        # The caller namespace sees a replacement at /w/smalltalk. The verified descriptor
+        # still names the original directory, now renamed beneath the same backing root.
+        machine.succeed("mv /var/cache/evidence/work/smalltalk /var/cache/evidence/work/verified-original && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/smalltalk && printf swapped-directory > /var/cache/evidence/work/smalltalk/checkout-marker && printf resume > /run/st-sekrets/bind-control/resume")
+        machine.wait_for_unit("ci-evidence-caller.service")
+        assert machine.succeed("systemctl show --value -p ExecMainStatus ci-evidence-caller.service").strip() == "0"
+        swapped = machine.succeed("cat /var/cache/evidence/swap-output")
+        assert "checkout=/w/smalltalk:private-runner-checkout" in swapped
+        assert "checkout-readonly" in swapped and "exit=0" in swapped
+        assert "swapped-directory" not in swapped
+        machine.succeed("systemctl stop ci-evidence-caller.service && rm -rf /run/st-sekrets/bind-control /var/cache/evidence/work/smalltalk && mv /var/cache/evidence/work/verified-original /var/cache/evidence/work/smalltalk")
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/tmp", succeed=False)
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/missing", succeed=False)
     machine.succeed("install -d -m 0755 /var/cache/evidence/other/smalltalk && ln -s /var/cache/evidence/other /var/cache/evidence/work/escape")
     program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/escape/smalltalk", succeed=False)
-    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", backing="/var/cache/evidence/other", succeed=False)
+    with subtest("Program refuses a private checkout with the wrong inode before bwrap"):
+        machine.succeed("install -d -o sekrets -m 0700 /run/st-sekrets/bind-control && touch /run/st-sekrets/bind-control/watch")
+        assert "passed checkout does not match the configured runner backing directory" in program(
+            f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", backing="/var/cache/evidence/other", succeed=False)
+        machine.fail("test -e /run/st-sekrets/bind-control/invoked")
+        machine.succeed("rm -rf /run/st-sekrets/bind-control")
     # Reachable private mount but wrong physical-root owner: refusal comes from the gateway,
     # rather than a client that cannot enter its cwd.
     machine.succeed("chown robin /var/cache/evidence/work && chmod 0755 /var/cache/evidence/work")
