@@ -959,8 +959,10 @@ mod tests {
             st3_client::SIDEBAR_ARRANGEMENT_UUID
         );
         let oldest = "arrangement/person/avery/019a0000-0000-7000-8000-000000000002";
-        let mut sidebar = Sidebar::default();
-        sidebar.arrangements = vec![named("019a0000-0000-7000-8000-000000000009", "Desk")];
+        let mut sidebar = Sidebar {
+            arrangements: vec![named("019a0000-0000-7000-8000-000000000009", "Desk")],
+            ..Default::default()
+        };
         assert_eq!(picked(&sidebar), None, "only a Sidebar is the Sidebar");
         for uuid in [
             "019a0000-0000-7000-8000-000000000003",
