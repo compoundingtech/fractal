@@ -11395,6 +11395,9 @@ struct AgentRestartRequest {
     subject: String,
     actor: String,
     idempotency_key: String,
+    /// Restart without first asking the seat for its handoff.
+    #[serde(default)]
+    now: bool,
 }
 
 async fn restart_agent(
@@ -11507,7 +11510,15 @@ async fn restart_agent(
                     Value::String(member.runtime_id.clone()),
                 ),
                 ("incarnation_id".into(), Value::String(incarnation.into())),
-            ]),
+            ])
+            .into_iter()
+            .chain(request.now.then(|| {
+                (
+                    "operation".to_owned(),
+                    Value::String(crate::handoff::RESTART_NOW_OPERATION.into()),
+                )
+            }))
+            .collect(),
             evidence: vec![token],
             expected_subject: None,
             idempotency_key: Some(key),

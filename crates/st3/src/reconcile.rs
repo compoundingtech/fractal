@@ -64,6 +64,8 @@ const HARNESS_READINESS_DEADLINE_MS: u128 = 60_000;
 /// A new incarnation is told where its seat was only while it is new: one the daemon first finds
 /// running much later (a daemon that was down, an upgrade) already has its context.
 const SESSION_START_WINDOW_MS: u128 = 10 * 60 * 1000;
+/// How long a planned restart waits for the seat to write its handoff and say it is ready.
+const RESTART_PREPARE_DEADLINE_MS: u128 = 120_000;
 const WORK_WAKE_RETRY_MS: u128 = 15_000;
 // A mechanical gate may run for minutes. Each poll reruns the entire host reconciliation
 // pass, including PTY snapshots. Ten seconds bounds result recognition without keeping a
@@ -987,6 +989,8 @@ pub struct Reconciler<R = NativeRuntime> {
     /// The latest incarnation of each seat whose start has been looked at, so a pass does no work for
     /// an incarnation it has already handled.
     session_starts: Arc<Mutex<HashMap<String, String>>>,
+    /// How long a planned restart waits for a handoff (see [`RESTART_PREPARE_DEADLINE_MS`]).
+    restart_prepare_deadline_ms: u128,
     /// The wake each running step has armed for its timeout or lease expiry, by step subject.
     step_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
@@ -1157,6 +1161,7 @@ impl Reconciler<NativeRuntime> {
             strict_incremental: false,
             skip_unneeded: std::env::var("ST3_INCREMENTAL").as_deref() != Ok("off"),
             session_starts: Arc::new(Mutex::new(HashMap::new())),
+            restart_prepare_deadline_ms: RESTART_PREPARE_DEADLINE_MS,
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
@@ -1300,6 +1305,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             strict_incremental: true,
             skip_unneeded: false,
             session_starts: Arc::new(Mutex::new(HashMap::new())),
+            restart_prepare_deadline_ms: RESTART_PREPARE_DEADLINE_MS,
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
@@ -1458,6 +1464,13 @@ impl<R: RuntimeControl> Reconciler<R> {
     #[doc(hidden)]
     pub fn skipping_unneeded(mut self, skip: bool) -> Self {
         self.skip_unneeded = skip;
+        self
+    }
+
+    /// How long a planned restart waits for the seat's handoff before it goes ahead.
+    #[doc(hidden)]
+    pub fn with_restart_prepare_deadline(mut self, deadline: Duration) -> Self {
+        self.restart_prepare_deadline_ms = deadline.as_millis();
         self
     }
 
@@ -3006,6 +3019,25 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     if let Some(error) = blocked.take() {
                                         return Err(error);
                                     }
+                                    let reason = format!(
+                                        "the declared {} changed",
+                                        changes.join(" and ")
+                                    );
+                                    let trigger = format!(
+                                        "declared:{}:{}",
+                                        self.store
+                                            .selected_desired_token(&subject.subject)?
+                                            .unwrap_or_default(),
+                                        observation.incarnation_id.as_deref().unwrap_or("")
+                                    );
+                                    if !self.restart_may_proceed(
+                                        &subject.subject,
+                                        &observation,
+                                        &trigger,
+                                        &reason,
+                                    )? {
+                                        return Ok(());
+                                    }
                                     self.record_once(
                                         &subject.subject,
                                         "runtime.reconcile-decision",
@@ -3774,6 +3806,111 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.signal_changed();
         }
         Ok(())
+    }
+
+    /// Whether a planned restart of `subject` may stop it now. A seat that can answer is first
+    /// sent a "prepare for restart" message with a deadline; the restart waits until the seat has
+    /// written its handoff or said it is ready, or the deadline passes. A seat that is not up and
+    /// ready has nobody to ask, so its restart goes ahead. `trigger` names the restart, so each
+    /// one prepares once however many passes it takes.
+    fn restart_may_proceed(
+        &self,
+        subject: &str,
+        observation: &RuntimeObservation,
+        trigger: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            return Ok(true);
+        };
+        if !self
+            .store
+            .current_harness(subject)?
+            .is_some_and(|harness| harness.incarnation_id == incarnation && harness.is_ready())
+        {
+            return Ok(true);
+        }
+        let key = format!("restart-prepare:{subject}:{trigger}");
+        let now = now_ms();
+        let Some(prepare) = self.store.operation_claim(&key)? else {
+            let deadline = now.saturating_add(self.restart_prepare_deadline_ms);
+            let prepare = self.store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.reconcile-decision".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("key".into(), Value::String("restart-prepare".into())),
+                    ("decision".into(), Value::String("prepare".into())),
+                    ("reason".into(), Value::String(reason.into())),
+                    (
+                        "restart_at_unix_ms".into(),
+                        Value::String(deadline.to_string()),
+                    ),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.clone()),
+            })?;
+            let message_id = &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16];
+            self.store.append_claim(&ClaimInput {
+                subject: format!("message/{message_id}"),
+                kind: "message.sent".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), Value::String("daemon/runtime".into())),
+                    ("to".into(), Value::String(subject.into())),
+                    (
+                        "content".into(),
+                        Value::String(crate::handoff::render_prepare(reason, deadline, now)),
+                    ),
+                    ("status".into(), Value::String("sent".into())),
+                    ("title".into(), Value::String("Prepare for restart".into())),
+                    ("in_reply_to".into(), Value::Null),
+                    (
+                        "tags".into(),
+                        Value::Array(vec![Value::String(format!(
+                            "{}{}",
+                            crate::handoff::PREPARE_TAG_PREFIX,
+                            prepare.id
+                        ))]),
+                    ),
+                ]),
+                evidence: vec![prepare.id],
+                expected_subject: None,
+                idempotency_key: Some(format!("{key}:message")),
+            })?;
+            self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
+            self.signal_changed();
+            return Ok(false);
+        };
+        let deadline = prepare
+            .body
+            .pointer("/fields/restart_at_unix_ms")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u128>().ok())
+            .unwrap_or(0);
+        let ready = crate::handoff::acknowledged_since(
+            &self.store,
+            subject,
+            prepare.accepted_at_unix_ms,
+        )?;
+        if !ready && now < deadline {
+            self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
+            return Ok(false);
+        }
+        self.record_once(
+            subject,
+            "runtime.reconcile-decision",
+            BTreeMap::from([
+                ("key".into(), Value::String("restart-prepare".into())),
+                (
+                    "decision".into(),
+                    Value::String(if ready { "ready" } else { "deadline-passed" }.into()),
+                ),
+                ("reason".into(), Value::String(reason.into())),
+            ]),
+        )?;
+        Ok(true)
     }
 
     /// Give a seat's new incarnation the handoff its last session left and the live state of its
@@ -7382,6 +7519,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &request,
                     &format!("restart blocked: {error:#}"),
                 );
+            }
+            if request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+                && !self.restart_may_proceed(
+                    &subject.subject,
+                    observation,
+                    &request.id,
+                    "a restart was requested",
+                )?
+            {
+                return Ok(true);
             }
             self.record_member(subject, observation, true)?;
             self.reconcile_runtime_stop(
