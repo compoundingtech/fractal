@@ -21,7 +21,7 @@ import { ConversationImageViewport, VisibleConversationImage, type VisibleImageS
 import { dictationAvailable, startDictation } from '../modules/st-dictation';
 import type { RootScreen } from '../navigation';
 import { openSubagentConversation } from '../conversationNavigation';
-import { useStore } from '../store';
+import { useStore, type MessageRequest, type Sent } from '../store';
 import { fonts, theme } from '../theme';
 import { Button, Field, LINE, Markdown, T } from '../ui';
 import { AlertsStrip } from './Alerts';
@@ -31,7 +31,8 @@ const RULES: ConversationRules = rules;
 const c = tokenColor;
 
 const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, older: { paged: false, start: false, loading: false } };
-type Pending = { id: string; text: string; at: string; failed?: string; images?: number };
+// `unconfirmed` is the exact request st may have taken and has not confirmed, to send again unchanged.
+type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
 
 function nowClock() {
@@ -269,11 +270,22 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     list.current?.scrollToOffset({ offset: 0, animated: offset.current < 1200 });
     const tags = dictated || spoken !== undefined ? ['dictated'] : undefined;
     setDictated(false);
-    const failed = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
+    const sent = await actions.send(agent.id, text, agent.current_session_id ?? undefined, tags, sending);
     // Images that did not go stay ready to send again.
-    if (failed && sending.length) setImages(previous => addImages(sending, previous).images);
-    if (failed) setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, failed } : candidate));
-    else setTimeout(() => setPending(previous => previous.filter(candidate => candidate.id !== item.id)), 60_000);
+    if (sent.how === 'failed' && sending.length) setImages(previous => addImages(sending, previous).images);
+    settle(item.id, sent);
+  }
+  // An unconfirmed message goes again as the same request, so st keeps at most one of it.
+  async function sendAgain(item: Pending) {
+    if (!item.unconfirmed || item.resending) return;
+    setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
+    settle(item.id, await actions.resend(item.unconfirmed));
+  }
+  // A sent message waits to show up in the conversation; one st has not confirmed keeps its request.
+  function settle(id: string, sent: Sent) {
+    setPending(previous => previous.map(candidate => candidate.id !== id ? candidate
+      : { ...candidate, resending: false, failed: sent.how === 'failed' ? sent.error : undefined, unconfirmed: sent.how === 'unconfirmed' ? sent.request : undefined }));
+    if (sent.how === 'sent') setTimeout(() => setPending(previous => previous.filter(candidate => candidate.id !== id)), 60_000);
   }
   // An image from the photo library or the clipboard, for the next message.
   function attach() {
@@ -369,7 +381,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
       keyExtractor={row => row.kind === 'entry' ? row.entry.id : row.kind === 'call' ? `call:${row.entry.id}` : row.kind === 'bundle' ? row.id : row.kind === 'pending' ? row.pending.id : 'older'}
       renderItem={({ item: row }) => row.kind === 'older'
         ? <Pressable accessibilityRole="button" onPress={() => { dragged.current = true; loadOlder(); }} style={styles.entry}><T dim>{olderNote(timeline)}</T></Pressable>
-        : row.kind === 'pending' ? <PendingView pending={row.pending} />
+        : row.kind === 'pending' ? <PendingView pending={row.pending} canSend={canSend} onSendAgain={sendAgain} />
         : row.kind === 'bundle' ? <BundleView row={row} onToggle={toggle} />
         : row.kind === 'call' && !open.has(row.entry.id) ? <CallView entry={row.entry} tool={row.tool} onToggle={toggle} />
         // A long press turns the entry into selectable text where it is, with the handles and menu of
@@ -458,11 +470,16 @@ function AgentStrip({ agent, onMission }: { agent: NonNullable<ReturnType<typeof
   </View>;
 }
 
-const PendingView = memo(function PendingView({ pending }: { pending: Pending }) {
+const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }: { pending: Pending; canSend: boolean; onSendAgain: (pending: Pending) => void }) {
   const rule = RULES.pending;
-  return <View style={[styles.entry, styles.barred, { borderLeftColor: c(pending.failed ? rule.failed : rule.sending_edge) }]}>
-    <T color={c(pending.failed ? rule.failed : rule.sending.color)}>{pending.failed ? `you · not sent: ${pending.failed}` : rule.sending.text}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
+  const tone = pending.failed ? rule.failed : pending.unconfirmed ? rule.unconfirmed : null;
+  const label = pending.failed ? `you · not sent: ${pending.failed}`
+    : pending.unconfirmed ? (pending.resending ? 'you · sending again…' : 'you · st may have taken it and has not confirmed yet')
+    : rule.sending.text;
+  return <View style={[styles.entry, styles.barred, { borderLeftColor: c(tone ?? rule.sending_edge) }]}>
+    <T color={c(tone ?? rule.sending.color)}>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
     <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
+    {pending.unconfirmed ? <Button label="Send again" color={c(rule.unconfirmed)} disabled={!canSend || pending.resending} onPress={() => onSendAgain(pending)} /> : null}
   </View>;
 });
 

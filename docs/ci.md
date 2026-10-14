@@ -336,6 +336,12 @@ requires both the daemon and a double-forked child in a new session to disappear
 five seconds, and separately injects an evidence-collection error to prove `node.stop()`
 still runs. Existing canary assertions, phase bounds and zero retries remain unchanged.
 
+`boot_canaries::interrupted_tests_keep_logs_and_pending_observations` kills an isolated
+fixture controller and checks the guardian keeps daemon/driver logs, pending outbox sequences,
+and an interrupted verdict. `daemon_restart` and `daemon_environment` also register their
+short socket/runtime roots with that guardian; failures keep diagnostics in
+`target/boot-canaries/` before the roots are removed. Capture errors are explicit artifacts.
+
 The Codex stand-in's schema files are generated from the protocol gate's own fixture; when the
 required Codex methods change, `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p st-drivers
 the_boot_canary_codex_stub_schemas` rewrites them.
@@ -466,7 +472,7 @@ The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Nod
 After the root frozen install, `bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
 `tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
-6.0.3 and Effect 4.0.0-rc.118. The iOS project allows explicit TypeScript import extensions
+6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
 
 ### Fractal web
@@ -485,9 +491,10 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
-  without a changed generated client file; root flake-only changes also do not trigger it.
+  without a changed generated client file; root `flake.nix` changes also do not trigger it.
   Other relevant paths are
   root `package.json*`, `pnpm-workspace.yaml*`, `pnpm-lock.yaml`,
+  `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
   `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
@@ -679,6 +686,13 @@ grows with the whole store. Neither is part of `linux-gate`; making one required
 for the repository's owner. Both run `scripts/ci-perf`, and `.config/nextest.toml` keeps their
 tests out of `linux-tests`.
 
+The isolated `link_minutes` case writes its preserved daemon, link-event, trace and
+replication evidence under `RUNNER_TEMP/perf/link-minutes-evidence`. Its supervised
+child inherits the explicit evidence parent, including when `CI_RUN_ID` is absent.
+The existing `perf-cost-logs` upload runs on failure and includes this visible tree;
+its oracle, one-attempt policy and exit status are unchanged. Interrupted runs may
+leave partial evidence; an uploaded directory is not a completed-test verdict.
+
 `perf-cost` runs `daemon_cost::` (`crates/st3/tests/daemon_cost.rs`) on every pull request and
 `main` push, on the stages' runner. It skips
 merge-queue entries, which wait only for required checks, so a queued entry needs no more runners
@@ -785,6 +799,36 @@ cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads
 ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
 
+#### The daemon beside a seat-priority hog
+
+`daemon_load::a_seat_priority_hog_leaves_the_request_latency_targets_reported` runs the steady load
+twice on one generated store: alone, then beside a CPU and disk hog at the priority seats get by
+default. On Linux that is nice 10 and best-effort IO priority 7; on macOS, `taskpolicy -b`
+(background QoS). The test process may itself run niced (cargo's tests run in `builds.slice` on
+hetz2, which a host timer renices to 10), so the hog runs 10 nice levels below the test process, at
+most 19, and the report names both. The hog is twice the online CPUs in busy loops and two writers
+that `fsync` 128 MiB files; the timed load starts once the 1-minute load average is past the
+core count (`ST_LOAD_HOG_RAMP_SECONDS`, 180 by default), and the run fails if the load average was
+not past it at the start, at its lowest 5-second sample or at the end.
+
+Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
+agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
+every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
+`GET /v1/client/request-latency` serves: `person-read` (100 ms p99), `person-read-fresh` (300 ms),
+`write-ack` (100 ms) and `message-send` (a send against the write-ack target), each with and without
+the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does
+not, until `ST_LOAD_HOG_STRICT=1`.
+
+```sh
+ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo test --release \
+  -p st3 --features perf-load --test perf_load a_seat_priority_hog -- --nocapture
+nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
+```
+
+It is a step of its own and no required check until its numbers are stable. "Without the hog" is
+the host's load as it was: on a shared host that is not an idle machine, and the report gives the
+load average. Keep a Mac's load average under 10 outside the test window.
+
 #### Measuring a change on hetz2: the perf slot
 
 A builder measures a change with `nix develop .#perf -c bash scripts/ci-perf load`. Outside CI on
@@ -803,7 +847,7 @@ the machine.
 - A run past its timeout is stopped (SIGTERM, then SIGKILL after 10 s) and frees the slot. The
   timeout is two hours unless the run asks for less with `--timeout`; time in line does not
   count. A run stopped by it exits 124.
-- Only `load` is slotted, and only on hetz2. Anywhere else nothing shares the machine.
+- Only `load` and `load-hog` are slotted, and only on hetz2. Anywhere else nothing shares the machine.
   `scripts/ci-perf-slot-test` proves turns, order, kill, signals and timeout.
 
 The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
@@ -918,7 +962,6 @@ repo-settings changes have merged.
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
 | `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
-| `release-portable.yml` | Preserve dispatch inputs, accepted-source verification, packaging, publishing and fresh-download execution proof. Move Linux to Namespace. |
 | `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
 
 The content guard still rejects real machine/home identities and private fleet configuration

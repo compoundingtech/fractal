@@ -354,6 +354,9 @@ pub enum AgentState {
     Compacting,
     Idle,
     Starting,
+    /// Declared, with no running session after its launch window (st's `down` state): the
+    /// details say since when. Never shown as starting or working.
+    Down,
     Stopped,
     Retired,
     Unknown,
