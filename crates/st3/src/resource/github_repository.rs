@@ -1656,12 +1656,12 @@ async fn open_pull_requests(
             nodes.len() < OPEN_PULL_REQUEST_LIMIT,
             "the repository has more than {OPEN_PULL_REQUEST_LIMIT} open pull requests"
         );
-        anyhow::ensure!(
-            calls < PULL_REQUEST_CALL_LIMIT,
-            "the GitHub pull request observation exceeded {PULL_REQUEST_CALL_LIMIT} GraphQL calls"
-        );
-        calls += 1;
         let data = if emit_pulls {
+            anyhow::ensure!(
+                calls < PULL_REQUEST_CALL_LIMIT,
+                "the GitHub pull request observation exceeded {PULL_REQUEST_CALL_LIMIT} GraphQL calls"
+            );
+            calls += 1;
             tracing::debug!(owner, repository, page_size, "reading GitHub pull request page");
             match github_graphql(
                 client,
@@ -1700,6 +1700,11 @@ async fn open_pull_requests(
             .take(100)
             .collect::<Vec<_>>();
         if !ids.is_empty() {
+            anyhow::ensure!(
+                calls < PULL_REQUEST_CALL_LIMIT,
+                "the GitHub pull request observation exceeded {PULL_REQUEST_CALL_LIMIT} GraphQL calls"
+            );
+            calls += 1;
             let resolved_data =
                 github_graphql(client, api_base, token, RESOLVED_ITEMS, json!({"ids": ids}))
                     .await?;
@@ -2290,14 +2295,18 @@ mod tests {
     #[tokio::test]
     async fn empty_advancing_pages_exhaust_the_call_cap_without_caching() {
         let (github, base) = FakeGithub::start().await;
+        *github.graphql.lock() = json!({"data": {"nodes": []}}).to_string();
         github.graphql_queue.lock().extend((0..PULL_REQUEST_CALL_LIMIT).map(|page| {
-            pull_page(json!([]), Some(&format!("page-{page}")), json!([]))
+            pull_page(json!([]), (page + 1 < PULL_REQUEST_CALL_LIMIT)
+                .then(|| format!("page-{page}")).as_deref(), json!([]))
         }));
-        let error = read_pull_pages(&base, &[]).await.err().unwrap();
+        let identities = (0..1000).map(|id| format!("I_{id}")).collect::<Vec<_>>();
+        let error = read_pull_pages(&base, &identities).await.err().unwrap();
         assert!(error.to_string().contains("exceeded 200 GraphQL calls"));
         let requests = github.graphql_requests.lock();
         assert_eq!(requests.len(), PULL_REQUEST_CALL_LIMIT);
-        assert_eq!(requests[199]["variables"]["after"], "page-198");
+        assert_eq!(requests.iter().filter(|request| request["variables"].get("ids").is_some()).count(), 10);
+        assert_eq!(requests[199]["variables"]["after"], "page-188");
         assert!(!pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner).contains_key(
             &format!("{base} github/acme/garden"),
         ));

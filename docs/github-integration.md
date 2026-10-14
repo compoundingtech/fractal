@@ -86,7 +86,7 @@ at 20 with no remembered refusal ceiling. Debug logs record each page size; retr
 failed and reduced sizes. Other failures, or an execution refusal at one pull, fail the
 observation without caching any partial result. The complete listing remains bounded at
 1,000 open pulls regardless of page size. An observation also permits at most 200 GraphQL
-calls, including retries and empty pages with advancing cursors. Exceeding either bound or
+calls, including retries, identity-resolution requests, and empty pages with advancing cursors. Exceeding either bound or
 receiving a non-advancing continuation cursor fails rather than silently truncating facts.
 
 ## Main Performance failure messages
