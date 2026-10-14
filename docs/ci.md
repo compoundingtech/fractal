@@ -1159,3 +1159,14 @@ requests retain their signal status. No compiler or test is retried. Source, run
 producer attempt, toolchain and individual file hashes are still checked before extraction.
 The job logs the ZIP size/digest and transfer attempt. This protects the transfer boundary;
 it does not establish the cause of earlier digest mismatches or a measured speedup.
+
+## Tests the sandboxed st3 check does not run
+
+`checks.st3` (the Nix build of the st3 workspace's tests) leaves out the tests named in
+`nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
+Today these are the 13 `setup::` integration tests, which need a login shell the sandbox user does
+not have. Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`
+shards run every one of them, as do the wrapper path's runs, so nothing is dropped, only moved.
+The check fails if an entry no longer names exactly one test (the list has gone stale) and if any
+unlisted test fails. Do not add an entry to hide a failing test; add it only when the sandbox cannot
+provide what the test needs, and say what.
