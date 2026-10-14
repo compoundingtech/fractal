@@ -299,6 +299,32 @@ class ReleaseNotes(unittest.TestCase):
         with self.assertRaisesRegex(ImpactError, 'rules version 10 -> 11'):
             collect(self.repo, self.base, source)
 
+    def test_shared_storage_version_is_read_from_the_exact_candidate(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/st-storage-version/src/lib.rs',
+                   'pub const STORAGE_VERSION: u32 = 19;')
+        value = fragment()
+        value['schema'] = {'status': 'changed', 'detail': 'Shared version; forward migration.',
+                           'transitions': [[16, 19]]}
+        self.add_fragment(value=value)
+        source = self.commit('Move the schema version to its shared crate')
+        self.write('crates/st-storage-version/src/lib.rs',
+                   'pub const STORAGE_VERSION: u32 = 99;')
+        report = check_pull_request(self.repo, self.base, source)
+        self.assertEqual(report['version_changes'][0]['to'], 19)
+        self.assertEqual(collect(self.repo, self.base, source)['versions']['schema'], [16, 19])
+
+    def test_shared_storage_version_change_requires_its_transition(self):
+        self.write('crates/smallclaims/src/store.rs',
+                   'pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;')
+        self.write('crates/st-storage-version/src/lib.rs',
+                   'pub const STORAGE_VERSION: u32 = 19;')
+        self.add_fragment()
+        source = self.commit('Unclassified shared schema transition')
+        with self.assertRaisesRegex(ImpactError, 'schema version 16 -> 19'):
+            check_pull_request(self.repo, self.base, source)
+
     def test_intermediate_schema_and_rules_changes_are_preserved(self):
         for schema, rules, name, transitions in [(17, 11, 'first', [16, 17, 10, 11]), (16, 12, 'second', [17, 16, 11, 12])]:
             self.write('crates/smallclaims/src/store.rs', f'pub const SCHEMA_VERSION: &str = "PRAGMA user_version = {schema};";')

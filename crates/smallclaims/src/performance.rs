@@ -370,6 +370,16 @@ pub struct Charged {
     kind: String,
     client: Option<String>,
 }
+impl Charged {
+    /// The request route or background task.
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+    /// The client that sent the request, when known.
+    pub fn client(&self) -> Option<&str> {
+        self.client.as_deref()
+    }
+}
 thread_local! {static CURRENT: RefCell<Option<Charged>> = const {RefCell::new(None)};}
 pub fn current() -> Option<Charged> {
     CURRENT.with(|label| label.borrow().clone())

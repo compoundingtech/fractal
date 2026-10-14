@@ -344,6 +344,27 @@ impl StructuredRequest {
             }
             return Ok(json!({"type": "update", "outcome": "read"}));
         }
+        // The person may always set a request aside without answering it: `dismiss` is not one of
+        // the asker's answers, it is the person's own, and it tells the asker so (Nathan,
+        // 2026-10-11). A request that names its own `dismiss` answer keeps it.
+        if input.is_some_and(|input| input.id.as_deref() == Some(DISMISS))
+            && !self.answers.iter().any(|option| option.id == DISMISS)
+        {
+            let mut answer = json!({"type": self.request_type.as_str(), "outcome": "dismissed"});
+            if let Some(text) = input
+                .and_then(|input| input.text.as_deref())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                if text.chars().count() > MAX_TEXT {
+                    return Err(invalid_answer(format!(
+                        "answer text must be at most {MAX_TEXT} characters"
+                    )));
+                }
+                answer["text"] = json!(text);
+            }
+            return Ok(answer);
+        }
         let fallback;
         let input = match input {
             Some(input) => input,
@@ -459,8 +480,17 @@ impl StructuredRequest {
     }
 }
 
+/// The answer id by which a person sets a request aside; the asker reads it as a dismissal.
+pub const DISMISS: &str = "dismiss";
+
 /// The human-readable history line for a typed answer.
 pub fn answer_summary(answer: &Value) -> String {
+    if answer["outcome"] == "dismissed" {
+        return match answer["text"].as_str() {
+            Some(text) => format!("Dismissed without an answer: {text}"),
+            None => "Dismissed without an answer".to_owned(),
+        };
+    }
     let text = answer["text"].as_str();
     match (answer["label"].as_str(), text) {
         (Some(label), Some(text)) => format!("{label}: {text}"),
@@ -540,6 +570,53 @@ mod tests {
             request.answer(Some(&unknown), "").unwrap_err().code,
             "invalid-person-answer"
         );
+    }
+
+    #[test]
+    fn a_person_can_always_dismiss_a_request_and_the_asker_is_told() {
+        for kind in ["decision", "choice"] {
+            let mut value = decision();
+            value["type"] = json!(kind);
+            if kind == "choice" {
+                for answer in value["answers"].as_array_mut().unwrap() {
+                    answer.as_object_mut().unwrap().remove("outcome");
+                }
+            }
+            let (request, _) = StructuredRequest::parse(&value).unwrap();
+            let dismiss = AnswerInput {
+                id: Some("dismiss".into()),
+                text: None,
+            };
+            let answer = request.answer(Some(&dismiss), "").unwrap();
+            assert_eq!(answer, json!({"type": kind, "outcome": "dismissed"}));
+            assert_eq!(answer_summary(&answer), "Dismissed without an answer");
+            let with_reason = AnswerInput {
+                text: Some("Not now.".into()),
+                ..dismiss
+            };
+            let answer = request.answer(Some(&with_reason), "").unwrap();
+            assert_eq!(
+                answer_summary(&answer),
+                "Dismissed without an answer: Not now."
+            );
+        }
+        // Prose alone still never selects or dismisses.
+        let (request, _) = StructuredRequest::parse(&decision()).unwrap();
+        assert_eq!(request.answer(None, "dismiss").unwrap_err().code, "answer-required");
+        // A request that names its own `dismiss` answer keeps its meaning.
+        let mut own = decision();
+        own["answers"][1]["id"] = json!("dismiss");
+        let (request, _) = StructuredRequest::parse(&own).unwrap();
+        let answer = request
+            .answer(
+                Some(&AnswerInput {
+                    id: Some("dismiss".into()),
+                    text: None,
+                }),
+                "",
+            )
+            .unwrap();
+        assert_eq!(answer["outcome"], "decline");
     }
 
     #[test]

@@ -15,10 +15,9 @@ starting source is older than the previous published release.
 | Starting state | Guidance and evidence |
 | --- | --- |
 | New empty installation | Use [getting started](../getting-started.md). Initial distribution scope is Linux x86_64 and macOS Apple Silicon, one fleet per person. Archive CI checks packaging and CLI/TUI startup; a clean machine with a real harness login needs a separate onboarding rehearsal. |
-| v0.3.15, source `122fefd6` → v0.3.16, source `5c0a151e` | The [v0.3.16 report](https://github.com/compoundingtech/smalltalk/releases/tag/v0.3.16) classifies the full source interval. Schema identity remains 16 and checkpoint rules remain 11, but startup DDL, client behavior and manual steps still change. This establishes classified upgrade guidance, not a completed isolated populated-fleet rehearsal or a guaranteed interruption time. |
+| v0.3.16, source `5c0a151e` → v0.3.17, source `f4cec96e` | The [v0.3.17 report](https://github.com/compoundingtech/smalltalk/releases/tag/v0.3.17) classifies the full source interval. Schema identity remains 16 and checkpoint rules remain 11, but the interval adds local tables and an index, narrows the mission-root tree response, and lists manual steps for integrations. This establishes classified upgrade guidance, not a completed isolated populated-fleet rehearsal or a guaranteed interruption time. |
 | Earlier st3 source | Read all intervening notes, including intermediate migrations and manual repairs. Rehearse a populated copy before rollout; no blanket upgrade or downgrade guarantee covers every earlier 0.x source. |
 | Populated v0.3.4 with possible unsigned delegation grants | Preserve raw SQLite state and keys **before doctor, restart or export**. Follow the [founder signing audit](founder-signing-audit.md). Its bounded candidate rehearsal proved recovery of preserved unsealed work; already-sealed unsigned history remains affected. It is not exact v0.3.5 archive acceptance. |
-| st2 state | This is a different generation. Use its explicit migration workflow and [st2 guide](../../README.st2.md); do not treat installing an st3 archive as an in-place database upgrade. |
 
 Prefer roll-forward when the old binary cannot read the current database, claim vocabulary or
 live driver resume format. Database migrations are forward-only unless a downgrade is explicitly
@@ -36,11 +35,11 @@ fresh writer; it is not a downgrade or permission to overwrite a running member.
 | Client API | `st3.client.v0`, projection versions and capability versions are distinct from release tags and database schema. Discover capabilities first; unknown required capability versions stop the client, while unknown optional capabilities may be ignored. See the [client contract](client-v0/README.md#discovery-lists-and-details). |
 | Native harness and driver resume | Provider APIs, managed extensions and saved resume state have their own contracts. See [seats across deploys](seat-deploys.md); rolling back across the push-delivery boundary can require coordinated seat restarts. |
 
-Use CLI and stui from the same release source. Current client version scope is:
+Use CLI and the terminal UI from the same release source. Current client version scope is:
 
 | Client | Version/evidence boundary |
 | --- | --- |
-| CLI and stui | v0.3.16 archives embed source `5c0a151e`; native release CI checks both tools. This is not a cross-version client guarantee. |
+| CLI and the terminal UI | v0.3.17 archives embed source `f4cec96e`; native release CI checks both tools. This is not a cross-version client guarantee. |
 | TypeScript `@smalltalk/st3-client` | Repository-private package version `0.1.0`; CI contract/schema tests run against its source revision. The package number does not identify the daemon source. |
 | Swift `St3Client` / iOS app | In-tree client source and client-v0 capability contract; no separate released client-version compatibility matrix is claimed. Fresh-device app onboarding is separate evidence. |
 
@@ -55,7 +54,7 @@ shape. Consult the release notes before using new client features.
 Install and log in to the harness as the OS user who runs the daemon. Record its actual version
 when diagnosing an issue; Smalltalk does not publish a universal minimum-version promise for
 all future vendor releases. No exhaustive real-provider version matrix is established for
-v0.3.16. The rows below describe tested native contracts, not acceptance of every vendor version.
+v0.3.17. The rows below describe tested native contracts, not acceptance of every vendor version.
 
 | Harness | Existing coverage and launch boundary |
 | --- | --- |
