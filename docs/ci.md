@@ -491,9 +491,10 @@ workflow-level path filters. `linux-gate` does not depend on them.
   `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
   `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
   trigger web execution. Rust generators and their schema/docs inputs do not trigger it
-  without a changed generated client file; root flake-only changes also do not trigger it.
+  without a changed generated client file; root `flake.nix` changes also do not trigger it.
   Other relevant paths are
   root `package.json*`, `pnpm-workspace.yaml*`, `pnpm-lock.yaml`,
+  `megarepo.kdl`, `megarepo.lock`, `flake.lock`,
   `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
   `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
   `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
