@@ -3,6 +3,23 @@ use super::*;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 mod lease;
+mod peek_capability;
+pub(crate) use lease::{Binding as LeaseBinding, Lease, ORIGIN_HEADER};
+
+/// Run one lease query (revalidation, proof, or selected-use) as an admitted store read.
+/// A lease is a per-socket authority handle, so each query owns its own clone.
+async fn lease_query<T, F>(lease: Arc<Lease>, work: F) -> anyhow::Result<T>
+where
+    F: FnOnce(&Lease) -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let store = lease
+        .authority()
+        .ok_or_else(|| anyhow::anyhow!("authority stopped"))?;
+    crate::api::read_deadline::store_read(&store, move || work(&lease))
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!(error.to_string())))
+}
 
 const SUBPROTOCOL: &str = "st3.client.pty.v0";
 const CHUNK: usize = 16 * 1024;
@@ -62,6 +79,16 @@ pub(crate) async fn attachment(
     {
         return Err(remote_unavailable_for_owner(&state, &live.owner_host_id));
     }
+    if request.mode == st3_client::RawTerminalMode::Peek {
+        let capability = peek_capability::issue(&state, &session, &terminal_id, &live)?;
+        return Ok(Json(json!({
+            "terminal_id": terminal_id,
+            "runtime_incarnation": live.incarnation_id,
+            "owner_host_id": live.owner_host_id,
+            "mode": "peek",
+            "stream_capability": capability,
+        })));
+    }
     let attachment_id = format!("terminal-attachment/{}", new_request_id());
     let capability =
         derive_terminal_capability(&state, &session.actor, &attachment_id, &live.owner_host_id)?;
@@ -82,11 +109,7 @@ pub(crate) async fn attachment(
                 ("raw_mode".into(), json!(mode_name(request.mode))),
                 (
                     "raw_authorization_epoch".into(),
-                    if request.mode == st3_client::RawTerminalMode::Peek {
-                        json!(authorization_epoch(&state, &session)?)
-                    } else {
-                        Value::Null
-                    },
+                    Value::Null,
                 ),
                 (
                     "capability_hash".into(),
@@ -119,11 +142,16 @@ pub(crate) async fn stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
+    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let upgrade = upgrade.and_then(|Extension(context)| context.0);
     authorize(&session, query.mode)?;
+    // This protocol subscribes in the upgrade request, without a JSON subscribe command.
+    let first_frame = subscription_first_frame("terminal", "raw", upgrade.as_ref())
+        .map(|first| first.span);
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
         .iter()
@@ -135,13 +163,14 @@ pub(crate) async fn stream(
         .iter()
         .filter_map(|protocol| protocol.strip_prefix(TERMINAL_CAPABILITY_PROTOCOL_PREFIX))
         .collect::<Vec<_>>();
-    if protocols.len() != 2
-        || protocols
-            .iter()
-            .filter(|protocol| **protocol == SUBPROTOCOL)
-            .count()
-            != 1
-        || capabilities.len() != 1
+    // The upgrade is already authenticated. Native PEEK clients need no capability;
+    // browsers may continue using their capability and ATTACH still requires one.
+    let direct_peek = query.mode == st3_client::RawTerminalMode::Peek
+        && protocols == [SUBPROTOCOL];
+    if !direct_peek
+        && (protocols.len() != 2
+            || protocols.iter().filter(|protocol| **protocol == SUBPROTOCOL).count() != 1
+            || capabilities.len() != 1)
     {
         return Err(validation(
             "raw terminal requires st3.client.pty.v0 plus one st3.cap.* protocol",
@@ -151,16 +180,51 @@ pub(crate) async fn stream(
     if !live.terminal {
         return Err(validation("raw attachment requires a terminal runtime"));
     }
-    consume_terminal_attachment_mode(
-        &state,
-        &session,
-        &client_detail_id("terminal", &id),
-        &query.incarnation,
-        Some(capabilities[0]),
-        Some(mode_name(query.mode)),
-    )?;
+    let acquisition_epoch = if direct_peek {
+        Some(authorization_epoch(&state, &session)?)
+    } else if query.mode == st3_client::RawTerminalMode::Peek {
+        Some(peek_capability::consume(
+            &state, &session, &client_detail_id("terminal", &id), &live, capabilities[0],
+        )?)
+    } else {
+        consume_terminal_attachment_mode(
+            &state,
+            &session,
+            &client_detail_id("terminal", &id),
+            &query.incarnation,
+            Some(capabilities[0]),
+            Some(mode_name(query.mode)),
+        )?;
+        None
+    };
+    let origin = headers
+        .get(ORIGIN_HEADER)
+        .map(|header| {
+            if session.transport != "unix" || query.mode != st3_client::RawTerminalMode::Peek {
+                return Err(forbidden(
+                    "raw origin bindings require a trusted Unix PEEK route",
+                ));
+            }
+            serde_json::from_slice::<LeaseBinding>(header.as_bytes()).map_err(ApiError::internal)
+        })
+        .transpose()?;
+    let lease = (query.mode == st3_client::RawTerminalMode::Peek)
+        .then(|| {
+            Lease::register(
+                &state,
+                &session,
+                &client_detail_id("terminal", &id),
+                &live.owner_host_id,
+                &query.incarnation,
+                origin,
+                acquisition_epoch
+                    .as_deref()
+                    .ok_or_else(|| forbidden("raw PEEK capability has no authorization epoch"))?,
+            )
+        })
+        .transpose()?;
     // Open and fence before HTTP upgrade: a stale owner incarnation is a refusal, not a blank pane.
-    let transport = if live.owner_host_id == client_host_id(&state.node) {
+    let (transport, control) = if live.owner_host_id == client_host_id(&state.node) {
         let terminal = crate::model::LocalTerminal {
             subject: terminal_subject(&id),
             runtime_id: live.runtime_id,
@@ -171,9 +235,12 @@ pub(crate) async fn stream(
             .await
             .map_err(|error| stale(error.to_string()))?;
         stream.set_nonblocking(true).map_err(ApiError::internal)?;
-        UnixStream::from_std(stream).map_err(ApiError::internal)?
+        (
+            UnixStream::from_std(stream).map_err(ApiError::internal)?,
+            None,
+        )
     } else {
-        state
+        let (transport, control) = state
             .client_relay
             .as_ref()
             .ok_or_else(|| remote_unavailable_for_owner(&state, &live.owner_host_id))?
@@ -183,15 +250,32 @@ pub(crate) async fn stream(
                 &client_detail_id("terminal", &id),
                 &query.incarnation,
                 query.mode,
+                lease.clone(),
             )
             .await
-            .map_err(|error| remote_read_error(&live.owner_host_id, error))?
+            .map_err(|error| remote_read_error(&live.owner_host_id, error))?;
+        (transport, Some(control))
     };
+    if let Some(lease) = lease.clone() {
+        lease_query(lease, |lease| lease.revalidate())
+            .await
+            .map_err(|error| stale(error.to_string()))?;
+    }
+    if query.mode == st3_client::RawTerminalMode::Peek {
+        tracing::info!(
+            person = %session.authority_actor,
+            session = %session.actor,
+            terminal = %id,
+            owner = %live.owner_host_id,
+            incarnation = %query.incarnation,
+            "raw PEEK open authorized"
+        );
+    }
     Ok(websocket
         .protocols([SUBPROTOCOL])
         .max_message_size(CHUNK * 4)
         .max_frame_size(CHUNK * 4)
-        .on_upgrade(move |socket| splice(socket, transport, Some(query.mode))))
+        .on_upgrade(move |socket| splice(socket, transport, Some(query.mode), lease, control, upgrade, first_frame)))
 }
 
 /// One bounded byte splice; closing either direction drops the persistent owner connection.
@@ -200,14 +284,68 @@ pub(crate) async fn splice(
     socket: WebSocket,
     transport: UnixStream,
     mode: Option<st3_client::RawTerminalMode>,
+    lease: Option<Arc<Lease>>,
+    control: Option<tokio::sync::mpsc::Sender<Value>>,
+    _upgrade: Option<opentelemetry::trace::SpanContext>,
+    mut first_frame: Option<tracing::Span>,
 ) {
     let (mut sink, mut source) = socket.split();
     let (mut reader, mut writer) = transport.into_split();
+    let proof_ready = tokio::sync::Notify::new();
     let upload = async {
         let mut gate = FrameGate::new(mode);
         while let Some(Ok(message)) = source.next().await {
             match message {
+                axum::extract::ws::Message::Text(text) => {
+                    let Some(lease) = &lease else {
+                        break;
+                    };
+                    let Ok(message) = serde_json::from_str::<lease::Control>(&text) else {
+                        break;
+                    };
+                    let result = match message {
+                        lease::Control::SelectedUse { sequence } => {
+                            let result = lease_query(lease.clone(), move |lease| {
+                                lease.selected_use(sequence)
+                            })
+                            .await;
+                            if result.is_ok()
+                                && let Some(control) = &control
+                                && control
+                                    .send(json!({"type":"selected-use","sequence":sequence}))
+                                    .await
+                                    .is_err()
+                            {
+                                break;
+                            }
+                            result
+                        }
+                        lease::Control::AuthorityProof {
+                            lease_id,
+                            watcher_epoch,
+                            sequence,
+                        } if lease.owner_side() && lease_id == lease.binding.lease_id => {
+                            let result = lease_query(lease.clone(), move |lease| {
+                                lease.proof(&watcher_epoch, sequence)
+                            })
+                            .await;
+                            if result.is_ok() {
+                                proof_ready.notify_one();
+                            }
+                            result
+                        }
+                        _ => break,
+                    };
+                    if result.is_err() {
+                        break;
+                    }
+                }
                 axum::extract::ws::Message::Binary(bytes) => {
+                    if lease.as_ref().is_some_and(|lease| {
+                        lease.check().is_err() || lease.owner_side() && !lease.has_proof()
+                    }) {
+                        break;
+                    }
                     if gate.write(&mut writer, &bytes).await.is_err() {
                         break;
                     }
@@ -219,23 +357,61 @@ pub(crate) async fn splice(
     };
     let download = async {
         let mut bytes = [0_u8; CHUNK];
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut sequence = 0_u64;
         loop {
-            let Ok(count) = reader.read(&mut bytes).await else {
-                break;
-            };
-            if count == 0
-                || sink
-                    .send(axum::extract::ws::Message::Binary(
-                        bytes[..count].to_vec().into(),
-                    ))
-                    .await
-                    .is_err()
-            {
-                break;
+            tokio::select! {
+                biased;
+                _ = heartbeat.tick(), if lease.is_some() => {
+                    let heartbeat_lease = lease.clone().expect("heartbeat requires lease");
+                    if lease_query(heartbeat_lease.clone(), |lease| lease.revalidate())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let lease = heartbeat_lease;
+                    sequence += 1;
+                    if lease.owner_side() {
+                        if sink.send(axum::extract::ws::Message::Text(json!({"type":"owner-proof","lease_id":lease.binding.lease_id,"watcher_epoch":lease.binding.gateway_epoch,"sequence":sequence,"issued_at_unix_ms":client_now_ms()}).to_string().into())).await.is_err() { break; }
+                    } else if lease.binding.gateway == lease.binding.owner {
+                        let epoch = lease.binding.gateway_epoch.clone();
+                        let proofed = lease_query(lease.clone(), move |lease| {
+                            lease.proof(&epoch, sequence)
+                        })
+                        .await
+                        .is_ok();
+                        if !proofed {
+                            break;
+                        }
+                    }
+                }
+                // An accepted first proof enables reads immediately, not at the next heartbeat.
+                () = proof_ready.notified() => {}
+                read = reader.read(&mut bytes), if lease.as_ref().is_none_or(|lease| !lease.owner_side() || lease.has_proof()) => {
+                    let Ok(count) = read else { break; };
+                    if count == 0 || lease.as_ref().is_some_and(|lease| lease.check().is_err()) { break; }
+                    if let Some(span) = &first_frame {
+                        span.record("st.page.rows", 0_i64);
+                        span.record("st.page.bytes", count as i64);
+                        span.record("span.label", format!("terminal raw {count}"));
+                    }
+                    let first_span = first_frame.clone();
+                    if first_frame_work(first_span, sink.send(axum::extract::ws::Message::Binary(bytes[..count].to_vec().into()))).await.is_err() { break; }
+                    first_frame = None;
+                }
             }
         }
     };
-    tokio::select! { () = upload => {}, () = download => {} }
+    let expired = async {
+        if let Some(lease) = &lease {
+            lease.expired().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! { biased; () = expired => {}, () = upload => {}, () = download => {} }
 }
 
 /// Validate frame headers before forwarding them, without copying or buffering payloads.

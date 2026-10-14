@@ -14,6 +14,9 @@ use crate::store::{CheckpointManifest, CheckpointManifestPage, Store};
 
 pub const FORMAT: &str = "st3.claim-backup";
 pub const VERSION: u32 = 1;
+/// The version of an archive that also carries message bodies. An archive without any keeps
+/// [`VERSION`], so a build that predates bodies restores it; one with bodies it refuses cleanly.
+pub const VERSION_WITH_BODIES: u32 = 2;
 pub(crate) const PAGE: usize = 512;
 // One envelope can contain document bytes; reject unbounded lines before allocating them.
 const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;
@@ -45,7 +48,20 @@ pub enum Record {
     Envelope(ReplicaEnvelope),
     Checkpoint(CheckpointManifestPage),
     Signatures(Vec<ReplicaEnvelopeSignature>),
+    /// A long message body the exporting member holds as its owner, with the hash it is kept by.
+    /// Restore writes it back beside the database. See [`crate::message_body`].
+    MessageBody(MessageBodyRecord),
     End { envelopes: u64, sha256: String },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MessageBodyRecord {
+    /// The message whose text this is, and the sender whose store held it.
+    pub message: String,
+    pub actor: String,
+    pub sha256: String,
+    /// The text's bytes, base64.
+    pub data: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -57,6 +73,15 @@ pub struct RestoreReport {
     pub log_digest: String,
     pub projections_match: bool,
     pub tables: BTreeMap<String, TableDigest>,
+    /// Long message bodies the archive held and the restored claims name, verified by hash.
+    #[serde(default)]
+    pub message_bodies_restored: u64,
+    /// Bodies in the archive that no restored claim names with that hash; not restored.
+    #[serde(default)]
+    pub message_bodies_unmatched: u64,
+    /// Long messages the restored claims name, including those whose text another member owns.
+    #[serde(default)]
+    pub message_bodies_referenced: u64,
 }
 
 pub(crate) fn write_record(
@@ -146,7 +171,12 @@ pub fn create_from_database(database: &Path, destination: &Path) -> Result<Heade
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    let header = store.write_backup(&mut temporary)?;
+    let header = store.write_backup_with_bodies(
+        &mut temporary,
+        Some(&crate::message_body::bodies(
+            database.parent().unwrap_or(Path::new(".")),
+        )),
+    )?;
     temporary.as_file().sync_all()?;
     temporary.persist_noclobber(destination)?;
     Ok(header)
@@ -171,7 +201,8 @@ fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {
 
 fn check_header(header: &Header) -> Result<()> {
     ensure!(
-        header.format == FORMAT && header.version == VERSION,
+        header.format == FORMAT
+            && (header.version == VERSION || header.version == VERSION_WITH_BODIES),
         "unsupported claim backup format/version"
     );
     ensure!(
@@ -179,6 +210,23 @@ fn check_header(header: &Header) -> Result<()> {
         "backup lacks the claim source digest"
     );
     Ok(())
+}
+
+/// A body record's text, which must be what its hash says.
+fn body_bytes(body: &MessageBodyRecord) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    ensure!(
+        crate::blobs::is_sha256(&body.sha256) && body.message.starts_with("message/"),
+        "a backed-up message body names no message and hash"
+    );
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&body.data)
+        .context("decode a backed-up message body")?;
+    ensure!(
+        hex::encode(Sha256::digest(&bytes)) == body.sha256,
+        "a backed-up message body does not match its hash"
+    );
+    Ok(bytes)
 }
 
 /// Check framing and completeness without admitting anything.
@@ -196,6 +244,13 @@ pub fn verify_file(path: &Path) -> Result<Header> {
         match record {
             Record::Envelope(_) => envelopes += 1,
             Record::Checkpoint(_) | Record::Signatures(_) => {}
+            Record::MessageBody(body) => {
+                ensure!(
+                    header.version >= VERSION_WITH_BODIES,
+                    "a message body in an archive that does not declare them"
+                );
+                body_bytes(&body)?;
+            }
             Record::End {
                 envelopes: expected,
                 sha256,
@@ -264,9 +319,16 @@ pub fn restore(source: &Path, destination: &Path) -> Result<RestoreReport> {
     let mut count = 0;
     let mut page = Vec::with_capacity(PAGE);
     let mut checkpoint = None;
+    let mut restored_bodies = Vec::new();
     loop {
         let (record, bytes) = read_record(&mut input)?.context("backup ended during restore")?;
         match record {
+            Record::MessageBody(body) => {
+                let bytes = body_bytes(&body)?;
+                let staged = crate::message_body::bodies(stage.path());
+                staged.put(&body.actor, &body.message, &bytes)?;
+                restored_bodies.push((body.actor, body.message, body.sha256));
+            }
             Record::Envelope(envelope) => {
                 page.push(envelope);
                 count += 1;
@@ -307,11 +369,33 @@ pub fn restore(source: &Path, destination: &Path) -> Result<RestoreReport> {
         restore_hash.update(bytes);
     }
     store.receive_backup_page(&header, &page)?;
-    let report = store.finish_backup_restore(&header, &writer, count, checkpoint.as_ref())?;
+    let mut report = store.finish_backup_restore(&header, &writer, count, checkpoint.as_ref())?;
+    // Restore only the texts a restored claim names, with the hash it gives. The count of long
+    // messages the claims name says how many texts the archive did not hold: those another
+    // member owns, or that were lost before the backup.
+    let staged_bodies = crate::message_body::bodies(stage.path());
+    let mut verified = Vec::new();
+    for (actor, message, sha256) in std::mem::take(&mut restored_bodies) {
+        let named = store
+            .message(&message)?
+            .filter(|view| view.from == actor)
+            .and_then(|view| view.body_attachment())
+            .is_some_and(|body| body.sha256 == sha256);
+        if named {
+            verified.push((actor, message));
+        } else {
+            report.message_bodies_unmatched += 1;
+        }
+    }
+    report.message_bodies_restored = verified.len() as u64;
+    report.message_bodies_referenced = store.message_body_references()?;
     drop(store);
     // Store closes/checkpoints its writer before publication; never publish WAL-dependent data.
     let connection = rusqlite::Connection::open(&staged_path)?;
-    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    let checkpoint_started = std::time::Instant::now();
+    let checkpoint = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    smallclaims::sqlite::telemetry::checkpoint_finished(checkpoint_started.elapsed());
+    checkpoint?;
     drop(connection);
     #[cfg(unix)]
     {
@@ -326,6 +410,13 @@ pub fn restore(source: &Path, destination: &Path) -> Result<RestoreReport> {
         fs::hard_link(&staged_path, destination)?;
     }
     drop(existing);
+    // The full texts of long messages this member owned go back beside the database.
+    let restored = crate::message_body::bodies(directory);
+    for (actor, message) in &verified {
+        if let Some(bytes) = staged_bodies.read(actor, message)? {
+            restored.put(actor, message, &bytes)?;
+        }
+    }
     fs::File::open(directory)?.sync_all()?;
     Ok(report)
 }

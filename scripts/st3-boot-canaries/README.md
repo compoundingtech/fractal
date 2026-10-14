@@ -6,9 +6,11 @@ message.
 
     run BINARY EVIDENCE_DIR HARNESS SCENARIO [--bound SECONDS] [--scratch DIR] [--replacement-binary BINARY]
 
-`HARNESS` is `claude`, `codex`, `pi`, `omp` or `opencode`. `SCENARIO` is `fresh`, `restart`,
-`daemon-restart`, `reexec`, `concurrent`, `suspend` or (Codex only) `import`; `run --help` says
-what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
+`HARNESS` is `claude`, `codex`, `pi`, `omp` or `opencode`. `SCENARIO` is one of `fresh`,
+`restart`, `daemon-restart`, `reexec`, `concurrent`, `suspend`, `claim-socket-denied`,
+`access-auto`, `access-bypass`, `idle-hold` (Codex/OpenCode), `utf8` and `import` (Codex),
+or `channel-missing`, `channel-uninitialized` and `channel-parked` (Claude);
+`run --help` says what each does. Each stand-in keeps its sessions the way its harness does, so `suspend` proves that a resumed seat comes
 back on the session it suspended on, holds hour-old mail, and consumes recent never-offered
 mail exactly once. The Rust wrapper
 `crates/st3/tests/boot_canaries.rs` runs every pair as its own test in the required Linux gate.
@@ -82,7 +84,12 @@ so races the real ones hide are hit every time.
 The evidence directory holds `result.json` (the verdict and the seat's last state), `daemon.log`,
 `terminal-*.txt` (the seat's screen), `trace-*.jsonl` (its claims), `receipts-*.jsonl` (what the
 stand-in saw and did), and `observation-outboxes.json` (pending event sequences and driver
-diagnostics). Predecessor adoption can also leave legacy harness records. Read the trace first: it shows which side
+diagnostics), and private `driver-*.log` files. Runtime roots are registered with the
+process guardian before startup. On interruption, the guardian reaps their writers, captures
+these files and records an interrupted verdict before removing the roots. A collection error
+is recorded in `capture-errors.json`; it cannot skip the other logs. Normal failure snapshots
+are captured before shutdown, with the final outbox state in `observation-outboxes-after-stop.json`.
+Predecessor adoption can also leave legacy harness records. Read the trace first: it shows which side
 wrote what, in what order. Fix the product on main; do not slow a stand-in to hide a race. The
 canaries found these when they were written: Codex ending its session before the daemon's first
 mailbox replay, Codex publishing its predecessor's `ended` record as the new incarnation's, and a

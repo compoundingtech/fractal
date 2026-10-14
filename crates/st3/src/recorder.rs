@@ -38,6 +38,14 @@ const MARKER_SCHEMA: &str = "st3.recorder.v1";
 const RECORD_SCHEMA: &str = "st3.recorder.command.v1";
 /// `execvp` searches this list when PATH is unset.
 const DEFAULT_PATH: &str = "/usr/bin:/bin";
+// Keep git and gh independent: the real gh may legitimately start git.
+fn depth_variable(program: &str) -> &'static str {
+    match program {
+        "git" => "ST3_RECORDER_GIT_DEPTH",
+        "gh" => "ST3_RECORDER_GH_DEPTH",
+        _ => unreachable!("only git and gh have recorders"),
+    }
+}
 const ARGUMENT_LIMIT: usize = 4096;
 const RECEIPT_SCHEMA: &str = "st3.recorder.receipt.v1";
 const RECEIPT_LINE_LIMIT: usize = 1024;
@@ -206,6 +214,10 @@ pub fn invoked_program() -> Option<&'static str> {
 
 /// Runs the real program, records the call, and exits the way the real program exited.
 pub fn run(program: &'static str) -> ! {
+    if std::env::var_os(depth_variable(program)).is_some() {
+        eprintln!("st recorder: refusing recursive {program} recorder invocation");
+        std::process::exit(126);
+    }
     let started_at = SystemTime::now();
     let started = Instant::now();
     let mut arguments = std::env::args_os();
@@ -217,6 +229,7 @@ pub fn run(program: &'static str) -> ! {
         .ok()
         .and_then(|executable| fs::metadata(executable).ok());
     let real = real_program(program, path.as_deref(), own.as_ref());
+    let delegated = delegated_path(path.as_deref(), own.as_ref());
     let capture = marker.as_ref().is_some_and(|marker| marker.receipts.is_some())
         && program == "gh"
         && arguments.get(1).is_some_and(|argument| argument == "create")
@@ -232,9 +245,9 @@ pub fn run(program: &'static str) -> ! {
     let outcome = match &real {
         // A bare name stays bare, as a shell would pass it; a path names the real program.
         Some(real) if argv0.as_bytes().contains(&b'/') => {
-            relay(real, real.as_os_str(), &arguments, capture, &mut last_line)
+            relay(program, real, real.as_os_str(), &arguments, &delegated, capture, &mut last_line)
         }
-        Some(real) => relay(real, &argv0, &arguments, capture, &mut last_line),
+        Some(real) => relay(program, real, &argv0, &arguments, &delegated, capture, &mut last_line),
         None => {
             eprintln!("st recorder: {program}: command not found after the recorder on PATH");
             Outcome::Exited(127)
@@ -288,6 +301,31 @@ fn real_program(
             own.is_some_and(|own| own.dev() == metadata.dev() && own.ino() == metadata.ino());
         (executable && !itself).then_some(candidate)
     })
+}
+
+/// Git hooks and aliases must find real tools instead of reentering the recorder. A wrapper
+/// that explicitly executes a recorder still meets the depth guard before it can spawn again.
+fn delegated_path(path: Option<&OsStr>, own: Option<&fs::Metadata>) -> OsString {
+    let entries = std::env::split_paths(path.unwrap_or(OsStr::new(DEFAULT_PATH)))
+        .filter(|entry| {
+            let directory = search_entry(entry);
+            !directory.join(MARKER).exists()
+                && !own.is_some_and(|own| PROGRAMS.iter().any(|program| {
+                    fs::metadata(directory.join(program)).is_ok_and(|metadata| {
+                        own.dev() == metadata.dev() && own.ino() == metadata.ino()
+                    })
+                }))
+        });
+    // On Unix, split_paths entries contain no colon. Reassemble them directly so preparing
+    // the delegated PATH is infallible, including empty entries for the working directory.
+    let mut path = OsString::new();
+    for (index, entry) in entries.enumerate() {
+        if index != 0 {
+            path.push(":");
+        }
+        path.push(entry);
+    }
+    path
 }
 
 /// An empty PATH entry means the working directory. The result always contains a slash, so
@@ -439,14 +477,16 @@ unsafe fn errno_location() -> *mut libc::c_int {
 /// Runs the real program as a child in this process group with this process's stdio, working
 /// directory, and environment, and relays signals until it exits.
 fn relay(
+    program: &str,
     real: &Path,
     argv0: &OsStr,
     arguments: &[OsString],
+    path: &OsStr,
     capture: bool,
     last_line: &mut LastLine,
 ) -> Outcome {
     let mut command = std::process::Command::new(real);
-    command.arg0(argv0).args(arguments);
+    command.arg0(argv0).args(arguments).env("PATH", path).env(depth_variable(program), "1");
     let Some((signal_read, signal_write)) = nonblocking_read_pipe() else {
         return spawn_unrelayed(command, real);
     };
@@ -1008,23 +1048,27 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let recorder = root.path().join("recorder");
         let unmarked = root.path().join("unmarked");
+        let symlinked = root.path().join("symlinked");
         let real = root.path().join("real");
-        for directory in [&recorder, &unmarked, &real] {
+        for directory in [&recorder, &unmarked, &symlinked, &real] {
             fs::create_dir(directory).unwrap();
             executable(&directory.join("git"));
         }
         fs::write(recorder.join(MARKER), "{}").unwrap();
         fs::remove_file(unmarked.join("git")).unwrap();
         fs::hard_link(recorder.join("git"), unmarked.join("git")).unwrap();
+        fs::remove_file(symlinked.join("git")).unwrap();
+        std::os::unix::fs::symlink(recorder.join("git"), symlinked.join("git")).unwrap();
         let own = fs::metadata(recorder.join("git")).unwrap();
-        let path = std::env::join_paths([&recorder, &unmarked, &real]).unwrap();
+        let path = std::env::join_paths([&recorder, &unmarked, &symlinked, &real]).unwrap();
 
         assert_eq!(
             real_program("git", Some(&path), Some(&own)),
             Some(real.join("git"))
         );
-        let only_recorders = std::env::join_paths([&recorder, &unmarked]).unwrap();
+        let only_recorders = std::env::join_paths([&recorder, &unmarked, &symlinked]).unwrap();
         assert_eq!(real_program("git", Some(&only_recorders), Some(&own)), None);
+        assert_eq!(delegated_path(Some(&path), Some(&own)), real.as_os_str());
     }
 
     #[test]

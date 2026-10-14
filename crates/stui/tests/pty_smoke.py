@@ -25,7 +25,7 @@ import threading
 import time
 
 
-FIRST_FRAME = b" working"  # The status bar's count is present even before st connects.
+FIRST_FRAME = b"$ usage"  # The top bar's usage slot is on the first frame, before and after st answers. (Its working count waits for the first state from st, so a placeholder never flips.)
 
 
 def plain(output: bytes) -> bytes:
@@ -39,6 +39,35 @@ def answer_queries(master: int, chunk: bytes) -> None:
         os.write(master, b"\x1b[?62;c")
 
 
+def entrypoint_case(binary: str) -> None:
+    # A seat or either redirected stream must retain bare-st help without terminal modes.
+    for seat, terminal_in, terminal_out in ((True, True, True), (False, False, True),
+                                            (False, True, False), (False, False, False)):
+        master, slave = pty.openpty()
+        env = os.environ.copy()
+        env.pop("ST_AGENT", None)
+        if seat:
+            env["ST_AGENT"] = "agent/demo"
+        try:
+            result = subprocess.run([binary], stdin=slave if terminal_in else subprocess.DEVNULL,
+                                    stdout=slave if terminal_out else subprocess.PIPE,
+                                    stderr=subprocess.PIPE, env=env, timeout=5)
+            output = result.stderr + (result.stdout or b"")
+            while select.select([master], [], [], 0)[0]:
+                output += os.read(master, 65536)
+            assert result.returncode == 2, f"bare st help returned {result.returncode}"
+            assert b"Usage: st" in output, "bare st did not show help"
+            assert b"\x1b[?1049h" not in output, "bare st entered the alternate screen"
+        finally:
+            os.close(master)
+            os.close(slave)
+    print("bare st: seats and either redirected stream retain help, exit 2")
+
+
+def tui_command(binary: str) -> list[str]:
+    return [binary, "ui"] if "--ui" in sys.argv[2:] else [binary]
+
+
 def run_case(binary: str, ending: str, endpoint: str | None = None) -> None:
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
@@ -48,7 +77,7 @@ def run_case(binary: str, ending: str, endpoint: str | None = None) -> None:
         env["ST3_ENDPOINT"] = endpoint
     if ending == "panic":
         env["STUI_TEST_PANIC_AFTER_ENTER"] = "1"
-    proc = subprocess.Popen([binary], stdin=slave, stdout=slave, stderr=slave, env=env)
+    proc = subprocess.Popen(tui_command(binary), stdin=slave, stdout=slave, stderr=slave, env=env)
     os.close(slave)
     captured = bytearray()
 
@@ -160,7 +189,7 @@ def delayed_getter_case(binary: str) -> None:
 def hangup_case(binary: str) -> None:
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-    proc = subprocess.Popen([binary], stdin=slave, stdout=slave, stderr=slave,
+    proc = subprocess.Popen(tui_command(binary), stdin=slave, stdout=slave, stderr=slave,
                             env={**os.environ, "TERM": "xterm-256color"})
     os.close(slave)
     deadline = time.monotonic() + 3
@@ -197,7 +226,7 @@ def tmux_hangup_case(binary: str) -> None:
     base = [tmux, "-L", socket_name]
     subprocess.run(
         base + ["new-session", "-d", "-s", target,
-                f"exec env ST3_PERSON=person/alex {shlex.quote(binary)}"],
+                f"exec env ST3_PERSON=person/alex {shlex.join(tui_command(binary))}"],
         check=True, capture_output=True,
     )
     pid = int(subprocess.check_output(
@@ -207,7 +236,7 @@ def tmux_hangup_case(binary: str) -> None:
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             command = subprocess.check_output(["ps", "-p", str(pid), "-o", "comm="], text=True)
-            if "stui" in command:
+            if os.path.basename(binary) in command:
                 break
             time.sleep(0.05)
         else:
@@ -230,14 +259,79 @@ def tmux_hangup_case(binary: str) -> None:
             pass
 
 
+def shifted_keys_case(binary: str) -> None:
+    """A terminal that reports every key as an escape code sends Shift+i as `i` with Shift.
+    Play one: answer the keyboard-protocol query, check what stui asks for, and type shifted keys
+    into the palette's search box, as such a terminal would send them."""
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    env = os.environ.copy()
+    env["TERM"] = "xterm-256color"
+    proc = subprocess.Popen(tui_command(binary), stdin=slave, stdout=slave, stderr=slave, env=env)
+    os.close(slave)
+    captured = bytearray()
+
+    def collect(seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.05)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                return
+            captured.extend(chunk)
+            if b"\x1b[?u" in chunk:
+                os.write(master, b"\x1b[?0u")  # Supports the keyboard protocol.
+            if b"\x1b[c" in chunk:
+                os.write(master, b"\x1b[?62;c")
+
+    try:
+        collect(1.5)
+        pushed = re.findall(rb"\x1b\[>(\d+)u", bytes(captured))
+        assert pushed, "stui did not ask the terminal for the keyboard protocol"
+        flags = int(pushed[-1])
+        assert flags & 4, f"stui did not ask for alternate keys (flags {flags})"
+        os.write(master, b"\x0b")  # Ctrl+K: the palette and its search box.
+        collect(0.5)
+        # Shift+i and Shift+; with the layout's character given, then Shift+j with none given.
+        # The screen is redrawn in part, so each key is checked as the cell it newly wrote,
+        # followed by the box's cursor.
+        for sequence, typed in ((b"\x1b[105:73;2u", "I"), (b"\x1b[59:58;2u", ":"), (b"\x1b[106;2u", "J")):
+            captured.clear()
+            os.write(master, sequence)
+            collect(0.5)
+            text = plain(bytes(captured)).decode("utf-8", "replace")
+            assert typed + "\u258f" in text, f"{sequence!r} did not type {typed!r} ({text[-120:]!r})"
+        os.write(master, b"\x1b")
+        collect(0.3)
+        os.write(master, b"\x11")
+        collect(0.5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        os.close(master)
+    print("shifted keys: capitals and symbols typed from raw escape codes")
+
+
 if __name__ == "__main__":
-    binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/stui"
+    binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/st3"
+    if "--only-entrypoint" in sys.argv[2:]:
+        entrypoint_case(binary)
+        sys.exit(0)
     skip_panic = "--no-panic" in sys.argv[2:]
+    if "--only-shifted-keys" in sys.argv[2:]:
+        # The one case `cargo test` runs (../st3/tests/typed_keys.rs): keys as a terminal sends them.
+        shifted_keys_case(binary)
+        sys.exit(0)
     for case in ("normal", "signal", "panic"):
         if case == "panic" and skip_panic:
             print("panic: skipped (release binary has no debug panic hook)")
             continue
         run_case(binary, case)
+    shifted_keys_case(binary)
     delayed_getter_case(binary)
     hangup_case(binary)
     tmux_hangup_case(binary)
