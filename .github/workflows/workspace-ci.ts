@@ -491,7 +491,10 @@ export const fractalWebJobs = {
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
     permissions: { contents: 'read' },
-    outputs: { relevant: '${{ steps.detect.outputs.relevant }}' },
+    outputs: {
+      relevant: '${{ steps.detect.outputs.relevant }}',
+      'kit-inputs': '${{ steps.detect.outputs.kit-inputs }}',
+    },
     steps: [
       {
         name: 'Detect web-relevant changes',
@@ -499,8 +502,8 @@ export const fractalWebJobs = {
         env: {
           EVENT: '${{ github.event_name }}',
           REMOTE: '${{ github.server_url }}/${{ github.repository }}.git',
-          BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}',
-          HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}',
+          BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
+          HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
         run: embeddedPython('ci-fractal-web-changes'),
       },
@@ -520,7 +523,12 @@ export const fractalWebJobs = {
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
       {
         ...nixDevelopStep({ name: 'Run the fractal-web lanes and dependency license check', flake: '.#web', command: ['bash', 'scripts/ci-fractal-web'] }),
-        env: pnpmStoreEnv,
+        env: {
+          ...pnpmStoreEnv,
+          KIT_INPUTS: '${{ needs.fractal-web-changes.outputs.kit-inputs }}',
+          BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
+          HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
+        },
       },
     ],
   },

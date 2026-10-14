@@ -2926,14 +2926,15 @@ jobs:
       contents: read
     outputs:
       relevant: ${{ steps.detect.outputs.relevant }}
+      kit-inputs: ${{ steps.detect.outputs.kit-inputs }}
     steps:
       - name: Detect web-relevant changes
         id: detect
         env:
           EVENT: ${{ github.event_name }}
           REMOTE: "${{ github.server_url }}/${{ github.repository }}.git"
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: |
           python3 - <<'PY'
           #!/usr/bin/env python3
@@ -2978,6 +2979,7 @@ jobs:
               "flake.lock",
               "pnpm-install-contract.json*",
               ".npmrc",
+              "flake.nix",
               "tsconfig*.json*",
               ".buckroot*",
               ".buckconfig*",
@@ -2994,6 +2996,22 @@ jobs:
               ".github/workflows/cache-audit.ts",
               ".github/repo-settings.json*",
           )
+          # Keep workspace dependency coverage in sync with the guarded package graph in ci-fractal-web-test.
+          KIT_PATTERNS = (
+              "packages/fractal-ui/**",
+              "clients/typescript/st3-scenarios/**",
+              "clients/typescript/st3-client/**",
+              "package.json*",
+              "pnpm-workspace.yaml*",
+              "pnpm-lock.yaml",
+              "pnpm-install-contract.json*",
+              ".npmrc",
+              "flake.nix",
+              "flake.lock",
+              "scripts/ci-fractal-web*",
+              ".github/workflows/fleet.yml*",
+              ".github/workflows/workspace-ci.ts",
+          )
           SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -3005,10 +3023,15 @@ jobs:
 
 
           MATCHERS = tuple(pattern_regex(pattern) for pattern in PATTERNS)
+          KIT_MATCHERS = tuple(pattern_regex(pattern) for pattern in KIT_PATTERNS)
+
+
+          def kit_paths(paths):
+              return [path for path in paths if any(matcher.match(path) for matcher in KIT_MATCHERS)]
 
 
           def relevant_paths(paths):
-              return [path for path in paths if any(matcher.match(path) for matcher in MATCHERS)]
+              return [path for path in paths if any(matcher.match(path) for matcher in (*MATCHERS, *KIT_MATCHERS))]
 
 
           def git(directory, *args):
@@ -3034,19 +3057,22 @@ jobs:
               event = os.environ.get("EVENT", "")
               summary = []
               if event == "workflow_dispatch":
-                  relevant, summary = True, ["Manual run: web execution is forced."]
-              elif event in ("pull_request", "merge_group"):
+                  relevant, kit_inputs, summary = True, True, ["Manual run: web execution and kit plays are forced."]
+              elif event in ("pull_request", "merge_group", "push"):
                   paths = changed_paths(os.environ["REMOTE"], event, os.environ.get("BASE_SHA", ""), os.environ.get("HEAD_SHA", ""))
                   matched = relevant_paths(paths)
                   relevant = bool(matched)
+                  kit_inputs = bool(kit_paths(paths))
                   summary = [f"{len(paths)} changed path(s), {len(matched)} web-relevant."] + [f"- `{path}`" for path in matched[:50]]
               else:
                   raise ValueError(f"unsupported event {event!r}")
               with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                   output.write(f"relevant={'true' if relevant else 'false'}\n")
+                  output.write(f"kit-inputs={'true' if kit_inputs else 'false'}\n")
               with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as step_summary:
                   step_summary.write("\n".join([f"fractal-web execution: **{'required' if relevant else 'not required'}**", *summary]) + "\n")
               print(f"relevant={'true' if relevant else 'false'}")
+              print(f"kit-inputs={'true' if kit_inputs else 'false'}")
               return 0
 
 
@@ -3104,6 +3130,9 @@ jobs:
         run: "nix develop '.#web' -c bash scripts/ci-fractal-web"
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
+          KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
       - name: Report job cache coverage
         if: always()
         shell: bash
