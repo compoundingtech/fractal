@@ -14,19 +14,30 @@ Use these documents for implementation details:
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.
 - [Free mode](kdl-lifecycle.md#free-mode): within a fleet, an agent may do anything the person who
   runs the fleet may do, as itself, until principals and grants land.
+- [Person delegation](person-delegation.md): record a person's prior answer or instruction as
+  the agent, with the person's allowed list, exact episode, and quoted evidence.
 - [Schema registry](schema.md) lists the generated public subject, resource, and claim vocabulary.
 - [Typed custom subjects](custom-subjects.md) defines immutable registrations, generic reads and replies, and derived-state freshness,
   and the decision-tree manifest.
 - [Data authority](data-authority.md) separates durable facts from projections and caches.
+- [0.x compatibility](compatibility.md) states upgrade baselines, independent contracts and current platform proof.
+- [Install/upgrade troubleshooting and support](../when-something-is-wrong.md) provides the diagnostic entry point and sanitized issue path.
 - [Claim backups](backups.md) explains live snapshots, offline restore, and recovered writer identities.
+- [Stable node identity](node-identity.md) explains computer renames, same-state recovery and local ownership diagnostics.
 - [Founder signing audit](founder-signing-audit.md) explains read-only capture, preserved unsealed
   upgrades, and the remaining warnings for already-sealed unsigned delegations.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
+- [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
   are recorded and replicated.
 - [Checkpoints and trimming](checkpoints.md) explains how every node of a fleet agrees to delete old
   claims together: when a checkpoint is due, seal, verify and trim, which claims a rule may drop and
   why, excusing an unreachable member, and what the first real trim taught.
+- [Checkpoint capture in bounded memory](checkpoint-capture.md) is the design for capturing,
+  planning and proving a checkpoint within a fixed memory budget, with a capture that resumes
+  after a restart (#2492).
+- [Retention](retention.md) names how long st keeps each claim kind: the policy file, its four
+  classes, and how a rule is added and measured.
 - [Shell completion](cli-completion/spec.md) defines live entity candidates, their descriptions,
   and short-name resolution; [requirements](cli-completion/requirements.md).
 - [Lanes](lanes.md) defines the ordered lanes a mission run works through, such as the merge
@@ -36,8 +47,11 @@ Use these documents for implementation details:
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
 - [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
+- [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
+  message a restarted seat is sent with that handoff and the live state of its work.
 - [Seats across deploys](seat-deploys.md) explains how a running seat's driver and channels follow
   a replaced st binary without ending the provider session, and how st reports a stale message path.
+- [Silent messages](silent-messages.md) explains the silent and wake message kinds, capped held batches, and where status and run events go.
 - [Delivery probes](delivery-probes.md) describes token-free native-channel probes, per-direction
   read latency, overdue attention, and the replicated results in `st doctor`.
 - [Live-path priority](priority.md) explains how the daemon and each PTY server outrank the builds
@@ -47,6 +61,8 @@ Use these documents for implementation details:
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
+- [Instances](instances.md) explains `--instance NAME`: a second, fully separate st on one machine
+  with its own state, sockets, service names and harness accounts, and the uninstall that removes it.
 - [Sekrets](sekrets.md) explains the opt-in gateway that runs any CLI with a credential no seat
   can read: profiles, policies, grants, how it tells a seat from its person, and its sandbox.
 - [Command recorder](command-recorder.md) explains how every `git` and `gh` call st starts is
@@ -78,5 +94,7 @@ harness events: sessions, turns, plan mode, subagents, tool calls, usage, and wh
 on. It never asks an agent to report on itself and never tells an agent how to behave. A seat starts
 idle with no prompt and takes no turn until a person types or a message is posted. Work reaches it
 as a message that names a ready step, and the step's goals and constraints say what the work is.
+A seat that sits idle holding a claimed step, with nothing set to wake it, gets one message naming
+the step and what it waits on ([idle holders](mission-graph-runtime.md#idle-holders)).
 st's only other text for agents is the skill that `st skill` prints, which describes how to use st
 and sets no rules of conduct. Keep this rule when changing drivers, messages, or the skill.

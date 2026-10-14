@@ -47,8 +47,8 @@ and approve it with `st launch approve-and-launch`. An authorized agent uses
 Every harness file declares the same `agent/example/worker` seat, and every mission example
 assigns work to it, so the missions run with whichever harness you apply. The planner, reviewer,
 and chief seat files declare other seats, named for their roles. omp seats run best on
-`openai-codex/gpt-6-astra`; [Running st with omp](../../docs/st3/omp.md) explains why and lists
-the setup.
+`openai-codex/gpt-6-astra` (see the comment in [`seats/omp.kdl`](seats/omp.kdl));
+[Running st with omp](../../docs/st3/omp.md) lists the setup.
 
 ### Give a seat work and order it
 

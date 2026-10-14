@@ -193,6 +193,14 @@ class AppServer:
         params = message.get("params") or {}
         if method == "initialize":
             self.send(client, {"id": ident, "result": {"userAgent": "codex-stub"}})
+        elif method == "config/read":
+            self.send(client, {"id": ident, "result": {
+                "config": {"approval_policy": None},
+                "origins": {"approval_policy": None}}})
+        elif method == "hooks/list":
+            self.send(client, {"id": ident, "result": {"data": [
+                {"cwd": cwd, "hooks": []} for cwd in params.get("cwds", [])
+            ]}})
         elif method == "thread/start":
             if not self.thread_id:
                 self.thread_id = str(uuid.uuid4())
@@ -212,7 +220,22 @@ class AppServer:
                 if requested != self.thread_id:
                     stubmodel.receipt("thread", id=requested, resumed=True)
                 self.thread_id = requested
-                self.send(client, {"id": ident, "result": {"thread": self.thread()}})
+                result = {"thread": self.thread()}
+                for setting in ("approvalPolicy", "approvalsReviewer", "model"):
+                    if setting in params:
+                        result[setting] = params[setting]
+                if "sandbox" in params:
+                    result["sandbox"] = {"type": {
+                        "read-only": "readOnly",
+                        "workspace-write": "workspaceWrite",
+                        "danger-full-access": "dangerFullAccess",
+                    }[params["sandbox"]]}
+                if "permissions" in params:
+                    result["activePermissionProfile"] = {"id": params["permissions"]}
+                effort = params.get("config", {}).get("model_reasoning_effort")
+                if effort is not None:
+                    result["reasoningEffort"] = effort
+                self.send(client, {"id": ident, "result": result})
         elif method == "account/read":
             self.send(client, {"id": ident, "result": {"account": {"type": "apiKey"}}})
         elif method == "thread/read":
@@ -256,7 +279,15 @@ class AppServer:
             self.send(client, {"id": ident, "result": {}})
 
     def finish(self, turn, text):
-        stubmodel.act(text)
+        result = stubmodel.act(text)
+        if result and (Path.cwd() / "claim-socket-denied").exists():
+            command, completed = result
+            item = {"type": "commandExecution", "id": f"claim-{turn}", "command": command,
+                    "status": "completed", "exitCode": completed.returncode,
+                    "aggregatedOutput": completed.stdout + completed.stderr}
+            stubmodel.receipt("claim-tool-result", item=item)
+            self.broadcast({"method": "item/completed", "params": {
+                "threadId": self.thread_id, "turnId": turn, "item": item}})
         self.broadcast({"method": "turn/completed", "params": {
             "threadId": self.thread_id, "turn": {"id": turn, "status": "completed"}}})
 

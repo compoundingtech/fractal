@@ -14,8 +14,6 @@ An explicit [owned set](owned-sets.md), published with `st apply --set NAME`, gi
 responsibility for a complete membership list. Its successful publication retires omitted members
 with source and revision fences, and requires confirmation for mass retirement.
 
-The removed wrapper keyword is an error. There is no compatibility form.
-
 `st apply FILE... --as ACTOR` previews and publishes exact authored KDL: seats, missions,
 schedules, and other supported root declarations. Multiple files are bundled into one atomic
 publication, with references resolved across the bundle. Every file starts with `version 2`;
@@ -38,11 +36,16 @@ the plain-file preview snapshot as it does for publication.
 Publication checks exec gates by default and refuses broken commands (exit codes other than 0
 or 1). A gate that answers "not yet" (exit 1) does not block publication, just as with
 `st missions check`. Use `--no-gate-check` to skip this check. Dry runs without `--check`
-run no commands.
+run no commands. Publication, dry-run checks, and `missions check` check ordinary mission
+and step exec gates, including per-round steps. Loop `until` scripts are listed as
+"not checked, they run after each round", with that reason shown. A running loop still
+evaluates them at every round boundary, after the round has produced its outputs.
 
-`st agents apply` and `st missions publish` remain legacy commands. Each prints a one-line
-notice on stderr naming `st apply` as its replacement. Both accept `--dry-run` and `--preview`.
-The agent command keeps its previous behavior of publishing without gate checks.
+`st agents apply` and `st missions publish` are legacy commands. Each prints a one-line notice on stderr
+naming `st apply` as its replacement and accepts `--dry-run` (alias `--preview`). `st agents apply` publishes
+without gate checks, so its equivalent is `st apply FILE --no-gate-check`; `st missions publish` is
+equivalent to `st apply FILE` with the same options. Seat publication through `st apply` adds
+`published_missions` to the JSON receipt.
 
 ## Definitions do not start work
 
@@ -72,6 +75,22 @@ Direct runtime declarations in a mission belong to each run of that mission. Dir
 A native harness starts with no prompt. It takes no turn until a person types or a message is posted. When a step assigned to it becomes ready, st posts it a message that names the step. Mission goals and constraints remain in the graph.
 
 A harness block cannot declare `prompt`. Parsing refuses it with `harness-prompt-removed`; put the instruction in a step goal or send the seat a message.
+
+An agent declaration may include one optional `lifecycle` child:
+
+```kdl
+lifecycle "standing"
+```
+
+Its only accepted values are `"standing"`, `"owner"`, and `"bounded"`. This is declared
+lifecycle metadata, separate from observed runtime state, restart policy, and the `one-shot`
+flag; it does not change process behavior. Omission means unknown, with no default or
+inference from mission ownership or other declaration settings.
+
+Publishing a replacement agent declaration updates this metadata. Omitting `lifecycle` from
+that replacement clears the previous value; omitting the entire agent declaration from an
+upsert still leaves it unchanged. A client sees the selected declaration's value in its
+optional roster row `lifecycle` field, or no field when the declaration has none.
 
 An agent may declare the bare `one-shot` flag. Once its process exits or vanishes, the daemon
 records a stop, removes it from default inventory, and retains its declaration and history.
@@ -164,6 +183,23 @@ mission-run "release/deploy" {
 ```
 
 `st missions start deploy --after release/build` publishes the same declaration.
+
+### Reporting a run
+
+A run can name an agent to tell when it fails, is cancelled or stalls:
+
+```kdl
+mission-run "release/deploy" {
+  mission "mission/deploy@0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  workspace "/work/deploy"
+  requester "person/operator"
+  report-to "agent/ops/watcher"
+  report-completed "true"
+}
+```
+
+`st missions start deploy --report-to agent/ops/watcher --report-completed` publishes the same
+declaration. `report-completed` needs `report-to`. See [Run reports](mission-graph-runtime.md#run-reports).
 
 st gives the run an agentless first step, `after-run`. Every other step of the normal phase depends on it. The step completes when the named run completes. It fails when that run fails or is cancelled, and the waiting run then fails.
 
@@ -300,11 +336,12 @@ A human-protected revision creates a durable revision proposal. The named operat
 
 ## Free mode
 
-Within a fleet, an agent may do anything the person who runs the fleet may do. This is free mode,
-and it is the rule within a fleet until principals and grants land
-([#867](https://github.com/compoundingtech/smalltalk/issues/867),
-[#882](https://github.com/compoundingtech/smalltalk/issues/882)). Every seat in a fleet runs as
-that person's Unix user, so per-agent checks were never a security boundary there.
+Within a fleet, an agent may do anything the person who runs the fleet may do. This is free mode, the
+default. Every seat in a fleet runs as that person's Unix user, so per-agent checks are not a security
+boundary there. A person can restrict what agents may write with `st rules`: `st rules lockdown --as person/NAME`
+sets the preset rules in audit mode, `st rules audit` lists the writes they would have refused, and
+`st rules mode` turns one off or enforces it. Signed principals and grants are not built
+([#867](https://github.com/compoundingtech/smalltalk/issues/867), [#882](https://github.com/compoundingtech/smalltalk/issues/882)).
 
 An agent publishes, starts, revises, cancels, and retires missions in any namespace, sets a run's
 outcome, retries and wakes any step, applies, starts, and stops any seat (including its own), moves
@@ -317,8 +354,9 @@ Free mode keeps three things:
   A harness with `ST_AGENT` can mutate only as its own seat. On Linux, the local Unix API also binds
   a connection from a harness process or its descendants to that seat and refuses a different
   actor, including `--as person/NAME`.
-- **Workflow.** Human review gates, lane approvers, steps assigned to a person (only that person
-  completes them with `st work done`), and attention for a person work as before.
+- **Workflow.** Human review gates, lane approvers, steps assigned to a person, and attention
+  keep their workflow fences. A person can enable [bounded delegation](person-delegation.md)
+  so an agent records a prior answer or instruction with `--for`, its own actor, and evidence.
 - **The fleet boundary.** Only members sync, and clients and paired apps keep their pairing.
 
 `mission-authority`, `queue-authority`, `seat-authority`, and `agent-authority` blocks still
@@ -463,16 +501,16 @@ gate "the operator approves deployment" type="human" {
 The mission pauses at the gate. A later review command records the decision against the exact gate request. Editing and republishing the mission does not forge a decision.
 
 ```sh
-st attention ls --as person/operator
-st attention approve step-run/RELEASE_GENERATION/deploy \
+st alerts ls --as person/operator
+st alerts approve step-run/RELEASE_GENERATION/deploy \
   --as person/operator \
   --reason "the exact release result is accepted"
 ```
 
-`st attention ls --as person/operator` lists the current person-owned inbox, including pending KDL
+`st alerts ls --as person/operator` lists the current person-owned inbox, including pending KDL
 human gates. Human authority is required and never inferred from an environment variable.
 
-The decision target is the gate's `attention/...` ID that `st attention ls` prints, or the mission
+The decision target is the gate's `attention/...` ID that `st alerts ls` prints, or the mission
 run, step run or loop run (`loop-run/GENERATION/PATH`, for a loop's `until` or `on-exhausted`
 gate) that owns it. The command binds the decision to the exact current request. A target that
 names no gate is refused with `review-target-unknown`. A gate with nothing pending is refused
@@ -480,8 +518,8 @@ with `review-not-requested`, which says why: who already answered it and how, or
 since it was asked (a new attempt, revision or generation, or a finished step or run). A card ID
 the gate has replaced names the card that asks now.
 
-Human gates default to `mode="approve"`: `st attention approve` passes the gate and
-`st attention reject --reason TEXT` fails it with the reviewer's reason. A worker-owned step
+Human gates default to `mode="approve"`: `st alerts approve` passes the gate and
+`st alerts reject --reason TEXT` fails it with the reviewer's reason. A worker-owned step
 can instead use `mode="feedback"`:
 
 ```kdl
@@ -491,16 +529,16 @@ gate "review the draft" type="human" mode="feedback" {
 }
 ```
 
-That review offers approve and request changes. Run `st attention request-changes
+That review offers approve and request changes. Run `st alerts request-changes
 step-run/GENERATION/draft --reason "Add the missing source." --as person/operator` to send
 feedback to the step's worker. The step starts a new attempt without entering `failed`, and its
 goals include `Reviewer feedback: Add the missing source.` The worker must claim and complete that
 new attempt; the next review is a distinct request. Feedback gates require a worker-owned step.
 Mission-level, loop, and agentless gates use approve mode.
 
-## Human attention
+## Person alerts
 
-`st attention ls --as person/NAME` reads current source state: ready person steps, human
+`st alerts ls --as person/NAME` reads current source state: ready person steps, human
 gates, valid launch previews, outstanding proposal reviews, unread person messages/reminders,
 and failures whose current source needs a person. Priority precedes waiting age. Each card's
 identity includes its source, recipient and waiting episode. A cancelled or retired owner,
@@ -508,7 +546,7 @@ removed source, replacement generation or changed attempt removes the card befor
 Failed sources can retain their own repair fault. Held subscription requests do not appear.
 
 ```sh
-st attention ls --as person/operator
+st alerts ls --as person/operator
 st work ask --for person/operator --title "Choose a release date" \
   --reason "The release needs a date" --step step-run/release/prepare \
   --as agent/release/operator --idempotency-key release-date
@@ -518,12 +556,13 @@ st work done step-run/release/ask-ID --as person/operator --summary "Friday"
 An ask creates a person-assigned runtime step in the live owning generation. Its origin waits in
 `waiting-person`, without a lease or time/retry consumption. Only the assigned person can
 complete it. The response resumes the same origin attempt with a new readiness epoch. A requester
-can use `st work cancel-ask STEP --as AGENT --summary TEXT`. An unclaimed live requester can
-use `--new-run NAME`; claimed work must name `--step`. Repeated keys return the same source.
+can cancel its ask with `st work cancel-ask STEP --as AGENT --summary TEXT`. When asking, an
+unclaimed live requester passes `st work ask --new-run NAME`; claimed work must pass `--step`. Repeating an
+`--idempotency-key` returns the same source.
 
 A person message leaves on read or archive, without an age expiry. A launch needs its current
 valid preview. Faults describe source recovery and inspection; they have no independent dismiss
-state. Legacy `attention request`, `resolve` and `withdraw` return `attention-migrated`.
+state. Legacy `st alerts request`, `resolve` and `withdraw` return `attention-migrated`.
 Historical attention claims remain audit data; only provably live agent asks are imported as
 person steps. `st doctor` reads the same snapshot for attention age checks.
 
@@ -578,3 +617,45 @@ An accepted operation can cause later runtime work. A later start, stop, observe
 This split keeps authored intent atomic and keeps real-world effects observable.
 
 The st eval suite proves these workflows with isolated state and bounded run time.
+
+## Mission revision provenance
+
+A top-level mission can record why its revision was produced and where it came from:
+
+```kdl
+version 2
+mission "orchard/release" state="ready" {
+  provenance {
+    reason "Apply the approved release plan."
+    source {
+      repository "https://example.invalid/orchard/missions"
+      commit "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      path "missions/release.kdl"
+      renderer "orchard-renderer-v1"
+    }
+    decision "decision/approved-release-scope"
+    evidence "doc/orchard/release-proof@opaque-reference"
+  }
+  goal "Prepare the release."
+  step "prepare" { goal "Prepare the release." }
+}
+```
+
+The block requires one reason and exactly one source with repository, full commit id, relative
+path and renderer. Decision and evidence strings can repeat; they are opaque references, and
+neither references nor renderer text are resolved or executed. Each list allows at most 32
+references of 1,024 UTF-8 bytes each; source text allows 1,024 bytes per field, reason allows
+2,048 bytes, and the complete JSON block allows 16 KiB. Empty strings, control characters,
+unknown or duplicate fixed fields, abbreviated/non-hexadecimal commits, and paths with absolute,
+empty, dot or parent components are refused. Commits accept full SHA-1 or SHA-256 ids.
+
+Provenance is fixed at the first publication of the exact mission revision. Republishing the
+same block is a no-op; omitting it preserves the existing block. Replacing it, or attaching one
+to an already published revision that had none, is refused. Change the mission definition to
+publish a new revision with new provenance. Earlier revisions keep their earlier blocks.
+`st missions show`, `st launch preview` and `st work revise` show the block. Launch approval
+also commits the displayed provenance. Querying revisions by source commit is deferred.
+
+Provenance is stored as a `mission.provenance` claim on `mission/ID@REVISION`, written atomically with
+`mission.published`; it never changes mission or step hashes. Publish provenance-bearing KDL through an
+upgraded node.
