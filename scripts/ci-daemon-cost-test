@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Exercise archive-only cost selection, report failures and the actual gate shell."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('cost', str(ROOT / 'scripts/ci-daemon-cost'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+cost = importlib.util.module_from_spec(spec)
+loader.exec_module(cost)
+with tempfile.TemporaryDirectory(prefix='daemon cost ') as tmp:
+    base = Path(tmp)
+    tools = base / 'bin'; tools.mkdir()
+    mock = '''#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+root = pathlib.Path(os.environ['RUNNER_TEMP'])
+with (root / 'calls.jsonl').open('a') as f: f.write(json.dumps(args) + '\\n')
+assert args[:2] in (['nextest', 'list'], ['nextest', 'run'])
+assert '--binaries-metadata' in args and '--cargo-metadata' in args
+assert '--ignore-default-filter' in args and '--workspace' not in args and '--locked' not in args
+assert args[args.index('-E')+1] == 'package(=st3) and binary(=integration) and test(/^daemon_cost::/)'
+mode = os.environ['MODE']
+names = json.loads(os.environ['NAMES'])
+if args[1] == 'list':
+    if mode == 'missing': names.pop()
+    tests = {n: {'ignored': mode == 'ignored', 'filter-match': {'status': 'matches'}} for n in names}
+    suites = {'integration': {'testcases': tests}}
+    if mode == 'duplicate': suites['second'] = {'testcases': tests}
+    print(json.dumps({'rust-suites': suites})); sys.exit(0)
+assert args[args.index('--test-threads')+1] == '1' and args[args.index('--retries')+1] == '0'
+assert args[args.index('--no-tests')+1] == 'fail'
+assert os.environ['ST_COST_SCALES'] == '0.01,0.1'
+assert os.environ['ST_BENCH_DIR'].startswith(str(root / 'perf/daemon-cost'))
+bench = pathlib.Path(os.environ['ST_BENCH_DIR'])
+(bench / 'generated-0.01.sqlite3').write_bytes(b'fixture')
+report = {'scales': [0.01, 0.1], 'growth_limit': 3.0, 'slack': 5000,
+          'small': {'route': {}}, 'large': {'route': {}}, 'failures': []}
+if mode == 'threshold': report['growth_limit'] = 9
+if mode == 'report_failure': report['failures'] = ['adverse']
+if mode != 'no_report': pathlib.Path(os.environ['ST_COST_REPORT']).write_text(json.dumps(report))
+print('cost stand-in completed')
+sys.exit(17 if mode == 'test_failure' else 0)
+'''
+    (tools / 'cargo').write_text(mock); (tools / 'cargo').chmod(0o755)
+    (tools / 'git').write_text('#!/bin/sh\ncase "$*" in "rev-parse HEAD") printf "%s\\n" "$GITHUB_SHA";; *) exit 99;; esac\n')
+    (tools / 'git').chmod(0o755)
+    source = base / 'source'; source.mkdir()
+    names = ['no_request_does_work_that_grows_with_the_store', 'the_cost_check_covers_every_route', 'new_fixture_window_control']
+    cost_source = '\n'.join('#[tokio::test]\nasync fn ' + name + '() {}' for name in names)
+    expected = cost.required(cost_source)
+    for name in ('daemon_cost.rs', 'daemon_bench.rs'):
+        path = source / 'crates/st3/tests' / name
+        path.parent.mkdir(parents=True, exist_ok=True); path.write_text(cost_source if name == 'daemon_cost.rs' else 'source stand-in')
+    for mode in ('pass', 'missing', 'ignored', 'duplicate', 'test_failure', 'no_report', 'threshold', 'report_failure', 'source_mismatch'):
+        temp = base / mode; temp.mkdir()
+        archive = temp / 'ci-test-archives'; archive.mkdir()
+        identity = {'identity': {'source': 'b'*40 if mode == 'source_mismatch' else 'a'*40}, 'files': {'workspace.tar.zst': 'hash'}}
+        (archive / 'manifest.json').write_text(json.dumps(identity))
+        env = {**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH'],
+               'MODE': mode, 'NAMES': json.dumps(sorted(expected)), 'GITHUB_SHA': 'a'*40,
+               'RUNNER_TEMP': str(temp), 'CI_TEST_EXTRACTED': str(temp / 'extracted'),
+               'CI_TEST_WORKSPACE': str(source), 'GITHUB_STEP_SUMMARY': str(temp / 'summary'),
+               'ST_COST_SCALES': '9,90', 'ST_BENCH_DIR': str(base / 'foreign')}
+        result = subprocess.run(['python3', str(ROOT / 'scripts/ci-daemon-cost')], cwd=source,
+                                env=env, capture_output=True, text=True, timeout=10)
+        assert (result.returncode == 0) == (mode == 'pass'), (mode, result.stdout, result.stderr)
+        calls = [json.loads(line) for line in (temp / 'calls.jsonl').read_text().splitlines()]
+        assert len(calls) == (1 if mode in ('missing', 'ignored', 'duplicate', 'source_mismatch') else 2), (mode, calls)
+        if mode == 'test_failure':
+            assert result.returncode == 17
+            assert json.loads((temp / 'perf/daemon-cost/result.json').read_text())['exit'] == 17
+        if mode == 'pass':
+            assert (temp / 'perf/daemon-cost/identity.json').is_file()
+            assert (temp / 'perf/daemon-cost/fixture-hashes.json').is_file()
+            assert 'zero retries' in (temp / 'summary').read_text()
+    assert not (base / 'foreign').exists()
+
+workflow = (ROOT / '.github/workflows/fleet.yml').read_text()
+gate = workflow.split('  linux-gate:\n', 1)[1].split('  daemon-cost:\n', 1)[0]
+shell = gate.split('run: |\n', 1)[1].split('      - name:', 1)[0]
+shell = '\n'.join(line[10:] for line in shell.splitlines() if line.startswith('          '))
+for event in ('merge_group', 'pull_request', 'push'):
+    for outcome in ('success', 'skipped', 'failure', 'cancelled', ''):
+        merge = 'success success ' + outcome if event == 'merge_group' else 'skipped skipped ' + outcome
+        result = subprocess.run(['bash', '-c', shell], env={**os.environ, 'EVENT': event,
+            'RESULTS': ' '.join(['success'] * 7), 'MERGE_RESULTS': merge}, capture_output=True)
+        assert (result.returncode == 0) == (outcome == ('success' if event == 'merge_group' else 'skipped')), (event, outcome)
+print('Deterministic cost controls passed: archive-only, exact inventory, zero retries, failure/report retention and real merge-group gate')
