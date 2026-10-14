@@ -2,6 +2,8 @@
 export { AgentRow, StatusGlyph } from './composition/Sidebar.tsx'
 export { ThreadHeader, ResizableSplit, TerminalDrawer } from './composition/Shell.tsx'
 export { SidebarAgentRow, SidebarQueryContext, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
+export { SidebarTree } from './sidebar/SidebarTree.tsx'
+export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'
 export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
 export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 export type { AgentRowData, AgentStatus } from './composition-model.ts'
