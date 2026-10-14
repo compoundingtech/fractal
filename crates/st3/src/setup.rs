@@ -86,7 +86,10 @@ pub struct SetupArgs {
 }
 
 pub struct PreparedSetup {
+    // Only the binary calls setup now, and it reads `initial_subject` alone; these were public library fields.
+    #[allow(dead_code)]
     pub config: Config,
+    #[allow(dead_code)]
     pub harness: Option<String>,
     pub initial_subject: Option<String>,
 }

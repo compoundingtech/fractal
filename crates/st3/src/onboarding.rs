@@ -33,6 +33,8 @@ fn client(config: &Config) -> Result<Client> {
 }
 
 /// Count every historical run, including completed and cancelled runs on another member.
+// Not called in the binary; it was a public library function.
+#[allow(dead_code)]
 pub async fn has_run(config: &Config) -> Result<bool> {
     has_run_on(&client(config)?).await
 }
