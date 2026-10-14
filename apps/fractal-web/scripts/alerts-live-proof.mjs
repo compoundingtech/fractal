@@ -37,7 +37,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const app = fileURLToPath(new URL('..', import.meta.url))
@@ -132,6 +132,12 @@ function down() {
   if (existsSync(tools)) {
     const result = st(['uninstall', '--yes', '--erase-local-graph', '--no-service', '--offline'], { check: false })
     process.stdout.write(result.stdout + result.stderr)
+  }
+  // WEBPROOF_ROOT comes from the environment: remove only a directory this script made.
+  if (!basename(root).startsWith('st-webproof') || !existsSync(join(root, 'fleet-created'))) {
+    console.error(`not removing ${root}: it is not named st-webproof* or has no fleet-created marker from this script`)
+    process.exitCode = 1
+    return
   }
   rmSync(root, { recursive: true, force: true })
   console.log(`removed ${root}`)
