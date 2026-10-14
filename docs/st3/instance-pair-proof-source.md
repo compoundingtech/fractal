@@ -28,6 +28,11 @@ names `proof-a` and `proof-b` and no service install. Its fixed peer listeners a
 `127.0.0.1:31313` and `127.0.0.1:31314`. Its local API sockets remain in the respective
 instance run directories. The job's reviewer must verify the actual bound addresses and
 no inherited production state, sockets, credentials, HOME, config or service access.
+The launcher starts every subprocess with a constructed environment dictionary from an
+**empty parent map**, and reads `/proc/PID/environ` after each long-lived child starts to
+require its exec-time environment exactly matches those five supplied keys. `st --instance`
+then adds private XDG paths within the child. A same-UID process can still access another
+same-UID process's files or socket; these paths do not defend against hostile guest code.
 
 Candidate CLI source has `--instance`, `fleet create/join --no-service`,
 `--advertise-loopback`, `fleet invite --via loopback`, and join `--via` with an HTTP loopback
@@ -47,6 +52,8 @@ parent environment: `HOME=/var/tmp/st3-ip/launcher`, `PATH=/usr/bin:/bin`, `LANG
 `TMPDIR=/var/tmp/st3-ip/tmp`, `PYTHONDONTWRITEBYTECODE=1`. It refuses root, changed EUID,
 preexisting root, symlinked binary, wrong digest, or any added environment key. Each child
 gets only a constructed environment with its own HOME and instance run directory. A
+preflight bind checks both fixed loopback ports are free before creating any state; the
+post-start child-owned listener check catches a port taken after preflight. A
 fixed operator-owned job must pin the absolute launcher path, binary, script digest, user,
 work directory, and lifetime; callers cannot choose argv, endpoint, content, instance name,
 or package. This source does not install such a job.
@@ -75,6 +82,17 @@ it never carries native private keys, invitation codes, API bodies, child logs, 
 This scope is `exhaustive-fixture-documents-and-admitted-claims-v1`, **not** a global Source,
 checkpoint, shared projection, Fabric, iOS, or live-fleet oracle.
 
+After each native start, the launcher inspects each child's `/proc/PID/fd` socket inodes
+against `/proc/net/tcp` and `/proc/net/tcp6`. It requires exactly one TCP listener for
+that member, owned by its daemon child and bound to that member's fixed
+`127.0.0.1` port; it refuses any other child TCP listener. At the final cut it requires
+every **observed** child TCP remote to be loopback or unset, and writes both members'
+listener/remote booleans and socket counts in the receipt. A missing proc read or a
+disappearing child fails closed. This is a sampled, child-owned TCP observation; it cannot
+prove that no short-lived connection occurred between reads, no UDP or other process used
+the network, or that a same-UID process could not interfere. Operations still needs an
+out-of-band egress and process/socket observation before qualifying the job.
+
 The 8 MiB per response, 128 MiB aggregate local API wire budget, 2,048 request cap,
 50-document set, 48 KiB final receipt cap, fixed two members, and bounded readiness and
 child shutdown times limit the authored program. Operations must provide an external hard
@@ -99,7 +117,9 @@ binary package outside the script-owned root, is gone.
 The companion `scripts/st3-instance-pair-proof-test.py` defines pure source controls for
 50 exact document names/content, binding claim and physical-cut checks, a bounded
 differing-claim list, secret-free errors, constructed child environments, and an unreaped
-child's failing receipt with its root preserved for the disposable-job owner. It imports
+child's failing receipt with its root preserved for the disposable-job owner. It also
+checks exact daemon-owned loopback bind, an extra or wildcard listener, loopback and
+nonloopback child TCP remotes, and preexisting-root refusal. It imports
 the program but starts no native fixture. The test file is submitted for review, **UNRUN**.
 
 The meaningful source controls for the new script are: altered/extra environment, preexisting

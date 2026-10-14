@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
+import ipaddress
 import io
 import json
 from pathlib import Path
@@ -82,6 +83,47 @@ class SourceControls(unittest.TestCase):
             member.fleet_file.write_text(member.fleet_file.read_text() + 'extra = "fabric://node"\n')
             with self.assertRaisesRegex(proof.Refused, "nonloopback-route"):
                 member.check_loopback_transport()
+
+    def test_tcp_listener_must_be_child_owned_and_exact_loopback_bind(self):
+        loopback = ipaddress.ip_address("127.0.0.1")
+        unset = ipaddress.ip_address("0.0.0.0")
+        listener = {"local": (loopback, proof.PORTS["a"]), "remote": (unset, 0), "state": "0A"}
+        observed = proof.assess_tcp("a", {10}, {20}, {10: listener})
+        self.assertTrue(observed["expected_loopback_listener_owned_by_daemon"])
+        self.assertEqual(observed["child_tcp_sockets_observed"], 1)
+        for daemon, worker, rows in ((set(), {10}, {10: listener}),
+                                     ({10}, {20}, {10: listener | {"local": (unset, proof.PORTS["a"])}}),
+                                     ({10}, {20}, {10: listener, 20: listener})):
+            with self.assertRaisesRegex(proof.Refused, "tcp-listener-bind"):
+                proof.assess_tcp("a", daemon, worker, rows)
+
+    def test_every_observed_child_tcp_remote_is_loopback_or_unset(self):
+        loopback = ipaddress.ip_address("127.0.0.1")
+        unset = ipaddress.ip_address("0.0.0.0")
+        listener = {"local": (loopback, proof.PORTS["a"]), "remote": (unset, 0), "state": "0A"}
+        connected = {"local": (loopback, 44000), "remote": (loopback, proof.PORTS["b"]),
+                     "state": "01"}
+        observed = proof.assess_tcp("a", {10}, {20}, {10: listener, 20: connected})
+        self.assertTrue(observed["all_observed_child_tcp_remotes_loopback_or_unset"])
+        with self.assertRaisesRegex(proof.Refused, "tcp-remote-nonloopback"):
+            proof.assess_tcp("a", {10}, {20}, {10: listener, 20: connected | {
+                "remote": (ipaddress.ip_address("203.0.113.8"), 443)}})
+
+    def test_preexisting_root_refused_before_any_binary_check(self):
+        with tempfile.TemporaryDirectory() as root:
+            with mock.patch.object(proof, "ROOT", Path(root)), mock.patch.object(proof.sys, "argv", ["proof"]), \
+                    mock.patch.object(proof.os, "getuid", return_value=1000), \
+                    mock.patch.object(proof.os, "geteuid", return_value=1000):
+                with self.assertRaisesRegex(proof.Refused, "state-not-fresh"):
+                    proof.preflight()
+
+    def test_port_preflight_refuses_a_failed_bind(self):
+        probe = mock.MagicMock()
+        probe.__enter__.return_value.bind.side_effect = OSError("occupied")
+        with mock.patch.object(proof.socket, "socket", return_value=probe):
+            with self.assertRaisesRegex(proof.Refused, "port-in-use"):
+                proof.check_ports_free()
+        probe.__enter__.return_value.bind.assert_called_once_with(("127.0.0.1", proof.PORTS["a"]))
 
     def test_unreaped_child_preserves_root_and_fails_receipt(self):
         with tempfile.TemporaryDirectory() as parent:

@@ -7,6 +7,7 @@ The two st instances are separate local state, not a credential/security boundar
 
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,7 @@ REFUSAL_CODES = {
     "cli-failed", "cli-output-width", "fixed-argv-only", "own-user-required",
     "state-not-fresh", "wrong-binary-path", "wrong-binary", "unexpected-environment",
     "invite-shape",
+    "child-environment", "port-in-use", "tcp-listener-bind", "tcp-remote-nonloopback",
 } | {"unready-admission-" + field for field in ADMISSION_FIELDS} | {
     "member-field-mismatch-" + field for field in COMPARE_FIELDS}
 
@@ -95,6 +97,63 @@ def safe_error(error):
         if code in REFUSAL_CODES:
             return code
     return "fixture-refused"
+
+
+def initial_environment(child):
+    # Linux exposes the exec-time environment, before st --instance adds its private XDG paths.
+    entries = Path(f"/proc/{child.pid}/environ").read_bytes().rstrip(b"\0").split(b"\0")
+    return dict(entry.decode().split("=", 1) for entry in entries)
+
+
+def socket_inodes(child):
+    require(child.poll() is None, "child-exited")
+    inodes = set()
+    for fd in Path(f"/proc/{child.pid}/fd").iterdir():
+        link = os.readlink(fd)
+        match = re.fullmatch(r"socket:\[(\d+)\]", link)
+        if match:
+            inodes.add(int(match.group(1)))
+    return inodes
+
+
+def proc_address(raw, family):
+    address, port = raw.split(":")
+    octets = bytes.fromhex(address)
+    if family == 4:
+        octets = octets[::-1]
+    else:
+        octets = b"".join(octets[index:index + 4][::-1] for index in range(0, 16, 4))
+    return ipaddress.ip_address(octets), int(port, 16)
+
+
+def tcp_rows():
+    rows = {}
+    for family in (4, 6):
+        lines = Path(f"/proc/net/tcp{'' if family == 4 else '6'}").read_text().splitlines()
+        for line in lines[1:]:
+            fields = line.split()
+            rows[int(fields[9])] = {
+                "local": proc_address(fields[1], family),
+                "remote": proc_address(fields[2], family),
+                "state": fields[3],
+            }
+    return rows
+
+
+def assess_tcp(role, daemon_inodes, worker_inodes, rows):
+    owned = daemon_inodes | worker_inodes
+    observed = {inode: row for inode, row in rows.items() if inode in owned}
+    listeners = [(inode, row) for inode, row in observed.items() if row["state"] == "0A"]
+    require(len(listeners) == 1 and listeners[0][0] in daemon_inodes and
+            listeners[0][1]["local"] == (ipaddress.ip_address("127.0.0.1"), PORTS[role]),
+            "tcp-listener-bind")
+    require(all(row["remote"][0].is_loopback or
+                (row["remote"][0].is_unspecified and row["remote"][1] == 0)
+                for row in observed.values()), "tcp-remote-nonloopback")
+    return {"expected_loopback_listener_owned_by_daemon": True,
+            "no_other_child_tcp_listener": True,
+            "all_observed_child_tcp_remotes_loopback_or_unset": True,
+            "child_tcp_sockets_observed": len(observed)}
 
 
 class UnixHTTP(http.client.HTTPConnection):
@@ -317,12 +376,19 @@ class Member:
                                  env=self.environment(), stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=log)
         self.children.append((child, log))
+        require(initial_environment(child) == self.environment(), "child-environment")
 
     def start_native(self):
         self.start("up")
         await_ready(lambda: request(self, "GET", "/v1/health")["status"] == "ready",
                     [child for child, _ in self.children])
         self.start("replication-worker")
+        self.observe_tcp()
+
+    def observe_tcp(self):
+        require(len(self.children) == 2, "child-exited")
+        daemon, worker = (child for child, _ in self.children)
+        return assess_tcp(self.role, socket_inodes(daemon), socket_inodes(worker), tcp_rows())
 
     def stop(self):
         failed = False
@@ -341,6 +407,15 @@ class Member:
         return not failed and all(child.poll() is not None for child, _ in self.children)
 
 
+def check_ports_free():
+    for port in PORTS.values():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                raise Refused("port-in-use") from None
+
+
 def preflight():
     require(len(sys.argv) == 1, "fixed-argv-only")
     require(os.geteuid() != 0 and os.getuid() == os.geteuid(), "own-user-required")
@@ -348,6 +423,7 @@ def preflight():
     require(BINARY.is_file() and not BINARY.is_symlink(), "wrong-binary-path")
     require(hashlib.sha256(BINARY.read_bytes()).hexdigest() == BINARY_SHA, "wrong-binary")
     require(dict(os.environ) == PARENT_ENVIRONMENT, "unexpected-environment")
+    check_ports_free()
     os.umask(0o077)
 
 
@@ -367,7 +443,9 @@ def public_cut(cut):
 
 def main():
     receipt = {"kind": "interim-instance-pair-proof", "accepted": False,
-               "scope": "one-disposable-job-two-same-uid-instances", "controls_unqualified": True}
+               "scope": "one-disposable-job-two-same-uid-instances", "controls_unqualified": True,
+               "child_environment_source": "empty-parent-map",
+               "child_initial_environments_exact": False}
     members = []
     owned_root_created = False
     try:
@@ -399,6 +477,7 @@ def main():
               "--port", str(PORTS["b"]), "--transports", "loopback", "--advertise-loopback")
         b.check_loopback_transport()
         b.start_native()
+        receipt["child_initial_environments_exact"] = True
         children = [child for member in members for child, _ in member.children]
         def fifty_on_b():
             page = request(b, "GET", "/v1/documents?prefix=" + urllib.parse.quote(PREFIX, safe="") + "&limit=51")
@@ -411,6 +490,7 @@ def main():
         cut_b = capture_cut(b)
         compare_cuts(cut_a, cut_b)
         compare_cuts(cut_a, capture_cut(a))
+        receipt["tcp"] = {"a": a.observe_tcp(), "b": b.observe_tcp()}
         receipt["cuts"] = {"a": public_cut(cut_a), "b": public_cut(cut_b)}
         receipt["documents_compared"] = 50
         receipt["accepted"] = True
