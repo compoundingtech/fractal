@@ -15,6 +15,7 @@ const server = await createServer({
 after(() => server.close())
 const { Transcript, LiveActivity } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
 const { EmbraceRuntimeProvider } = await server.ssrLoadModule('/src/assistant-ui/EmbraceRuntime.tsx')
+const { SendUnconfirmed } = await server.ssrLoadModule('/src/assistant-ui/composition/TranscriptFeedback.tsx')
 
 const now = Date.parse('2026-01-15T12:30:00Z')
 const prompt = { _tag: 'Text', id: 'prompt/example', role: 'user', text: 'Keep the visible rows grouped.', attachments: [], streaming: false, at: new Date(now).toISOString() }
@@ -39,4 +40,23 @@ test('live activity shares compact header durations and host-supplied waiting st
   const noStart = renderToStaticMarkup(React.createElement(LiveActivity, { state: { _tag: 'WaitingForAnswer' }, now }))
   assert.ok(noStart.includes('Waiting for your answer'))
   assert.ok(!noStart.includes('Working'))
+})
+
+test('an unconfirmed send reads as not confirmed yet with Send again, never as a failure', () => {
+  const unconfirmed = { ...prompt, sendState: { _tag: 'Unconfirmed', detail: 'Sending it again is safe.' } }
+  const element = React.createElement(EmbraceRuntimeProvider, {
+    options: { messages: [unconfirmed], isRunning: false, onNew: async () => {} },
+  }, React.createElement(Transcript, { turns: [{ ...turn, prompt: unconfirmed }], title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now, onRetrySend: () => {} }))
+  const markup = renderToStaticMarkup(element)
+  assert.match(markup, /data-send-state="unconfirmed"/)
+  assert.match(markup, /data-testid="send-unconfirmed"/)
+  assert.match(markup, /role="status"/)
+  assert.match(markup, /Not confirmed yet/)
+  assert.match(markup, /Send again/)
+  assert.doesNotMatch(markup, />Sent</)
+  assert.doesNotMatch(markup, /send-failure|Couldn&#x27;t send|Couldn't send|role="alert"/)
+  // Without a retry handler there is no action to offer.
+  const bare = renderToStaticMarkup(React.createElement(SendUnconfirmed, { state: { _tag: 'Unconfirmed' } }))
+  assert.match(bare, /Not confirmed yet/)
+  assert.doesNotMatch(bare, /Send again/)
 })

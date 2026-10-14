@@ -493,18 +493,6 @@ fn operation_note(label: &str) -> ClaimInput {
     }
 }
 
-/// How many pages one quiet pass over the edge store observes.
-fn quiet_observations(store: &Store) -> usize {
-    let mut observations = 0;
-    assert!(
-        store
-            .operation_projection_drift_with_observer(&mut |_| observations += 1)
-            .unwrap()
-            .is_empty()
-    );
-    observations
-}
-
 /// A daemon keeps appending operations while doctor or the start-up repair audits. The audit
 /// still completes, and reports none of the consistent new rows as drift.
 #[test]
@@ -562,28 +550,65 @@ fn the_audit_completes_with_a_continuously_appending_writer() {
     assert!(store.operation_projection_drift().unwrap().is_empty());
 }
 
-/// A write to an operation the audit may already have read, while it runs. `mutate` runs once,
-/// after observation `at`, while later pages and candidate rechecks are still to come.
-fn audit_with_mutation_at(store: &Store, at: usize, mutate: &dyn Fn(&Store)) -> Vec<String> {
-    let mut observations = 0;
+/// A semantic position within the fixed fixture, independent of how many snapshots a
+/// cooperative time yield splits its rows across. No point depends on a probe scan.
+#[derive(Clone, Copy, Debug)]
+struct MutationPoint {
+    phase: &'static str,
+    rows: usize,
+}
+
+/// Run a mutation after a completed page reaches the selected phase's row prefix. Later
+/// snapshots must still follow it; every mutation point is below this fixture's frontiers.
+fn audit_with_mutation_at(
+    store: &Store,
+    at: MutationPoint,
+    mutate: &dyn Fn(&Store),
+) -> Vec<String> {
+    let mut rows = 0;
+    let mut mutated = false;
+    let mut observed_after_mutation = false;
     let drift = store
-        .operation_projection_drift_with_observer(&mut |_| {
-            observations += 1;
-            if observations == at {
-                mutate(store);
+        .operation_projection_drift_with_snapshot_observer(&mut |phase, page_rows| {
+            if mutated {
+                observed_after_mutation = true;
+            } else if phase == at.phase {
+                rows += page_rows;
+                if rows >= at.rows {
+                    mutate(store);
+                    mutated = true;
+                }
             }
         })
         .unwrap();
-    assert!(observations > at, "the mutation ran after the last snapshot");
+    assert!(mutated, "mutation point {at:?} was not reached");
+    assert!(
+        observed_after_mutation,
+        "{at:?}: the mutation ran after the last snapshot"
+    );
     drift
 }
 
-/// Every observation of a quiet pass but the last, so each mutation lands in every phase:
-/// claim pages, tombstone pages, operation pages and between them.
-fn mutation_points(store: &Store) -> std::ops::Range<usize> {
-    let quiet = quiet_observations(store);
-    assert!(quiet >= 6, "{quiet} observations");
-    1..quiet
+/// Cover the captured frontiers and early, middle and late row prefixes of each walk.
+/// There are over 600 valid claims, 300 tombstones and 300 operations, so even a full
+/// 128-row page crossing one of these points leaves another snapshot to come. A 20 ms
+/// yield can change the snapshot number of a point but cannot remove its row prefix.
+fn mutation_points() -> impl Iterator<Item = MutationPoint> {
+    [
+        ("frontiers", 1),
+        ("claims", 1),
+        ("claims", 128),
+        ("claims", 256),
+        ("claims", 512),
+        ("checkpoints", 1),
+        ("checkpoints", 128),
+        ("checkpoints", 256),
+        ("operations", 1),
+        ("operations", 128),
+        ("operations", 256),
+    ]
+    .into_iter()
+    .map(|(phase, rows)| MutationPoint { phase, rows })
 }
 
 fn edge_store_in(directory: &tempfile::TempDir) -> EdgeStore {
@@ -594,18 +619,16 @@ fn edge_store_in(directory: &tempfile::TempDir) -> EdgeStore {
 /// it, because it already read that operation; it reports nothing else, and the next pass,
 /// which starts after the write, reports exactly it.
 fn assert_caught_by_this_or_the_next_pass(operation: &str, mutate: &dyn Fn(&Store, &EdgeStore)) {
-    let probe = tempfile::tempdir().unwrap();
-    let points = mutation_points(&edge_store_in(&probe).store);
-    for at in points {
+    for at in mutation_points() {
         let directory = tempfile::tempdir().unwrap();
         let edge = edge_store_in(&directory);
         let drift = audit_with_mutation_at(&edge.store, at, &|store| mutate(store, &edge));
         assert!(
             drift.is_empty() || drift == [operation],
-            "after snapshot {at}: {drift:?}"
+            "after {at:?}: {drift:?}"
         );
         let next = edge.store.operation_projection_drift().unwrap();
-        assert_eq!(next, [operation], "after snapshot {at}");
+        assert_eq!(next, [operation], "after {at:?}");
         assert_eq!(next, old_drift(&edge.store));
     }
 }
@@ -638,16 +661,14 @@ fn a_source_repaired_during_the_audit_is_caught_by_the_next_pass() {
 /// current state must suppress it.
 #[test]
 fn a_consistent_conflict_written_during_the_audit_is_never_reported() {
-    let probe = tempfile::tempdir().unwrap();
-    let points = mutation_points(&edge_store_in(&probe).store);
-    for at in points {
+    for at in mutation_points() {
         let directory = tempfile::tempdir().unwrap();
         let EdgeStore { store, .. } = edge_store_in(&directory);
         let drift = audit_with_mutation_at(&store, at, &|store| {
             write_claims(store, vec![claim("op/many/0001", "d/9", "late-conflict")], 64);
             execute(store, "UPDATE operations SET state='conflict' WHERE id='op/many/0001'", []);
         });
-        assert!(drift.is_empty(), "after snapshot {at}: {drift:?}");
+        assert!(drift.is_empty(), "after {at:?}: {drift:?}");
         assert_eq!(operation_row(&store, "op/many/0001").unwrap().2, "conflict");
         assert!(old_drift(&store).is_empty());
         assert!(store.operation_projection_drift().unwrap().is_empty());
@@ -658,16 +679,17 @@ fn a_consistent_conflict_written_during_the_audit_is_never_reported() {
 /// ran before the repair, never anything else, and the next pass is clean.
 #[test]
 fn drift_repaired_during_the_audit_is_gone_from_the_next_pass() {
-    let probe = tempfile::tempdir().unwrap();
-    let points = mutation_points(&edge_store_in(&probe).store);
-    for at in points {
+    for at in mutation_points() {
         let directory = tempfile::tempdir().unwrap();
         let EdgeStore { store, .. } = edge_store_in(&directory);
         execute(&store, "UPDATE operations SET state='conflict' WHERE id='op/active'", []);
         let drift = audit_with_mutation_at(&store, at, &|store| {
             execute(store, "UPDATE operations SET state='active' WHERE id='op/active'", []);
         });
-        assert!(drift.is_empty() || drift == ["op/active"], "after snapshot {at}: {drift:?}");
+        assert!(
+            drift.is_empty() || drift == ["op/active"],
+            "after {at:?}: {drift:?}"
+        );
         assert!(store.operation_projection_drift().unwrap().is_empty());
         assert!(old_drift(&store).is_empty());
     }

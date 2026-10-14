@@ -143,3 +143,5 @@ export type SendState =
       /** Source-controlled retry policy; when present it decides whether Retry appears. */
       readonly retryable?: boolean
     }
+  /** st may have taken the send and has not confirmed it yet; sending it again is safe. */
+  | { readonly _tag: 'Unconfirmed'; readonly detail?: string }

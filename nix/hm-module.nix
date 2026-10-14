@@ -99,6 +99,11 @@ in
       default = null;
       description = "Managed harness access mode. Null preserves legacy bypass; select auto for new installations.";
     };
+    seatPriority = mkOption {
+      type = types.nullOr (types.enum [ "background" "normal" ]);
+      default = null;
+      description = "How seats rank against the daemon for CPU and IO. Null means background; normal gives seats the daemon's priority.";
+    };
     node = mkOption { type = types.nullOr types.str; default = null; description = "Daemon node name; null uses the daemon default."; };
     stateDir = mkOption {
       type = types.str;
@@ -179,6 +184,7 @@ in
     xdg.configFile."st3/config.toml".text =
       "person = ${builtins.toJSON cfg.person}\n"
       + lib.optionalString (cfg.accessMode != null) "access_mode = ${builtins.toJSON cfg.accessMode}\n"
+      + lib.optionalString (cfg.seatPriority != null) "seat_priority = ${builtins.toJSON cfg.seatPriority}\n"
       + lib.optionalString (cfg.node != null) "node = ${builtins.toJSON cfg.node}\n"
       + "state_dir = ${builtins.toJSON cfg.stateDir}\n"
       + lib.optionalString (cfg.ptyRoot != null) "pty_root = ${builtins.toJSON cfg.ptyRoot}\n"
