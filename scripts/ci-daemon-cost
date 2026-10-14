@@ -9,7 +9,7 @@ import subprocess
 import time
 
 def required(source):
-    names = re.findall(r"#\[(?:tokio::)?test(?:\([^]\n]*\))?\]\s*(?:async\s+)?fn\s+(\w+)", source)
+    names = re.findall(r"#\[(?:tokio::)?test(?:\([^]\n]*\))?\]\s*(?:#\[[^\n]*\]\s*)*(?:async\s+)?fn\s+(\w+)", source)
     expected = {"daemon_cost::" + name for name in names}
     if len(names) != len(expected) or not {
         "daemon_cost::no_request_does_work_that_grows_with_the_store",

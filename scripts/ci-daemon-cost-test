@@ -53,7 +53,7 @@ sys.exit(17 if mode == 'test_failure' else 0)
     (tools / 'git').chmod(0o755)
     source = base / 'source'; source.mkdir()
     names = ['no_request_does_work_that_grows_with_the_store', 'the_cost_check_covers_every_route', 'new_fixture_window_control']
-    cost_source = '\n'.join('#[tokio::test]\nasync fn ' + name + '() {}' for name in names)
+    cost_source = '#[test]\n#[should_panic(expected = \"failure\")]\nfn expected_panic_is_a_control() {}\n' + '\n'.join('#[tokio::test]\nasync fn ' + name + '() {}' for name in names)
     expected = cost.required(cost_source)
     for name in ('daemon_cost.rs', 'daemon_bench.rs'):
         path = source / 'crates/st3/tests' / name
