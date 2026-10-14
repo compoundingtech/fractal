@@ -329,6 +329,23 @@ impl Repository {
         Ok(value)
     }
 
+    /// Enumerate only the isolated, URL-keyed tracking namespace with the same
+    /// environment isolation and output bounds as other local Git reads.
+    pub fn tracking_inventory(&self, remote_url: &str) -> Result<String> {
+        let namespace = format!(
+            "refs/st/tracking/{}/",
+            hex::encode(sha2::Sha256::digest(remote_url.as_bytes()))
+        );
+        self.text(
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                &namespace,
+            ],
+            None,
+        )
+    }
+
     pub fn source(&self, revision: &str) -> Result<(String, String)> {
         ensure!(
             !revision.is_empty() && !revision.starts_with('-'),

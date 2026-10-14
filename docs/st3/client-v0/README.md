@@ -1007,6 +1007,19 @@ The v0 action discriminators are:
 | Terminals | `terminal.input`, `terminal.resize`, `terminal.attach`, `terminal.detach` | runtime incarnation; resize and a line of input (`mode` `line`) also require the screen sequence; raw and key input do not |
 | Pairing | `pairing.begin`, `pairing.complete`, `pairing.revoke` | pairing/device revision where applicable |
 
+After authentication and snapshot admission, `message.send` waits at most three seconds
+for confirmation of dispatch and its action receipt. HTTP 503 `message-send-unconfirmed`
+has `retryable: false` and details `{applied: "unknown", action_id, idempotency_key}`.
+The admitted send can still finish; this response does not assert rollback or rejection.
+Keep the original action ID, key and payload, and resend that identical request to recover
+the durable outcome. Never create a new key for this response. At most sixteen send workers
+remain pending in a daemon. Concurrent retries wait for the held key within the same
+confirmation deadline and consume no additional worker capacity while waiting. Healthy
+retries return the original durable receipt; an expired wait returns the same unconfirmed
+outcome. A full limit returns the existing `rate-limited` code with
+`applied: "none"` before submitting that request. This bounds confirmation waiting and
+pending send workers, not authentication, snapshot admission or the underlying writer hold.
+
 `runtime.stop` publishes a stop for the selected member. `runtime.restart` terminates the current
 incarnation of a member with an `always` restart policy; its desired state then starts the next
 incarnation. `runtime.reset` publishes a restart-window reset for a run-owned member. A client
@@ -2062,6 +2075,18 @@ reads are restricted to content-addressed files in the bound Pi/OMP blob store. 
 signatures, with SVG/HTML/unrecognized bytes returned only as opaque octets.
 
 `message.send` accepts `kind: "silent" | "wake"`; omitted kind means wake. Silent mail stays unread until a real wake offers at most eight held messages, or it is read on demand. Replies default to wake independently of their parent; there is no question tag or per-seat wake policy. Person and system wake events always wake. Signed silent requests carry `st3-silent` in signed tags. Old daemons ignore the kind field and do not hold silent tags; inspect receipt tags in mixed-version fleets. See [silent messages](../silent-messages.md).
+
+Message resources and `GET /v1/messages/delivery/{subject}` expose the existing
+`delivery` projection: `state` (`pending`, `waiting`, or `read`), durable handoff `phase`,
+human-readable `reason`, `age_ms`, and `recipient_delivery`. Native transport acceptance
+(`phase: delivered`) is not recipient read. A `sent` or `staged` message whose recipient's
+current, fresh native harness observation is `blocked_on: human` has `state: waiting`
+and a `reason` explicitly saying it is held outside the native harness for a human answer
+or approval. The durable message remains queued, not delivered; no separate held wire
+state is introduced. The held reason clears when an answer, cancellation, or timeout
+clears that observation, when its runtime incarnation ends or restarts, or when the
+observation is no longer fresh. Old-incarnation observations cannot restore a hold.
+Already delivered, read, and closed messages never acquire this held reason.
 
 ### Submission incarnation
 
