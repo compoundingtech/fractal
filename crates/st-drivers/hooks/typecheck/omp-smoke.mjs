@@ -358,6 +358,27 @@ const acknowledged = () =>
   readFrames()
     .filter((frame) => frame.type === "delivered")
     .map((frame) => frame.meta?.messageId);
+// The recorder consumes an IPC pipe in another process. Subscribe before checking the
+// snapshot so an ACK arriving between those operations cannot be missed.
+const awaitAcknowledgement = (messageId) => new Promise((resolve, reject) => {
+  const finish = (error) => {
+    clearTimeout(deadline);
+    watcher.close();
+    if (error) reject(error);
+    else resolve();
+  };
+  const check = () => {
+    try {
+      if (acknowledged().includes(messageId)) finish();
+    } catch (error) {
+      finish(error);
+    }
+  };
+  const watcher = fs.watch(framesPath, check);
+  const deadline = setTimeout(() => finish(new Error(`Recorder did not acknowledge ${messageId}`)), 5_000);
+  watcher.on("error", finish);
+  check();
+});
 const toolCall = (id) =>
   handlers.get("tool_call")({ toolName: "bash", toolCallId: id, input: {} }, holdCtx);
 const toolResult = (id) =>
@@ -1137,7 +1158,7 @@ if (process.argv[2]?.includes("st-omp-channel")) {
     assert.strictEqual(handedOver.length, beforeInFlight, `${proof} proof retains in-flight hold`);
     throwing = false;
     await handlers.get("tool_result")({ toolName: "bash", toolCallId: `foreground-${proof}` }, inFlightCtx);
-    await pause(100);
+    await awaitAcknowledgement(`message/hold-${mailSequence}`);
     assert.strictEqual(handedOver.length, beforeInFlight + 1, "matching real tool result releases once");
     assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
     await handlers.get("agent_end")(successfulEnd, inFlightCtx);
