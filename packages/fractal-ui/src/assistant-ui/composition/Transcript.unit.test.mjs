@@ -63,3 +63,15 @@ test('an unconfirmed send reads as not confirmed yet with Send again, never as a
   assert.match(bare, /Not confirmed yet/)
   assert.doesNotMatch(bare, /Send again/)
 })
+
+test('host-owned header omits only the duplicate band, including unavailable history', () => {
+  for (const availability of [{ _tag: 'Available' }, { _tag: 'Unavailable', reason: 'Not available' }]) {
+    const render = (showHeader) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
+      options: { messages: [], isRunning: false, onNew: async () => {} },
+    }, React.createElement(Transcript, { turns: [], title: 'Row projection', showHeader, availability, sync: { _tag: 'Live', since: now }, now, observedAt: now })))
+    assert.doesNotMatch(render(false), /data-testid="transcript-header"/)
+    // Failing control: the default standalone presentation still owns a header.
+    assert.match(render(undefined), /data-testid="transcript-header"/)
+    assert.match(render(false), /transcript-(empty|unavailable)/)
+  }
+})
