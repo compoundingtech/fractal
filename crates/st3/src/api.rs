@@ -545,6 +545,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
             .layer(DefaultBodyLimit::max(client_observations::MAX_BODY_BYTES)))
         .route("/v1/client/documents/content", get(client_v0::document_get))
         .route("/v1/client/usage", get(client_v0::usage_period))
+        .route("/v1/client/slo", get(client_v0::slo_list))
+        .route("/v1/client/slo/history", get(client_v0::slo_history))
         .route("/v1/client/mail-backlog", get(mail_backlog::get))
         .route("/v1/client/clients", get(client_v0::clients_list))
         .route(
@@ -18774,6 +18776,22 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         assert_eq!(status, StatusCode::OK, "{history}");
         assert_eq!(history["samples"], 2);
         assert_eq!(history["steps"], json!([80.0, 60.0]));
+        // Clients read the same rows and the same history, typed.
+        let (status, client_list) = get_request(app.clone(), "/v1/client/slo").await;
+        assert_eq!(status, StatusCode::OK, "{client_list}");
+        let typed: st3_client::SloList = serde_json::from_value(client_list.get("value").unwrap_or(&client_list).clone()).unwrap();
+        let weekly = typed.rows.iter().find(|row| row.id == "ada/claude-1/weekly").unwrap();
+        assert_eq!((weekly.kind.as_str(), weekly.remaining_percent), ("budget", Some(70.0)));
+        assert!(weekly.resets_at_unix_ms.is_none() && weekly.measured_at_unix_ms.is_some());
+        assert!(typed.rows.iter().any(|row| row.kind == "objective" && row.id == "person-read"));
+        let (status, client_history) = get_request(
+            app.clone(),
+            &format!("/v1/client/slo/history?id=cpu&since_ms={}&until_ms={now}&steps=2", now - 240_000),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{client_history}");
+        let typed: st3_client::SloHistory = serde_json::from_value(client_history.get("value").unwrap_or(&client_history).clone()).unwrap();
+        assert_eq!((typed.id.as_str(), typed.samples, typed.steps), ("cpu", 2, vec![Some(80.0), Some(60.0)]));
         for query in [
             format!("id=cpu&since_ms={now}&until_ms={now}"),
             format!("id=cpu&since_ms=0&until_ms={now}"),

@@ -2428,6 +2428,25 @@ pub(super) async fn usage_period(
     Ok(Json(value))
 }
 
+/// Every objective and budget with what is left of each: the rows `st slo` prints.
+pub(super) async fn slo_list(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    super::get_slo(State(state)).await
+}
+
+/// What was left of one objective or budget across a period, from the daemon's local history.
+pub(super) async fn slo_history(
+    State(state): State<AppState>,
+    Extension(session): Extension<ClientSession>,
+    Query(query): Query<super::SloHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    super::get_slo_history(State(state), Query(query)).await
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SubjectDefinitionQuery {

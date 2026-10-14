@@ -556,6 +556,32 @@ retention decision for native per-request records remain later work.
 The Rust method is `Client::usage_period(since_ms, until_ms)`;
 Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms, until_ms })`.
 
+### Objectives and budgets
+
+`GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
+`read.projections`. The value is `SloList { as_of_unix_ms, rows }`. An objective is a target with
+windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
+phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
+limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has `id`, `kind`
+(`objective` or `budget`), `about`, `target`, `current`, `window`, `remaining_percent` (what is
+left of the error budget or allowance; null when nothing was measured), `status` (`met`, `missed`,
+`no-data` or `stale`, the last meaning the newest reading is not recent) and `explain`, the row in
+plain words. A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`. The list is
+computed on each read from live windows and readings; it writes nothing.
+
+`GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
+across a period, from the daemon's local observation log (one reading a minute, kept seven days;
+it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,
+spans at most seven days and answers in `steps` equal steps (default 120, 1 to 1000); a period
+that ends before it starts, is longer than seven days or asks for another number of steps is
+`invalid-slo-period`. The value is `SloHistory { id, since_ms, until_ms, samples, steps }`: each
+step holds its lowest reading, and a step with no reading is null, so a gap means "not measured",
+never "spent". A daemon that has run for less than the period has fewer readings than steps.
+
+The Rust methods are `Client::slo_list()` and `Client::slo_history(id, since_ms, until_ms, steps)`;
+Swift has `sloList()` and `sloHistory(id:sinceMS:untilMS:steps:)`, and TypeScript `sloList()` and
+`sloHistory(id, { since_ms, until_ms, steps })`.
+
 ### Clients connected now
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
