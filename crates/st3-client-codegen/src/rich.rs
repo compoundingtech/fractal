@@ -813,26 +813,48 @@ fn validate_condition_value(assertion: &Value, field: &Value, cx: &Cx, depth: us
     if depth > 64 {
         bail!("recursive conditional fields are not translated");
     }
+    let object = field.as_object().context("conditional target must be an allowlisted schema")?;
+    if object.keys().any(|key| !matches!(key.as_str(),
+        "$ref" | "$comment" | "description" | "title" | "examples" | "type" | "const" | "enum"
+        | "oneOf" | "items" | "minItems" | "maxItems" | "uniqueItems"
+        | "minLength" | "maxLength" | "pattern" | "format"
+        | "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf"
+    )) {
+        bail!("conditional target is outside the wire-identity allowlist");
+    }
     if let Some(reference) = field.get("$ref").and_then(Value::as_str) {
         let name = reference.strip_prefix("#/$defs/").context("only #/$defs/ refs")?;
         return validate_condition_value(
             assertion, cx.normalized.get(name).context("conditional field definition")?, cx, depth + 1,
         );
     }
-    if nullable_inner(field).is_some() || field.get("x-st-codec").is_some() || open_enum(field).is_some() {
-        bail!("conditional nullable or transformed field values are not translated");
+    if nullable_inner(field).is_some() {
+        bail!("conditional nullable field values are not translated");
     }
-    for key in ["oneOf", "anyOf"] {
-        if let Some(branches) = field.get(key).and_then(Value::as_array) {
-            for branch in branches {
-                validate_condition_value(assertion, branch, cx, depth + 1)?;
-            }
-            return Ok(());
+    if let Some(branches) = field.get("oneOf").and_then(Value::as_array) {
+        for branch in branches {
+            validate_condition_value(assertion, branch, cx, depth + 1)?;
         }
+        return Ok(());
     }
-    let empty = Map::new();
-    let fields = field.get("properties").and_then(Value::as_object).unwrap_or(&empty);
-    validate_condition_fields(assertion, fields, cx, depth + 1)
+    let scalar = |value: &Value| value.is_boolean() || value.is_string() || value.is_number();
+    let literal = field.get("const").is_some_and(scalar)
+        || field.get("enum").and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty() && values.iter().all(scalar));
+    match field.get("type").and_then(Value::as_str) {
+        Some("boolean" | "string" | "number" | "integer") => {}
+        Some("array") => {
+            validate_condition_value(&Value::Bool(true), field.get("items").context("conditional array items")?, cx, depth + 1)?;
+            if assertion.as_object().is_some_and(|object| object.keys().any(|key| !matches!(
+                key.as_str(), "$comment" | "description" | "title" | "examples" | "maxItems" | "minItems"
+            ))) {
+                bail!("conditional arrays only support item-count assertions");
+            }
+        }
+        None if literal => {}
+        _ => bail!("conditional target is outside the wire-identity allowlist"),
+    }
+    validate_condition_fields(assertion, &Map::new(), cx, depth + 1)
 }
 
 /// Relationship assertions operate on decoded fields without replacing their base schemas.
@@ -1591,6 +1613,19 @@ mod tests {
         let mut unused = independent_fixture(json!({"type": "array", "items": {"type": "string"}}), Value::Bool(true));
         unused["$defs"]["Entry"]["properties"]["title"] = json!({"type": ["string", "null"]});
         assert!(models(&unused).is_ok());
+    }
+
+    #[test]
+    fn excluded_enum_conditional_targets_fail_closed() {
+        let field = json!({"type": "string", "not": {"enum": ["known"]}});
+        let assertion = json!({"properties": {"tags": {"const": "future"}}});
+        let schema = independent_fixture(field.clone(), assertion.clone());
+        assert!(format!("{:#}", models(&schema).unwrap_err()).contains("allowlist"));
+        let mut referenced = independent_fixture(json!({"$ref": "#/$defs/Excluded"}), assertion.clone());
+        referenced["$defs"]["Excluded"] = field.clone();
+        assert!(format!("{:#}", models(&referenced).unwrap_err()).contains("allowlist"));
+        let union = independent_fixture(json!({"oneOf": [field, {"const": "known"}]}), assertion);
+        assert!(format!("{:#}", models(&union).unwrap_err()).contains("allowlist"));
     }
 
     #[test]
