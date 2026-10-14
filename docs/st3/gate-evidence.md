@@ -278,6 +278,24 @@ hostile workflow author. These limits are why full tier requires a platform-boun
 queue/manual source and an accepted workflow pin. Native receipts remain separate
 work; this does not certify the behavior of all target code or runtime identity.
 
+## Evidence observe workflow
+
+`.github/workflows/evidence-observe.yml` starts from a finished merge-group run of
+`Workspace CI` (or a manual replay from `main`) on runners labelled `evidence-ci`. It never runs
+for a pull request or a fork. `scripts/ci-evidence-observe` asks the protected observer
+(`$EVIDENCE_OBSERVER`, the operator's JSON argument vector; default
+`st sekrets -- st3 evidence observe-ci`) to record the run, imports the returned pack into a
+persistent scratch repository, verifies every full-trust record with `scripts/evidence-verify`
+against the key list in `main`, creates `refs/notes/evidence/<record>` and pushes it. It runs no
+check, never replaces an existing ref, and publishes degraded records labelled as unsigned and
+unverified. A full record that does not verify fails the job and creates no ref. The same code
+serves a degraded profile (no key) and a full one; the operator's profile decides.
+
+The server rejects a shallow push, and the pack carries the source commit without its history, so
+the script first fetches the source's missing parents from the repository. Run
+`python3 scripts/ci-evidence-observe-test` for the cases (signature verified, verifier refusal,
+wrong run, malformed pack, push with a missing parent, replay).
+
 ## Fresh CI re-attestation
 
 The protected CI adapter accepts repeatable `--re-attest RECORD_ID` selectors

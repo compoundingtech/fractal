@@ -1120,6 +1120,7 @@
             pkgs.git
             pkgs.gnutar
             pkgs.jq
+            pkgs.openssh
             pkgs.python3
             pkgs.zstd
           ];
