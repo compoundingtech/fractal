@@ -133,7 +133,10 @@ mod roster_admission;
 pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
 mod attention_snapshot;
-pub(crate) use attention_snapshot::{NativePromptState, native_prompt_gone_key};
+pub(crate) use attention_snapshot::{
+    NativePromptState, native_prompt_gone_key, screen_prompt_delivered_key, screen_prompt_gone_key,
+    screen_prompt_undelivered_key,
+};
 pub(crate) mod attention_list;
 pub(crate) mod owner_lists;
 pub(crate) mod summary_list;
