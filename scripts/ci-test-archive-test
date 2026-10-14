@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory() as tmp:
     bin_dir = scratch / 'bin'
     bin_dir.mkdir()
     cargo = bin_dir / 'cargo'
-    cargo.write_text('''#!/usr/bin/env python3
+    cargo.write_text('#!' + sys.executable + '''
 import json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
@@ -97,7 +97,7 @@ else:
 ''')
     cargo.chmod(0o755)
     bash = bin_dir / 'bash'
-    bash.write_text("#!/usr/bin/env python3\nimport json, os, sys\nassert sys.argv[1:] == ['scripts/ci-linux', 'conversation-model']\nwith open(os.environ['CALLS'], 'a') as stream: stream.write(json.dumps(['bash', *sys.argv[1:]]) + '\\n')\n")
+    bash.write_text("#!" + sys.executable + "\nimport json, os, sys\nassert sys.argv[1:] == ['scripts/ci-linux', 'conversation-model']\nwith open(os.environ['CALLS'], 'a') as stream: stream.write(json.dumps(['bash', *sys.argv[1:]]) + '\\n')\n")
     bash.chmod(0o755)
     rustc = bin_dir / 'rustc'
     rustc.write_text('#!/bin/sh\necho fixture-rustc\n')
