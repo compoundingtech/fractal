@@ -1,5 +1,5 @@
-//! What the sync worker asks of the store it keeps in step: export and receive exchanges, answer
-//! heals, serve and adopt checkpoints, publish endpoints, redeem invites, and read membership.
+//! What the sync worker asks of the store it keeps in step: export and receive exchanges, serve
+//! and adopt checkpoints, publish endpoints, redeem invites, and read membership.
 
 use std::borrow::Borrow;
 use std::future::Future;
@@ -13,8 +13,8 @@ use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
 use crate::fleet::handshake::JoinRequest;
 use crate::replication::{
-    ReplicationExchange, ReplicationExportResponse, ReplicationHealAnswer, ReplicationHealQuery,
-    ReplicationHealStep, ReplicationInventory, ReplicationReceiveResponse,
+    ReplicationExchange, ReplicationExportResponse, ReplicationInventory,
+    ReplicationReceiveResponse,
 };
 use crate::store::{
     CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage,
@@ -38,6 +38,17 @@ pub trait Backend: Clone + Send + Sync + 'static {
         signature_requests: &[ReplicaEnvelopeId],
     ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send;
 
+    /// The recent-inbound guard still requests the complete, unchanged summary.
+    /// A process boundary may mark this local request for count/wall accounting.
+    fn guard_summary(
+        &self,
+        fleet_id: &str,
+    ) -> impl Future<Output = Result<ReplicationExportResponse>> + Send {
+        async move {
+            self.export(fleet_id, &ReplicationInventory::default(), true, &[]).await
+        }
+    }
+
     /// Store a peer's exchange, then admit and project what it carried. `round_trip` is how
     /// long this worker's request that returned it took, when the exchange is a response.
     fn receive(
@@ -47,21 +58,6 @@ pub trait Backend: Clone + Send + Sync + 'static {
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
-
-    /// Answer a peer's heal question from this node's claims.
-    fn heal_answer(
-        &self,
-        peer: &str,
-        fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> impl Future<Output = Result<ReplicationHealAnswer>> + Send;
-
-    /// Compare a peer's heal answer with this node's claims and learn what to ask next.
-    fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> impl Future<Output = Result<ReplicationHealStep>> + Send;
 
     fn checkpoint_manifest(
         &self,
@@ -220,23 +216,6 @@ where
             })
         })
         .await?
-    }
-
-    async fn heal_answer(
-        &self,
-        peer: &str,
-        _fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> Result<ReplicationHealAnswer> {
-        self.store().heal_answer(peer, query)
-    }
-
-    async fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> Result<ReplicationHealStep> {
-        self.store().heal_next(peer, answer)
     }
 
     async fn checkpoint_manifest(

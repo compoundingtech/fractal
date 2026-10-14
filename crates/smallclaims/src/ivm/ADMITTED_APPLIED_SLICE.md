@@ -308,3 +308,83 @@ positive/128SQL/50000VM/zeroautoindex assertions and measured interval are uncha
 All26successor names/work outcomes areUNRUN; no general schema-scale work bound,
 authority/lifetime proof or activation follows. Current-main hosted/Intake and
 curator eligibility remain required; the curator owns the next queue action.
+
+
+## Fixture-only retained-prefix reclamation controls
+
+The next slice uses the same single-consumer file-backed/WAL Store fixture,
+with 32 admitted inputs, 16 applied and 16 pending. The ordinary prune helper now
+delegates its identical transaction body to a private helper shared by fault
+and crash controls; no production Installer, capture, prepared-page, Runtime,
+schema, scheduling or writer/reader finalizer changes. Existing strict/growth
+control bodies and their 128 SQL / 50,000 VM / zero-autoindex assertions stay unchanged.
+
+New controls independently copy image/reference/native/output rows and reconcile
+actual retained and journal byte sums, row counters and lifetime total. They
+witness actual image and journal DELETEs before outer rollback or a refused
+COMMIT, remove fixture hooks before returning the writer (including a caught
+panic), require an idle writer and check the specific SQLite commit-hook error.
+SQLite documents that a nonzero commit hook converts COMMIT to rollback:
+https://www.sqlite.org/c3ref/commit_hook.html and
+https://www.sqlite.org/rescode.html#constraint_commithook. The manifest, hooks
+and oracle remain fixture-owned, not a production fatal-cleanup contract.
+
+Separate exact-name child controls terminate the process before/after prune
+COMMIT. A flushed stdout marker and a file+parent-directory-synced phase artifact
+identify the phase; the parent requires both marker and distinct exit code
+before reopening. A synced pre-prune oracle checks all rows and counters after
+reopen, including retained_bytes and total_rows. Open performs no derived
+replay or counter repair; remaining pending inputs must still publish correctly.
+This does not upgrade the existing sidecar lifetime manifest to production
+all-instance restore/replacement authority.
+
+One maintenance scope covers the ordinary background prune acquisition, SQL,
+COMMIT and physical writer return, ending before diagnostic/oracle queries. It
+prints actual SQL/VM/fullscan/sort/autoindex work and removed rows/image bytes,
+and requires positive SQL and VM, <=128 SQL, <=50,000 VM and zero-autoindex. A
+same-name no-feature twin fails rather than omits the requirement. The only new
+nextest override exposes successful output; no retry/selection/thread/budget
+changes. All five new unique names are UNRUN at source authoring, including
+both actual crash phases; arithmetic is not a successful work tuple.
+
+These controls do not fix metadata inventory growth: #2173 measured whole-page
+128/129/136/160/256 statements at 0/1/8/32/128 added unrelated tables, with
+zero headroom at the base. Reusable schema/lifetime authority, multi-consumer
+retention, native/canonical mutation closure, physical-schema/work-at-scale,
+unsafe cleanup/quarantine, hold/CPU and production opt-in remain open. No new
+factory, worker, proof capability, admission policy or source activation.
+
+## Two-consumer production journal controls (fixture only)
+
+The next two controls register distinct fixture operators over the same source
+and existing namespace-keyed output/coverage tables. They drive the production
+`Installer::prune_journal` directly through existing managed background writer
+transactions. The wrapper performs no minimum/cutoff calculation or journal
+deletion of its own. It does not invoke the single-consumer image-prune helper:
+all 32 immutable images stay retained, within the existing 256-image cap.
+
+One control installs both prefix roots, advances A to 32 and B to 16, and checks
+that only the first 16 journal references disappear. A second prune must remove
+zero until B consumes the remaining original references. This second call is
+necessary to discriminate a fast-root cutoff when each call is capped at 16.
+B's current-source status and getter explicitly refuse at revision 16; after B
+reaches 32, both namespaces match native-derived ID/subject/kind/digest output.
+
+The other control uses an actual active follower catchup job at revision zero
+without a published root. That job must pin every reference even while A is
+current. Only an explicit committed cancel releases the job's pin. Cancellation
+must leave the other's separately ready root intact. A captured stale follower
+page refuses publication without changing its job/root/coverage/output rows or
+the source journal counters. The stopped follower remains unavailable; it is
+not automatically restarted or repaired. Cancellation of a separately published
+follower root is outside this control.
+
+These two names are UNRUN at source authoring. They claim only journal retention
+for this fixed two-consumer registry, not image reclamation across two consumers,
+crash and reopen with two consumers, multiconsumer rollback/refused-COMMIT, or a
+whole-prune accounting tuple/nextest override. Those are deferred and unverified.
+Existing single-consumer crash and work receipts do not qualify them. No new
+nextest setting, production table/trigger/library/Runtime/factory/worker or
+authority/lifetime proof is added, and all earlier controls and ceilings remain
+unchanged. Metadata growth remains adverse and the original strict page has
+zero statement headroom; any current-main failure must retain its actual tuple.
