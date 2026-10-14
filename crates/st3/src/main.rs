@@ -1467,7 +1467,18 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     } else if client.get::<Value>("/v1/health").await.is_ok()
         || st3::startup::read(&config.socket).is_some()
     {
-        anyhow::bail!("stop st3 up and st3 replication-worker, then run st uninstall --yes again");
+        // Setup starts an instance's daemon without a service when the person declines one, so
+        // nothing else would stop it. Only the process that answers on the instance's own socket
+        // is stopped; the default install's daemon is still left for its owner to stop.
+        let stopped = instance.is_some() && {
+            st3::service::stop_owned_runtimes(&config)?;
+            st3::service::stop_daemon_at(&config.socket, std::time::Duration::from_secs(20))?
+        };
+        anyhow::ensure!(
+            stopped,
+            "stop st3 up and st3 replication-worker, then run st uninstall --yes again"
+        );
+        println!("stopped\tthe daemon this instance started without a service");
     }
     if instance.is_none()
         && let Err(error) = st_drivers::claude_channel::remove_st3_channel(true)

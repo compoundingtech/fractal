@@ -481,6 +481,161 @@ pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// The pid of the process that listens on `socket`, read from the connection itself, so it is the
+/// daemon of exactly this socket and of no other install.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn socket_owner_pid(socket: &Path) -> Option<u32> {
+    use std::os::fd::AsRawFd as _;
+    let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    #[cfg(target_os = "linux")]
+    let pid = {
+        let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of_val(&credentials) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut credentials as *mut libc::ucred).cast(),
+                &mut size,
+            )
+        };
+        (result == 0).then_some(credentials.pid)?
+    };
+    #[cfg(target_os = "macos")]
+    let pid = {
+        let mut pid: libc::pid_t = 0;
+        let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut size,
+            )
+        };
+        (result == 0).then_some(pid)?
+    };
+    u32::try_from(pid).ok().filter(|pid| *pid > 1)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn socket_owner_pid(_socket: &Path) -> Option<u32> {
+    None
+}
+
+/// What names one process for as long as it lives: its pid with its start time, so a pid that is
+/// reused by another process is a different identity. `argv` is what it was started with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessIdentity {
+    start: String,
+    argv: Vec<String>,
+    ended: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `pid (comm) state ...`: comm may hold spaces and parentheses, so split after the last ')'.
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // Field 3 is the state, field 22 the start time in clock ticks since boot.
+    let (state, start) = (fields.first()?, fields.get(19)?);
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    Some(ProcessIdentity {
+        start: (*start).to_string(),
+        argv: cmdline
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect(),
+        ended: matches!(*state, "Z" | "X"),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    let ps = |field: &str| {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-o", field, "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (output.status.success() && !text.is_empty()).then_some(text)
+    };
+    let start = ps("lstart=")?;
+    let argv = ps("command=")?;
+    Some(ProcessIdentity {
+        start,
+        argv: argv.split_whitespace().map(str::to_string).collect(),
+        ended: ps("state=").is_some_and(|state| state.starts_with('Z')),
+    })
+}
+
+/// Whether `argv` is a st3 daemon: the program is `st3` or `st` and one of its arguments is `up`.
+fn is_daemon_argv(argv: &[String]) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    matches!(name, "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
+}
+
+/// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
+/// then force it after `grace`. Only the process that answers on this socket (or, on Linux, the one
+/// that holds its startup lock) is signalled, and only when it is a st3 daemon; a signal goes to
+/// the process whose start time was read first, never to a later process that reused its pid.
+/// Returns whether such a daemon was found and has ended.
+pub fn stop_daemon_at(socket: &Path, grace: std::time::Duration) -> Result<bool> {
+    let pid = socket_owner_pid(socket).or_else(|| crate::startup::read(socket).map(|r| r.pid));
+    let Some(pid) = pid.filter(|pid| *pid != std::process::id()) else {
+        return Ok(false);
+    };
+    stop_daemon_process(pid, grace, std::time::Duration::from_secs(5))
+}
+
+fn stop_daemon_process(
+    pid: u32,
+    grace: std::time::Duration,
+    kill_wait: std::time::Duration,
+) -> Result<bool> {
+    let target = libc::pid_t::try_from(pid).context("the daemon's pid is out of range")?;
+    let Some(identity) = process_identity(pid) else {
+        anyhow::bail!("the process on the daemon socket (pid {pid}) is gone; try again");
+    };
+    anyhow::ensure!(
+        !identity.ended && is_daemon_argv(&identity.argv),
+        "the process on the daemon socket (pid {pid}, {}) is not a st3 daemon; not stopping it",
+        identity.argv.join(" ")
+    );
+    let still_running =
+        || process_identity(pid).is_some_and(|now| now.start == identity.start && !now.ended);
+    for (signal, wait) in [(libc::SIGTERM, grace), (libc::SIGKILL, kill_wait)] {
+        // Re-check just before each signal: the daemon may have ended and its pid been reused.
+        if !still_running() {
+            return Ok(true);
+        }
+        if unsafe { libc::kill(target, signal) } != 0
+            && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("signal the st daemon (pid {pid})"));
+        }
+        let deadline = std::time::Instant::now() + wait;
+        while still_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !still_running() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn running_pty_ids(
     snapshot: impl IntoIterator<Item = st_runtime::PtyObservation>,
 ) -> std::collections::HashSet<String> {
@@ -1124,6 +1279,34 @@ fn systemd_quote_arg(argument: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::PeerConfig;
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_daemon_refuses_a_process_that_is_not_one() -> Result<()> {
+        let mut other = std::process::Command::new("sleep").arg("60").spawn()?;
+        let error = stop_daemon_process(
+            other.id(),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        )
+        .expect_err("a sleep is not an st3 daemon");
+        assert!(error.to_string().contains("not a st3 daemon"), "{error}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(other.try_wait()?.is_none(), "the process was signalled");
+        other.kill()?;
+        other.wait()?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_daemon_is_st3_or_st_started_with_up() {
+        let argv = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert!(is_daemon_argv(&argv("/opt/example/bin/st3 up --config c")));
+        assert!(is_daemon_argv(&argv("st up")));
+        assert!(!is_daemon_argv(&argv("st3 agents ls")));
+        assert!(!is_daemon_argv(&argv("sleep up")));
+        assert!(!is_daemon_argv(&[]));
+    }
 
     #[test]
     fn reader_cache_override_is_persisted_for_the_daemon_on_both_platforms() -> Result<()> {
