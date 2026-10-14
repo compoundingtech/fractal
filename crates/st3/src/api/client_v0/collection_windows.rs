@@ -361,11 +361,11 @@ impl Windows {
             self.builds.fetch_add(1, Ordering::SeqCst);
             compute()
         };
-        if matches!(request.collection.as_str(), "summary" | "clients" | "usage" | "machines" | "devices" | "sessions") { return compute(); }
+        if matches!(request.collection.as_str(), "summary" | "clients" | "usage" | "machines" | "devices" | "sessions") { return compute().map(|(items, more, _)| (items, more)); }
         // A published view is already the shared copy, and it can be published anew without a
         // commit (a deadline passing): caching it by commit revision would serve the older one.
         if state.store.collection_view_published(&request.collection) {
-            return compute();
+            return compute().map(|(items, more, _)| (items, more));
         }
         let Some(prepared) = prepared else {
             return compute().map(|(items, more, _)| (items, more));
