@@ -874,7 +874,10 @@ pub(in crate::api) async fn chunk(
     require_scope(&session, "read.projections")?;
     let session_id = conversation_session_id(&state, &id)?;
     if let Some(owner) = conversation_owner_host(
-        &state, &session, &session_id, id.starts_with("agent/").then_some(id.as_str()),
+        &state,
+        &session,
+        &session_id,
+        id.starts_with("agent/").then_some(id.as_str()),
     )? {
         let value = state
             .client_relay
@@ -920,37 +923,38 @@ pub(super) async fn chunk_local(
     let _slot = read_slot(slots)?;
     let request_state = state.clone();
     let request_session = session_id.to_owned();
-    let (bytes, media) = crate::api::read_deadline::spawn_blocking(move || -> Result<_, ApiError> {
-        let native = request_session.starts_with("session/external-");
-        let source = if native {
-            locator.source.session(&request_session)
-        } else {
-            source(&request_state, &request_session)?
-        };
-        let value = located_value(&source, &locator)?;
-        let result = if locator.image {
-            image_bytes(&source, &value)?
-        } else {
-            (
-                serde_json::to_vec(&value).map_err(ApiError::internal)?,
-                "application/json".to_owned(),
-            )
-        };
-        // Bytes belong to the validated record snapshot. Blob hashes bind external
-        // pixels to that snapshot. Recheck source identity/binding, without decoding
-        // the same record twice. An edit after capture is observed by the next fetch.
-        let rebound = if native {
-            source
-        } else {
-            self::source(&request_state, &request_session)?
-        };
-        if basis(&rebound)? != locator.basis {
-            return Err(invalidated());
-        }
-        Ok(result)
-    })
-    .await
-    .map_err(ApiError::internal)??;
+    let (bytes, media) =
+        crate::api::read_deadline::spawn_blocking(move || -> Result<_, ApiError> {
+            let native = request_session.starts_with("session/external-");
+            let source = if native {
+                locator.source.session(&request_session)
+            } else {
+                source(&request_state, &request_session)?
+            };
+            let value = located_value(&source, &locator)?;
+            let result = if locator.image {
+                image_bytes(&source, &value)?
+            } else {
+                (
+                    serde_json::to_vec(&value).map_err(ApiError::internal)?,
+                    "application/json".to_owned(),
+                )
+            };
+            // Bytes belong to the validated record snapshot. Blob hashes bind external
+            // pixels to that snapshot. Recheck source identity/binding, without decoding
+            // the same record twice. An edit after capture is observed by the next fetch.
+            let rebound = if native {
+                source
+            } else {
+                self::source(&request_state, &request_session)?
+            };
+            if basis(&rebound)? != locator.basis {
+                return Err(invalidated());
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(ApiError::internal)??;
     let start =
         usize::try_from(offset).map_err(|_| validation("content offset is out of range"))?;
     if start > bytes.len() {
@@ -1269,16 +1273,26 @@ mod tests {
             .find(|item| item["body"]["blocks"][0]["view"]["type"] == "task")
             .unwrap();
         let block = &item["body"]["blocks"][0];
-        let tasks = block["view"]["tasks"].as_array().expect("task view survives preparation");
+        let tasks = block["view"]["tasks"]
+            .as_array()
+            .expect("task view survives preparation");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["name"], "reviewer");
         assert_eq!(tasks[0]["agent"], "scout");
-        assert!(tasks[0]["task"].as_str().unwrap().contains("[st truncated this native timeline value:"));
+        assert!(
+            tasks[0]["task"]
+                .as_str()
+                .unwrap()
+                .contains("[st truncated this native timeline value:")
+        );
         assert_eq!(block["continuation"]["reason"], "size-limit");
         let token = block["continuation"]["ref"].as_str().unwrap();
         let pointer = locator(token, &native.id).unwrap().pointer;
         assert_eq!(pointer, "/body");
-        let original = originals.iter().find(|entry| entry["id"] == item["id"]).unwrap();
+        let original = originals
+            .iter()
+            .find(|entry| entry["id"] == item["id"])
+            .unwrap();
         let fetched = fetch_json_chunks(&state, &native, token).await;
         assert_eq!(fetched, *original.pointer(&pointer).unwrap());
         assert_eq!(fetched["arguments"], arguments);
@@ -1727,7 +1741,14 @@ mod tests {
                             && (entry_type != "content" || item["role"] == "assistant")
                     })
                     .unwrap();
-                assert_eq!(item["role"], if entry_type == "content" { "assistant" } else { "system" });
+                assert_eq!(
+                    item["role"],
+                    if entry_type == "content" {
+                        "assistant"
+                    } else {
+                        "system"
+                    }
+                );
                 assert!(serde_json::to_vec(item).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
                 let body = &item["body"];
                 if entry_type == "content" {
@@ -1735,7 +1756,12 @@ mod tests {
                     if negotiated {
                         let view = &body["blocks"][0]["view"];
                         assert!(view["message"].as_str().unwrap().contains("[st truncated"));
-                        assert!(view["native"]["errorMessage"].as_str().unwrap().contains("[st truncated"));
+                        assert!(
+                            view["native"]["errorMessage"]
+                                .as_str()
+                                .unwrap()
+                                .contains("[st truncated")
+                        );
                         assert_eq!(view["native"]["errorStatus"], 429);
                     }
                 } else {
@@ -1749,7 +1775,14 @@ mod tests {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .find(|block| block["kind"] == if entry_type == "content" { "error" } else { "status" })
+                        .find(|block| {
+                            block["kind"]
+                                == if entry_type == "content" {
+                                    "error"
+                                } else {
+                                    "status"
+                                }
+                        })
                         .unwrap();
                     assert_eq!(block["continuation"]["reason"], "size-limit");
                 } else {
@@ -1792,7 +1825,10 @@ mod tests {
         ];
         std::fs::write(
             &native.transcript,
-            records.iter().map(|record| format!("{record}\n")).collect::<String>(),
+            records
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>(),
         )
         .unwrap();
         let original = crate::external_sessions::normalized_timeline(&native).unwrap();
@@ -1826,22 +1862,39 @@ mod tests {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .find(|block| block["kind"] == if item["type"] == "content" { "error" } else { "status" })
+                        .find(|block| {
+                            block["kind"]
+                                == if item["type"] == "content" {
+                                    "error"
+                                } else {
+                                    "status"
+                                }
+                        })
                         .unwrap();
                     let token = block["continuation"]["ref"].as_str().unwrap();
                     assert_eq!(locator(token, &native.id).unwrap().pointer, "/body");
                     let full = fetch_json_chunks(&state, &native, token).await;
-                    let source = original.iter().find(|source| source["id"] == item["id"]).unwrap();
+                    let source = original
+                        .iter()
+                        .find(|source| source["id"] == item["id"])
+                        .unwrap();
                     assert_eq!(full, source["body"]);
                     match index {
                         0 => {
                             let view = &full["blocks"][0]["view"];
                             assert_eq!(view["message"], provider_message["errorMessage"]);
-                            assert_eq!(view["native"]["errorMessage"], provider_message["errorMessage"]);
-                            assert_eq!(view["native"]["retryRecovery"], provider_message["retryRecovery"]);
+                            assert_eq!(
+                                view["native"]["errorMessage"],
+                                provider_message["errorMessage"]
+                            );
+                            assert_eq!(
+                                view["native"]["retryRecovery"],
+                                provider_message["retryRecovery"]
+                            );
                         }
                         _ => {
-                            let detail: Value = serde_json::from_str(full["detail"].as_str().unwrap()).unwrap();
+                            let detail: Value =
+                                serde_json::from_str(full["detail"].as_str().unwrap()).unwrap();
                             assert_eq!(detail, exit);
                         }
                     }
@@ -1916,7 +1969,8 @@ mod tests {
                         for block in blocks {
                             if let Some(token) = block["continuation"]["ref"].as_str() {
                                 let decoded = locator(token, &native.id).unwrap();
-                                block["continuation"]["ref"] = serde_json::to_value(decoded).unwrap();
+                                block["continuation"]["ref"] =
+                                    serde_json::to_value(decoded).unwrap();
                             }
                         }
                     }

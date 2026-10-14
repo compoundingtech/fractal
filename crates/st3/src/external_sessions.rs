@@ -4522,19 +4522,30 @@ fn push_omp_exit(items: &mut Vec<Value>, sequence: u64, timestamp: &str, data: &
     // A stopped process says nothing about the turn or pending tools. Unknown exits
     // must not look successful; keep the complete checkpoint in either body shape.
     let kind = data.get("kind").and_then(Value::as_str).unwrap_or_default();
-    let reason = data.get("reason").and_then(Value::as_str).unwrap_or_default();
+    let reason = data
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let exit_code = data
         .get("exitCode")
         .or_else(|| data.get("code"))
         .and_then(Value::as_i64);
     let fatal_reason = matches!(
         reason,
-        "fatal" | "crash" | "uncaughtException" | "uncaught_exception"
-            | "unhandledRejection" | "unhandled_rejection"
+        "fatal"
+            | "crash"
+            | "uncaughtException"
+            | "uncaught_exception"
+            | "unhandledRejection"
+            | "unhandled_rejection"
     );
     let code = match kind {
-        "fatal" | "crash" | "uncaughtException" | "uncaught_exception"
-        | "unhandledRejection" | "unhandled_rejection" => Some("native_session_exit_fatal"),
+        "fatal"
+        | "crash"
+        | "uncaughtException"
+        | "uncaught_exception"
+        | "unhandledRejection"
+        | "unhandled_rejection" => Some("native_session_exit_fatal"),
         "normal" | "signal" | "process_exit" | "exit"
             if fatal_reason || exit_code.is_some_and(|code| code != 0) =>
         {
@@ -4567,7 +4578,9 @@ fn push_omp_exit(items: &mut Vec<Value>, sequence: u64, timestamp: &str, data: &
             }),
         )
     };
-    items.push(timeline_item(sequence, timestamp, "system", entry_type, body));
+    items.push(timeline_item(
+        sequence, timestamp, "system", entry_type, body,
+    ));
 }
 
 fn push_omp_content(
@@ -4931,7 +4944,13 @@ mod tests {
                     },
                 });
                 let first = items.len();
-                normalize_omp(driver, &record, sequence, "2026-10-06T00:00:00Z", &mut items);
+                normalize_omp(
+                    driver,
+                    &record,
+                    sequence,
+                    "2026-10-06T00:00:00Z",
+                    &mut items,
+                );
                 let blocks: Vec<_> = items[first..]
                     .iter()
                     .filter_map(|item| item["body"]["blocks"].as_array())
@@ -4940,7 +4959,13 @@ mod tests {
                 let owner = blocks.last().unwrap();
                 assert_eq!(owner["metadata"]["usage"]["cost_usd"], usd);
                 assert_eq!(owner["metadata"]["usage"]["total"], 17);
-                assert_eq!(blocks.iter().filter(|block| block["metadata"]["usage"].is_object()).count(), 1);
+                assert_eq!(
+                    blocks
+                        .iter()
+                        .filter(|block| block["metadata"]["usage"].is_object())
+                        .count(),
+                    1
+                );
             }
             let header = crate::conversation_header::derive(&items, false);
             assert_eq!(header["cost"]["value"]["usd"], 0.75);
@@ -4977,19 +5002,32 @@ mod tests {
         for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
             let mut items = Vec::new();
             for (sequence, message, timestamp) in [
-                (0, json!({
-                    "role": "assistant", "content": "previous answer", "model": "old-model",
-                    "usage": {"cost": {"total": 0.25}},
-                    "contextSnapshot": {"promptTokens": 11},
-                }), "2026-10-06T00:00:00Z"),
-                (1000, json!({
-                    "role": "assistant", "content": content, "model": "latest-model",
-                    "usage": {"input": 12, "output": 5, "totalTokens": 17, "cost": {"total": 0.5}},
-                    "contextSnapshot": {"promptTokens": 23}, "ttft": 10, "duration": 30,
-                }), "2026-10-06T00:00:01Z"),
+                (
+                    0,
+                    json!({
+                        "role": "assistant", "content": "previous answer", "model": "old-model",
+                        "usage": {"cost": {"total": 0.25}},
+                        "contextSnapshot": {"promptTokens": 11},
+                    }),
+                    "2026-10-06T00:00:00Z",
+                ),
+                (
+                    1000,
+                    json!({
+                        "role": "assistant", "content": content, "model": "latest-model",
+                        "usage": {"input": 12, "output": 5, "totalTokens": 17, "cost": {"total": 0.5}},
+                        "contextSnapshot": {"promptTokens": 23}, "ttft": 10, "duration": 30,
+                    }),
+                    "2026-10-06T00:00:01Z",
+                ),
             ] {
-                normalize_omp(driver, &json!({"type": "message", "message": message}),
-                    sequence, timestamp, &mut items);
+                normalize_omp(
+                    driver,
+                    &json!({"type": "message", "message": message}),
+                    sequence,
+                    timestamp,
+                    &mut items,
+                );
             }
             let owner = &items.last().unwrap()["body"]["blocks"][0];
             assert_eq!(owner["kind"], "tool_call");
@@ -5001,7 +5039,10 @@ mod tests {
             items.reverse();
             let head = &items[..200];
             assert_eq!(head.len(), 200);
-            assert!(head.iter().all(|item| item["sequence"].as_u64().unwrap() > 1001));
+            assert!(
+                head.iter()
+                    .all(|item| item["sequence"].as_u64().unwrap() > 1001)
+            );
             let header = crate::conversation_header::derive(head, true);
             assert_eq!(header["cost"]["value"], json!({"usd": 0.5, "window": true}));
             assert_eq!(header["model"]["value"], "latest-model");
@@ -5110,8 +5151,12 @@ mod tests {
                     .any(|block| block["view"]["type"] == "tool_start"
                         && block["visibility"] == "internal")
             );
-            assert!(blocks.iter().any(|block| block["metadata"]["context_tokens"] == 23
-                && block["metadata"]["usage"]["cost_usd"] == 0.01));
+            assert!(
+                blocks
+                    .iter()
+                    .any(|block| block["metadata"]["context_tokens"] == 23
+                        && block["metadata"]["usage"]["cost_usd"] == 0.01)
+            );
             for kind in ["text", "reasoning"] {
                 assert!(blocks.iter().any(|block| block["kind"] == kind));
             }
@@ -5575,7 +5620,10 @@ mod tests {
             base.join("logins/first/projects"),
             base.join("elsewhere/second-login/projects"),
         ];
-        assert_eq!(find("on-first", None, &extra).unwrap().transcript, first.join("on-first.jsonl"));
+        assert_eq!(
+            find("on-first", None, &extra).unwrap().transcript,
+            first.join("on-first.jsonl")
+        );
         assert_eq!(find("on-second", None, &extra).unwrap().transcript, hint);
         // A recorded path never stands in for a different session, a relative path, or a link.
         assert!(find("on-first", Some(&hint), &[]).is_none());
@@ -5755,25 +5803,71 @@ mod tests {
             (json!({"kind":"signal","reason":"sighup"}), None),
             (json!({"kind":"normal","reason":"dispose"}), None),
             (json!({"kind":"normal","reason":"manual"}), None),
-            (json!({"kind":"process_exit","reason":"exit","exitCode":0}), None),
+            (
+                json!({"kind":"process_exit","reason":"exit","exitCode":0}),
+                None,
+            ),
             (json!({"kind":"exit","reason":"exit","code":0}), None),
-            (json!({"kind":"fatal","reason":"uncaught_exception"}), Some("native_session_exit_fatal")),
-            (json!({"kind":"fatal","reason":"unhandled_rejection"}), Some("native_session_exit_fatal")),
-            (json!({"kind":"uncaughtException","reason":"exception"}), Some("native_session_exit_fatal")),
-            (json!({"kind":"unhandledRejection","reason":"rejection"}), Some("native_session_exit_fatal")),
-            (json!({"kind":"crash","reason":"crash"}), Some("native_session_exit_fatal")),
-            (json!({"kind":"normal","reason":"uncaughtException"}), Some("native_session_exit_fatal")),
-            (json!({"kind":"signal","reason":"unhandledRejection"}), Some("native_session_exit_fatal")),
-            (json!({"kind":"process_exit","reason":"exit","exitCode":1}), Some("native_session_exit_fatal")),
-            (json!({"kind":"exit","reason":"exit","code":2}), Some("native_session_exit_fatal")),
-            (json!({"kind":"normal","reason":"exit","exitCode":1}), Some("native_session_exit_fatal")),
-            (json!({"kind":"process_exit","reason":"exit"}), Some("native_session_exit_unknown")),
-            (json!({"kind":"signal","reason":"future-signal"}), Some("native_session_exit_unknown")),
-            (json!({"kind":"future-kind","reason":"sigterm"}), Some("native_session_exit_unknown")),
-            (json!({"reason":"dispose"}), Some("native_session_exit_unknown")),
+            (
+                json!({"kind":"fatal","reason":"uncaught_exception"}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"fatal","reason":"unhandled_rejection"}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"uncaughtException","reason":"exception"}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"unhandledRejection","reason":"rejection"}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"crash","reason":"crash"}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"normal","reason":"uncaughtException"}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"signal","reason":"unhandledRejection"}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"process_exit","reason":"exit","exitCode":1}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"exit","reason":"exit","code":2}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"normal","reason":"exit","exitCode":1}),
+                Some("native_session_exit_fatal"),
+            ),
+            (
+                json!({"kind":"process_exit","reason":"exit"}),
+                Some("native_session_exit_unknown"),
+            ),
+            (
+                json!({"kind":"signal","reason":"future-signal"}),
+                Some("native_session_exit_unknown"),
+            ),
+            (
+                json!({"kind":"future-kind","reason":"sigterm"}),
+                Some("native_session_exit_unknown"),
+            ),
+            (
+                json!({"reason":"dispose"}),
+                Some("native_session_exit_unknown"),
+            ),
         ] {
             let mut data = data;
-            data["pendingToolCalls"] = json!([{"toolName":"ask","args":{"future":[false,null,42]}}]);
+            data["pendingToolCalls"] =
+                json!([{"toolName":"ask","args":{"future":[false,null,42]}}]);
             data["future"] = json!({"native":"unchanged"});
             let mut items = Vec::new();
             normalize_omp(
