@@ -117,6 +117,14 @@ def verify_full(verifier, repo, tree, check, keys):
     return answer
 
 
+def token_env(token):
+    """git configuration for the token through the environment, so no process listing shows it."""
+    if not token:
+        return {}
+    header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+    return {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader', 'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
+
+
 def fetch_parents(repo, remote, token, sources):
     """Make the sources' missing parents available to the scratch repository.
 
@@ -126,10 +134,6 @@ def fetch_parents(repo, remote, token, sources):
     connectivity check walks every ref. That is exactly the state a scratch repository is in after
     a run without --remote, or after any earlier import.
     """
-    config = []
-    if token:
-        header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-        config = ['-c', f'http.extraheader=Authorization: Basic {header}']
     repo = Path(repo)
     history = repo.with_name(repo.name + '-history')
     parents = set()
@@ -141,8 +145,8 @@ def fetch_parents(repo, remote, token, sources):
         return
     if not history.exists():
         subprocess.run(['git', 'init', '--quiet', '--bare', str(history)], check=True)
-    done = subprocess.run(['git', '-C', str(history), *config, 'fetch', '--quiet', '--no-tags', remote, *sorted(parents)],
-                          capture_output=True, timeout=1800, env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+    done = subprocess.run(['git', '-C', str(history), 'fetch', '--quiet', '--no-tags', remote, *sorted(parents)],
+                          capture_output=True, timeout=1800, env=dict(os.environ, GIT_TERMINAL_PROMPT='0', **token_env(token)))
     if done.returncode != 0:
         text = done.stderr.decode(errors='replace')
         if token:
@@ -157,14 +161,9 @@ def fetch_parents(repo, remote, token, sources):
 
 
 def publish(repo, remote, token, refs):
-    config = []
-    if token:
-        header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-        config = ['-c', f'http.extraheader=Authorization: Basic {header}']
-
     def remote_git(*args):
-        done = subprocess.run(['git', '-C', str(repo), *config, *args], capture_output=True, timeout=1800,
-                              env=dict(os.environ, GIT_TERMINAL_PROMPT='0'))
+        done = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, timeout=1800,
+                              env=dict(os.environ, GIT_TERMINAL_PROMPT='0', **token_env(token)))
         if done.returncode != 0:
             text = done.stderr.decode(errors='replace')
             if token:
