@@ -6,6 +6,7 @@ const path = require('node:path');
 const ts = require('typescript');
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'st3-ts-client-'));
+fs.writeFileSync(path.join(temporary, 'package.json'), JSON.stringify({ type: 'commonjs' }));
 for (const name of ['Models.generated', 'Subjects.generated', 'Client.generated', 'fetch-receiver.test']) {
     const source = fs.readFileSync(path.join(__dirname, `${name}.ts`), 'utf8');
     const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, rewriteRelativeImportExtensions: true } }).outputText;

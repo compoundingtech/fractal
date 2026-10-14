@@ -152,7 +152,7 @@ export class St3Client {
     private readonly baseUrl: string;
     private readonly credential?: ClientOptions['credential'];
     private readonly traceContext?: ClientOptions['traceContext'];
-    private readonly client?: string;
+    private readonly client: string | undefined;
     private readonly fetchImpl: typeof fetch;
     /** Shared with every `withTraceContext` view so they discover once. */
     private discoveryCache: { value?: EnvelopeOf<Capabilities> } = {};

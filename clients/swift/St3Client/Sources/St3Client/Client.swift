@@ -15,6 +15,12 @@ public struct TraceContext: Sendable, Equatable {
     }
 }
 
+public enum SubjectsSelector: Sendable {
+    case family(String, refPrefix: String? = nil)
+    case ref(String)
+}
+private struct SubjectStreamControl: Decodable { let kind: String; let message: String? }
+
 public actor St3Client {
     public let baseURL: URL
     private let session: URLSession

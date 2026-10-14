@@ -4608,6 +4608,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hex",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",

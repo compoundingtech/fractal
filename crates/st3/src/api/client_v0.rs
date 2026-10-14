@@ -2062,7 +2062,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // one of them can change it. A published view rereads when it publishes instead;
                 // a commit that can change the agents roster asks its refresher to publish.
                 // Local observations can change native heads without advancing the graph index.
-                reread_due |= subscriptions.values().any(|s| s.request.collection == "subjects");
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "subjects").map(|(id, _)| id.clone()));
                 let index = state.store.index().unwrap_or(weighed);
                 let roster_refresher = state.store.agent_roster_refresher_running();
                 let followed = |s: &CollectionSubscription| s.ivm.is_none()
@@ -4249,7 +4249,16 @@ fn machine_summary_resources(
     snapshot: &ClientSnapshot,
     session: &ClientSession,
 ) -> anyhow::Result<Vec<Value>> {
-    machine_resources_with_work(state, false, snapshot, session, false)
+    Ok(machine_summary_resources_and_hosts(state, snapshot, session)?.0)
+}
+
+/// The summary's machines and the host each current runtime runs on, by runtime subject.
+fn machine_summary_resources_and_hosts(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+) -> anyhow::Result<(Vec<Value>, BTreeMap<String, String>)> {
+    machine_resources_and_hosts(state, false, snapshot, session, false)
 }
 
 fn machine_resources_with_work(
@@ -4259,6 +4268,16 @@ fn machine_resources_with_work(
     session: &ClientSession,
     include_work: bool,
 ) -> anyhow::Result<Vec<Value>> {
+    Ok(machine_resources_and_hosts(state, history, snapshot, session, include_work)?.0)
+}
+
+fn machine_resources_and_hosts(
+    state: &AppState,
+    history: bool,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    include_work: bool,
+) -> anyhow::Result<(Vec<Value>, BTreeMap<String, String>)> {
     let runtimes = runtime_resources(state, history, snapshot, session)?;
     let mut host_runtime_ids = BTreeMap::<String, BTreeSet<String>>::new();
     let mut host_running_runtimes = BTreeMap::<String, usize>::new();
@@ -4546,7 +4565,7 @@ fn machine_resources_with_work(
         machines.push(machine);
     }
     machines.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
-    Ok(machines)
+    Ok((machines, runtime_owner_hosts))
 }
 
 /// How long page reads serve the daemon's last diagnostic report before one of them asks for a

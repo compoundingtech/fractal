@@ -13,7 +13,7 @@ st --instance trial uninstall --yes --erase-local-graph
 
 `st --instance NAME setup` runs the first-run questions for the instance: it installs `st3`, `st` and
 `pty` into the instance's own `bin/` (nothing goes on your login PATH or into `~/.local/bin`), and
-the built-in expert works in the instance's work folder, `work/agents/`. Run the instance's commands from
+the built-in Smalltalk Assistant works in the instance's work folder, `work/agents/`. Run the instance's commands from
 there, or with `--instance`.
 
 A name is 1 to 24 lowercase letters, digits and single hyphens. The flag works before or after the
@@ -35,7 +35,7 @@ Everything below one directory, `~/.st-instance/NAME`:
 | `claude/` | the instance's Claude account, plugins and `st` skill | `CLAUDE_CONFIG_DIR` |
 | `codex/` | the instance's Codex account and `st` skill | `CODEX_HOME` |
 | `home/` | the skill copy for pi, omp and opencode (`home/.agents/skills`) | |
-| `work/` | the instance's work root: default workspaces for new agents in `work/agents/NAME`, including the onboarding expert | |
+| `work/` | the instance's work root: default workspaces for new agents in `work/agents/NAME`, including the Smalltalk Assistant | |
 | `app/` | the macOS app bundle | |
 
 The instance is applied to the environment once, at startup, before any thread exists. The daemon

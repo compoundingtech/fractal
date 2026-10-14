@@ -25,6 +25,7 @@
           "enum": [
             "arrangement.edit",
             "custom.reply",
+            "prompt.respond",
             "attention.resolve",
             "review.approve",
             "review.reject",
@@ -114,6 +115,16 @@
             },
             "type": {
               "const": "custom.reply"
+            }
+          }
+        },
+        {
+          "properties": {
+            "parameters": {
+              "$ref": "#/$defs/PromptRespondParameters"
+            },
+            "type": {
+              "const": "prompt.respond"
             }
           }
         },
@@ -316,6 +327,14 @@
                 },
                 "in_reply_to": {
                   "$ref": "#/$defs/Id"
+                },
+                "kind": {
+                  "description": "Wake is the default; silent holds unread mail until the next real wake.",
+                  "enum": [
+                    "silent",
+                    "wake"
+                  ],
+                  "type": "string"
                 },
                 "session_id": {
                   "$ref": "#/$defs/Id"
@@ -1190,6 +1209,13 @@
               "minimum": 0,
               "type": "integer"
             },
+            "activity": {
+              "description": "What the seat is doing that is neither ordinary work nor a wait on a person, shown as its status and never as an alert: compacting while its harness compacts its conversation (Claude Code, Codex and omp report both edges). Absent otherwise and on older daemons; clients show unknown values as plain text.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "ask": {
               "description": "Structured human ask kind (question, permission, or review); meaningful only while blocked_on is human.",
               "type": [
@@ -1239,6 +1265,17 @@
               "oneOf": [
                 {
                   "$ref": "#/$defs/AgentDelivery"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "down_since": {
+              "description": "When a `down` seat began waiting for a session; null in every other state.",
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Timestamp"
                 },
                 {
                   "type": "null"
@@ -1314,6 +1351,10 @@
                   "type": "null"
                 }
               ]
+            },
+            "lifecycle": {
+              "$ref": "#/$defs/AgentLifecycle",
+              "description": "The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row."
             },
             "name": {
               "type": "string"
@@ -1568,6 +1609,10 @@
     "AgentDeclaration": {
       "additionalProperties": false,
       "properties": {
+        "accountable": {
+          "pattern": "^person/[A-Za-z0-9_.-]+$",
+          "type": "string"
+        },
         "id": {
           "$ref": "#/$defs/Id"
         },
@@ -1683,6 +1728,21 @@
       "pattern": "^(?:agent)/[^\\s]+$",
       "type": "string",
       "x-st-ref": "agent"
+    },
+    "AgentLifecycle": {
+      "anyOf": [
+        {
+          "enum": [
+            "standing",
+            "owner",
+            "bounded"
+          ]
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown."
     },
     "AgentMessageDay": {
       "additionalProperties": false,
@@ -2063,6 +2123,7 @@
             "starting",
             "running",
             "waiting",
+            "down",
             "stopped",
             "failed",
             "suspended"
@@ -2072,7 +2133,7 @@
           "type": "string"
         }
       ],
-      "description": "Desired/observed agent seat state. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`."
+      "description": "Desired/observed agent seat state. `down`: the seat is declared, has no running session and no fresh harness report after its launch window; `down_since` says since when. `suspended`: the seat was stopped at a quiet boundary and resumes its own native session; see `suspension`."
     },
     "AgentStopParameters": {
       "additionalProperties": false,
@@ -2925,6 +2986,7 @@
               "items": {
                 "enum": [
                   "custom.reply",
+                  "prompt.respond",
                   "work.done",
                   "review.approve",
                   "review.reject",
@@ -2939,6 +3001,10 @@
               },
               "type": "array"
             },
+            "alert": {
+              "description": "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts.",
+              "type": "boolean"
+            },
             "attention_kind": {
               "anyOf": [
                 {
@@ -2949,7 +3015,9 @@
                     "unread-message",
                     "person-step",
                     "agent-request",
-                    "fault"
+                    "fault",
+                    "harness-login",
+                    "harness-prompt"
                   ]
                 },
                 {
@@ -2964,6 +3032,17 @@
             "blocked": {
               "$ref": "#/$defs/AttentionBlocked",
               "description": "The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask."
+            },
+            "conversation_id": {
+              "$ref": "#/$defs/Id",
+              "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it."
+            },
+            "conversation_ids": {
+              "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all.",
+              "items": {
+                "$ref": "#/$defs/Id"
+              },
+              "type": "array"
             },
             "custom_form": {
               "description": "Data-only registered reply form; absent on native attention.",
@@ -3308,6 +3387,11 @@
               "minimum": 1,
               "type": "integer"
             },
+            "max_message_bytes": {
+              "description": "The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096.",
+              "minimum": 1,
+              "type": "integer"
+            },
             "max_page_items": {
               "minimum": 1,
               "type": "integer"
@@ -3486,6 +3570,60 @@
           "additionalProperties": false,
           "properties": {
             "actor": {
+              "type": "null"
+            },
+            "collection": {
+              "enum": [
+                "clients",
+                "usage",
+                "machines",
+                "devices",
+                "sessions",
+                "terminals"
+              ]
+            },
+            "id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "kind": {
+              "const": "subscribe"
+            },
+            "limit": {
+              "maximum": 200,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "person": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "since_ms": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "type": "null"
+            },
+            "until_ms": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "collection"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "actor": {
               "type": [
                 "string",
                 "null"
@@ -3497,7 +3635,8 @@
                 "attention",
                 "agents",
                 "work",
-                "glasses"
+                "glasses",
+                "summary"
               ]
             },
             "id": {
@@ -3783,6 +3922,10 @@
             "has_more": {
               "type": "boolean"
             },
+            "header": {
+              "$ref": "#/$defs/ConversationHeader",
+              "description": "Present when conversation-blocks.v1 is negotiated and at least one header field is available"
+            },
             "id": {
               "type": "string"
             },
@@ -3880,12 +4023,97 @@
         "agents",
         "work",
         "glasses",
-        "arrangements"
+        "arrangements",
+        "summary",
+        "clients",
+        "usage",
+        "machines",
+        "devices",
+        "sessions",
+        "terminals"
+      ]
+    },
+    "ConnectedClient": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/ResourceHeader"
+        },
+        {
+          "properties": {
+            "actor": {
+              "type": "string"
+            },
+            "client": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "connected": {
+              "type": "boolean"
+            },
+            "device_id": {
+              "type": "string"
+            },
+            "device_name": {
+              "type": "string"
+            },
+            "follows": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "connected-client"
+            },
+            "last_seen": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "member": {
+              "type": "string"
+            },
+            "person": {
+              "type": "string"
+            },
+            "since": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "streams": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "via": {
+              "enum": [
+                "local",
+                "gateway",
+                "tailscale"
+              ]
+            }
+          },
+          "required": [
+            "actor",
+            "person",
+            "member",
+            "via",
+            "connected",
+            "streams",
+            "since",
+            "last_seen",
+            "follows",
+            "kind"
+          ],
+          "type": "object"
+        }
       ]
     },
     "ConversationChanges": {
       "additionalProperties": false,
       "properties": {
+        "header": {
+          "$ref": "#/$defs/ConversationHeader",
+          "description": "Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of"
+        },
         "items": {
           "items": {
             "$ref": "#/$defs/TimelineEntry"
@@ -3973,6 +4201,69 @@
       "required": [
         "ref",
         "media_type"
+      ],
+      "type": "object"
+    },
+    "ConversationHeader": {
+      "description": "Optional conversation header on timeline pages and delta responses (conversation-blocks.v1). A field is absent when neither source has it; `working` comes only from the register and the register wins over the transcript once live.",
+      "properties": {
+        "ask": {
+          "$ref": "#/$defs/ConversationHeaderField",
+          "description": "value: {call_id, questions: [TimelineAskQuestion]} or null for the last ask call without a matching result"
+        },
+        "context": {
+          "$ref": "#/$defs/ConversationHeaderField",
+          "description": "value: {tokens: integer|null, window: integer|null}"
+        },
+        "cost": {
+          "$ref": "#/$defs/ConversationHeaderField",
+          "description": "value: {usd: number, window: true when the fold window is truncated}"
+        },
+        "jobs": {
+          "$ref": "#/$defs/ConversationHeaderField",
+          "description": "value: [JobSummary], latest state per job id, keeping non-terminal ones"
+        },
+        "model": {
+          "$ref": "#/$defs/ConversationHeaderField",
+          "description": "value: model id string"
+        },
+        "subagents": {
+          "$ref": "#/$defs/ConversationHeaderField",
+          "description": "value: [SubagentSummary], task outputs whose status is not terminal"
+        },
+        "todos": {
+          "$ref": "#/$defs/ConversationHeaderField",
+          "description": "value: [{phase, items: [TimelineTodoItem]}]"
+        },
+        "working": {
+          "$ref": "#/$defs/ConversationHeaderField",
+          "description": "value: boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ConversationHeaderField": {
+      "additionalProperties": false,
+      "description": "One conversation header field: its latest value, where it came from and when.",
+      "properties": {
+        "as_of": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "source": {
+          "description": "register: live latest-wins value; transcript: derived from the fold window",
+          "enum": [
+            "register",
+            "transcript"
+          ]
+        },
+        "value": {
+          "description": "Field value, any JSON; see each ConversationHeader property for its shape"
+        }
+      },
+      "required": [
+        "value",
+        "source",
+        "as_of"
       ],
       "type": "object"
     },
@@ -4326,6 +4617,65 @@
       ],
       "type": "object"
     },
+    "DirectiveNote": {
+      "additionalProperties": false,
+      "description": "A person's current advisory note. It never assigns work, grants authority or satisfies a gate.",
+      "properties": {
+        "author": {
+          "pattern": "^person/[^/\\s]+$",
+          "type": "string"
+        },
+        "expires_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "person": {
+          "pattern": "^person/[^/\\s]+$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "text": {
+          "description": "At most 4096 UTF-8 bytes; whitespace-only text is refused.",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "time": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "person",
+        "author",
+        "time",
+        "text",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "DirectiveNotes": {
+      "additionalProperties": false,
+      "properties": {
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/DirectiveNote"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "notes"
+      ],
+      "type": "object"
+    },
     "DocumentContent": {
       "additionalProperties": false,
       "properties": {
@@ -4361,6 +4711,9 @@
         },
         "value": {
           "oneOf": [
+            {
+              "$ref": "#/$defs/DirectiveNotes"
+            },
             {
               "$ref": "#/$defs/Capabilities"
             },
@@ -4483,6 +4836,8 @@
             "terminal-unavailable",
             "terminal-ended",
             "timeline-history-incomplete",
+            "projection-detail-too-large",
+            "projection-detail-invalid-source",
             "conversation-content-invalidated",
             "transcript-unavailable",
             "blob-too-large",
@@ -4491,6 +4846,9 @@
             "blob-quota-exceeded",
             "blob-not-found",
             "blob-expired",
+            "message-too-large",
+            "message-store-full",
+            "long-message-signature-unsupported",
             "internal"
           ]
         },
@@ -4999,6 +5357,45 @@
       "pattern": "^[a-z][a-z0-9-]*/[^\\s]+$",
       "type": "string",
       "x-st-ref": "*"
+    },
+    "JobSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "output_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "state": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state"
+      ],
+      "type": "object"
     },
     "Lane": {
       "allOf": [
@@ -5848,6 +6245,16 @@
               },
               "type": "array"
             },
+            "body_bytes": {
+              "description": "The length in UTF-8 bytes of the whole text, with body_ref.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "body_ref": {
+              "description": "Present when content is only the start of a longer message; read the whole text with message-body.get.",
+              "pattern": "^blob/[0-9a-f]{64}$",
+              "type": "string"
+            },
             "content": {
               "type": "string"
             },
@@ -5916,6 +6323,31 @@
           "type": "object"
         }
       ]
+    },
+    "MessageBody": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "complete": {
+          "description": "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent.",
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "bytes",
+        "text"
+      ],
+      "type": "object"
     },
     "MessageProvenance": {
       "additionalProperties": false,
@@ -6115,7 +6547,7 @@
               "assignee": {
                 "oneOf": [
                   {
-                    "$ref": "#/$defs/AgentId"
+                    "$ref": "#/$defs/ActorRef"
                   },
                   {
                     "type": "null"
@@ -6125,7 +6557,7 @@
               "claimant": {
                 "oneOf": [
                   {
-                    "$ref": "#/$defs/AgentId"
+                    "$ref": "#/$defs/ActorRef"
                   },
                   {
                     "type": "null"
@@ -6134,6 +6566,17 @@
               },
               "id": {
                 "$ref": "#/$defs/StepRunId"
+              },
+              "progress_at": {
+                "description": "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress.",
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/Timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "since": {
                 "$ref": "#/$defs/Timestamp"
@@ -6276,7 +6719,7 @@
         "assignee": {
           "oneOf": [
             {
-              "$ref": "#/$defs/AgentId"
+              "$ref": "#/$defs/ActorRef"
             },
             {
               "type": "null"
@@ -6312,7 +6755,7 @@
         "claimant": {
           "oneOf": [
             {
-              "$ref": "#/$defs/AgentId"
+              "$ref": "#/$defs/ActorRef"
             },
             {
               "type": "null"
@@ -6372,8 +6815,30 @@
             }
           ]
         },
+        "nudged_at": {
+          "description": "When st last nudged this held step's holder for idling with nothing set to wake it.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "path": {
           "type": "string"
+        },
+        "progress_at": {
+          "description": "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "since": {
           "$ref": "#/$defs/Timestamp"
@@ -6424,7 +6889,7 @@
           ]
         },
         "assignee": {
-          "$ref": "#/$defs/AgentId"
+          "$ref": "#/$defs/ActorRef"
         },
         "assignee_state": {
           "type": "string"
@@ -65566,6 +66031,216 @@
       },
       "type": "object"
     },
+    "ObservationAccepted": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted": {
+          "const": true
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "ObservationLatency": {
+      "additionalProperties": false,
+      "properties": {
+        "buckets": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "maximum": 3670015,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "maximum": 1000000,
+                "minimum": 1,
+                "type": "integer"
+              }
+            ],
+            "type": "array"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "type": "array"
+        },
+        "carrier": {
+          "enum": [
+            "fabric",
+            "tailscale",
+            "lan"
+          ]
+        },
+        "count": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "interval_end": {
+          "format": "date-time",
+          "maxLength": 32,
+          "type": "string"
+        },
+        "interval_start": {
+          "format": "date-time",
+          "maxLength": 32,
+          "type": "string"
+        },
+        "kind": {
+          "const": "latency"
+        },
+        "max_ms": {
+          "maximum": 3600000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "over_target": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "enum": [
+            "direct",
+            "relay"
+          ]
+        },
+        "target": {
+          "enum": [
+            "ios-open-to-live",
+            "ios-connect",
+            "ios-message-ack",
+            "ios-conversation-open",
+            "ios-terminal-open",
+            "ios-recover"
+          ]
+        }
+      },
+      "required": [
+        "target",
+        "carrier",
+        "interval_start",
+        "interval_end",
+        "kind",
+        "count",
+        "over_target",
+        "max_ms",
+        "buckets"
+      ],
+      "type": "object"
+    },
+    "ObservationLiveShare": {
+      "additionalProperties": false,
+      "properties": {
+        "carrier": {
+          "enum": [
+            "fabric",
+            "tailscale",
+            "lan"
+          ]
+        },
+        "foreground_ms": {
+          "maximum": 60000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "interval_end": {
+          "format": "date-time",
+          "maxLength": 32,
+          "type": "string"
+        },
+        "interval_start": {
+          "format": "date-time",
+          "maxLength": 32,
+          "type": "string"
+        },
+        "kind": {
+          "const": "live-share"
+        },
+        "live_ms": {
+          "maximum": 60000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "enum": [
+            "direct",
+            "relay"
+          ]
+        },
+        "target": {
+          "const": "ios-live-share"
+        }
+      },
+      "required": [
+        "target",
+        "carrier",
+        "interval_start",
+        "interval_end",
+        "kind",
+        "foreground_ms",
+        "live_ms"
+      ],
+      "type": "object"
+    },
+    "ObservationReport": {
+      "additionalProperties": false,
+      "properties": {
+        "report_id": {
+          "maxLength": 36,
+          "minLength": 36,
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "samples": {
+          "items": {
+            "$ref": "#/$defs/ObservationSample"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "report_id",
+        "samples"
+      ],
+      "type": "object"
+    },
+    "ObservationResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "const": "st3.client.v0"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "value": {
+          "$ref": "#/$defs/ObservationAccepted"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ObservationSample": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ObservationLatency"
+        },
+        {
+          "$ref": "#/$defs/ObservationLiveShare"
+        }
+      ]
+    },
     "Observer": {
       "allOf": [
         {
@@ -66095,7 +66770,8 @@
             "selected",
             "custom",
             "feedback",
-            "read"
+            "read",
+            "dismissed"
           ]
         },
         "text": {
@@ -66367,6 +67043,30 @@
       ],
       "type": "object"
     },
+    "PromptRespondParameters": {
+      "additionalProperties": false,
+      "description": "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers (allow or deny).",
+      "properties": {
+        "answer": {
+          "enum": [
+            "allow",
+            "deny"
+          ]
+        },
+        "episode": {
+          "type": "string"
+        },
+        "target_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "target_id",
+        "episode",
+        "answer"
+      ],
+      "type": "object"
+    },
     "PublicationDefinition": {
       "additionalProperties": false,
       "description": "Canonical publication values with resolved compiler defaults; requires read.declarations.",
@@ -66515,6 +67215,15 @@
     "Resource": {
       "oneOf": [
         {
+          "$ref": "#/$defs/ConnectedClient"
+        },
+        {
+          "$ref": "#/$defs/Usage"
+        },
+        {
+          "$ref": "#/$defs/Summary"
+        },
+        {
           "$ref": "#/$defs/Attention"
         },
         {
@@ -66610,7 +67319,10 @@
                 "history",
                 "session",
                 "glass",
-                "arrangement"
+                "arrangement",
+                "summary",
+                "connected-client",
+                "usage"
               ]
             },
             {
@@ -66985,6 +67697,10 @@
         "projection_version": {
           "const": "client-projection.v0"
         },
+        "published_at": {
+          "$ref": "#/$defs/Timestamp",
+          "description": "For rows a background refresher prepared, such as the agents roster: when it published them. They reflect `store_index`, and local activity up to this time."
+        },
         "store_index": {
           "minimum": 0,
           "type": "integer"
@@ -67169,6 +67885,64 @@
         "type",
         "question",
         "why_person"
+      ],
+      "type": "object"
+    },
+    "SubagentSummary": {
+      "additionalProperties": false,
+      "description": "One subagent of a task tool output. name is the OMP name (id when no separate name exists), agent is the type, task is the full assignment. conversation.session_id opens the readable child transcript.",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "conversation": {
+          "additionalProperties": false,
+          "properties": {
+            "session_id": {
+              "$ref": "#/$defs/Id"
+            }
+          },
+          "required": [
+            "session_id"
+          ],
+          "type": "object"
+        },
+        "cost_usd": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "requests": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "status"
       ],
       "type": "object"
     },
@@ -120998,7 +121772,7 @@
           "const": "subject-schemas"
         },
         "native_registry_digest": {
-          "const": "ff5d32bcb9b8af733d5e536653dfb7b3731616fc7dac19302f54d87a38880f33"
+          "const": "208efbba38a9b165e9bc8f90e49c72982d0a2e4cd928a7be829266c55a216f59"
         },
         "projected_digest_convention": {
           "const": "canonical-effective-definitions-with-transitive-dependencies-excluding-discovery-v1"
@@ -180324,6 +181098,10 @@
                   "projection_version": {
                     "const": "client-projection.v0"
                   },
+                  "published_at": {
+                    "$ref": "#/$defs/Timestamp",
+                    "description": "For rows a background refresher prepared, such as the agents roster: when it published them. They reflect `store_index`, and local activity up to this time."
+                  },
                   "store_index": {
                     "minimum": 0,
                     "type": "integer"
@@ -241234,6 +242012,10 @@
                   "projection_version": {
                     "const": "client-projection.v0"
                   },
+                  "published_at": {
+                    "$ref": "#/$defs/Timestamp",
+                    "description": "For rows a background refresher prepared, such as the agents roster: when it published them. They reflect `store_index`, and local activity up to this time."
+                  },
                   "store_index": {
                     "minimum": 0,
                     "type": "integer"
@@ -242828,7 +243610,7 @@
           }
         },
         "projected_schema_sha256": {
-          "const": "25b844bdca80cc5e479fa69a6697b3f3dc25885e5fee91c78d49368cd3eaa0f2"
+          "const": "2d42b5a4020dc34e095b3df0bb6452bda6cd2a12bde966aea21ad728a049f695"
         },
         "resources": {
           "additionalProperties": {
@@ -244264,6 +245046,98 @@
       ],
       "type": "object"
     },
+    "Summary": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/ResourceHeader"
+        },
+        {
+          "properties": {
+            "active_missions": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "agents_as_of": {
+              "additionalProperties": false,
+              "description": "The published agents roster the agent counts came from, when a background refresher prepares it: its graph cut and when it was published. Absent when the counts come from this snapshot itself.",
+              "properties": {
+                "published_at": {
+                  "$ref": "#/$defs/Timestamp"
+                },
+                "store_index": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "store_index",
+                "published_at"
+              ],
+              "type": "object"
+            },
+            "alerts": {
+              "description": "Open alerts: items that block or wait on this person. Updates are not counted. Absent on daemons that predate alerts.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "summary"
+            },
+            "machines": {
+              "$ref": "#/$defs/SummaryMachines"
+            },
+            "needs_you": {
+              "description": "The alert count; an older daemon also counted unread updates.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "person_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "working_agents": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "person_id",
+            "needs_you",
+            "working_agents",
+            "active_missions",
+            "machines"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "Complete current source counts, independent of list page limits. One summary/current resource per authorized subscription. Unavailable source coverage sends resync, never inferred zero counts."
+    },
+    "SummaryMachines": {
+      "additionalProperties": false,
+      "properties": {
+        "connected": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "indirect": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offline": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "connected",
+        "indirect",
+        "offline"
+      ],
+      "type": "object"
+    },
     "SyncNotice": {
       "additionalProperties": false,
       "properties": {
@@ -244818,6 +245692,74 @@
       ],
       "type": "object"
     },
+    "TimelineAskAnswer": {
+      "additionalProperties": false,
+      "properties": {
+        "custom": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "selected": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "question",
+        "selected"
+      ],
+      "type": "object"
+    },
+    "TimelineAskQuestion": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "multi": {
+          "type": "boolean"
+        },
+        "options": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "label"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "question": {
+          "type": "string"
+        },
+        "recommended": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "question",
+        "options",
+        "multi"
+      ],
+      "type": "object"
+    },
     "TimelineBlock": {
       "additionalProperties": false,
       "properties": {
@@ -244828,11 +245770,11 @@
           "type": "string"
         },
         "kind": {
-          "description": "text, reasoning, tool_call, tool_output, image, image_link, job, subagent, ask, status, error, document, source_record, raw_text, unknown; future kinds remain readable as JSON",
+          "description": "text, reasoning, tool_call, tool_output, image, image_link, job, subagent, ask, status, error, document, source_record, raw_text, irc, unknown; future kinds remain readable as JSON",
           "type": "string"
         },
         "metadata": {
-          "description": "Source-supplied metadata including timing (wallTimeMs, timeoutSeconds); preserve names, units, values and future fields",
+          "description": "Source-supplied metadata including timing (wallTimeMs, timeoutSeconds); assistant text/reasoning blocks may carry model, provider, usage {input, output, cache_read, cache_write, total, cost_usd}, context_tokens, stop_reason, ttft_ms and duration_ms; preserve names, units, values and future fields",
           "type": "object"
         },
         "payload": {
@@ -244840,6 +245782,10 @@
         },
         "source_type": {
           "type": "string"
+        },
+        "view": {
+          "$ref": "#/$defs/TimelineView",
+          "description": "Parsed typed projection of the block; a renderer that does not know the view type renders the block as without a view. The full native data stays in payload"
         },
         "visibility": {
           "description": "UI hint: visible (default), internal or hidden-by-harness; never an access restriction",
@@ -244917,6 +245863,10 @@
         },
         "entry_id": {
           "$ref": "#/$defs/Id"
+        },
+        "header": {
+          "$ref": "#/$defs/ConversationHeader",
+          "description": "Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of"
         },
         "operation": {
           "enum": [
@@ -245198,6 +246148,10 @@
           },
           "type": "array"
         },
+        "body_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
         "from": {
           "$ref": "#/$defs/ParticipantRef"
         },
@@ -245234,6 +246188,10 @@
     "TimelinePage": {
       "additionalProperties": false,
       "properties": {
+        "header": {
+          "$ref": "#/$defs/ConversationHeader",
+          "description": "Present when conversation-blocks.v1 is negotiated; each field names its value, source and as_of"
+        },
         "items": {
           "items": {
             "$ref": "#/$defs/TimelineEntry"
@@ -245320,6 +246278,22 @@
         }
       },
       "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "TimelineTodoItem": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "content",
         "status"
       ],
       "type": "object"
@@ -245582,6 +246556,992 @@
       ],
       "type": "object"
     },
+    "TimelineView": {
+      "description": "Parsed typed projection of a block, discriminated by type. Known types are closed; future types keep JSON through the fallback.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TimelineViewBash"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewEdit"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewWrite"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewRead"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewSearch"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewTodo"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewAsk"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewTask"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewHub"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewEval"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewGeneric"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewIrc"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewJob"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewSkill"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewCompaction"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewAssistantError"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewModelChange"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewThinkingLevel"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewTitle"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewSessionExit"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewToolStart"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewResetBoundary"
+        },
+        {
+          "$ref": "#/$defs/TimelineViewCredentialPin"
+        },
+        {
+          "description": "Fallback for a future view.type: render the block as without a view",
+          "properties": {
+            "type": {
+              "not": {
+                "enum": [
+                  "bash",
+                  "edit",
+                  "write",
+                  "read",
+                  "search",
+                  "todo",
+                  "ask",
+                  "task",
+                  "hub",
+                  "eval",
+                  "generic",
+                  "irc",
+                  "job",
+                  "skill",
+                  "compaction",
+                  "assistant_error",
+                  "model_change",
+                  "thinking_level",
+                  "title",
+                  "session_exit",
+                  "tool_start",
+                  "reset_boundary",
+                  "credential_pin"
+                ]
+              },
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimelineViewAsk": {
+      "additionalProperties": false,
+      "description": "tool_call fields: questions; tool_output fields: answers.",
+      "properties": {
+        "answers": {
+          "items": {
+            "$ref": "#/$defs/TimelineAskAnswer"
+          },
+          "type": "array"
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "questions": {
+          "items": {
+            "$ref": "#/$defs/TimelineAskQuestion"
+          },
+          "type": "array"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "ask"
+        }
+      },
+      "required": [
+        "type",
+        "tool"
+      ],
+      "type": "object"
+    },
+    "TimelineViewAssistantError": {
+      "additionalProperties": false,
+      "description": "Assistant error from the native session record and its persisted retry marker; no retry state is inferred.",
+      "properties": {
+        "api": {
+          "type": "string"
+        },
+        "error_id": {
+          "type": "integer"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "presentation": {
+          "enum": [
+            "full",
+            "compact-recovered",
+            "none"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "retry": {
+          "additionalProperties": false,
+          "properties": {
+            "attempt": {
+              "type": "integer"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            },
+            "recovered_at": {
+              "$ref": "#/$defs/Timestamp"
+            },
+            "recovery": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "superseded_by": {
+              "additionalProperties": false,
+              "properties": {
+                "model": {
+                  "type": "string"
+                },
+                "provider": {
+                  "type": "string"
+                },
+                "response_id": {
+                  "type": "string"
+                },
+                "timestamp": {
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "status": {
+          "enum": [
+            "failed",
+            "recovered",
+            "superseded"
+          ]
+        },
+        "stop_reason": {
+          "type": "string"
+        },
+        "type": {
+          "const": "assistant_error"
+        }
+      },
+      "required": [
+        "type",
+        "status",
+        "presentation",
+        "is_error",
+        "label",
+        "message"
+      ],
+      "type": "object"
+    },
+    "TimelineViewBash": {
+      "additionalProperties": false,
+      "description": "tool_call fields: command, cwd, timeout_s, env_keys, background; tool_output fields: call_id, is_error, exit_code, wall_ms, timed_out.",
+      "properties": {
+        "background": {
+          "type": "boolean"
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "env_keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "intent": {
+          "description": "Parsed from the OMP `i` field",
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "timeout_s": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool": {
+          "description": "Native tool name",
+          "type": "string"
+        },
+        "type": {
+          "const": "bash"
+        },
+        "wall_ms": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "tool"
+      ],
+      "type": "object"
+    },
+    "TimelineViewCompaction": {
+      "additionalProperties": false,
+      "description": "On a status block; summary is bounded with an owner continuation.",
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "short_summary": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "tokens_after": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tokens_before": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "compaction"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "TimelineViewCredentialPin": {
+      "additionalProperties": false,
+      "description": "Credential bookkeeping, with internal visibility. The hash stays in the raw record only.",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "type": {
+          "const": "credential_pin"
+        }
+      },
+      "required": [
+        "type",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "TimelineViewEdit": {
+      "additionalProperties": false,
+      "description": "tool_call fields: path (first [PATH#TAG] header), ops, input_bytes; tool_output fields: path, first_changed_line, diff.",
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "diff": {
+          "description": "Unified diff as given",
+          "type": "string"
+        },
+        "first_changed_line": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "input_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "ops": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "edit"
+        }
+      },
+      "required": [
+        "type",
+        "tool"
+      ],
+      "type": "object"
+    },
+    "TimelineViewEval": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "code_bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "reset": {
+          "type": "boolean"
+        },
+        "timeout_s": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "eval"
+        }
+      },
+      "required": [
+        "type",
+        "tool",
+        "language",
+        "code_bytes"
+      ],
+      "type": "object"
+    },
+    "TimelineViewGeneric": {
+      "additionalProperties": false,
+      "description": "Any other tool: tool_call field name; tool_output fields is_error, wall_ms.",
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "generic"
+        },
+        "wall_ms": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "tool"
+      ],
+      "type": "object"
+    },
+    "TimelineViewHub": {
+      "additionalProperties": false,
+      "description": "tool_call fields: op, name, target, message, timeout_s; tool_output fields: timed_out, jobs, state.",
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/JobSummary"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "op": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "timeout_s": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "hub"
+        }
+      },
+      "required": [
+        "type",
+        "tool",
+        "op"
+      ],
+      "type": "object"
+    },
+    "TimelineViewIrc": {
+      "additionalProperties": false,
+      "description": "Block kind `irc` from a custom_message irc:incoming record.",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "reply_to": {
+          "type": "string"
+        },
+        "type": {
+          "const": "irc"
+        }
+      },
+      "required": [
+        "type",
+        "from",
+        "message",
+        "message_id"
+      ],
+      "type": "object"
+    },
+    "TimelineViewJob": {
+      "additionalProperties": false,
+      "description": "Block kind `job` from launch-completion (details.jobs) and async-result records.",
+      "properties": {
+        "jobs": {
+          "items": {
+            "$ref": "#/$defs/JobSummary"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "job"
+        }
+      },
+      "required": [
+        "type",
+        "jobs"
+      ],
+      "type": "object"
+    },
+    "TimelineViewModelChange": {
+      "additionalProperties": false,
+      "properties": {
+        "fallback": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "type": {
+          "const": "model_change"
+        }
+      },
+      "required": [
+        "type",
+        "model"
+      ],
+      "type": "object"
+    },
+    "TimelineViewRead": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "range": {
+          "description": "Suffix after `:` in the read path",
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "read"
+        }
+      },
+      "required": [
+        "type",
+        "tool",
+        "path"
+      ],
+      "type": "object"
+    },
+    "TimelineViewResetBoundary": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "reset_boundary"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "TimelineViewSearch": {
+      "additionalProperties": false,
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "case": {
+          "type": "boolean"
+        },
+        "engine": {
+          "enum": [
+            "grep",
+            "glob",
+            "web"
+          ]
+        },
+        "file_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "file_limit_reached": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gitignore": {
+          "type": "boolean"
+        },
+        "hidden": {
+          "type": "boolean"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "limit": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "match_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "per_file_limit_reached": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        },
+        "skip": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "type": {
+          "const": "search"
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "tool",
+        "engine"
+      ],
+      "type": "object"
+    },
+    "TimelineViewSessionExit": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "type": {
+          "const": "session_exit"
+        }
+      },
+      "required": [
+        "type",
+        "kind",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "TimelineViewSkill": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "description": "Native skill arguments, any JSON"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "type": {
+          "const": "skill"
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ],
+      "type": "object"
+    },
+    "TimelineViewTask": {
+      "additionalProperties": false,
+      "description": "tool_call fields: context, tasks; tool_output fields: async, total_ms, agents.",
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/$defs/SubagentSummary"
+          },
+          "type": "array"
+        },
+        "async": {
+          "type": "boolean"
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "context": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "tasks": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "task": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "task"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "total_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "const": "task"
+        }
+      },
+      "required": [
+        "type",
+        "tool"
+      ],
+      "type": "object"
+    },
+    "TimelineViewThinkingLevel": {
+      "additionalProperties": false,
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "level": {
+          "type": "string"
+        },
+        "type": {
+          "const": "thinking_level"
+        }
+      },
+      "required": [
+        "type",
+        "level"
+      ],
+      "type": "object"
+    },
+    "TimelineViewTitle": {
+      "additionalProperties": false,
+      "properties": {
+        "previous": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "type": {
+          "const": "title"
+        }
+      },
+      "required": [
+        "type",
+        "title"
+      ],
+      "type": "object"
+    },
+    "TimelineViewTodo": {
+      "additionalProperties": false,
+      "description": "tool_call fields: op, items, phase, task; tool_output fields: phases.",
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/TimelineTodoItem"
+          },
+          "type": "array"
+        },
+        "op": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "phases": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "items": {
+                "items": {
+                  "$ref": "#/$defs/TimelineTodoItem"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "items"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "task": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "todo"
+        }
+      },
+      "required": [
+        "type",
+        "tool"
+      ],
+      "type": "object"
+    },
+    "TimelineViewToolStart": {
+      "additionalProperties": false,
+      "description": "On an internal-visibility `status` block; renderers attach it to the call row and do not draw it alone.",
+      "properties": {
+        "call_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "tool_start"
+        }
+      },
+      "required": [
+        "type",
+        "call_id",
+        "tool",
+        "started_at"
+      ],
+      "type": "object"
+    },
+    "TimelineViewWrite": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "line_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "type": {
+          "const": "write"
+        }
+      },
+      "required": [
+        "type",
+        "tool",
+        "path",
+        "bytes"
+      ],
+      "type": "object"
+    },
     "Timestamp": {
       "description": "RFC 3339 UTC instant; servers emit millisecond precision with `Z`.",
       "examples": [
@@ -245621,12 +247581,37 @@
                   "session",
                   "glass",
                   "arrangement",
-                  "owned-set"
+                  "owned-set",
+                  "summary",
+                  "connected-client",
+                  "usage"
                 ]
               },
               "type": "string"
             }
           },
+          "type": "object"
+        }
+      ]
+    },
+    "Usage": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/ResourceHeader"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "usage"
+            },
+            "value": {
+              "$ref": "#/$defs/UsagePeriod"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
           "type": "object"
         }
       ]
@@ -246404,6 +248389,15 @@
             "mission_run_id": {
               "$ref": "#/$defs/Id"
             },
+            "nudged_at_unix_ms": {
+              "description": "When st last nudged this held step's holder for idling with nothing set to wake it.",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "x-st-codec": "epoch-ms"
+            },
             "path": {
               "type": "string"
             },
@@ -246414,12 +248408,30 @@
               },
               "type": "array"
             },
+            "progress_at": {
+              "description": "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress.",
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Timestamp"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "readiness_epoch": {
               "minimum": 0,
               "type": "integer"
             },
             "state": {
               "$ref": "#/$defs/WorkState"
+            },
+            "submitted_incarnation": {
+              "description": "Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "timeout_ms": {
               "minimum": 0,
@@ -246468,6 +248480,17 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "holder_down_since": {
+          "description": "Set on a seat's current work when the seat is `down`: the step is claimed by a holder with no session, and its progress and activity predate that.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "id": {
@@ -259432,9 +261455,9 @@
       "schema_id": "subject-schema/c77a2ad01777232ed1b219d72e3bf3bbb9b2f5a179fca5a550659604f68ec2e6/subscription"
     }
   ],
-  "native_registry_digest": "ff5d32bcb9b8af733d5e536653dfb7b3731616fc7dac19302f54d87a38880f33",
+  "native_registry_digest": "208efbba38a9b165e9bc8f90e49c72982d0a2e4cd928a7be829266c55a216f59",
   "projected_digest_convention": "canonical-effective-definitions-with-transitive-dependencies-excluding-discovery-v1",
-  "projected_schema_sha256": "25b844bdca80cc5e479fa69a6697b3f3dc25885e5fee91c78d49368cd3eaa0f2",
+  "projected_schema_sha256": "2d42b5a4020dc34e095b3df0bb6452bda6cd2a12bde966aea21ad728a049f695",
   "resources": {
     "additional_fields": false,
     "by_kind": {

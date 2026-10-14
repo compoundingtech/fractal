@@ -293,6 +293,7 @@ pub fn family_descriptor(family: &str) -> Option<Value> {
             fields.insert("facts", FieldSpec {
                 value_type: crate::ValueType::Object,
                 required: false,
+                nullable: false,
                 values: Vec::new(),
                 immutable: false,
                 reference: false,
