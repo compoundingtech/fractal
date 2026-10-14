@@ -1419,7 +1419,7 @@ mod tests {
             include_bytes!("../../../docs/st3/client-v0/schemas/client-v0.schema.json"),
             include_bytes!("../../../docs/st3/client-v0/schemas/operations.json"),
         ]);
-        let ts_models = typescript_models(&schema, &operations)?;
+        let ts_models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
         let ts_schema = rich::models(&schema)?;
         let ts_client = render_marker(
             TYPESCRIPT_CLIENT_TEMPLATE,
