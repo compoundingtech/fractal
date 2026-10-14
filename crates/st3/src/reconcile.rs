@@ -22059,12 +22059,10 @@ agent "import/omp/fixture" {{
                     vec!["omp".into()],
                     &managed,
                     &launch.environment[crate::suspension::CONTINUE_ENV],
-                    Some(Path::new(
-                        &launch.environment[crate::suspension::CONTINUE_PATH_ENV],
-                    )),
+                    None,
                 )
                 .unwrap(),
-                vec!["omp", "--resume", newer.to_str().unwrap()]
+                vec!["omp", "--resume", newer_id]
             );
         }
         // Relocation outside the linked inventory is intentionally unsupported.
@@ -22083,10 +22081,10 @@ agent "import/omp/fixture" {{
             vec!["omp".into()],
             &managed,
             newer_id,
-            Some(&relocated),
+            None,
         )
         .unwrap_err();
-        assert_eq!(refusal.code, "managed-directory-foreign-link");
+        assert_eq!(refusal.code, "transcript-missing");
         store
             .append_claim(&ClaimInput {
                 subject: subject.subject.clone(),
@@ -22143,9 +22141,8 @@ agent "import/omp/fixture" {{
             diagnostics[0].body["fields"]["code"],
             crate::suspension::CONTINUE_UNAVAILABLE_CODE
         );
-        // Repair restores a strict launch of the previously refused native ID.
-        // Its successful binding supersedes the old refusal rather than leaving
-        // the repaired import permanently forced into fresh conversations.
+        // A strict repair can select the transcript, but a newer binding cannot
+        // clear a permanent continuation refusal for the same native ID.
         let repaired = managed.join(relocated.file_name().unwrap());
         fs::rename(&relocated, &repaired).unwrap();
         assert_eq!(
@@ -22168,11 +22165,8 @@ agent "import/omp/fixture" {{
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let launch = starts.last().unwrap();
-        assert_eq!(launch.environment[crate::suspension::CONTINUE_ENV], newer_id);
-        assert_eq!(
-            launch.environment[crate::suspension::CONTINUE_PATH_ENV],
-            repaired.to_str().unwrap()
-        );
+        assert!(!launch.environment.contains_key(crate::suspension::CONTINUE_ENV));
+        assert!(!launch.environment.contains_key(crate::suspension::CONTINUE_PATH_ENV));
         assert!(!launch.environment.contains_key(crate::suspension::RESUME_ENV));
     }
 

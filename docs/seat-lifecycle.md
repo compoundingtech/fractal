@@ -171,8 +171,8 @@ symlink to another home; sessions stored only in another home are not discovered
 
 OMP imports use the same strict resume handshake, with `ST3_NATIVE_RESUME_SESSION`
 holding the native session ID and `ST3_NATIVE_RESUME_PATH` pinning the absolute
-transcript path. The driver validates the transcript header, links its directory
-into the managed inventory without copying it, and launches OMP with that exact
+transcript path. The driver validates the transcript header, links the transcript
+and its artifacts into the managed inventory without copying them, and launches OMP with that exact
 path. Missing or mismatched transcripts fail the launch rather than starting anew.
 The pair bootstraps an imported or repaired seat until an incarnation-bearing
 durable `harness.session-file` binding records a `desired_token` naming the

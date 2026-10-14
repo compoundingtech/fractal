@@ -6427,7 +6427,11 @@ mod tests {
                 "chosen-model"
             ]
         );
-        assert_eq!(fs::read_link(&managed).unwrap(), external);
+        assert!(managed.is_dir());
+        assert_eq!(
+            fs::read_link(managed.join(transcript.file_name().unwrap())).unwrap(),
+            transcript
+        );
         assert_eq!(
             crate::native_resume::pi_family_argv(
                 "omp",

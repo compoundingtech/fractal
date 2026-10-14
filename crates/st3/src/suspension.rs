@@ -763,6 +763,25 @@ mod tests {
     }
 
     #[test]
+    fn continuation_permanent_refusals_survive_rebinding_only_the_refused_session() {
+        for legacy in [false, true] {
+            let store = Store::open_memory("node").unwrap();
+            let key = if legacy {
+                continue_unavailable_key("agent/example", "native")
+            } else {
+                typed_continue_unavailable_key("agent/example", "native", "transcript-missing", None)
+            };
+            continuation_claim(&store, "harness.diagnostic", json!({
+                "code":CONTINUE_UNAVAILABLE_CODE,"status":"transcript-missing","session_id":"native"
+            }), Some(key));
+            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native"}), None);
+            assert!(continue_session(&store, "agent/example", "omp", None, None).unwrap().is_none());
+            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"other"}), None);
+            assert_eq!(continue_session(&store, "agent/example", "omp", None, None).unwrap().unwrap().0, "other");
+        }
+    }
+
+    #[test]
     fn continuation_fresh_context_wins_over_stale_authored_refusal() {
         let store = Store::open_memory("node").unwrap();
         continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native"}), None);
