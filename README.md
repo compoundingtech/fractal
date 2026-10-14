@@ -11,7 +11,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compound
 The installer selects your platform, verifies the downloaded archive and opens `st`.
 On the first run, choose your name and this machine's name, accept the background
 service, and choose an installed coding harness. Before it starts, setup says that the
-built-in expert runs an agent on your own harness account (using its usage and quota) and
+built-in Smalltalk Assistant runs an agent on your own harness account (using its usage and quota) and
 asks; it then guides you through your first mission and stays available afterward. Nothing
 is started on an installation that already has a configuration.
 
@@ -28,11 +28,11 @@ also needs Python 3. Harness CLIs and their accounts are separate. If none is
 installed, `st` still opens; install a supported harness and run `st setup` later.
 For Claude, first complete its native welcome, account or API-key confirmation and
 permission-bypass consent as the same user and profile. Successful auth-status or
-print checks alone do not prove that the expert can authenticate.
+print checks alone do not prove that the Assistant can authenticate.
 Neither GitHub nor `gh` is required. Native macOS build and installer tests run in CI;
 clean-machine app, launchd and permission setup still need a manual rehearsal.
 
-**[Get started](docs/getting-started.md)** covers first-run questions, the expert,
+**[Get started](docs/getting-started.md)** covers first-run questions, the Smalltalk Assistant,
 installation choices and background services. Each person currently runs their own
 fleet; start with one machine and add others when you need them.
 

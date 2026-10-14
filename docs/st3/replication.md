@@ -488,14 +488,20 @@ Each inventory says how many envelopes its sender takes in one exchange, 4,096 f
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
-exchanges list every differing range within the 512-identity listing. Live differences settle in
+exchanges list every differing range within the 512-identity listing. A store counts answers
+across all its peers, so the start steps by the golden ratio rather than by one: a peer answered
+every fourth time would otherwise see every fourth start and, with four differing ranges, only the
+first. Each peer reaches every range within about four times as many answers as there are ranges. Live differences settle in
 one two-phase exchange however many tombstone ranges differ, and no exchange carries a whole
 inventory. Builds before this one ran an extra full-inventory round whenever a compact round made
 no progress; on a fleet whose stores hold a million envelopes, each such round sent about 228 MB
 each way, and tombstone-only differences made it run on nearly every exchange. This build never
 asks for a full inventory. It still answers an older peer's request without range digests with
-its complete identity list, so members may upgrade in any order, and those answers stop once
-every member runs this build. A pair of members with only tombstone differences reports no
+its complete identity list. Members may upgrade in any order safely, but convergence is assured
+only once every member runs this build: an older member answers this build's request by listing
+its first differing ranges in order, and this build no longer falls back to a full inventory
+when that listing stops on tombstone ranges. The large answers also stop once every member runs
+this build. A pair of members with only tombstone differences reports no
 progress, so the worker rests rather than loops. Importing older or losing checkpoint lineages
 remains separate ([#1433](https://github.com/compoundingtech/smalltalk/issues/1433),
 [#1052](https://github.com/compoundingtech/smalltalk/issues/1052)); live-envelope convergence
