@@ -49,7 +49,8 @@ def env(name, default=''):
 def guard():
     """Event and ref the key may be used for: the merge queue, main, and pull requests from this repository
     (never a fork). A same-repository author controls the workflow file its own pull request runs, so for a
-    pull request the key is exposed to that author's code: known defect, recorded in the gate-evidence docs."""
+    pull request the key is exposed to that author's code: known defect, recorded in the gate-evidence docs.
+    A pull request signs only when its authors are on the list at the base commit (check_authors)."""
     event, ref = env('GITHUB_EVENT_NAME'), env('GITHUB_REF')
     patterns = ALLOWED_REFS.get(event)
     if patterns is None:
@@ -60,7 +61,42 @@ def guard():
         head, repository = env('PR_HEAD_REPOSITORY'), env('GITHUB_REPOSITORY')
         if not head or not repository or head != repository:
             raise Refused(f'refusing pull request from {head or "an unknown repository"!r}: only pull requests from {repository or "this repository"} may use the key')
+        check_authors(env('PR_BASE_SHA'), env('PR_HEAD_SHA'), env('PR_USER'), env('GITHUB_ACTOR'))
     return f'{event} on {ref}'
+
+
+AUTHORS_FILE = '.st/evidence-authors.json'
+
+
+def _git(*args):
+    clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    done = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat', *args],
+                          capture_output=True, text=True, env=clean)
+    if done.returncode:
+        raise Refused(f'git {args[0]} failed: {done.stderr.strip()[-300:]}')
+    return done.stdout
+
+
+def check_authors(base, head, opener, actor):
+    """A pull request run signs only when its authors are the repository's own. The list is read from the BASE
+    commit, so the pull request cannot widen it. Two kinds of check: the GitHub logins of whoever opened the
+    pull request and of whoever triggered this run are authenticated by GitHub; the commit author emails are
+    free text in git (anyone can write any of them), so they only catch a stray commit by someone else."""
+    if not base or not head:
+        raise Refused('the pull request base and head commits are not known, so its authors cannot be checked')
+    try:
+        allowed = json.loads(_git('show', f'{base}:{AUTHORS_FILE}'))
+        logins = {login.lower() for login in allowed['logins']}
+        emails = [pattern.lower() for pattern in allowed['emails']]
+    except (Refused, ValueError, KeyError, TypeError) as error:
+        raise Refused(f'no usable author list at the base commit ({AUTHORS_FILE}): {error}')
+    for role, login in (('opened the pull request', opener), ('triggered this run', actor)):
+        if not login or login.lower() not in logins:
+            raise Refused(f'refusing: {login or "an unknown account"!r}, who {role}, is not in the author list')
+    for line in _git('log', '--no-merges', '--format=%H %ae', f'{base}..{head}').splitlines():
+        sha, _, email = line.partition(' ')
+        if not any(fnmatch.fnmatchcase(email.lower(), pattern) for pattern in emails):
+            raise Refused(f'refusing: commit {sha[:12]} is authored by {email!r}, who is not in the author list')
 
 
 def configure(root):

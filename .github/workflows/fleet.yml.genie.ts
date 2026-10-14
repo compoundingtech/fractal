@@ -442,6 +442,9 @@ done`,
       env: {
         EVIDENCE_PUSH_TOKEN: '${{ github.token }}',
         PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
         NEEDS_JSON: '${{ toJSON(needs) }}',
       },
       steps: [

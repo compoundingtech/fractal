@@ -350,13 +350,16 @@ The machine that ran a check can sign the result itself, with no call to GitHub.
 `EVIDENCE_SIGNING_KEY` secret of the `evidence-signing` environment (forks never receive it).
 `scripts/ci-evidence-signing` holds the steps that handle it, and all of them are tested without
 GitHub: `guard` allows only merge-queue refs, `main`, manual runs on `main` and same-repository
-pull requests; `configure` writes the signer configuration and key as mode 0600 in a 0700
+pull requests whose opener, run trigger and commit authors are on the list `.st/evidence-authors.json`
+at the base commit (GitHub logins are authenticated; commit author emails are free text and only
+catch a stray commit by someone else; a fork never signs); `configure` writes the signer configuration and key as mode 0600 in a 0700
 directory and masks every key line; `once CHECK` refuses a second signature for a check in one job;
 `cleanup` overwrites and removes the key, and runs even when earlier steps failed. The wrapper and
 signer scripts must come from the base commit of the change, never from the tree under test.
 Accepted gap: code under test in a job that holds the key can read it. That now includes every pull
 request from this repository: its author controls the workflow file the run executes, so a person or agent with
-write access can read the key and sign any note. Forks never get it. Narrowing the `evidence-signing`
+write access can read the key and sign any note; the author list narrows who gets a note, it does not
+stop that person's code from reading the key. Forks never get it. Narrowing the `evidence-signing`
 environment back to the merge queue and main undoes this.
 
 An aggregate job records what it knows: `scripts/ci-evidence-signing aggregate FILE` builds, from

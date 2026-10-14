@@ -336,7 +336,12 @@ git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"`,
       name: 'May this job use the signing key?',
       id: 'evidence-guard',
       if: "${{ always() && steps.evidence-base.outcome == 'success' }}",
-      env: { PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}' },
+      env: {
+        PR_HEAD_REPOSITORY: '${{ github.event.pull_request.head.repo.full_name }}',
+        PR_BASE_SHA: '${{ github.event.pull_request.base.sha }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        PR_USER: '${{ github.event.pull_request.user.login }}',
+      },
       run: `python3 ${evidenceHelper} guard`,
     },
     {

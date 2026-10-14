@@ -22,8 +22,8 @@ GENV = dict(BASE, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', 
             GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
 
 
-def helper(*args, env=None, check=None):
-    done = subprocess.run([sys.executable, str(HELPER), *args], capture_output=True, text=True, env=dict(BASE, **(env or {})))
+def helper(*args, env=None, check=None, cwd=None):
+    done = subprocess.run([sys.executable, str(HELPER), *args], capture_output=True, text=True, env=dict(BASE, **(env or {})), cwd=cwd)
     return done
 
 
@@ -46,8 +46,9 @@ cases = [
     ('push to another branch', dict(GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/other'), False),
     ('manual run on main', dict(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/main'), True),
     ('manual run on a branch', dict(GITHUB_EVENT_NAME='workflow_dispatch', GITHUB_REF='refs/heads/topic'), False),
-    ('same-repository pull request', dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/9/merge',
-                                          GITHUB_REPOSITORY='example/repo', PR_HEAD_REPOSITORY='example/repo'), True),
+    # Allowed only with a base, a head and the opener and actor on the author list: see the author cases below.
+    ('same-repository pull request with no base or head commit', dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/9/merge',
+                                          GITHUB_REPOSITORY='example/repo', PR_HEAD_REPOSITORY='example/repo'), False),
     ('same-repository pull request on a branch ref', dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/heads/topic',
                                                           GITHUB_REPOSITORY='example/repo', PR_HEAD_REPOSITORY='example/repo'), False),
     ('fork pull request', dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/9/merge',
@@ -62,6 +63,61 @@ for label, env, allowed in cases:
     done = helper('guard', env=env)
     assert (done.returncode == 0) == allowed, (label, done.stdout, done.stderr)
 print('passed: the key is for merge-queue refs, main and same-repository pull requests; a fork pull request and every other event is refused')
+
+# --- guard: a same-repository pull request signs only when its authors are on the list at the BASE commit
+with tempfile.TemporaryDirectory() as directory:
+    repo = Path(directory) / 'repo'
+    repo.mkdir()
+    git(repo, 'init', '-q', '-b', 'main')
+    (repo / '.st').mkdir()
+    (repo / '.st/evidence-authors.json').write_text((ROOT / '.st/evidence-authors.json').read_text())
+
+    def commit(message, email, files=None):
+        for name, text in (files or {'f.txt': message}).items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / name).write_text(text)
+        git(repo, 'add', '-A')
+        env = dict(GENV, GIT_AUTHOR_EMAIL=email, GIT_COMMITTER_EMAIL='me@nathanherald.com')
+        done = subprocess.run(['git', '-C', str(repo), 'commit', '-q', '-m', message], capture_output=True, env=env)
+        assert done.returncode == 0, done.stderr.decode()
+        return git(repo, 'rev-parse', 'HEAD')
+
+    base = commit('base', 'me@nathanherald.com')
+    git(repo, 'checkout', '-q', '-b', 'ours')
+    ours = commit('ours', 'me@nathanherald.com')
+    git(repo, 'checkout', '-q', '-b', 'agent', base)
+    agent = commit('agent', 'ci-builder@users.noreply.github.com')
+    git(repo, 'checkout', '-q', '-b', 'outsider', base)
+    first = commit('theirs', 'someone@elsewhere.example')
+    git(repo, 'checkout', '-q', '-b', 'mixed', 'ours')
+    mixed = commit('theirs on top', 'someone@elsewhere.example')
+    git(repo, 'checkout', '-q', '-b', 'widens', base)
+    (repo / '.st/evidence-authors.json').write_text(json.dumps({'logins': ['mallory'], 'emails': ['*']}))
+    widens = commit('widen the list in the same pull request', 'someone@elsewhere.example', {'.st/evidence-authors.json': json.dumps({'logins': ['mallory'], 'emails': ['*']})})
+    git(repo, 'checkout', '-q', '-b', 'nolist')
+    git(repo, 'rm', '-q', '-r', '.st')
+    nolist_base = commit('base without a list', 'me@nathanherald.com', {'g.txt': 'x'})
+    git(repo, 'checkout', '-q', 'ours')
+    nolist_head = commit('head', 'me@nathanherald.com', {'h.txt': 'x'})
+
+    def pr(base_sha, head_sha, opener='myobie', actor='myobie', head_repo='example/repo'):
+        return helper('guard', cwd=repo, env=dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/9/merge', GITHUB_REPOSITORY='example/repo',
+                                                  PR_HEAD_REPOSITORY=head_repo, PR_BASE_SHA=base_sha, PR_HEAD_SHA=head_sha, PR_USER=opener, GITHUB_ACTOR=actor))
+
+    assert pr(base, ours).returncode == 0, pr(base, ours).stdout + pr(base, ours).stderr
+    assert pr(base, agent).returncode == 0, 'an agent builder identity on the list signs'
+    assert pr(base, ours, opener='schickling-assistant').returncode == 0
+    refused = pr(base, first)
+    assert refused.returncode == 1 and 'someone@elsewhere.example' in refused.stdout, refused.stdout
+    assert pr(base, mixed).returncode == 1, 'one outsider commit on top of ours is enough to refuse'
+    assert pr(base, ours, opener='mallory').returncode == 1, 'an opener outside the list is refused'
+    assert pr(base, ours, actor='mallory').returncode == 1, 'someone outside the list re-running or pushing is refused'
+    assert pr(base, ours, opener='').returncode == 1
+    assert pr(base, ours, head_repo='someone/repo').returncode == 1, 'a fork is refused whatever its authors'
+    assert pr(base, widens).returncode == 1, 'a pull request cannot widen the list it is judged by'
+    assert pr(nolist_base, nolist_head).returncode == 1, 'no list at the base commit: nothing signs'
+    assert pr('0' * 40, ours).returncode == 1, 'commits that cannot be found refuse'
+print('passed: a same-repository pull request signs only when its opener, the account that triggered the run and every commit author are on the list at the base commit; an outsider\'s commit on a same-repository branch gets no note')
 
 with tempfile.TemporaryDirectory() as directory:
     tmp = Path(directory)

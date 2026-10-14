@@ -1,0 +1,27 @@
+{
+  "about": "Who may have a pull-request run signed with the CI key. Read from the BASE commit of the pull request, so a pull request cannot widen it. 'logins' are GitHub accounts (checked for whoever opened the pull request and whoever triggered the run; GitHub authenticates these). 'emails' are fnmatch patterns for commit author emails (git author fields are free text, so they only catch a stray commit by someone else). Forks are refused before this list is read.",
+  "logins": [
+    "myobie",
+    "schickling",
+    "schickling-assistant"
+  ],
+  "emails": [
+    "me@nathanherald.com",
+    "myobie@icloud.com",
+    "schickling.j@gmail.com",
+    "myobie@users.noreply.github.com",
+    "*+myobie@users.noreply.github.com",
+    "schickling@users.noreply.github.com",
+    "*+schickling@users.noreply.github.com",
+    "schickling-assistant@users.noreply.github.com",
+    "*+schickling-assistant@users.noreply.github.com",
+    "smalltalk-*@users.noreply.github.com",
+    "ci-builder@users.noreply.github.com",
+    "*-builder@users.noreply.github.com",
+    "noreply@anthropic.com",
+    "codex@openai.com",
+    "*@smalltalk.invalid",
+    "*@agents.invalid",
+    "*@example.invalid"
+  ]
+}
