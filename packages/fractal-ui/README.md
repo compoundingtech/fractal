@@ -37,6 +37,24 @@ pnpm --filter @smalltalk/fractal-ui build-storybook  # packages/fractal-ui/story
 The package is an explicit member of the root pnpm workspace and uses its pinned toolchain, frozen lockfile and lifecycle-script suppression. `bash scripts/ci-fractal-web` runs its typecheck, static Storybook build and strict play gate after the shared install.
 The kit keeps TypeScript 6.0.3 and declares the Node types used by its Storybook configuration explicitly.
 
+The static kit book disables Vite CSS splitting only in its Storybook config.
+`@stylexjs/unplugin` 0.19.0 collects the full book's atomic rules, then appends them
+to one emitted CSS asset; its `cssInjectionTarget` option chooses an existing
+asset, not a preview-head injection. With split CSS, the default choice can be a
+lazy story's stylesheet, leaving direct visits to other stories unstyled.
+With `cssCodeSplit: false`, the shared stylesheet loads from `iframe.html` before
+any story import. Development's runtime CSS injection is unchanged.
+
+After the static build, the web gate runs
+`node packages/fractal-ui/scripts/check-storybook-stylex.mjs`. It requires every
+emitted stylesheet containing StyleX-generated class selectors to be linked as
+a stylesheet in the preview head. This is a load-order-independent check for all
+stories, rather than a visit that could inherit CSS from an earlier story. The
+split-CSS configuration fails because its StyleX-bearing story asset has no such
+head link. A negative control removes those links in memory and must fail the
+same assertion; no built files are modified. This checks asset availability,
+not browser rendering or execution of story plays.
+
 The dev server binds to localhost on a fixed port (53705). To view it from another machine, forward the port, for example `ssh -L 53705:localhost:53705 <host>`, and open http://localhost:53705.
 
 ## Strict play gate
