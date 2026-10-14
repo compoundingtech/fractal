@@ -11,6 +11,7 @@ pub struct SmalltalkRuntime {
     /// Committed launch-source invalidation, independent of append frontiers.
     pub(crate) publication_cache_epoch: Mutex<Option<(i64, bool)>>,
     pub(crate) publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
+    pub(crate) git_change_registry: std::sync::OnceLock<Arc<crate::changes::service::Registry>>,
     /// One registry per graph. Registration alone does not certify source coverage.
     pub(crate) ivm_views: Option<Arc<smallclaims::ivm::Views>>,
     /// Receipt waits and collection sockets share this one commit observer. Publisher
@@ -476,6 +477,20 @@ impl Runtime for SmalltalkRuntime {
 
     fn plan_checkpoint_drops(&self, sealed: &SealedSet) -> DropPlan {
         checkpoint_rules::plan_drops(sealed)
+    }
+
+    fn checkpoint_claim_facts(
+        &self,
+        claim: &ClaimRecord,
+    ) -> smallclaims::store::checkpoint_staging::CheckpointClaimFacts {
+        checkpoint_rules::claim_facts(claim)
+    }
+
+    fn plan_staged_checkpoint_drops(
+        &self,
+        planner: &smallclaims::store::checkpoint_staging::StagedPlanner<'_>,
+    ) -> Result<()> {
+        checkpoint_rules::plan_staged(planner)
     }
 
     fn clear_checkpoint_projections(&self, transaction: &Transaction<'_>) -> Result<()> {
