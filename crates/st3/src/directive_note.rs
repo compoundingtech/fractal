@@ -28,6 +28,21 @@ enum NoteCommand {
     },
     /// Clear your current note. Only persons may clear their own note.
     Clear,
+    /// Attach short context to an agent, mission, mission run or step run.
+    Add {
+        target: String,
+        text: String,
+        #[arg(long = "for", default_value = "me", value_parser = ["me", "agent"])]
+        audience: String,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// Read current subject notes on a target, or authored by you.
+    Ls { target: Option<String> },
+    /// Archive one of your subject notes.
+    Archive { id: String },
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -49,9 +64,10 @@ pub(super) async fn run(
     let actor = super::configured_actor(args.actor.as_deref(), configured_person, "note")?;
     if let Some(own) = std::env::var("ST_AGENT").ok().filter(|own| !own.is_empty()) {
         anyhow::ensure!(actor == own, "an agent must read notes as its own harness identity");
-        anyhow::ensure!(args.command.is_none(), "only a person outside an agent seat can set or clear a note");
+        anyhow::ensure!(!matches!(args.command, Some(NoteCommand::Set { .. } | NoteCommand::Clear)),
+            "only a person outside an agent seat can set or clear a directive note");
     }
-    if args.command.is_some() {
+    if matches!(args.command, Some(NoteCommand::Set { .. } | NoteCommand::Clear)) {
         super::parse_person_subject(&actor).map_err(anyhow::Error::msg)?;
     }
     let Endpoint::Unix(socket) = endpoint else {
@@ -62,6 +78,9 @@ pub(super) async fn run(
     } else {
         Client::unix_as(socket, &actor)?
     };
+    if matches!(args.command, Some(NoteCommand::Add { .. } | NoteCommand::Ls { .. } | NoteCommand::Archive { .. })) {
+        return run_subject_note(&client, &actor, args.command.expect("subject command"), json_output).await;
+    }
     match args.command {
         None => {
             let response: NotesResponse = client
@@ -85,6 +104,7 @@ pub(super) async fn run(
             let (text, expires_at) = match command {
                 NoteCommand::Set { text, expires_at } => (Some(text), expires_at),
                 NoteCommand::Clear => (None, None),
+                NoteCommand::Add { .. } | NoteCommand::Ls { .. } | NoteCommand::Archive { .. } => unreachable!("subject command handled above"),
             };
             let response: NoteResponse = client
                 .request("PUT", "/v1/notes", Some(&json!({
@@ -100,6 +120,41 @@ pub(super) async fn run(
             }
             println!("{}", if text.is_some() { "Note set." } else { "Note cleared." });
         }
+    }
+    Ok(())
+}
+
+async fn run_subject_note(client: &Client, actor: &str, command: NoteCommand, json_output: bool) -> Result<()> {
+    match command {
+        NoteCommand::Add { target, text, audience, session, expires_at } => {
+            let response: serde_json::Value = client.post("/v1/subject-notes", &json!({
+                "target": target, "text": text,
+                "audience": if audience == "me" { "self" } else { "agent" },
+                "session": session, "expires_at": expires_at,
+            })).await.context("could not add subject note")?;
+            if json_output { return super::print_value(&response, true); }
+            println!("{}", response["note"]["id"].as_str().unwrap_or("Note added."));
+        }
+        NoteCommand::Ls { target } => {
+            let query = target.map_or_else(
+                || format!("author={}", urlencoding::encode(actor)),
+                |target| format!("target={}", urlencoding::encode(&target)),
+            );
+            let response: serde_json::Value = client.get(&format!("/v1/client/subject-notes?{query}")).await?;
+            if json_output { return super::print_value(&response, true); }
+            let notes: Vec<st3::store::subject_notes::SubjectNote> = serde_json::from_value(response["notes"].clone())?;
+            if notes.is_empty() { println!("No current subject notes."); }
+            for note in notes {
+                println!("{} — {} on {} at {}\n{}", note.id, note.author, note.target, note.updated_at, note.text);
+            }
+        }
+        NoteCommand::Archive { id } => {
+            let response: serde_json::Value = client.request("PUT",
+                &format!("/v1/subject-notes/{}", urlencoding::encode(&id)), Some(&json!({"text": null}))).await?;
+            if json_output { return super::print_value(&response, true); }
+            println!("Note archived.");
+        }
+        NoteCommand::Set { .. } | NoteCommand::Clear => unreachable!("directive command handled separately"),
     }
     Ok(())
 }
@@ -131,5 +186,25 @@ mod tests {
         assert_eq!(expires_at.as_deref(), Some("2099-01-01T00:00:00Z"));
         assert!(super::super::Cli::try_parse_from(["st", "note", "clear", "--person", "person/other"]).is_err());
         assert!(super::super::Cli::try_parse_from(["st", "note", "set"]).is_err());
+    }
+
+    #[test]
+    fn subject_note_parser_preserves_directive_commands_and_scope() {
+        let cli = super::super::Cli::try_parse_from([
+            "st", "note", "add", "agent/example/worker", "short context", "--for", "agent", "--session", "current",
+        ]).unwrap();
+        let super::super::Command::Note(args) = cli.command else { panic!("expected note") };
+        let Some(NoteCommand::Add { target, text, audience, session, .. }) = args.command else { panic!("expected add") };
+        assert_eq!(target, "agent/example/worker");
+        assert_eq!(text, "short context");
+        assert_eq!(audience, "agent");
+        assert_eq!(session.as_deref(), Some("current"));
+        for argv in [
+            vec!["st", "note", "ls"],
+            vec!["st", "note", "ls", "mission/example"],
+            vec!["st", "note", "archive", "note/person/example/0192f3c4-7a1e-7c3a-9b2d-4f5e6a7b8c9d"],
+        ] {
+            assert!(super::super::Cli::try_parse_from(argv).is_ok());
+        }
     }
 }

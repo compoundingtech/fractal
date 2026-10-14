@@ -88,6 +88,7 @@ pub use published_attention::start_attention_list;
 #[cfg(test)]
 pub(crate) use published_attention::{published_attention_rows, refresh_attention_list};
 mod directive_notes;
+mod subject_notes;
 mod request_latency;
 mod client_observations;
 mod terminal_view;
@@ -513,6 +514,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/capabilities", get(client_capabilities))
         .route("/v1/client/notes", get(directive_notes::read))
         .route("/v1/notes", axum::routing::put(directive_notes::write))
+        .route("/v1/client/subject-notes", get(subject_notes::read))
+        .route("/v1/subject-notes", post(subject_notes::create))
+        .route("/v1/subject-notes/{*id}", axum::routing::put(subject_notes::update))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/arrangements", get(client_v0::arrangements::list))
@@ -987,7 +991,9 @@ async fn response_envelope_unbounded(
         .into_response();
     }
     let started = Instant::now();
-    let client_request = request.uri().path().starts_with("/v1/client/");
+    let client_request = request.uri().path().starts_with("/v1/client/")
+        || request.uri().path() == "/v1/subject-notes"
+        || request.uri().path().starts_with("/v1/subject-notes/");
     let request_id = if client_request {
         crate::relay_trace::current().map_or_else(
             || format!("request/{}", new_request_id()),
