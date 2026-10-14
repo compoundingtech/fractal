@@ -561,6 +561,10 @@ writes the record id to the job summary. The wiring is deliberately conservative
   check whose gate job ran the marker (and should also refuse one whose own job ran `evidence covered by a trusted
   note`, the step a wired job runs only when it skipped its work), and the in-job producers refuse to sign for a
   stage that did not run, so a skip never produces a fresh note for itself.
+- Every signing step is told when its gate skipped: it gets `GATE_SKIP` (true when any gate that can cover that job
+  said skip), and the signing helper then makes no note whatever the job's log or step outcomes say. The aggregate
+  note job `needs` every `evidence-gate-*` job, so it sees them all and refuses to sign when any says skip. Each
+  gate a job reads is one of that job's own `needs`, which a test checks.
 - A skip of `genie-freshness` skips the tests of this machinery too (`ci-evidence-gate-test`,
   `evidence-verify-test`, `genie --check`) for that tree. That is accepted because the note is for the same tree and
   a change to those files is a protected path that always runs in full; a reader must not assume they ran.
