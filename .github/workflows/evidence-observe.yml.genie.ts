@@ -34,7 +34,7 @@ export default githubWorkflow(auditCaches({
       name: 'observe',
       // Merge-group runs of this repository only; a manual replay only from main. No pull
       // request event, fork or branch workflow can reach the observer or its credentials.
-      if: "${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'merge_group' && github.event.workflow_run.head_repository.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}",
+      if: "${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'merge_group' && github.event.workflow_run.conclusion != 'cancelled' && github.event.workflow_run.head_repository.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}",
       'runs-on': [evidenceGroup, evidenceRunner],
       'timeout-minutes': 30,
       defaults: { run: { shell: 'bash' } },

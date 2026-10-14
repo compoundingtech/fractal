@@ -288,7 +288,10 @@ for a pull request or a fork. `scripts/ci-evidence-observe` asks the protected o
 persistent scratch repository, verifies every full-trust record with `scripts/evidence-verify`
 against the key list in `main`, creates `refs/notes/evidence/<record>` and pushes it. It runs no
 check, never replaces an existing ref, and publishes degraded records labelled as unsigned and
-unverified. A full record that does not verify fails the job and creates no ref. The same code
+unverified. A full record that does not verify fails the job and creates no ref. A cancelled
+run has no `linux-gate` job to record (the observer exits 2): the workflow skips cancelled
+runs, and a replay of one reports "nothing to attest" instead of failing. The observer's answer
+is about 20 MB (the base64 object pack), so the script streams it to a file. The same code
 serves a degraded profile (no key) and a full one; the operator's profile decides.
 
 The server rejects a shallow push, and the pack carries the source commit without its history, so
