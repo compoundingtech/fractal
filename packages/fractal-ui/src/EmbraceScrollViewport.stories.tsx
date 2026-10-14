@@ -42,7 +42,7 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
   await frame()
   // ResizeObserver schedules compensation on the next frame; two frames alone race that work.
   await waitFor(() => expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1))
-  await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
+  await userEvent.click(canvas.getByRole('button', { name: 'Scroll to end' }))
   await frame()
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1))
   await expect(canvas.queryByRole('button', { name: 'Scroll to end' })).toBeNull()
