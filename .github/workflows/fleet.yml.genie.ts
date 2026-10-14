@@ -113,6 +113,64 @@ const linuxStageJob = ({
 })
 
 // Required gate. Label events belong to macos.yml so they never restart or cancel this workflow.
+// The Linux group. The jobs that are NOT required checks (the build, the test shards, clippy, fleet
+// compatibility) are skipped at the JOB level, so no runner is allocated. A skipped member shows up as
+// `skipped`, which is exactly what the aggregate evidence note producers refuse to sign for, so a skip cannot
+// refresh its own note. `linux-gate` accepts `skipped` members only when its own gate said skip. The jobs that
+// ARE required checks (mail-redelivery-canaries, isolation-vm) keep running and end in success with their steps
+// skipped, so a required check never reports `skipped`.
+// An existing step condition may be written as a whole `${{ ... }}`. Combining it with another term as text would
+// leave extra characters around the markers, which GitHub reads as a literal and always-true string (actionlint
+// reports it). Strip the markers first, then combine.
+const bareCondition = (condition: unknown) => String(condition).trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '')
+const gateSkip = (gate: string) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`
+const gateRecord = (gate: string) => `\${{ needs.evidence-gate-${gate}.outputs.record }}`
+const jobSkips: Record<string, { gates: string[]; skip: string }> = Object.fromEntries(
+  ['linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat'].map((id) => [
+    id,
+    { gates: ['linux-gate'], skip: gateSkip('linux-gate') },
+  ]),
+)
+// The aggregate note for linux-gate proves its member canaries passed, so either note covers the canaries.
+const stepSkips: Record<string, { gates: string[]; skip: string }> = {
+  'mail-redelivery-canaries': { gates: ['linux-gate', 'mail-redelivery-canaries'], skip: `${gateSkip('linux-gate')} || ${gateSkip('mail-redelivery-canaries')}` },
+  'isolation-vm': { gates: ['isolation-vm'], skip: gateSkip('isolation-vm') },
+}
+const skipStepsWhen = (steps: readonly any[], rule: { gates: string[]; skip: string }) => [
+  ...steps.map((step) =>
+    String(step.uses ?? '').startsWith('actions/checkout') ? step : { ...step, if: step.if == null ? `!(${rule.skip})` : `(${bareCondition(step.if)}) && !(${rule.skip})` },
+  ),
+  {
+    name: 'evidence covered by a trusted note',
+    if: rule.skip,
+    env: { RECORDS: rule.gates.map(gateRecord).join(' ') },
+    run: 'echo "covered by trusted evidence note: $RECORDS" >> "$GITHUB_STEP_SUMMARY"',
+  },
+]
+const wireEvidenceSkips = (jobs: Record<string, any>) => {
+  // The build feeds its dependents, so it may be skipped only when EVERY dependent is skipped, whether at job level
+  // or step level: derived from their rules, never written twice, so the two cannot drift apart.
+  const dependents = Object.keys(jobs).filter((id) => (jobSkips[id] || stepSkips[id]) && (jobs[id].needs ?? []).includes('linux-test-build'))
+  const rules = dependents.map((id) => jobSkips[id] ?? stepSkips[id])
+  const build = {
+    gates: [...new Set(rules.flatMap((rule) => rule.gates))],
+    skip: [...new Set(rules.map((rule) => `(${rule.skip})`))].join(' && '),
+  }
+  const withGates = (job: any, gates: string[]) => ({ ...job, needs: [...job.needs, ...gates.map((gate) => `evidence-gate-${gate}`)] })
+  const jobLevel = (job: any, rule: { gates: string[]; skip: string }) => {
+    const predicate = String(job.if).trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '')
+    return { ...withGates(job, rule.gates), if: `\${{ (${predicate}) && !(${rule.skip}) }}` }
+  }
+  return Object.fromEntries(
+    Object.entries(jobs).map(([id, job]) => {
+      if (id === 'linux-test-build') return [id, jobLevel(job, build)]
+      if (jobSkips[id]) return [id, jobLevel(job, jobSkips[id])]
+      if (stepSkips[id]) return [id, { ...withGates(job, stepSkips[id].gates), steps: skipStepsWhen(job.steps, stepSkips[id]) }]
+      return [id, job]
+    }),
+  )
+}
+
 // Skip a check's heavy steps when its evidence gate decided to skip (docs/st3/gate-evidence.md). The job
 // itself still runs and ends in success, so the check keeps its name and every `needs` on it keeps working.
 // The checkout is never skipped (the job's own cache-coverage report reads the repository), and a gate job
@@ -125,7 +183,7 @@ const skipIfCovered = (check: string, steps: readonly any[]) => {
         ? step
         // An existing condition may be written as a whole `${{ ... }}`; combining it as text would leave extra
         // characters around the markers, which GitHub reads as a literal and always-true string. Strip them first.
-        : { ...step, if: step.if == null ? covered : `(${String(step.if).trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '')}) && ${covered}` },
+        : { ...step, if: step.if == null ? covered : `(${bareCondition(step.if)}) && ${covered}` },
     ),
     {
       name: 'evidence covered by a trusted note',
@@ -216,7 +274,7 @@ export default githubWorkflow(withQueueWatch(readyPRJobs(auditCaches({
     ...defaultActionlintConfig,
     selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
   },
-  jobs: {
+  jobs: wireEvidenceSkips({
     [pickRunnerJobId]: pickRunnerJob,
     // Non-required provenance only: it runs alongside the gate and has no signer or key.
     // Retain the complete effective merge tree even after its ephemeral ref disappears.
@@ -479,7 +537,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
     },
     'linux-gate': {
       name: 'linux-gate',
-      needs: [pickRunnerJobId, 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries'],
+      needs: [pickRunnerJobId, 'evidence-gate-linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries'],
       // A skipped or cancelled stage must fail the gate, so it runs even when a stage failed.
       if: 'always()',
       // Aggregation needs no build caches and must not queue behind the work it summarizes.
@@ -489,7 +547,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         {
           name: 'Require every Linux stage to pass',
           // The stages only: pick-runner is skipped whenever ci1 is off.
-          env: { RESULTS: '${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}', EVENT: '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
+          env: { GATE_SKIP: '${{ needs.evidence-gate-linux-gate.outputs.skip }}', RESULTS: '${{ needs.linux-test-build.result }} ${{ needs.upgrade-impact.result }} ${{ needs.linux-tests.result }} ${{ needs.linux-tests-shard-2.result }} ${{ needs.linux-clippy.result }} ${{ needs.linux-fleet-compat.result }} ${{ needs.mail-redelivery-canaries.result }}', EVENT: '${{ github.event_name }}', MERGE_RESULTS: '${{ needs.linux-tests-shard-3.result }} ${{ needs.linux-tests-shard-4.result }}' },
           run: `set -eu
 set -- $RESULTS
 [ "$#" = 7 ] || { echo "incomplete base-stage results"; exit 1; }
@@ -500,9 +558,13 @@ if [ "$EVENT" = merge_group ]; then
 else
   [ "$MERGE_RESULTS" = "skipped skipped" ] || { echo "extra shards must be merge-only"; exit 1; }
 fi
-echo "stage results: $RESULTS"
+echo "stage results: $RESULTS (evidence skip: \${GATE_SKIP:-none})"
 for result in $RESULTS; do
-  [ "$result" = success ] || exit 1
+  [ "$result" = success ] && continue
+  # A stage the evidence gate skipped reports \`skipped\`; accepted only when this gate decided to skip,
+  # and never a failure or a cancellation.
+  [ "\${GATE_SKIP:-}" = true ] && [ "$result" = skipped ] && continue
+  exit 1
 done`,
         },
       ],
@@ -662,5 +724,5 @@ printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
     // runs have emitted it successfully.
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...fractalWebJobs,
-  },
+  }),
 }, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-isolation-vm": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-mail-redelivery-canaries": "Verifies Git notes only; builds nothing and never skips a check."}))))

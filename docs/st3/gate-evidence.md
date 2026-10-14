@@ -515,9 +515,8 @@ check for the typed `nix` observation is a later slice, agreed with the Nix prod
 Five non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
 `typescript-client`, `isolation-vm`, `genie-freshness`, `mail-redelivery-canaries`), decide whether
 a trusted note already covers the run's tree. They hold `contents: read` only, write nothing and dispatch
-nothing, and every problem becomes `decision=run`. **Today two checks consume the decision:**
-`genie-freshness` and `typescript-client` (below). Nothing else `needs` a gate job; `linux-gate`,
-`isolation-vm` and `mail-redelivery-canaries` still run in full whatever the gate says.
+nothing, and every problem becomes `decision=run`. **Every required check now consumes its gate's decision**: `genie-freshness` and `typescript-client`
+(by skipping their steps), and the Linux group (below).
 
 ### What a skip does
 
@@ -547,6 +546,24 @@ writes the record id to the job summary. The wiring is deliberately conservative
   pull-request time from these two checks.
 - Until a producer writes a note for a check, that check never skips. At the time of writing no note exists for
   these two, so both run in full; the first skip needs a producer.
+
+### The Linux group
+
+`linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
+level, which allocates no runner at all: `linux-tests` and its three shards, `linux-clippy` and
+`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. `linux-test-build` feeds the test shards,
+`mail-redelivery-canaries` and `isolation-vm`, so it skips only when **every one of them** is covered; that
+condition is derived from theirs in the generator, never written twice. The two jobs that are required checks in
+their own right keep running and end in success with their steps skipped, so a required check never reports
+`skipped`: `mail-redelivery-canaries` is covered by its own note or by `linux-gate`'s (the aggregate note proves
+its canaries passed), `isolation-vm` by its own note; both gate their first step, the pre-check that the shared
+build succeeded.
+
+`linux-gate` itself still runs always and still fails on anything but success, with one addition: it reads its gate's
+decision, and a member that reports `skipped` is accepted only when that decision was exactly `true`, never
+for a failure or a cancellation, and the stage counts are still enforced. A skipped job reports `skipped` to
+the aggregate evidence-note producers, which refuse to sign for a skipped member, so a skipped run writes no
+fresh `linux-gate` note.
 
 ### The skip policy
 
