@@ -64,6 +64,8 @@ const HARNESS_READINESS_DEADLINE_MS: u128 = 60_000;
 /// A new incarnation is told where its seat was only while it is new: one the daemon first finds
 /// running much later (a daemon that was down, an upgrade) already has its context.
 const SESSION_START_WINDOW_MS: u128 = 10 * 60 * 1000;
+/// How long a planned restart waits for the seat to write its handoff and say it is ready.
+const RESTART_PREPARE_DEADLINE_MS: u128 = 120_000;
 const WORK_WAKE_RETRY_MS: u128 = 15_000;
 // A mechanical gate may run for minutes. Each poll reruns the entire host reconciliation
 // pass, including PTY snapshots. Ten seconds bounds result recognition without keeping a
@@ -993,6 +995,8 @@ pub struct Reconciler<R = NativeRuntime> {
     /// The latest incarnation of each seat whose start has been looked at, so a pass does no work for
     /// an incarnation it has already handled.
     session_starts: Arc<Mutex<HashMap<String, String>>>,
+    /// How long a planned restart waits for a handoff (see [`RESTART_PREPARE_DEADLINE_MS`]).
+    restart_prepare_deadline_ms: u128,
     /// The wake each running step has armed for its timeout or lease expiry, by step subject.
     step_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
@@ -1163,6 +1167,7 @@ impl Reconciler<NativeRuntime> {
             strict_incremental: false,
             skip_unneeded: std::env::var("ST3_INCREMENTAL").as_deref() != Ok("off"),
             session_starts: Arc::new(Mutex::new(HashMap::new())),
+            restart_prepare_deadline_ms: RESTART_PREPARE_DEADLINE_MS,
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
@@ -1306,6 +1311,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             strict_incremental: true,
             skip_unneeded: false,
             session_starts: Arc::new(Mutex::new(HashMap::new())),
+            restart_prepare_deadline_ms: RESTART_PREPARE_DEADLINE_MS,
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
@@ -1464,6 +1470,13 @@ impl<R: RuntimeControl> Reconciler<R> {
     #[doc(hidden)]
     pub fn skipping_unneeded(mut self, skip: bool) -> Self {
         self.skip_unneeded = skip;
+        self
+    }
+
+    /// How long a planned restart waits for the seat's handoff before it goes ahead.
+    #[doc(hidden)]
+    pub fn with_restart_prepare_deadline(mut self, deadline: Duration) -> Self {
+        self.restart_prepare_deadline_ms = deadline.as_millis();
         self
     }
 
@@ -3012,6 +3025,25 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     if let Some(error) = blocked.take() {
                                         return Err(error);
                                     }
+                                    let reason = format!(
+                                        "the declared {} changed",
+                                        changes.join(" and ")
+                                    );
+                                    let trigger = format!(
+                                        "declared:{}:{}",
+                                        self.store
+                                            .selected_desired_token(&subject.subject)?
+                                            .unwrap_or_default(),
+                                        observation.incarnation_id.as_deref().unwrap_or("")
+                                    );
+                                    if !self.restart_may_proceed(
+                                        &subject.subject,
+                                        &observation,
+                                        &trigger,
+                                        &reason,
+                                    )? {
+                                        return Ok(());
+                                    }
                                     self.record_once(
                                         &subject.subject,
                                         "runtime.reconcile-decision",
@@ -3067,6 +3099,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     member,
                                     &observation,
                                     now_ms(),
+                                )?;
+                                self.reconcile_screen_prompt(
+                                    subject,
+                                    member,
+                                    &observation,
+                                    screen.as_deref(),
+                                    now_ms(),
+                                )?;
+                                self.reconcile_plan_approval(
+                                    subject,
+                                    member,
+                                    &observation,
+                                    screen.as_deref(),
                                 )?;
                                 self.reconcile_claude_channel_consent(
                                     subject,
@@ -3772,6 +3817,111 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Whether a planned restart of `subject` may stop it now. A seat that can answer is first
+    /// sent a "prepare for restart" message with a deadline; the restart waits until the seat has
+    /// written its handoff or said it is ready, or the deadline passes. A seat that is not up and
+    /// ready has nobody to ask, so its restart goes ahead. `trigger` names the restart, so each
+    /// one prepares once however many passes it takes.
+    fn restart_may_proceed(
+        &self,
+        subject: &str,
+        observation: &RuntimeObservation,
+        trigger: &str,
+        reason: &str,
+    ) -> Result<bool> {
+        let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            return Ok(true);
+        };
+        if !self
+            .store
+            .current_harness(subject)?
+            .is_some_and(|harness| harness.incarnation_id == incarnation && harness.is_ready())
+        {
+            return Ok(true);
+        }
+        let key = format!("restart-prepare:{subject}:{trigger}");
+        let now = now_ms();
+        let Some(prepare) = self.store.operation_claim(&key)? else {
+            let deadline = now.saturating_add(self.restart_prepare_deadline_ms);
+            let prepare = self.store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.reconcile-decision".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("key".into(), Value::String("restart-prepare".into())),
+                    ("decision".into(), Value::String("prepare".into())),
+                    ("reason".into(), Value::String(reason.into())),
+                    (
+                        "restart_at_unix_ms".into(),
+                        Value::String(deadline.to_string()),
+                    ),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.clone()),
+            })?;
+            let message_id = &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16];
+            self.store.append_claim(&ClaimInput {
+                subject: format!("message/{message_id}"),
+                kind: "message.sent".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), Value::String("daemon/runtime".into())),
+                    ("to".into(), Value::String(subject.into())),
+                    (
+                        "content".into(),
+                        Value::String(crate::handoff::render_prepare(reason, deadline, now)),
+                    ),
+                    ("status".into(), Value::String("sent".into())),
+                    ("title".into(), Value::String("Prepare for restart".into())),
+                    ("in_reply_to".into(), Value::Null),
+                    (
+                        "tags".into(),
+                        Value::Array(vec![Value::String(format!(
+                            "{}{}",
+                            crate::handoff::PREPARE_TAG_PREFIX,
+                            prepare.id
+                        ))]),
+                    ),
+                ]),
+                evidence: vec![prepare.id],
+                expected_subject: None,
+                idempotency_key: Some(format!("{key}:message")),
+            })?;
+            self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
+            self.signal_changed();
+            return Ok(false);
+        };
+        let deadline = prepare
+            .body
+            .pointer("/fields/restart_at_unix_ms")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u128>().ok())
+            .unwrap_or(0);
+        let ready = crate::handoff::acknowledged_since(
+            &self.store,
+            subject,
+            prepare.accepted_at_unix_ms,
+        )?;
+        if !ready && now < deadline {
+            self.arm_restart(&format!("restart-prepare:{subject}"), deadline);
+            return Ok(false);
+        }
+        self.record_once(
+            subject,
+            "runtime.reconcile-decision",
+            BTreeMap::from([
+                ("key".into(), Value::String("restart-prepare".into())),
+                (
+                    "decision".into(),
+                    Value::String(if ready { "ready" } else { "deadline-passed" }.into()),
+                ),
+                ("reason".into(), Value::String(reason.into())),
+            ]),
+        )?;
+        Ok(true)
+    }
+
     /// Give a seat's new incarnation the handoff its last session left and the live state of its
     /// work, as the first message it sees. Only an incarnation that replaced another, and that is
     /// still new, is told anything: a seat's first incarnation has no predecessor, and one found
@@ -4006,6 +4156,262 @@ impl<R: RuntimeControl> Reconciler<R> {
             idempotency_key: Some(crate::store::native_prompt_gone_key(&blocked.id)),
         })?;
         self.signal_changed();
+        Ok(())
+    }
+
+    /// A prompt only the terminal shows (Claude's new-MCP-server and workspace trust dialogs,
+    /// Codex's trust selection) waits on the seat's person: record it once while the screen shows
+    /// it, so it is an alert, and record it gone when the screen moves on. A person's answer from
+    /// a client is pressed into the dialog with its own keys, only while the screen still shows
+    /// that same dialog, and at most once. Claude's trust dialog is st's to recover first (see
+    /// `reconcile_claude_trust_screen`); it is the person's once that recovery has given up.
+    fn reconcile_screen_prompt(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+        now: u128,
+    ) -> Result<()> {
+        let (Some(driver @ ("claude" | "codex")), true, Some(incarnation), Some(screen)) = (
+            member.driver.as_deref(),
+            member.terminal && subject.kind == "agent",
+            observation.incarnation_id.as_deref(),
+            screen,
+        ) else {
+            return Ok(());
+        };
+        let shown = st_drivers::blocking_screen::screen_prompt(driver, screen)
+            .filter(|prompt| prompt.kind != "plan");
+        let shown = match shown {
+            Some(prompt) if driver == "claude" && prompt.kind == "trust" => {
+                let recent = self
+                    .claude_trust_prompts(&subject.subject)?
+                    .iter()
+                    .filter(|claim| {
+                        now.saturating_sub(claim.accepted_at_unix_ms)
+                            < CLAUDE_TRUST_RECOVERY_WINDOW_MS
+                    })
+                    .count();
+                (recent > CLAUDE_TRUST_RECOVERY_ATTEMPTS).then_some(prompt)
+            }
+            shown => shown,
+        };
+        let open = self.store.open_screen_prompt(&subject.subject, incarnation)?;
+        let same = |fields: &Value, prompt: &st_drivers::blocking_screen::ScreenPrompt| {
+            fields["status"] == prompt.kind && fields["matched_line"] == prompt.title.as_str()
+        };
+        if let Some((claim, _, fields)) = &open
+            && !shown.as_ref().is_some_and(|prompt| same(fields, prompt))
+        {
+            self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "harness.diagnostic".into(),
+                actor: Some(subject.subject.clone()),
+                fields: BTreeMap::from([
+                    ("code".into(), Value::String("native-screen-prompt-gone".into())),
+                    ("status".into(), Value::String("resolved".into())),
+                    ("driver".into(), Value::String(driver.into())),
+                    ("incarnation_id".into(), Value::String(incarnation.into())),
+                ]),
+                evidence: vec![claim.clone()],
+                expected_subject: None,
+                idempotency_key: Some(crate::store::screen_prompt_gone_key(claim)),
+            })?;
+            self.signal_changed();
+        }
+        let Some(prompt) = shown else {
+            return Ok(());
+        };
+        let Some((claim, _, _)) = open.filter(|(_, _, fields)| same(fields, &prompt)) else {
+            // A new prompt: its occurrence is the count of this incarnation's earlier ones, so a
+            // replayed pass records it once and a later prompt of the same kind is its own.
+            let earlier = self
+                .store
+                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .iter()
+                .filter(|claim| {
+                    claim.body.pointer("/fields/code").and_then(Value::as_str)
+                        == Some("native-screen-prompt")
+                        && claim_incarnation(claim) == Some(incarnation)
+                })
+                .count();
+            let mut fields = BTreeMap::from([
+                ("code".into(), Value::String("native-screen-prompt".into())),
+                ("status".into(), Value::String(prompt.kind.into())),
+                ("matched_line".into(), Value::String(prompt.title.clone())),
+                ("driver".into(), Value::String(driver.into())),
+                ("incarnation_id".into(), Value::String(incarnation.into())),
+            ]);
+            // A trust prompt asks about the folder the harness started in: the alert names it.
+            if prompt.kind == "trust" {
+                fields.insert("reason".into(), Value::String(member.cwd.clone()));
+            }
+            self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "harness.diagnostic".into(),
+                actor: Some(subject.subject.clone()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!(
+                    "native-screen-prompt:{}:{incarnation}:{earlier}",
+                    subject.subject
+                )),
+            })?;
+            self.signal_changed();
+            return Ok(());
+        };
+        let (answer, delivered) = self.store.screen_prompt_answer(&claim)?;
+        let Some(answer) = answer.filter(|_| !delivered) else {
+            return Ok(());
+        };
+        let Some(keys) = st_drivers::blocking_screen::screen_prompt_choices(driver, prompt.kind)
+            .iter()
+            .find(|(choice, _)| *choice == answer)
+            .and_then(|(_, label)| prompt.keys_for(label))
+        else {
+            return Ok(());
+        };
+        // Read the screen again just before typing: the keys are only for this exact dialog.
+        let Ok(fresh) = self.member_screen(&member.runtime_id) else {
+            return Ok(());
+        };
+        if st_drivers::blocking_screen::screen_prompt(driver, &fresh).as_ref() != Some(&prompt) {
+            return Ok(());
+        }
+        // Recorded before the keys: replay must never press them twice.
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(subject.subject.clone()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::String("native-screen-prompt-delivered".into())),
+                ("status".into(), Value::String(answer.clone())),
+                ("driver".into(), Value::String(driver.into())),
+                ("incarnation_id".into(), Value::String(incarnation.into())),
+            ]),
+            evidence: vec![claim.clone()],
+            expected_subject: None,
+            idempotency_key: Some(crate::store::screen_prompt_delivered_key(&claim)),
+        })?;
+        self.signal_changed();
+        for (pressed, key) in keys.iter().enumerate() {
+            if let Err(error) = self.runtime.send_key_if(&member.runtime_id, key, incarnation) {
+                // The answer counts as delivered, so it is never pressed again; a dialog left
+                // part way (moved, not confirmed) goes back to the person to answer in the
+                // terminal.
+                self.store.append_claim(&ClaimInput {
+                    subject: subject.subject.clone(),
+                    kind: "harness.diagnostic".into(),
+                    actor: Some(subject.subject.clone()),
+                    fields: BTreeMap::from([
+                        ("code".into(), Value::String("native-screen-prompt-undelivered".into())),
+                        ("severity".into(), Value::String("warning".into())),
+                        ("status".into(), Value::String(answer.clone())),
+                        (
+                            "reason".into(),
+                            Value::String(format!(
+                                "st pressed {pressed} of the {} keys for this answer before the terminal refused one: {error:#}",
+                                keys.len()
+                            )),
+                        ),
+                        ("driver".into(), Value::String(driver.into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                    ]),
+                    evidence: vec![claim.clone()],
+                    expected_subject: None,
+                    idempotency_key: Some(crate::store::screen_prompt_undelivered_key(&claim)),
+                })?;
+                self.signal_changed();
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Approve Claude's plan for the seat's person, who approved it from a client. A hook's allow
+    /// does not approve a plan (measured on Claude Code 2.1.296), so st presses the dialog's first
+    /// approving option, which continues in the seat's own permission mode: only while the screen
+    /// shows that dialog for the very prompt the person approved, and once.
+    fn reconcile_plan_approval(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+    ) -> Result<()> {
+        let (Some("claude"), true, Some(incarnation), Some(screen)) = (
+            member.driver.as_deref(),
+            member.terminal && subject.kind == "agent",
+            observation.incarnation_id.as_deref(),
+            screen,
+        ) else {
+            return Ok(());
+        };
+        let Some(blocked) = self
+            .store
+            .latest_claim(&subject.subject, Some("harness.observed"))?
+        else {
+            return Ok(());
+        };
+        let fields = blocked.body.get("fields").unwrap_or(&blocked.body);
+        let (Some(ownership), Some(transition)) = (
+            fields["ownership_sequence"].as_u64(),
+            fields["transition_sequence"].as_u64(),
+        ) else {
+            return Ok(());
+        };
+        if !crate::store::plan_approval(fields)
+            || fields["blocked_on"] != "human"
+            || fields["incarnation_id"] != incarnation
+        {
+            return Ok(());
+        }
+        let key = format!("native-plan-approved:{}:{ownership}:{transition}", subject.subject);
+        if self.store.native_prompt_state(&subject.subject, ownership, transition)?
+            != (crate::store::NativePromptState::Answered {
+                answer: "approve".into(),
+            })
+            || self.store.operation_recorded(&key)?
+        {
+            return Ok(());
+        }
+        let Some(dialog) = st_drivers::blocking_screen::screen_prompt("claude", screen)
+            .filter(|dialog| dialog.kind == "plan")
+        else {
+            return Ok(());
+        };
+        let Some(keys) = dialog.keys_for("Yes, ") else {
+            return Ok(());
+        };
+        // Read the screen again just before typing: the keys are only for this exact dialog.
+        let Ok(fresh) = self.member_screen(&member.runtime_id) else {
+            return Ok(());
+        };
+        if st_drivers::blocking_screen::screen_prompt("claude", &fresh).as_ref() != Some(&dialog) {
+            return Ok(());
+        }
+        // Recorded before the keys: replay must never press them twice.
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(subject.subject.clone()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::String("native-plan-approved".into())),
+                ("status".into(), Value::String("approve".into())),
+                ("driver".into(), Value::String("claude".into())),
+                ("incarnation_id".into(), Value::String(incarnation.into())),
+            ]),
+            evidence: vec![blocked.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(key),
+        })?;
+        self.signal_changed();
+        for key in keys {
+            self.runtime
+                .send_key_if(&member.runtime_id, key, incarnation)?;
+        }
         Ok(())
     }
 
@@ -7422,6 +7828,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                     &format!("restart blocked: {error:#}"),
                 );
             }
+            if request.body["fields"]["operation"] != crate::handoff::RESTART_NOW_OPERATION
+                && !self.restart_may_proceed(
+                    &subject.subject,
+                    observation,
+                    &request.id,
+                    "a restart was requested",
+                )?
+            {
+                return Ok(true);
+            }
             self.record_member(subject, observation, true)?;
             self.reconcile_runtime_stop(
                 &subject.subject,
@@ -8356,7 +8772,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
                 smallclaims::touched::record_due(|| {
                     self.isolate("mission-run", &subject, || {
-                        let run = self.store.mission_run_for_reconcile(id)?;
+                        let (run, mission) = self.store.mission_run_for_evaluation(id)?;
                         active_generations.insert(run.generation.clone());
                         active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
                         // From the view the evaluation started with: a write it makes changes subjects
@@ -8391,7 +8807,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 }
                             }
                         }
-                        let evaluated = self.evaluate_active_mission_run(&run);
+                        let evaluated = self.evaluate_active_mission_run(&run, mission);
                         // Recovery is diagnostic too: admission and execution writes come first.
                         if (!first_readiness_pending(&run)
                             || now_ms().saturating_sub(first_readiness_since(&run))
@@ -8496,7 +8912,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
     }
 
-    fn evaluate_active_mission_run(&self, run: &MissionRunView) -> Result<bool> {
+    fn evaluate_active_mission_run(
+        &self,
+        run: &MissionRunView,
+        mission: Option<MissionSpec>,
+    ) -> Result<bool> {
         if run.phase == "normal"
             && let Some(reason) = self.store.stale_subscription_pull_request_run(run)?
         {
@@ -8550,7 +8970,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             return self.reconcile_mission_run_cleanup(run);
         }
         let mission_id = run.mission.strip_prefix("mission/").unwrap_or(&run.mission);
-        let Some(mission) = self.store.mission_spec(mission_id, Some(&run.revision))? else {
+        smallclaims::touched::note_read(|| format!("mission/{mission_id}"));
+        let mission = if run.steps.is_empty() {
+            self.store.mission_spec(mission_id, Some(&run.revision))?
+        } else {
+            mission
+        };
+        let Some(mission) = mission else {
             return self.store.set_mission_run_state(
                 &run.id,
                 "blocked",
@@ -9818,7 +10244,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             format!("{base_key}:dispatch-{dispatch}")
         };
         let expected = self.store.mission_run_subject_for_idempotency_key(&key);
-        let existed = self.store.mission_run(&expected)?.is_some();
+        let existed = self.store.mission_run_status(&expected)?.is_some();
         let mut inputs: BTreeMap<String, String> = run
             .inputs
             .iter()
@@ -9839,7 +10265,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         inputs.insert(CANDIDATE_INDEX_INPUT.into(), String::new());
         let child = if existed {
             self.store
-                .mission_run(&expected)?
+                .mission_run_steps(&expected, false)?
                 .context("the existing loop round disappeared")?
         } else {
             match self.store.create_child_mission_run(
@@ -10505,12 +10931,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             candidate.map_or_else(|| "round".into(), |value| format!("candidate-{value}"))
         );
         let subject = self.store.mission_run_subject_for_idempotency_key(&key);
-        if let Some(child) = self.store.mission_run(&subject)? {
-            return Ok(match child.status.as_str() {
+        if let Some(status) = self.store.mission_run_status(&subject)? {
+            return Ok(match status.as_str() {
                 "completed" => LoopBranchOutcome::Completed,
                 "failed" | "cancelled" => LoopBranchOutcome::Failed(format!(
-                    "the loop {label} branch failed in `{}`",
-                    child.subject
+                    "the loop {label} branch failed in `{subject}`"
                 )),
                 _ => LoopBranchOutcome::Pending,
             });
@@ -10577,10 +11002,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         feedback: &str,
         item: Option<&Value>,
         candidate: Option<u32>,
-    ) -> Result<(MissionRunView, bool)> {
+    ) -> Result<()> {
         let subject = self.store.mission_run_subject_for_idempotency_key(&key);
-        if let Some(child) = self.store.mission_run(&subject)? {
-            return Ok((child, false));
+        if self.store.mission_run_status(&subject)?.is_some() {
+            return Ok(());
         }
         let mut inputs = self.child_loop_inputs(run);
         inputs.insert(LOOP_ROUND_INPUT.into(), round.to_string());
@@ -10593,7 +11018,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             CANDIDATE_INDEX_INPUT.into(),
             candidate.map_or_else(String::new, |value| value.to_string()),
         );
-        let child = self.store.create_child_mission_run(
+        self.store.create_child_mission_run(
             &MissionRunRequest {
                 mission: mission.id.clone(),
                 revision: Some(mission.revision.clone()),
@@ -10607,7 +11032,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             &view.subject,
             None,
         )?;
-        Ok((child, true))
+        Ok(())
     }
 
     fn loop_result_claim(
@@ -10724,7 +11149,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 format!("{base_key}:dispatch-{dispatch}")
             };
             let subject = self.store.mission_run_subject_for_idempotency_key(&key);
-            if let Some(child) = self.store.mission_run(&subject)? {
+            if let Some(child) = self.store.mission_run_steps(&subject, false)? {
                 match child.status.as_str() {
                     "running" | "standing" | "blocked" => active += 1,
                     "failed" | "cancelled" => {
@@ -10903,7 +11328,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 format!("{base_key}:dispatch-{dispatch}")
             };
             let subject = self.store.mission_run_subject_for_idempotency_key(&key);
-            if let Some(child) = self.store.mission_run(&subject)? {
+            if let Some(child) = self.store.mission_run_steps(&subject, false)? {
                 match child.status.as_str() {
                     "running" | "standing" | "blocked" => active += 1,
                     "failed" | "cancelled" => {
@@ -17594,7 +18019,7 @@ fn now_ms() -> u128 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[test]
     fn a_seats_own_priority_replaces_the_installs() {
         use super::overlay_runtime_environment;
@@ -17637,6 +18062,7 @@ mod tests {
     mod gate_on_demand;
     mod github_watch_selection;
     mod incremental_deadlines;
+    pub(crate) mod mission_eval_reuse;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;
@@ -18017,6 +18443,8 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         screens: Mutex<HashMap<String, String>>,
         keys: Mutex<Vec<String>>,
         key_error: Mutex<bool>,
+        /// How many keys `send_key_if` takes before it fails, when set.
+        keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
     }
 
@@ -18297,6 +18725,13 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         }
         fn send_key_if(&self, runtime_id: &str, key: &str, incarnation: &str) -> Result<()> {
             anyhow::ensure!(!*self.key_error.lock().unwrap(), "terminal input failed");
+            anyhow::ensure!(
+                self.keys_before_error
+                    .lock()
+                    .unwrap()
+                    .is_none_or(|limit| self.keys.lock().unwrap().len() < limit),
+                "terminal input failed"
+            );
             anyhow::ensure!(
                 self.ptys.lock().unwrap().iter().any(|pty| {
                     pty.runtime_id == runtime_id
@@ -37460,6 +37895,285 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         let second = ask();
         reconciler.reconcile_once().unwrap();
         assert!(!gone(&second.id));
+    }
+
+    /// Claude's new-MCP-server dialog fires no hook (measured on Claude Code 2.1.296), so only the
+    /// screen shows it. It is an alert for the seat's person while it is up; their answer is
+    /// pressed into that same dialog with its own keys, once, and the alert clears when the
+    /// screen moves on.
+    #[test]
+    fn a_screen_only_prompt_is_an_alert_and_its_answer_is_pressed_into_the_dialog_once() {
+        let mcp = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-mcp-server.txt");
+        let working = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.clone(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &mission.subject_tokens, "screen-prompt", Some("person/avery"))
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("seat", "running", "one")];
+        let show = |screen: &str| {
+            runtime
+                .screens
+                .lock()
+                .unwrap()
+                .insert("node.seat".into(), screen.into());
+        };
+        let alert = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
+        show(working);
+        reconciler.reconcile_once().unwrap();
+        assert!(alert().is_none());
+
+        show(mcp);
+        reconciler.reconcile_once().unwrap();
+        reconciler.reconcile_once().unwrap();
+        let shown = alert().expect("the dialog is an alert");
+        assert_eq!(shown.answers, vec!["use", "use-all", "skip"]);
+        assert!(shown.detail.starts_with("New MCP server found in this project: probe-echo."));
+        assert!(
+            shown.detail.contains("Use all also approves every MCP server this project adds later"),
+            "{}",
+            shown.detail
+        );
+        assert_eq!(
+            store
+                .claims_for("agent/node.seat", Some("harness.diagnostic"))
+                .unwrap()
+                .iter()
+                .filter(|claim| claim.body.pointer("/fields/code")
+                    == Some(&serde_json::json!("native-screen-prompt")))
+                .count(),
+            1,
+            "recorded once while it is up"
+        );
+        assert!(runtime.keys.lock().unwrap().is_empty(), "nobody answered yet");
+        assert_eq!(
+            store
+                .answer_native_prompt("agent/node.seat", &shown.episode, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "invalid-answer"
+        );
+        store
+            .answer_native_prompt("agent/node.seat", &shown.episode, "use", "person/avery")
+            .unwrap();
+        assert!(alert().is_none(), "an answered prompt is no longer an alert");
+        reconciler.reconcile_once().unwrap();
+        // From "Continue without" (selected) up to "Use this MCP server", then Return.
+        assert_eq!(runtime.keys.lock().unwrap().as_slice(), ["up", "up", "return"]);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().len(), 3, "pressed once");
+
+        // Claude moves on: the prompt is gone, and a later dialog is its own alert.
+        show(working);
+        reconciler.reconcile_once().unwrap();
+        assert!(alert().is_none());
+        show(mcp);
+        reconciler.reconcile_once().unwrap();
+        let again = alert().expect("a later dialog is its own alert");
+        assert_ne!(again.episode, shown.episode);
+        // A restarted seat's old dialog waits on nobody.
+        *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("seat", "running", "two")];
+        show(working);
+        reconciler.reconcile_once().unwrap();
+        assert!(alert().is_none());
+    }
+
+    /// The answer is recorded delivered before its keys, so it is never pressed twice. When the
+    /// terminal refuses a key part way (the selection moved, Return not pressed), the alert comes
+    /// back for the person to finish in the terminal, saying why, and offers no answer.
+    #[test]
+    fn a_screen_prompt_answer_the_terminal_refused_part_way_goes_back_to_the_person() {
+        let trust = include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-trust.txt");
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.clone(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &mission.subject_tokens, "screen-prompt", Some("person/avery"))
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let member = runtime.started_members.lock().unwrap()[0].clone();
+        *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("seat", "running", "one")];
+        runtime
+            .screens
+            .lock()
+            .unwrap()
+            .insert(member.runtime_id.clone(), trust.into());
+        let alert = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
+        reconciler.reconcile_once().unwrap();
+        let shown = alert().expect("the trust dialog is an alert");
+        assert!(
+            shown.detail.contains(&format!("its workspace {}", member.cwd)),
+            "the alert names the folder it asks about: {}",
+            shown.detail
+        );
+        assert!(shown.detail.contains("Trust trusts that folder"), "{}", shown.detail);
+        let keys = st_drivers::blocking_screen::screen_prompt("codex", trust)
+            .unwrap()
+            .keys_for("No, quit")
+            .unwrap();
+        assert!(keys.len() > 1, "quitting moves the selection, then presses Return");
+        *runtime.keys_before_error.lock().unwrap() = Some(1);
+        store
+            .answer_native_prompt("agent/node.seat", &shown.episode, "quit", "person/avery")
+            .unwrap();
+        assert!(alert().is_none());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().len(), 1, "the second key was refused");
+        let back = alert().expect("a part-way answer goes back to the person");
+        assert_eq!(back.episode, shown.episode);
+        assert!(back.answers.is_empty(), "only the terminal can finish it");
+        assert!(
+            back.detail.contains("may now sit on a different option")
+                && back.detail.contains(&format!("st pressed 1 of the {} keys", keys.len())),
+            "{}",
+            back.detail
+        );
+        *runtime.keys_before_error.lock().unwrap() = None;
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().len(), 1, "never pressed again");
+        runtime
+            .screens
+            .lock()
+            .unwrap()
+            .insert(member.runtime_id.clone(), "› ready".into());
+        reconciler.reconcile_once().unwrap();
+        assert!(alert().is_none(), "it clears when the dialog is gone");
+    }
+
+    /// A plan approved from a client is approved with the plan dialog's own keys, once, and only
+    /// while the dialog is on screen: Claude does not take a hook's allow for a plan.
+    #[test]
+    fn a_plan_approved_from_a_client_is_approved_in_its_dialog_once() {
+        let plan = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-plan-dialog.txt");
+        let working = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.clone(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &mission.subject_tokens, "plan-approval", Some("person/avery"))
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("seat", "running", "one")];
+        let show = |screen: &str| {
+            runtime
+                .screens
+                .lock()
+                .unwrap()
+                .insert("node.seat".into(), screen.into());
+        };
+        // The seat's terminal runs: its prompt waits on its person.
+        show(working);
+        reconciler.reconcile_once().unwrap();
+        let asked = store
+            .append_claim(&ClaimInput {
+                subject: "agent/node.seat".into(),
+                kind: "harness.observed".into(),
+                actor: Some("agent/node.seat".into()),
+                fields: serde_json::from_value(serde_json::json!({
+                    "state": "working", "driver": "claude", "incarnation_id": "one",
+                    "blocked_on": "human", "ask": "permission", "reason": "ExitPlanMode",
+                    "ownership_sequence": 1, "transition_sequence": 3}))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        let alert = store
+            .attention_items(Some("person/avery"))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.kind == "harness-prompt")
+            .unwrap();
+        assert_eq!(alert.answers, vec!["approve", "deny"]);
+        assert!(alert.detail.starts_with("Claude asks you to approve its plan;"));
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.keys.lock().unwrap().is_empty(), "nobody approved it yet");
+        store
+            .answer_native_prompt("agent/node.seat", &asked.id, "approve", "person/avery")
+            .unwrap();
+        // The dialog is not on screen yet: nothing is typed into whatever is.
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.keys.lock().unwrap().is_empty());
+        show(plan);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().as_slice(), ["return"]);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().len(), 1, "approved once");
     }
 
     #[test]

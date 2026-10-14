@@ -7,6 +7,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case agentQueueMove = "agent.queue-move"
     case agentRestart = "agent.restart"
     case agentResume = "agent.resume"
+    case agentRetire = "agent.retire"
     case agentStart = "agent.start"
     case agentStop = "agent.stop"
     case agentSuspend = "agent.suspend"
