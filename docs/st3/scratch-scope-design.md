@@ -277,7 +277,9 @@ checks `SO_PEERCRED` against its exact enrolled UID, PID, process birth, root-co
 systemd unit/cgroup and pinned executable on every mutation. The registry maps that proxy to
 one agent; a request cannot select another agent's identity. Direct CLI processes, proxy
 children and reparented descendants have different PIDs/births and refuse, even when their
-environment is cleared or their cgroup is unchanged. A proxy restart needs trusted
+environment is cleared or their cgroup is unchanged. Retain a pidfd where supported and
+recheck process birth and enrollment at every mutation, not only at connect; `SO_PEERCRED`
+alone does not prevent PID reuse after the peer exits. A proxy restart needs trusted
 re-enrollment; PID reuse must refuse.
 
 The proxy itself needs a protected, authenticated per-seat channel from the enrolled harness
@@ -332,10 +334,15 @@ to prepare a script/image for Intake, then a first run the day after script acce
 is conditional, not a scheduled or authorized run. The proposed backend is two non-root
 containers on one private internal Docker network, no published ports or host mounts,
 read-only rootfs, tmpfs state, capabilities dropped, no-new-privileges and explicit resource
-limits. Proposed enforcement combines a 30-minute runner limit with an operator-owned
+limits. Containers share the host kernel: this interim backend confines honest-agent mistakes
+and bounded-data fixtures, not hostile guest code. It is considered only for data fixtures
+running the fixed reviewed st build and check set; hostile-code tests require a stronger
+separately qualified backend. Proposed enforcement combines a 30-minute runner limit with an operator-owned
 one-hour external cleanup deadline. Docker group access is scheduled for removal by the
 separate #310 installation, so the narrow script invocation/installer authorization remains
-unresolved. No group retention or sudoers change is approved by this note.
+unresolved. Docker-group membership is root-equivalent and must not be the agent's trigger
+authorization. Require a narrow root-owned exact-script trigger with no caller arguments;
+no group retention or sudoers change is approved by this note.
 
 That local-container pair has no cross-host member or Tailscale, and currently specifies no
 qualified Fabric adapter. It can establish a bounded local replication fixture only; it
