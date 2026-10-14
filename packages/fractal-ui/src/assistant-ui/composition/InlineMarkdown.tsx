@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Link } from 'react-aria-components'
-import { parseInlineMarkdown, type InlineNode } from './inline-markdown'
+import { inlineNodesText, parseInlineMarkdown, type InlineNode } from './inline-markdown'
 import { phrasingStyles } from './phrasing.stylex'
 
 export { toPlainText } from './inline-markdown'
@@ -22,16 +22,19 @@ export interface InlineMarkdownProps {
 
 type LinkMode = NonNullable<InlineMarkdownProps['links']>
 
-function renderNodes(nodes: readonly InlineNode[], links: LinkMode): React.ReactNode[] {
+function renderNodes(nodes: readonly InlineNode[], links: LinkMode, depth = 0): React.ReactNode {
+  // Both element construction and React's own traversal stay bounded. Deeper
+  // content remains complete, escaped text rather than disappearing or throwing.
+  if (depth >= 32) return inlineNodesText(nodes)
   return nodes.map((node, key) => {
     switch (node._tag) {
       case 'Text': return <React.Fragment key={key}>{node.text}</React.Fragment>
       case 'Code': return <InlineCode key={key}>{node.code}</InlineCode>
-      case 'Strong': return <strong key={key} {...stylex.props(phrasingStyles.strong)}>{renderNodes(node.children, links)}</strong>
-      case 'Emphasis': return <em key={key} {...stylex.props(phrasingStyles.emphasis)}>{renderNodes(node.children, links)}</em>
+      case 'Strong': return <strong key={key} {...stylex.props(phrasingStyles.strong)}>{renderNodes(node.children, links, depth + 1)}</strong>
+      case 'Emphasis': return <em key={key} {...stylex.props(phrasingStyles.emphasis)}>{renderNodes(node.children, links, depth + 1)}</em>
       case 'Link': return links === 'anchor' && node.href !== undefined
-        ? <Link key={key} href={node.href} target="_blank" rel="noopener noreferrer" {...stylex.props(phrasingStyles.link)}>{renderNodes(node.children, links)}</Link>
-        : <React.Fragment key={key}>{renderNodes(node.children, links)}</React.Fragment>
+        ? <Link key={key} href={node.href} target="_blank" rel="noopener noreferrer" {...stylex.props(phrasingStyles.link)}>{renderNodes(node.children, links, depth + 1)}</Link>
+        : <React.Fragment key={key}>{renderNodes(node.children, links, depth + 1)}</React.Fragment>
     }
   })
 }

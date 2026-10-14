@@ -17,7 +17,7 @@ type Item = InlineNode | Delimiter
 
 const ASCII_PUNCTUATION = /^[!-/:-@[-`{-~]$/
 const SAFE_PROTOCOL = /^(?:https?|ircs?|mailto|xmpp)$/i
-const AUTOLINK = /^<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>/
+const AUTOLINK = /<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>/y
 const isWhitespace = (char: string | undefined) => char === undefined || /\s/u.test(char)
 const isPunctuation = (char: string | undefined) => char !== undefined && /[\p{P}\p{S}]/u.test(char)
 const isEscapable = (char: string | undefined) => char !== undefined && ASCII_PUNCTUATION.test(char)
@@ -37,40 +37,32 @@ const runLength = (source: string, at: number, char: string) => {
   return end - at
 }
 
-/** CommonMark: a code span closes only at a backtick run of exactly the opening run's length. */
-function closingRun(source: string, from: number, length: number): number {
-  for (let at = source.indexOf('`', from); at !== -1;) {
-    const run = runLength(source, at, '`')
-    if (run === length) return at
-    at = source.indexOf('`', at + run)
+/** One suffix table, including partial runs after escapes; no repeated indexOf suffix searches. */
+const codeMatches = (source: string): ReadonlyMap<number, number> => {
+  const ends = new Map<number, number>()
+  const next = new Map<number, number>()
+  for (let at = source.length - 1; at >= 0; at--) {
+    if (source[at] !== '`') continue
+    const end = at + 1
+    while (at > 0 && source[at - 1] === '`') at--
+    for (let start = at; start < end; start++) ends.set(start, next.get(end - start) ?? -1)
+    next.set(end - at, at)
   }
-  return -1
+  return ends
 }
 
 const unescape = (raw: string) => raw.replace(/\\([!-/:-@[-`{-~])/g, '$1')
 
-interface LinkMatch { readonly label: string; readonly destination: string; readonly end: number }
+interface LinkMatch { readonly close: number; readonly start: number; readonly destinationEnd: number; readonly angle: boolean; readonly end: number }
 
 /**
  * Match brackets once, from right to left. Each suffix records its first unmatched
  * closing bracket; an opening bracket skips its complete nested label in O(1).
  * Computing suffixes independently preserves labels even after skipped link destinations.
  */
-const bracketMatches = (source: string): ReadonlyMap<number, number> => {
+const bracketMatches = (source: string, codeEnds: ReadonlyMap<number, number>): ReadonlyMap<number, number> => {
   const closes = new Map<number, number>()
   const nextClose = new Int32Array(source.length + 2).fill(-1)
-  const codeEnds = new Map<number, number>()
-  const nextRun = new Map<number, number>()
-  // Include partial opening runs after an escape; closers must begin a full run.
-  for (let at = source.length - 1; at >= 0; at--) {
-    if (source[at] !== '`') continue
-    const end = at + 1
-    while (at > 0 && source[at - 1] === '`') at--
-    for (let start = at; start < end; start++) {
-      codeEnds.set(start, nextRun.get(end - start) ?? -1)
-    }
-    nextRun.set(end - at, at)
-  }
   let codeRunLength = 0
   for (let at = source.length - 1; at >= 0; at--) {
     const char = source[at]
@@ -147,48 +139,119 @@ function matchLink(source: string, open: number, closes: ReadonlyMap<number, num
   }
   if (source[at] !== ')') return undefined
   return {
-    label: source.slice(open + 1, close),
-    destination: unescape(source.slice(start + (angle ? 1 : 0), destinationEnd)),
+    close, start, destinationEnd, angle,
     end: at + 1,
   }
 }
 
-function scan(source: string, allowLinks: boolean): Item[] {
-  const items: Item[] = []
-  let text = ''
-  const flush = () => {
-    if (text !== '') items.push({ _tag: 'Text', text })
-    text = ''
-  }
-  let at = 0
+function scan(source: string): InlineNode[] {
+  const codes = codeMatches(source)
   let closes: ReadonlyMap<number, number> | undefined
   let destinations: DestinationMatches | undefined
-  while (at < source.length) {
+  const links = new Map<number, LinkMatch>()
+  const openers: number[] = []
+  let inactiveThrough = -1
+  const images = new Set<number>()
+  const autolinks = new Map<number, { readonly url: string; readonly end: number }>()
+  // CommonMark active brackets: a successful inner link deactivates all earlier
+  // link openers. Every opener is pushed/popped once, including failed outer links.
+  for (let at = 0; at < source.length;) {
     const char = source[at]!
-    if (char === '\\' && isEscapable(source[at + 1])) {
+    if (char === '\\' && isEscapable(source[at + 1])) { at += 2; continue }
+    if (char === '`') {
+      const run = runLength(source, at, '`'), end = codes.get(at) ?? -1
+      at = end === -1 ? at + run : end + run
+      continue
+    }
+    if (char === '<') {
+      AUTOLINK.lastIndex = at
+      const match = AUTOLINK.exec(source)
+      if (match !== null) {
+        autolinks.set(at, { url: match[1]!, end: AUTOLINK.lastIndex })
+        inactiveThrough = at
+        at = AUTOLINK.lastIndex
+        continue
+      }
+    }
+    if (char === '!' && source[at + 1] === '[') images.add(at + 1)
+    if (char === '[') openers.push(at)
+    else if (char === ']') {
+      closes ??= bracketMatches(source, codes)
+      const open = openers.pop()
+      if (open !== undefined && (images.has(open) || open > inactiveThrough) && closes.get(open) === at && source[at + 1] === '(') {
+        destinations ??= destinationMatches(source)
+        const link = matchLink(source, open, closes, destinations)
+        if (link !== undefined) {
+          links.set(open, link)
+          // Images retain their alt-label behavior; they do not deactivate links.
+          if (!images.has(open)) inactiveThrough = at
+          at = link.end
+          continue
+        }
+      }
+    }
+    at++
+  }
+  return scanRanges(source, codes, links, autolinks, images)
+}
+
+/** Frames use offsets into the one source and share all lookup tables. Image
+ * groups are transparent ropes until the final expansion, never copied per level. */
+function scanRanges(source: string, codes: ReadonlyMap<number, number>, links: ReadonlyMap<number, LinkMatch>, autolinks: ReadonlyMap<number, { readonly url: string; readonly end: number }>, images: ReadonlySet<number>): InlineNode[] {
+  interface Frame { readonly from: number; readonly to: number; readonly allowLinks: boolean; readonly link?: LinkMatch; readonly image?: boolean; readonly items: Item[]; text: string; at: number }
+  const groups = new Set<InlineNode>()
+  const frames: Frame[] = [{ from: 0, to: source.length, allowLinks: true, items: [], text: '', at: 0 }]
+  let result: InlineNode[] = []
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1]!
+    const { from, to, allowLinks, items } = frame
+    let { at, text } = frame
+    const flush = () => {
+      if (text !== '') items.push({ _tag: 'Text', text })
+      text = ''
+    }
+    if (at >= to) {
+      flush()
+      const children = resolve(items)
+      frames.pop()
+      const parent = frames[frames.length - 1]
+      if (parent === undefined) { result = children; break }
+      const link = frame.link!
+      const transparent = frame.image || !parent.allowLinks
+      const destination = transparent ? '' : unescape(source.slice(link.start + (link.angle ? 1 : 0), link.destinationEnd))
+      const node: InlineNode = { _tag: 'Link', href: safeLinkHref(destination), children }
+      if (transparent) groups.add(node)
+      parent.items.push(node)
+      continue
+    }
+    // Save the cursor even when a token branch continues this loop.
+    const advance = (next: number) => { frame.at = next; frame.text = text }
+    const char = source[at]!
+    if (char === '\\' && at + 1 < to && isEscapable(source[at + 1])) {
       text += source[at + 1]
-      at += 2
+      advance(at + 2)
       continue
     }
     if (char === '`') {
       const run = runLength(source, at, '`')
-      const end = closingRun(source, at + run, run)
+      const match = codes.get(at) ?? -1
+      const end = match < to ? match : -1
       if (end === -1) {
         // An unmatched run is literal backticks, never a code span.
         text += '`'.repeat(run)
-        at += run
+        advance(at + run)
         continue
       }
       flush()
       const raw = source.slice(at + run, end)
       // One leading and one trailing space are stripped when both exist and the span is not only spaces.
       items.push({ _tag: 'Code', code: raw.length >= 2 && raw.startsWith(' ') && raw.endsWith(' ') && raw.trim() !== '' ? raw.slice(1, -1) : raw })
-      at = end + run
+      advance(end + run)
       continue
     }
     if (char === '*' || char === '_') {
       const run = runLength(source, at, char)
-      const before = source[at - 1], after = source[at + run]
+      const before = at === from ? undefined : source[at - 1], after = at + run >= to ? undefined : source[at + run]
       const leftFlanking = !isWhitespace(after) && (!isPunctuation(after) || isWhitespace(before) || isPunctuation(before))
       const rightFlanking = !isWhitespace(before) && (!isPunctuation(before) || isWhitespace(after) || isPunctuation(after))
       flush()
@@ -198,41 +261,56 @@ function scan(source: string, allowLinks: boolean): Item[] {
         canOpen: char === '*' ? leftFlanking : leftFlanking && (!rightFlanking || isPunctuation(before)),
         canClose: char === '*' ? rightFlanking : rightFlanking && (!leftFlanking || isPunctuation(after)),
       })
-      at += run
+      advance(at + run)
       continue
     }
     if (char === '<') {
-      const autolink = AUTOLINK.exec(source.slice(at))
-      if (autolink !== null) {
+      const autolink = autolinks.get(at)
+      if (autolink !== undefined && autolink.end <= to) {
         flush()
-        const url = autolink[1]!
+        const { url } = autolink
         items.push(allowLinks ? { _tag: 'Link', href: safeLinkHref(url), children: [{ _tag: 'Text', text: url }] } : { _tag: 'Text', text: url })
-        at += autolink[0].length
+        advance(autolink.end)
         continue
       }
     }
-    const image = char === '!' && source[at + 1] === '['
+    const image = char === '!' && images.has(at + 1)
     if (char === '[' || image) {
-      closes ??= bracketMatches(source)
-      const labelEnd = closes.get(image ? at + 1 : at)
-      if (labelEnd === undefined || source[labelEnd + 1] !== '(') { text += char; at++; continue }
-      destinations ??= destinationMatches(source)
-      const link = matchLink(source, image ? at + 1 : at, closes, destinations)
-      if (link !== undefined) {
+      const link = links.get(image ? at + 1 : at)
+      if (link !== undefined && link.end <= to) {
         flush()
-        const children = resolve(scan(link.label, false))
-        // Images render their alt text only; a link nested in a link label keeps its label only.
-        if (image || !allowLinks) items.push(...children)
-        else items.push({ _tag: 'Link', href: safeLinkHref(link.destination), children })
-        at = link.end
+        advance(link.end)
+        const start = (image ? at + 1 : at) + 1
+        frames.push({ from: start, to: link.close, allowLinks: false, link, image, items: [], text: '', at: start })
         continue
       }
     }
     text += char
-    at++
+    advance(at + 1)
   }
-  flush()
-  return items
+  return groups.size === 0 ? result : expandGroups(result, groups)
+}
+
+/** Remove only private image/label ropes, preserving the public AST and text merging. */
+function expandGroups(nodes: readonly InlineNode[], groups: ReadonlySet<InlineNode>): InlineNode[] {
+  const output: InlineNode[] = []
+  const frames: { readonly input: readonly InlineNode[]; readonly output: InlineNode[]; at: number }[] = [{ input: nodes, output, at: 0 }]
+  while (frames.length > 0) {
+    const frame = frames[frames.length - 1]!
+    const node = frame.input[frame.at++]
+    if (node === undefined) { frames.pop(); continue }
+    if (node._tag === 'Text' || node._tag === 'Code') {
+      const previous = frame.output[frame.output.length - 1]
+      if (node._tag === 'Text' && previous?._tag === 'Text') frame.output[frame.output.length - 1] = { _tag: 'Text', text: previous.text + node.text }
+      else frame.output.push(node)
+    } else if (groups.has(node)) frames.push({ input: node.children, output: frame.output, at: 0 })
+    else {
+      const children: InlineNode[] = []
+      frame.output.push({ ...node, children })
+      frames.push({ input: node.children, output: children, at: 0 })
+    }
+  }
+  return output
 }
 
 const literal = (item: Item): InlineNode => item._tag === 'Delimiter' ? { _tag: 'Text', text: item.char.repeat(item.count) } : item
@@ -341,12 +419,25 @@ function resolve(items: Item[]): InlineNode[] {
 
 /** Line endings become spaces: the inline subset is single-line phrasing content. */
 export function parseInlineMarkdown(text: string): readonly InlineNode[] {
-  return resolve(scan(text.replace(/\r\n?|\n/g, ' '), true))
+  return scan(text.replace(/\r\n?|\n/g, ' '))
 }
 
-const plain = (nodes: readonly InlineNode[]): string => nodes.map(node => node._tag === 'Text' ? node.text : node._tag === 'Code' ? node.code : plain(node.children)).join('')
+/** Iterative traversal, with one final join even for arbitrarily deep emphasis. */
+export const inlineNodesText = (nodes: readonly InlineNode[]): string => {
+  const parts: string[] = []
+  const stack: { readonly nodes: readonly InlineNode[]; at: number }[] = [{ nodes, at: 0 }]
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1]!
+    const node = frame.nodes[frame.at++]
+    if (node === undefined) { stack.pop(); continue }
+    if (node._tag === 'Text') parts.push(node.text)
+    else if (node._tag === 'Code') parts.push(node.code)
+    else stack.push({ nodes: node.children, at: 0 })
+  }
+  return parts.join('')
+}
 
 /** Markers stripped for `title`, `aria-label` and `textValue`: code, emphasis and link labels keep their text. */
 export function toPlainText(text: string): string {
-  return plain(parseInlineMarkdown(text)).replace(/\s+/g, ' ').trim()
+  return inlineNodesText(parseInlineMarkdown(text)).replace(/\s+/g, ' ').trim()
 }

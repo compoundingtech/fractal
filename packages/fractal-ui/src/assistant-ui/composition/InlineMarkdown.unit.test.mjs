@@ -108,6 +108,116 @@ for (const pattern of ['a* ', '**a']) test(`delimiter search and removal require
   }
 })
 
+// Count real parser work, including native suffix searches/copies (which indexed
+// reads alone cannot see), delimiter walks/shifts, and typed-table allocation.
+const parserWork = source => {
+  let work = 0
+  const indexOf = String.prototype.indexOf, slice = String.prototype.slice
+  const push = Array.prototype.push, splice = Array.prototype.splice, TypedArray = globalThis.Int32Array
+  const counted = new Proxy(Object(source), {
+    get(target, key) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) work++
+      const value = Reflect.get(target, key)
+      return typeof value === 'function' ? value.bind(source) : value
+    },
+  })
+  String.prototype.indexOf = function (needle, from = 0) {
+    const result = indexOf.call(this, needle, from)
+    work += (result === -1 ? this.length : result + String(needle).length) - from
+    return result
+  }
+  String.prototype.slice = function (...args) {
+    const result = slice.apply(this, args)
+    work += result.length
+    return result
+  }
+  globalThis.Int32Array = new Proxy(TypedArray, {
+    construct(target, args) { work += Number(args[0]); return Reflect.construct(target, args) },
+  })
+  Array.prototype.push = function (...values) {
+    work += values.length
+    for (const value of values) if (value?._tag === 'Delimiter') {
+      for (const key of Object.keys(value)) {
+        let stored = value[key]
+        Object.defineProperty(value, key, {
+          configurable: true, enumerable: true,
+          get() { work++; return stored },
+          set(next) { stored = next },
+        })
+      }
+    }
+    return push.apply(this, values)
+  }
+  Array.prototype.splice = function (start, ...args) {
+    work += this.length - start
+    return splice.call(this, start, ...args)
+  }
+  try { parseInlineMarkdown({ replace: () => counted }) }
+  finally {
+    String.prototype.indexOf = indexOf; String.prototype.slice = slice
+    Array.prototype.push = push; Array.prototype.splice = splice; globalThis.Int32Array = TypedArray
+  }
+  return work
+}
+
+const mixedSource = (length, initialSeed) => {
+  let seed = initialSeed
+  const next = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed }
+  const primitives = ['[', ']', '(', ')', '*', '_', '`', '**', 'a', ' ', '\\[', '[x](/x)', '[[x](/in)](/out)', '[a](', '<https:x', '![alt](/x)']
+  const parts = []
+  let size = 0
+  while (size < length) {
+    const part = primitives[(next() >>> 8) % primitives.length]
+    parts.push(part)
+    size += part.length
+  }
+  return parts.join('').slice(0, length)
+}
+
+test('seeded mixed primitives keep parse/plain/React safe with linear measured work through 100k', () => {
+  for (const seed of [314159, 271828, 161803]) {
+    for (const length of [5_000, 10_000, 20_000, 50_000, 100_000]) {
+      const source = mixedSource(length, seed)
+      const work = parserWork(source)
+      assert.ok(work <= 160 * length, `seed ${seed}, ${length} characters: ${work} operations`)
+      assert.doesNotThrow(() => parseInlineMarkdown(source))
+      assert.doesNotThrow(() => toPlainText(source))
+      for (const links of ['label', 'anchor']) assert.doesNotThrow(() => render(source, links))
+    }
+  }
+})
+
+const deepPatterns = {
+  gateHalf: n => '['.repeat(Math.floor(n / 2)) + '](x)'.repeat(Math.floor(n / 8)),
+  gateFifths: n => '['.repeat(Math.floor(n / 5)) + '](x)'.repeat(Math.floor(n / 5)),
+  emphasis: n => ' *a'.repeat(Math.floor(n / 6)) + 'a* '.repeat(Math.floor(n / 6)),
+  images: n => '!['.repeat(Math.floor(n / 6)) + '](x)'.repeat(Math.floor(n / 6)),
+  distinctBackticks: n => {
+    const parts = []
+    let size = 0
+    for (let run = 1; size < n; run++) { const part = '`'.repeat(run) + ' x '; parts.push(part); size += part.length }
+    return parts.join('').slice(0, n)
+  },
+  failedAutolinks: n => '<https:'.repeat(Math.ceil(n / 7)).slice(0, n),
+}
+
+for (const [name, make] of Object.entries(deepPatterns)) test(`deep ${name}: linear work and no parse/plain/React stack failure`, () => {
+  for (const length of [5_000, 10_000, 20_000, 50_000, 100_000]) {
+    const source = make(length)
+    const work = parserWork(source)
+    assert.ok(work <= 160 * source.length, `${name}, ${source.length} characters: ${work} operations`)
+  }
+  const source = make(200_000).padEnd(200_000, ' ')
+  assert.doesNotThrow(() => parseInlineMarkdown(source))
+  assert.doesNotThrow(() => toPlainText(source))
+  for (const links of ['label', 'anchor']) assert.doesNotThrow(() => render(source, links))
+  if (name === 'emphasis') {
+    const markup = render(source)
+    assert.equal([...markup.matchAll(/<em(?:\s|>)/g)].length, 32)
+    assert.equal(markup.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim(), toPlainText(source))
+  }
+})
+
 test('the report prompt renders a code element without literal backticks', () => {
   const markup = render('found that `NOPASSWD: darwin-rebuild` makes')
   assert.match(markup, /<code class="[^"]+">NOPASSWD: darwin-rebuild<\/code>/)
