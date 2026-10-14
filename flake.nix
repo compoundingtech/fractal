@@ -157,6 +157,13 @@
           cargoBuildFlags = [ "-p" "st3" ];
         });
 
+        # Give the historical binary a distinct name in the check-only PATH.
+        # Resolving it there keeps its store identity out of the runtime derivation.
+        messagingCompat = pkgs.runCommand "st3-messaging-compat" { } ''
+          mkdir -p $out/bin
+          ln -s ${messagingBaseline}/bin/st3 $out/bin/st3-messaging-compat
+        '';
+
         # buildRustPackage compiles the workspace once per derivation, so a gate that differs from
         # an existing derivation only by test selection is folded into that derivation's check
         # phase instead of paying for a second compile. These extra runs deliberately mirror
@@ -365,6 +372,26 @@
           };
         };
 
+        # Tests that checks.st3 leaves out because the Nix build sandbox cannot give them what they
+        # need. One named list, a reason and an owner per entry; central CI and the wrapper path
+        # still run every one of them. The check fails if an entry no longer names exactly one
+        # test, and any test not listed here must pass.
+        st3Exclusions =
+          let
+            list = (builtins.fromJSON (builtins.readFile ./nix/st3-check-exclusions.json)).exclusions;
+            key = e: "${e.package}/${e.binary}/${e.test}";
+          in
+          assert pkgs.lib.assertMsg (list != [ ]) "nix/st3-check-exclusions.json lists no exclusion";
+          assert pkgs.lib.assertMsg (builtins.all (e: e.reason != "" && e.owner != "") list)
+            "every st3 check exclusion needs a reason and an owner";
+          assert pkgs.lib.assertMsg (
+            builtins.length (pkgs.lib.unique (map key list)) == builtins.length list
+          ) "st3 check exclusions must be unique";
+          list;
+        st3ExcludedFilter = pkgs.lib.concatMapStringsSep " | " (
+          e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
+        ) st3Exclusions;
+
         st3Check = pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
@@ -423,17 +450,25 @@
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
           checkPhase = ''
             runHook preCheck
+            # Every exclusion must still name exactly one test, or the list has gone stale.
+            cargo nextest list --release --offline --target ${rustHostTarget} \
+              --build-jobs "$NIX_BUILD_CORES" \
+              ${pkgs.lib.escapeShellArgs (pkgs.lib.remove "--no-fail-fast" st3Check.cargoTestFlags)} \
+              --message-format json -E ${pkgs.lib.escapeShellArg st3ExcludedFilter} > excluded-tests.json
+            matched=$(jq '[.["rust-suites"][].testcases | to_entries[] | select(.value["filter-match"].status == "matches")] | length' excluded-tests.json)
+            if [ "$matched" -ne ${toString (builtins.length st3Exclusions)} ]; then
+              echo "nix/st3-check-exclusions.json lists ${toString (builtins.length st3Exclusions)} tests but $matched match; remove or fix the stale entries" >&2
+              exit 1
+            fi
             cargo nextest run --release --offline --target ${rustHostTarget} \
               --build-jobs "$NIX_BUILD_CORES" --test-threads "$NIX_BUILD_CORES" --retries 0 \
+              -E ${pkgs.lib.escapeShellArg "not (${st3ExcludedFilter})"} \
               ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags} \
               -- ${pkgs.lib.escapeShellArgs st3Check.checkFlags}
             cargo test --doc --release --offline --target ${rustHostTarget} \
               -j "$NIX_BUILD_CORES" ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags}
             runHook postCheck
           '';
-          ST3_MESSAGING_COMPAT_BIN = "${messagingBaseline}/bin/st3";
-          ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
-          ST3_OTEL_REQUIRE = "1";
           # These two tests put an openpty(3) terminal into raw mode. In the macOS Nix build one
           # fails and the other hangs, so they run on Linux only until they pass on macOS.
           checkFlags = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
@@ -446,6 +481,14 @@
           # macOS /etc/profile otherwise puts host tools (such as /bin/ps, which
           # cannot execute in the sandbox) ahead of their declared Nix equivalents.
           preCheck = ''
+            # These tools enter PATH only through nativeCheckInputs. Do not put
+            # their store paths in attributes inherited by the unchecked package.
+            # Preserve the historical executable name for its CLI dispatch and
+            # fixtures that copy the binary: pass the original .../bin/st3 path.
+            ST3_MESSAGING_COMPAT_BIN=$(readlink -f "$(command -v st3-messaging-compat)")
+            ST3_OTELITE_BIN=$(command -v otelite)
+            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN
+            export ST3_OTEL_REQUIRE=1
             export HOME=$(mktemp -d)
             export SHELL=${pkgs.bashInteractive}/bin/bash
             printf 'export PATH=%q\n' "$PATH" > "$HOME/.bash_profile"
@@ -470,11 +513,15 @@
             pkgs.which
             pkgs.cargo-nextest
             pkgs.python3
+            # Evidence fixtures make throwaway SSH signing keys and let Git verify the signed
+            # notes; git itself comes from nativeBuildInputs above.
+            pkgs.openssh
             # Boot cleanup fixtures query their isolated daemon with curl.
             pkgs.curl
             pkgs.nodejs
             ptyPackage
             effect-utils.packages.${system}.otelite
+            messagingCompat
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.util-linux pkgs.systemd ]
           # Native session discovery lists processes with ps and lsof on macOS (Linux reads /proc).
@@ -502,7 +549,6 @@
         # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
         st3 = st3Check.overrideAttrs (_: {
           doCheck = false;
-          ST3_MESSAGING_COMPAT_BIN = "";
         });
 
         st3Help = pkgs.runCommand "st3-help-${version}" {
@@ -822,6 +868,12 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
+        checks.st3-runtime-inputs =
+          assert import ./nix/st3-runtime-input-tests.nix {
+            inherit self system;
+            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils messaging-baseline; };
+          };
+          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
         checks.st3-help = st3Help;
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
