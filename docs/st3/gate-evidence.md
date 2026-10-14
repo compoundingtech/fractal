@@ -17,7 +17,7 @@ is `https://smalltalk.dev/evidence/gate/v1`. Its fields are:
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Predicate schema version, initially `1`; unknown versions fail closed. |
-| `change_id` | Nonempty stable identifier; currently supplied by the workflow pending the change format. |
+| `change_id` | Nonempty free label in the signed predicate; supplied by the workflow or the wrapper. Nothing matches or filters on it. |
 | `signer` | Exact SSH principal in the caller's allowed-signers file, or null for degraded records. |
 | `tier` | `full`, `degraded`, or `test`; a signature alone never promotes a tier. |
 | `re_attests` | Optional degraded record ID when a fresh full-trust test run re-attests the same keyed check. |
@@ -184,8 +184,10 @@ The workflow embeds its producer in a temporary file outside the checkout. The
 receipt measures those actual script bytes. The artifact is retained for 14 days,
 including source objects whose synthetic merge ref has since moved or disappeared.
 
-`change_id` is `github:OWNER/REPO#NUMBER` for a PR or merge queue entry, pending the
-changes-in-git format. A queue entry can contain additional changes: its source
+`change_id` is a free label in the signed predicate. Today it is `github:OWNER/REPO#NUMBER`
+for a PR or merge queue entry in the source receipt, `github:OWNER/REPO@SHA` in the aggregate
+note, and `local:<commit>` from the local wrapper. Nothing reads a commit message, and no
+trailer or ref is needed. A queue entry can contain additional changes: its source
 and tree still identify the whole tested checkout. A manual run uses
 `github:OWNER/REPO@SOURCE`, without inventing a PR identity.
 
