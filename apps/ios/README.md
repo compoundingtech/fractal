@@ -61,12 +61,21 @@ python3 apps/ios/scripts/release_delivery.py \
   --developer-dir "$DEVELOPER_DIR"
 ```
 
+The script starts nothing by itself: delivery runs only when a separately
+configured host scheduler invokes it, and this repository ships no scheduler.
+
 The default ref is `origin/main`. Set `--ref` or `ST_IOS_REF` to another
 `origin/<branch>` (including an integration branch for unmerged app changes),
 or to a local branch in the source repository. Remote branches are fetched
 directly from the source repository's `origin`; the source checkout is never
 changed. A private dedicated clone, signed artifacts, and retry state live
 under `--state`. Use a separate state directory for each device/team.
+The tracked ref must be a branch only trusted maintainers can push, such as
+protected `origin/main`: its own code runs on the signing Mac by design (the
+Expo configuration and plugins, `export:ios`, Metro, CocoaPods, and Xcode
+build phases). The workspace install passes `--ignore-scripts`, so dependency
+lifecycle scripts never run there, even if the ref drops the workspace's
+`ignoreScripts` setting.
 Use `--build-only` or `ST_IOS_BUILD_ONLY=1` to prepare a signed artifact while
 phone access is held; remove the hold to install the same artifact without
 rebuilding. Before signing, the generated app's `Info.plist` receives the full
@@ -126,7 +135,7 @@ Delivery compares content, not commits. The observed head is the tracked ref
 from the last successful fetch, updated on every fetch, including reverts and
 app-irrelevant commits. Its content key hashes the Git trees of `apps/ios` and
 its local-package closure together with the inputs outside the revision: the
-Xcode directory, Node/npm/CocoaPods paths, inherited `EXPO_PUBLIC_*` values,
+Xcode directory, Node/pnpm/CocoaPods paths, inherited `EXPO_PUBLIC_*` values,
 and the pinned native environment. Builds always run with the daily Release
 values `APP_VARIANT=daily`, `ST3_FABRIC_PROOF=0` (read by `StFabric.podspec`),
 and `ST3_FABRIC_OFFLINE_DEBUG=0` (read by `metro.config.js`), so an inherited
@@ -140,7 +149,10 @@ count and the last assigned version plus one, so it never decreases across
 reverts, earlier refs, or branch switches. Every install checks it against the
 installed version; an artifact with a lower version is rebuilt instead.
 A pending artifact for other content is dropped, never installed.
-An unsuccessful build cannot be installed. A successful build is retained
+An unsuccessful build cannot be installed. A failed content key is retried
+after 15 minutes, then after 30, doubling up to six hours (`--build-backoff`
+or `ST_IOS_BUILD_BACKOFF` sets the first delay in seconds); new content, such
+as a fix, revert, or input change, builds on the next tick. A successful build is retained
 until installation and launch both succeed; an unreachable or locked phone
 is retried on the next tick without rebuilding. While the ref cannot be
 fetched, the last observed head is used, never an older revision, and is
@@ -159,11 +171,19 @@ zero is appropriate for a coordinated proof when the phone is not being used.
 
 Every invocation records outcomes to `outcomes.jsonl` and stdout; each build
 has `artifacts/<commit>/build.log`. `state.json` records the observed head and
-its content key, the pending signed artifact, and the installed content.
+its content key, the pending signed artifact, the installed content, and the
+installed and last assigned build versions. Every state file is written to a
+temporary file, fsynced, and renamed over the old one. An unreadable
+`state.json` is never replaced with fresh state, which could lower
+`CFBundleVersion`: the tick records `state_corrupt`, exits nonzero, and neither
+builds nor touches the phone until an operator restores or repairs the file.
 Optionally set both `--notify-from` and `--notify-to` (or
 `ST_IOS_NOTIFY_FROM`/`ST_IOS_NOTIFY_TO`) to send state changes with
 `st conversations send`: each newly installed commit, a new build failure,
 or device unavailability lasting over one hour (once until recovery).
+A notification carries only the outcome, time, commit, build version, and
+exit status; raw tool errors and log paths, which can name the device or
+signing identity, stay in `outcomes.jsonl`.
 Unchanged ticks stay in the log only. Notification failures do not discard
 delivery state or stop installation.
 Keep all logs and state private: native tools include signing/device details.

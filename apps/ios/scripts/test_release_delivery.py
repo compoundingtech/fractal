@@ -51,7 +51,7 @@ if name == "nice":
     assert args[:2] == ["-n", "19"], args
     os.execvpe(args[2], args[2:], os.environ)
 if name == "pnpm":
-    if args == ["install", "--frozen-lockfile"]:
+    if args == ["install", "--frozen-lockfile", "--ignore-scripts"]:
         for package in ("", "apps/ios", "clients/typescript/st3-views", "clients/typescript/st3-client"):
             (Path.cwd() / package / "node_modules").mkdir(parents=True, exist_ok=True)
         sys.exit(0)
@@ -174,6 +174,8 @@ class ReleaseDeliveryTests(unittest.TestCase):
             "ST_IOS_NOTIFY_TO": "",
             "ST_IOS_MAX_DEFERRAL": "2400",
             "ST_IOS_BUILD_ONLY": "0",
+            # Most tests exercise retries directly; backoff has its own test.
+            "ST_IOS_BUILD_BACKOFF": "0",
         })
         self.git("init", "--bare", "--initial-branch=main", str(self.origin), cwd=self.root)
         self.git("init", "--initial-branch=main", str(self.source), cwd=self.root)
@@ -899,6 +901,82 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assertNotIn("notified_unavailable", self.saved_state())
         self.assertEqual([event["outcome"] for event in self.notifications()], ["install_failed", "installed"])
         self.assertEqual(len(self.commands("xcodebuild")), 1)
+
+    def age_failed_build(self, seconds):
+        data = self.saved_state()
+        data["failed_build"]["at"] -= seconds
+        (self.state / "state.json").write_text(json.dumps(data))
+
+    def test_failed_build_backs_off_per_content_key_and_new_content_builds_at_once(self):
+        self.env["ST_IOS_BUILD_BACKOFF"] = "900"
+        self.configure(build_exit=65)
+        self.invoke()
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+        self.assertEqual(self.saved_state()["failed_build"]["attempts"], 1)
+        self.invoke()
+        self.assertEqual(self.outcomes()[-1], "build_backoff")
+        self.assertEqual(len(self.commands("xcodebuild")), 1)
+        # The first retry waits 900 seconds, the next 1800.
+        self.age_failed_build(901)
+        self.invoke()
+        self.assertEqual(self.outcomes()[-1], "build_failed")
+        self.assertEqual(self.saved_state()["failed_build"]["attempts"], 2)
+        self.age_failed_build(901)
+        self.invoke()
+        self.assertEqual(self.outcomes()[-1], "build_backoff")
+        self.assertEqual(len(self.commands("xcodebuild")), 2)
+        # A fix is new content: it builds on the next tick and clears the backoff.
+        self.configure(build_exit=0)
+        fixed = self.change_js("build-fix")
+        self.reconcile()
+        self.assertEqual(len(self.commands("xcodebuild")), 3)
+        self.assert_installed(fixed)
+        self.assertNotIn("failed_build", self.saved_state())
+
+    def test_workspace_install_never_runs_dependency_lifecycle_scripts(self):
+        self.reconcile("--build-only")
+        self.assertEqual([entry["args"] for entry in self.install_commands()],
+                         [["install", "--frozen-lockfile", "--ignore-scripts"]])
+
+    def test_corrupt_state_fails_closed_and_is_preserved(self):
+        self.reconcile()
+        self.assert_installed(self.initial_commit)
+        valid = (self.state / "state.json").read_bytes()
+        self.change_js("after-corruption")
+        for corrupt in (b'{"installed": ', b"[]", b"\xff\xfe"):
+            with self.subTest(corrupt=corrupt):
+                commands = len(self.commands())
+                (self.state / "state.json").write_bytes(corrupt)
+                result = self.invoke()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(self.outcomes()[-1], "state_corrupt")
+                # The version floor is never discarded or overwritten, and
+                # nothing builds, fetches into a build, or touches the phone.
+                self.assertEqual((self.state / "state.json").read_bytes(), corrupt)
+                self.assertEqual(self.commands()[commands:], [])
+        (self.state / "state.json").write_bytes(valid)
+        self.reconcile()
+        self.assertEqual(self.installed_build_version(), 2)
+
+    def test_notifications_carry_no_raw_tool_errors_or_log_paths(self):
+        self.enable_notifications()
+        self.configure(build_exit=65)
+        self.invoke()
+        self.configure(build_exit=0, install_exit=1)
+        self.change_js("redacted-install")
+        self.invoke()
+        self.age_unavailability()
+        self.invoke()
+        bodies = [entry["args"][entry["args"].index("--body") + 1] for entry in self.commands("st")]
+        self.assertEqual([json.loads(body)["outcome"] for body in bodies], ["build_failed", "install_failed"])
+        for body in bodies:
+            self.assertLessEqual(set(json.loads(body)), {"at", "outcome", "commit", "build_version", "exit", "retry_at"})
+            for private in ("TEST-DEVICE", str(self.state), "devicectl"):
+                self.assertNotIn(private, body)
+        # The private outcome log keeps the full diagnosis.
+        log = (self.state / "outcomes.jsonl").read_text()
+        self.assertIn("TEST-DEVICE", log)
+        self.assertIn("build.log", log)
 
     def test_js_only_changes_reuse_native_cache_but_reset_inlined_js_transforms(self):
         self.reconcile("--build-only")

@@ -66,9 +66,44 @@ def content_key(repo, commit, identity):
 
 
 def save(path, data):
+    """Replace `path` atomically and durably: a crash leaves the old or new file."""
     temporary = path.with_suffix(".new")
-    temporary.write_text(json.dumps(data, indent=2) + "\n")
+    with temporary.open("w") as file:
+        file.write(json.dumps(data, indent=2) + "\n")
+        file.flush()
+        os.fsync(file.fileno())
     temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+class StateCorrupt(ValueError):
+    """`state.json` is unreadable; it holds the monotonic version floor."""
+
+
+def load_state(path):
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (UnicodeDecodeError, ValueError) as error:
+        raise StateCorrupt(f"{path.name} is not valid JSON: {type(error).__name__}") from error
+    if not isinstance(data, dict):
+        raise StateCorrupt(f"{path.name} is not a JSON object")
+    return data
+
+
+# Failed builds of one content key back off exponentially from
+# ST_IOS_BUILD_BACKOFF seconds, capped at six hours; new content retries at once.
+BUILD_BACKOFF_CAP = 6 * 3600
+
+
+# Fields a notification may carry. Raw tool errors, log paths and command lines
+# can name the device, signing identity or host, so they stay in the private log.
+NOTIFICATION_FIELDS = ("at", "outcome", "commit", "build_version", "exit", "retry_at")
 
 
 # Environment read by the app's native and bundler configuration, pinned to
@@ -129,7 +164,9 @@ def build_release(args):
     identities = {"workspace": identity}
     if (inputs.get("packages") != identities
             or not (repo / "node_modules").is_dir()):
-        run(["pnpm", "install", "--frozen-lockfile"], cwd=repo, env=env)
+        # Dependency lifecycle scripts never run on the signing host, whatever
+        # the tracked ref's workspace configuration says.
+        run(["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"], cwd=repo, env=env)
         inputs["packages"] = identities
         save(inputs_file, inputs)
     else:
@@ -219,7 +256,7 @@ class Delivery:
         self.state = args.state
         self.state.mkdir(parents=True, exist_ok=True)
         self.file = self.state / "state.json"
-        self.data = json.loads(self.file.read_text()) if self.file.exists() else {}
+        self.data = {}
         self.env = os.environ.copy()
         self.env["DEVELOPER_DIR"] = args.developer_dir
 
@@ -247,10 +284,11 @@ class Delivery:
         if (marker and self.data.get(marker[0]) != marker[1]
                 and self.args.notify_from and self.args.notify_to):
             # Notification errors must not discard an artifact or stop delivery.
+            body = json.dumps({key: event[key] for key in NOTIFICATION_FIELDS if key in event})
             try:
                 run(["st", "--daemon-wait", "0", "conversations", "send",
                      "--from", self.args.notify_from, self.args.notify_to,
-                     "--subject", "iOS Release delivery", "--body", line], timeout=10)
+                     "--subject", "iOS Release delivery", "--body", body], timeout=10)
                 self.data[marker[0]] = marker[1]
                 self.persist()
             except (OSError, subprocess.SubprocessError) as error:
@@ -419,6 +457,18 @@ class Delivery:
         gate = shutil.which("gate-slot")
         if not gate:
             raise ValueError("gate-slot is required for heavy-job admission")
+        # A failed content key waits out its backoff instead of rebuilding on
+        # every tick; new content (a fix, revert, or input change) builds at once.
+        failed = self.data.get("failed_build")
+        attempts = 1
+        if failed and failed["key"] == key:
+            delay = min(self.args.build_backoff * 2 ** (failed["attempts"] - 1), BUILD_BACKOFF_CAP)
+            retry_at = failed["at"] + delay
+            if time.time() < retry_at:
+                self.record("build_backoff", commit=commit, attempts=failed["attempts"],
+                            retry_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(retry_at)))
+                return None
+            attempts = failed["attempts"] + 1
         git(repo, "checkout", "--detach", commit)
         # CFBundleVersion must never decrease across refs, reverts, or branch
         # switches: the commit count alone is not monotonic, so successful
@@ -441,10 +491,13 @@ class Delivery:
         with (output / "build.log").open("a") as log:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
         if result.returncode or not (output / "success.json").exists():
+            self.data["failed_build"] = {"key": key, "attempts": attempts, "at": time.time()}
+            self.persist()
             self.record("build_failed", commit=commit, exit=result.returncode,
                         log=str(output / "build.log"))
             return None
         self.data["last_build_version"] = version
+        self.data.pop("failed_build", None)
         self.persist()
         self.record("built", commit=commit, log=str(output / "build.log"))
         return json.loads((output / "success.json").read_text())
@@ -462,6 +515,9 @@ def main():
     parser.add_argument("--notify-to", default=os.environ.get("ST_IOS_NOTIFY_TO"))
     parser.add_argument("--max-deferral", type=int,
                         default=int(os.environ.get("ST_IOS_MAX_DEFERRAL", "2400")))
+    parser.add_argument("--build-backoff", type=int,
+                        default=int(os.environ.get("ST_IOS_BUILD_BACKOFF", "900")),
+                        help="Seconds before the first retry of a failed content key; doubles per failure")
     parser.add_argument("--build-only", action="store_true",
                         default=os.environ.get("ST_IOS_BUILD_ONLY") == "1",
                         help="Retain a signed artifact without touching the phone")
@@ -489,7 +545,14 @@ def main():
             return
         try:
             # Read after locking: another invocation may have just persisted.
-            delivery.data = json.loads(delivery.file.read_text()) if delivery.file.exists() else {}
+            delivery.data = load_state(delivery.file)
+        except (OSError, StateCorrupt) as error:
+            # The state holds the installed and last assigned build versions:
+            # a fresh state could lower CFBundleVersion. Fail closed, leave the
+            # file untouched for inspection, and neither build nor install.
+            delivery.record("state_corrupt", reason=str(error))
+            sys.exit(1)
+        try:
             delivery.reconcile()
         except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
             delivery.record("error", reason=str(error))
