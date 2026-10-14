@@ -2092,6 +2092,50 @@ pub struct MessageView {
     pub created_index: u64,
 }
 
+/// A definitive first-send refusal. Transport loss remains MessageSendUnconfirmed.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "variant")]
+pub enum MessageSendRefusal {
+    Retired {
+        recipient: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        successor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transfer: Option<String>,
+    },
+    LifecycleUnavailable {
+        recipient: String,
+        reason: LifecycleUnavailableReason,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LifecycleUnavailableReason {
+    Unavailable,
+    Conflict,
+}
+
+impl MessageSendRefusal {
+    pub fn into_error(self) -> St3Error {
+        let (code, variant, recipient) = match &self {
+            Self::Retired { recipient, .. } => ("recipient-retired", "Retired", recipient),
+            Self::LifecycleUnavailable { recipient, .. } => {
+                ("lifecycle-unavailable", "LifecycleUnavailable", recipient)
+            }
+        };
+        St3Error::new(
+            code,
+            format!("{variant}: recipient `{recipient}` refuses this first send"),
+        )
+        .with_detail("applied", "none")
+        .with_detail(
+            "refusal",
+            serde_json::to_value(&self).expect("refusal serializes"),
+        )
+    }
+}
+
 impl MessageView {
     /// A long body as the attachment record it is kept as: a file on the member that took the
     /// send, fetched from there like an image. See [`crate::message_body`].

@@ -372,6 +372,26 @@
           };
         };
 
+        # Tests that checks.st3 leaves out because the Nix build sandbox cannot give them what they
+        # need. One named list, a reason and an owner per entry; central CI and the wrapper path
+        # still run every one of them. The check fails if an entry no longer names exactly one
+        # test, and any test not listed here must pass.
+        st3Exclusions =
+          let
+            list = (builtins.fromJSON (builtins.readFile ./nix/st3-check-exclusions.json)).exclusions;
+            key = e: "${e.package}/${e.binary}/${e.test}";
+          in
+          assert pkgs.lib.assertMsg (list != [ ]) "nix/st3-check-exclusions.json lists no exclusion";
+          assert pkgs.lib.assertMsg (builtins.all (e: e.reason != "" && e.owner != "") list)
+            "every st3 check exclusion needs a reason and an owner";
+          assert pkgs.lib.assertMsg (
+            builtins.length (pkgs.lib.unique (map key list)) == builtins.length list
+          ) "st3 check exclusions must be unique";
+          list;
+        st3ExcludedFilter = pkgs.lib.concatMapStringsSep " | " (
+          e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
+        ) st3Exclusions;
+
         st3Check = pkgs.rustPlatform.buildRustPackage {
           pname = "st3";
           inherit version;
@@ -430,8 +450,19 @@
           # pollute CPU measurements and outlive the daemon delivery-presence startup grace.
           checkPhase = ''
             runHook preCheck
+            # Every exclusion must still name exactly one test, or the list has gone stale.
+            cargo nextest list --release --offline --target ${rustHostTarget} \
+              --build-jobs "$NIX_BUILD_CORES" \
+              ${pkgs.lib.escapeShellArgs (pkgs.lib.remove "--no-fail-fast" st3Check.cargoTestFlags)} \
+              --message-format json -E ${pkgs.lib.escapeShellArg st3ExcludedFilter} > excluded-tests.json
+            matched=$(jq '[.["rust-suites"][].testcases | to_entries[] | select(.value["filter-match"].status == "matches")] | length' excluded-tests.json)
+            if [ "$matched" -ne ${toString (builtins.length st3Exclusions)} ]; then
+              echo "nix/st3-check-exclusions.json lists ${toString (builtins.length st3Exclusions)} tests but $matched match; remove or fix the stale entries" >&2
+              exit 1
+            fi
             cargo nextest run --release --offline --target ${rustHostTarget} \
               --build-jobs "$NIX_BUILD_CORES" --test-threads "$NIX_BUILD_CORES" --retries 0 \
+              -E ${pkgs.lib.escapeShellArg "not (${st3ExcludedFilter})"} \
               ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags} \
               -- ${pkgs.lib.escapeShellArgs st3Check.checkFlags}
             cargo test --doc --release --offline --target ${rustHostTarget} \

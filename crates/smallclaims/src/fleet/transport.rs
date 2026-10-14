@@ -203,17 +203,29 @@ struct Finished {
 }
 
 async fn run_raw(program: &Path, arguments: &[&str]) -> Result<Finished> {
-    let output = tokio::time::timeout(
-        COMMAND_TIMEOUT,
-        tokio::process::Command::new(program)
-            .args(arguments)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .with_context(|| format!("{} {} timed out", program.display(), arguments.join(" ")))?
-    .with_context(|| format!("run {}", program.display()))?;
+    // Exec fails with "text file busy" while another process still holds the program open for
+    // writing: Fabric replaced by `fabric update`, or a file a sibling fork has not yet let go
+    // of. It clears within moments, so wait it out a few times instead of failing the call.
+    let mut busy = 0;
+    let output = loop {
+        let attempt = tokio::time::timeout(
+            COMMAND_TIMEOUT,
+            tokio::process::Command::new(program)
+                .args(arguments)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .with_context(|| format!("{} {} timed out", program.display(), arguments.join(" ")))?;
+        match attempt {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && busy < 5 => {
+                busy += 1;
+                tokio::time::sleep(Duration::from_millis(20 * busy)).await;
+            }
+            other => break other.with_context(|| format!("run {}", program.display()))?,
+        }
+    };
     Ok(Finished {
         success: output.status.success(),
         code: output.status.code(),
@@ -285,14 +297,22 @@ mod legacy {
         ("node is not in fabric allow-list", "peer_not_in_allow_list"),
     ];
 
+    /// The code the old words stand for, for a refusal said only in prose.
+    pub(super) fn refusal_code(text: &str) -> Option<&'static str> {
+        REFUSALS
+            .iter()
+            .find(|(words, _)| text.contains(words))
+            .map(|(_, code)| *code)
+    }
+
     pub(super) async fn run_dial(program: &Path, arguments: &[&str]) -> Result<String> {
         run(program, arguments).await.map_err(|error| {
             let Some(failure) = error.downcast_ref::<CommandFailure>() else {
                 return error;
             };
-            match REFUSALS.iter().find(|(words, _)| failure.0.contains(words)) {
-                Some((_, code)) => anyhow::Error::new(FabricError {
-                    code: (*code).into(),
+            match refusal_code(&failure.0) {
+                Some(code) => anyhow::Error::new(FabricError {
+                    code: code.into(),
                     class: FabricErrorClass::Refusal,
                     message: failure.0.clone(),
                     peer: None,
@@ -404,6 +424,29 @@ impl Fabric {
     /// The trusted peers in Fabric's `peers.toml`, as NodeID and local name.
     pub async fn peers(&self) -> Result<Vec<(String, String)>> {
         Ok(parse_fabric_peers(&run(&self.program, &["peers"]).await?))
+    }
+
+    /// Whether the peer's Fabric refuses this machine for `protocol`, asked with a fresh
+    /// `fabric probe --json`. `dial` never connects, so a refusal reaches st only as a tunnel
+    /// that closes; the probe is what names it. `None` when the probe was answered by anything
+    /// else (supported, a fault, a timeout, an unknown peer) or could not be run.
+    pub async fn refusal(&self, node: &str, protocol: &str) -> Option<FabricGrantRefusal> {
+        let finished = run_raw(&self.program, &["probe", node, protocol, "--json"])
+            .await
+            .ok()?;
+        let answer: Value = serde_json::from_str(finished.stdout.trim()).ok()?;
+        // Fabric 0.2.41 puts `code` and `class` beside `outcome`; older builds only the
+        // words in `error`.
+        let code = match answer.get("class").and_then(Value::as_str) {
+            Some("refusal") => answer.get("code")?.as_str()?.to_owned(),
+            Some(_) => return None,
+            None => legacy::refusal_code(answer.get("error")?.as_str()?)?.to_owned(),
+        };
+        Some(FabricGrantRefusal {
+            node: node.into(),
+            protocol: protocol.into(),
+            code,
+        })
     }
 
     /// Ask Fabric for a local Unix socket that tunnels to a peer's exposed protocol and return
@@ -745,13 +788,13 @@ mod tests {
 
     #[tokio::test]
     async fn every_fabric_refusal_code_is_a_grant_refusal() {
-        let root = tempfile::tempdir().unwrap();
         // The last code is invented: Fabric adds codes, and its class is what st reads.
         for code in [
             "peer_not_permitted_for_service",
             "peer_not_in_allow_list",
             "invented_future_refusal",
         ] {
+            let root = tempfile::tempdir().unwrap();
             let error = fails_with(root.path(), code, "refusal", 77)
                 .dial("invented-leaf", "st3-peer-v1")
                 .await
@@ -767,7 +810,6 @@ mod tests {
 
     #[tokio::test]
     async fn every_fabric_fault_code_is_a_fabric_error_and_not_a_refusal() {
-        let root = tempfile::tempdir().unwrap();
         // The shim's stderr carries the old refusal words on purpose: with `--json` they are
         // free text for people, and the class decides.
         for (code, class, expected) in [
@@ -789,6 +831,7 @@ mod tests {
                 FabricErrorClass::Fault,
             ),
         ] {
+            let root = tempfile::tempdir().unwrap();
             let status = if class == "usage" { 2 } else { 69 };
             let error = fails_with(root.path(), code, class, status)
                 .dial("invented-leaf", "st3-peer-v1")
@@ -855,6 +898,7 @@ mod tests {
             ),
             ("node is not in fabric allow-list", "peer_not_in_allow_list"),
         ] {
+            let root = tempfile::tempdir().unwrap();
             let refused = old_build(root.path(), &format!("echo '{words}' >&2; exit 1"));
             let error = refused
                 .dial("invented-leaf", "st3-peer-v1")
@@ -863,6 +907,7 @@ mod tests {
             let refusal = error.downcast_ref::<FabricGrantRefusal>().unwrap();
             assert_eq!(refusal.code, code);
         }
+        let root = tempfile::tempdir().unwrap();
         let away = old_build(root.path(), "echo 'peer offline' >&2; exit 1");
         assert!(
             !away
@@ -871,6 +916,94 @@ mod tests {
                 .unwrap_err()
                 .is::<FabricGrantRefusal>()
         );
+    }
+
+    /// A shim answering `probe` with `stdout` and `status`, and failing any other command.
+    fn probes_with(root: &Path, stdout: &str, status: u8) -> Fabric {
+        Fabric::new(shim(
+            root,
+            &format!("case \"$1\" in probe) echo '{stdout}'; exit {status};; *) exit 1;; esac"),
+        ))
+    }
+
+    fn answer(outcome: &str, code: &str, class: &str, error: &str) -> String {
+        let quoted = |text: &str| {
+            if text.is_empty() {
+                "null".to_owned()
+            } else {
+                format!("\"{text}\"")
+            }
+        };
+        format!(
+            "{{\"peer\":\"invented-leaf\",\"peer_id\":\"abc\",\"protocol\":\"st3-peer-v1\",\
+             \"outcome\":\"{outcome}\",\"round_trip_micros\":null,\"transport\":null,\
+             \"error\":{},\"code\":{},\"class\":{}}}",
+            quoted(error),
+            quoted(code),
+            quoted(class)
+        )
+    }
+
+    #[tokio::test]
+    async fn a_probe_names_a_refusal_by_its_code_and_nothing_else_is_one() {
+        for (stdout, status, expected) in [
+            (answer("unreachable", "peer_not_permitted_for_service", "refusal", "x"), 2, Some("peer_not_permitted_for_service")),
+            (answer("unreachable", "peer_not_in_allow_list", "refusal", "x"), 2, Some("peer_not_in_allow_list")),
+            (answer("unreachable", "invented_future_refusal", "refusal", "x"), 2, Some("invented_future_refusal")),
+            (answer("supported", "", "", ""), 0, None),
+            (answer("timeout", "timeout", "fault", "x"), 3, None),
+            (answer("unsupported", "service_not_exposed", "fault", "x"), 1, None),
+            // The prose is a refusal's words, but the code says fault, so the class decides.
+            (answer("unreachable", "unreachable", "fault", "peer not permitted for service"), 2, None),
+            (r#"{"error":{"code":"unknown_peer","class":"fault","message":"m","peer":"ghost","service":null}}"#.to_owned(), 64, None),
+            (String::new(), 64, None),
+            ("not json".to_owned(), 0, None),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let found = probes_with(root.path(), &stdout, status)
+                .refusal("invented-leaf", "st3-peer-v1")
+                .await;
+            assert_eq!(
+                found.as_ref().map(|refusal| refusal.code.as_str()),
+                expected,
+                "{stdout}"
+            );
+            if let Some(refusal) = found {
+                assert_eq!((refusal.node.as_str(), refusal.protocol.as_str()), ("invented-leaf", "st3-peer-v1"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_probe_from_an_older_fabric_is_read_by_its_words() {
+        for (error, expected) in [
+            (
+                "peer not permitted for service \\\"st3-peer-v1\\\"",
+                Some("peer_not_permitted_for_service"),
+            ),
+            (
+                "node is not in fabric allow-list",
+                Some("peer_not_in_allow_list"),
+            ),
+            ("connection reset", None),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            // No `code` or `class` keys at all, as before Fabric 0.2.41.
+            let stdout =
+                format!(r#"{{"peer":"invented-leaf","outcome":"unreachable","error":"{error}"}}"#);
+            let found = probes_with(root.path(), &stdout, 2)
+                .refusal("invented-leaf", "st3-peer-v1")
+                .await;
+            assert_eq!(
+                found.as_ref().map(|refusal| refusal.code.as_str()),
+                expected,
+                "{error}"
+            );
+        }
+        // A Fabric with no `probe` at all is not a refusal either.
+        let root = tempfile::tempdir().unwrap();
+        let none = Fabric::new(shim(root.path(), "exit 2"));
+        assert!(none.refusal("invented-leaf", "p").await.is_none());
     }
 
     #[tokio::test]
