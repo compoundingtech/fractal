@@ -75,6 +75,9 @@ export const pickRunnerJob = {
         PR_LABELS: '${{ toJSON(github.event.pull_request.labels.*.name) }}',
         OWNER: '${{ github.repository_owner }}',
         NEED: `\${{ vars.CI1_MIN_IDLE || '${ci1MinIdle}' }}`,
+        MERGE_OVERFLOW: '${{ vars.CI_MERGE_OVERFLOW }}',
+        MERGE_NEED: "${{ vars.CI_MERGE_MIN_IDLE || '3' }}",
+        RUN_ID: '${{ github.run_id }}',
       },
       run: `python3 - <<'CI_PICK_RUNNER'\n${readFileSync(new URL('../../scripts/ci-pick-runner', import.meta.url), 'utf8')}CI_PICK_RUNNER\n`,
     },
@@ -88,7 +91,7 @@ export const priorityRunnerJob = {
   steps: pickRunnerJob.steps.map(step => ({ ...step, env: { ...step.env, MODE: 'priority' } })),
 } as const
 
-// Every required merge job uses the owned priority lane; no Namespace overflow.
+// Every required merge job follows one pool decision, including explicit overflow.
 const mergeCi1Labels = `github.event_name == 'merge_group' && (needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-priority"]')`
 const pickedOr = (namespaceLabels: string, output = 'ci1') =>
   `\${{ fromJSON(${mergeCi1Labels} || (github.event_name != 'merge_group' && needs.${pickRunnerJobId}.outputs.${output}) || ${namespaceLabels}) }}`
@@ -118,6 +121,10 @@ export const mailStageRunsOn = pickedOr(
   namespaceLabels(linuxStageRunner),
   'ci1_mail',
 )
+
+// Extra merge partitions use either host's merge role; an overflowed group stays
+// wholly on its selected Namespace profile rather than mixing source cohorts.
+export const extraMergeTestRunsOn = `\${{ fromJSON(needs.${pickRunnerJobId}.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.${pickRunnerJobId}.outputs.ci1 || '["ci1-merge"]') }}`
 
 /** `runs-on` for a Linux profile job: picked ci1, else the shared Namespace queue class. */
 export const linuxRunsOn = pickedOr(

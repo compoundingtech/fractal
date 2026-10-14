@@ -25,6 +25,114 @@ assistant turn identify the selected provider and model. omp's Python `eval` too
 environment; run st commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
 available.
 
+## Driver launch and native binding
+
+The managed seat enters the shared `omp_session::run_native` launcher in process.
+The in-process OMP extension starts `driver omp-channel` on the executable named by
+`ST_OMP_CHANNEL_BIN`. The shared wrapper uses
+`ST_OMP_CHANNEL_{BIN,CATALOG,IDENTITY,RUNTIME_ID,SESSION,SEQ}` for its channel
+configuration; `ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION` and
+`ST_OMP_CHANNEL_RESUME_GENERATION` fence a cold residency resume.
+
+`session_start` sends the native OMP session ID before accepting Rust's hello.
+A matching ready frame completes the two-way exchange. A cold resume must prove the
+expected native ID, wrapper incarnation and residency generation before its candidate
+binding becomes authoritative. A later in-process session switch replaces the named
+predecessor and binds the new session. When OMP exposes its session-file getter, the
+session and ready frames also carry that exact JSONL path for transcript readers.
+
+## Exact-build admission
+
+An ordinary launch parses OMP's own unambiguous `MAJOR.MINOR.PATCH` release and measures
+its exact executable, interpreter, installation metadata and shipped extension identity.
+A residency resume validates its native checkpoint before even starting the version child;
+a missing, stale, foreign or changed binding refuses the launch. There is no minor-version
+allowlist. A prerelease or build-metadata banner is not admitted as its base release.
+
+Every unseen identity must pass five checks in a disposable RPC session:
+
+1. Load the shipped extension and recorder, exercise their API calls, and establish a real
+   native channel ready binding.
+2. Observe session, agent, turn and message lifecycle events through terminal `agent_end`.
+3. Prove a positive `ctx.isIdle()` sample and the channel's active-to-idle transition.
+4. Correlate tool approval requests and resolutions by session, tool name and call ID;
+   the local fixture denies only its empty fixture tool.
+5. Deliver a fresh nonce, require one transport acknowledgement, and prove completed
+   consumption in the fixture model and native messages.
+
+The probe uses empty HOME/XDG/credential/workspace/PTY roots and a local model fixture.
+Its model requests go only to loopback with dummy fixture keys. Successful and refused
+measurements are retained under the harness state root's `harness-admission` directory,
+with probe and adapter identity. Replacing the executable, interpreter, package manifest,
+available lockfile, extension or probe requests a new measurement. Historical captures
+certify only their exact measured builds, not every patch in a release family.
+
+The probe does not certify pricing, context arithmetic, every provider/model combination,
+or every interactive mode. Its retained test captures are in
+[`crates/st-drivers/tests/fixtures/harness-admission`](../../crates/st-drivers/tests/fixtures/harness-admission/).
+A refusal stops a new OMP provider before it claims the live session. Admission runs on
+restart and residency resume; it does not stop an already-running provider retroactively,
+and adopting an existing provider does not repeat the probe. See
+[harness admission](seat-deploys.md#harness-admission-at-the-next-launch) for the current
+incarnation's diagnostic and doctor result.
+
+### A person's admission exception
+
+A person whose machine cannot run the isolated probe can allow its exact installed build
+from their own terminal, outside an agent seat:
+
+```sh
+st admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
+```
+
+Use the executable the affected seat actually launches. Omitting `--binary` uses that
+terminal's PATH; `--state-dir` selects a nondefault daemon state directory. Run as the
+operating-system user that owns the seats, then restart only the affected seat.
+The command requires no daemon, producer/probe child or model credentials. It retains
+reason, time and exact producer/extension identity in a separate `*.override.json` record;
+failed measurements remain intact, and the driver identifies the active exception.
+An executable, interpreter, manifest, lockfile or extension replacement needs a new
+exception. The exception persists across st updates with the same producer and extension.
+
+To restore normal admission at the next launch:
+
+```sh
+st admission revoke omp --binary /path/to/omp
+```
+
+The exception cannot supply a missing interpreter or repair an incompatible producer or
+extension. It is a person's explicit allowance, not passing measured evidence.
+
+## Seat label authority
+
+The declared `name` is the human label; the desired-state declaration and normalized
+`display_name` retain the same value and the original declaring actor. Change that label with:
+
+```sh
+st agents rename agent/worker 'Build worker'
+st agents rename agent/worker --clear
+```
+
+In free mode any person or agent can rename a seat; a bound harness acts as itself.
+Rename refuses a launch this build cannot read, because republishing would erase it.
+Clearing restores the subject without its `agent/` prefix. A label-only revision keeps
+its predecessor's launch lineage, restart budget and crash-loop hold; it does not restart
+a finished, exhausted or parked seat.
+
+## Native subagent reporting
+
+OMP contexts identified as `sub` share the process-wide stash and never open a seat
+channel, receive its mail or close its binding. Their lifecycle frames use the top-level
+seat's existing channel. A run reports start, bounded progress and busy heartbeats,
+then an end outcome. Progress is at most once per ten seconds; a busy heartbeat is
+once per minute. A proven idle or unreadable context clears cached waits and stops
+reporting, and a late turn-end after the end emits nothing. Human asks and approvals
+keep a foreground run busy. IDs are bounded to 256 UTF-8 bytes and names to 128 bytes.
+st ends a subagent that has not reported for five minutes; see
+[subagents](subagents.md) for the roster and lifecycle contract.
+
+## Authored resume, transcripts and delivery
+
 An authored `args "--resume" "/absolute/path/<time>_<uuid>.jsonl"` (or `--resume=…`) keeps its
 original argv and transcript. On a fresh native omp/pi driver start, st links an absent or empty
 managed `provider-sessions` directory to the transcript's parent after checking the filename UUID

@@ -254,8 +254,12 @@ native startup argument. With no message, the seat starts idle. The Rust `st3-cl
 Ctrl+\\ detaches and leaves the agent running. `st terminals attach agent/builder.site` attaches
 again later, from any machine in the fleet. A terminal on another host is attached PTY to PTY over
 Fabric when that host runs `st terminals expose-fabric` and grants your machine the protocol it
-prints; no st daemon carries the bytes. Otherwise it goes through the client gateway as your
-person, the same path the apps use. `st ui` on a machine with its own st daemon attaches a terminal on this host to its PTY session, and one
+prints; the owner's st daemon routes each tunnel straight to the PTY session. While that daemon is
+stopped or restarting, as during every deploy, it refuses new tunnels and its live remote attaches
+drop; `st terminals attach` reconnects once it is back. A host that needs attaches to work without
+its daemon runs `st terminals expose-fabric --exec`, which has Fabric start a process per attach.
+Otherwise it goes through the client gateway as your person, the same path the apps use. `st ui`
+on a machine with its own st daemon attaches a terminal on this host to its PTY session, and one
 on another fleet host over Fabric when Fabric reaches the owner; the daemon only says where it lives.
 When Fabric cannot reach the owner, `st ui` goes through the client gateway and the terminal header
 says so with Fabric's reason. An owner that refuses the incarnation is never worked around. A paired

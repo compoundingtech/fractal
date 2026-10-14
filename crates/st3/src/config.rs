@@ -636,6 +636,12 @@ fn state_socket(state_dir: &Path) -> PathBuf {
     state_dir.join("run/st3.sock")
 }
 
+/// The daemon's Fabric terminal socket, which `st terminals expose-fabric` has Fabric forward
+/// each terminal tunnel to.
+pub fn terminal_socket(state_dir: &Path) -> PathBuf {
+    state_dir.join("run/terminals.sock")
+}
+
 /// The terminating NUL also occupies a byte in sockaddr_un.sun_path.
 #[cfg(target_os = "macos")]
 const SUN_PATH_BYTES: usize = 104;

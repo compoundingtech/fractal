@@ -93,6 +93,8 @@ pub(super) mod arrangements;
 pub(super) mod conversation_blocks;
 mod collection_windows;
 mod inventory;
+#[cfg(test)]
+mod conversation_follow_tests;
 mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
@@ -1328,7 +1330,7 @@ fn conversation_open_local_marked(
     });
     let (page, source_generation) =
         match conversation_first_page_at_generation(state, &snapshot, session, session_id) {
-            Ok(page) => page,
+            Ok((page, generation, _)) => (page, generation),
             Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS => return Err(error),
             // OPEN keeps the established managed-transcript availability notice and stored
             // fallback. Successful native reads still capture page and generation together;
@@ -6970,13 +6972,14 @@ fn conversation_read_now(
 }
 
 /// Read OPEN and change-replay pages through the same bounded fold, retaining the generation
-/// of the returned page without a second native read.
+/// of the returned page without a second native read. The final flag says whether the page
+/// came from the native projection rather than the stored timeline.
 fn conversation_first_page_at_generation(
     state: &AppState,
     snapshot: &ClientSnapshot,
     session: &ClientSession,
     session_id: &str,
-) -> Result<(Value, u64), ApiError> {
+) -> Result<(Value, u64, bool), ApiError> {
     let query = ClientListQuery { limit: Some(200), ..Default::default() };
     match conversation_blocks::source(state, session_id) {
         // Replay selects only its newest bounded projection, including for OpenCode.
@@ -6996,9 +6999,9 @@ fn conversation_first_page_at_generation(
             } else {
                 generation
             };
-            Ok((page.0, fence))
+            Ok((page.0, fence, true))
         }
-        Err(_) => Ok((timeline_value(state, snapshot, session, session_id, &query)?.0, 0)),
+        Err(_) => Ok((timeline_value(state, snapshot, session, session_id, &query)?.0, 0, false)),
     }
 }
 
@@ -7009,7 +7012,7 @@ fn conversation_read_now_unbounded(
     after: Option<&str>,
 ) -> Result<Value, ApiError> {
     let snapshot = new_client_snapshot(state);
-    let (page, source_generation) =
+    let (page, source_generation, native_replay) =
         conversation_first_page_at_generation(state, &snapshot, session, session_id)?;
     let all = page["items"]
         .as_array()
@@ -7055,7 +7058,10 @@ fn conversation_read_now_unbounded(
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
-        if let Some(owner) = owner.as_deref() {
+        // Native pages contain native records and Small Talk messages, not the driver's
+        // mirrored harness.timeline entries. Requiring those IDs in a native page creates
+        // a false gap on every observation, even when the native transcript is unchanged.
+        if let Some(owner) = owner.as_deref().filter(|_| !native_replay) {
             for claim in state
                 .store
                 .claims_page(Some(owner), None, store_index, None, false, 10_000)
@@ -7086,22 +7092,24 @@ fn conversation_read_now_unbounded(
                 message_indexes.insert(claim.store_index);
             }
         }
-        for claim in state
-            .store
-            .local_observations_after(local_position, 10_000)
-            .map_err(ApiError::internal)?
-        {
-            if claim.subject == owner.as_deref().unwrap_or_default()
-                && claim.kind == "harness.timeline"
+        if !native_replay {
+            for claim in state
+                .store
+                .local_observations_after(local_position, 10_000)
+                .map_err(ApiError::internal)?
             {
-                retention_changed |= claim.body.pointer("/fields/entry_type")
-                    .and_then(Value::as_str) == Some("truncation");
-                if let Some(id) = claim
-                    .body
-                    .pointer("/fields/entry_id")
-                    .and_then(Value::as_str)
+                if claim.subject == owner.as_deref().unwrap_or_default()
+                    && claim.kind == "harness.timeline"
                 {
-                    explicit_ids.insert(id.to_owned());
+                    retention_changed |= claim.body.pointer("/fields/entry_type")
+                        .and_then(Value::as_str) == Some("truncation");
+                    if let Some(id) = claim
+                        .body
+                        .pointer("/fields/entry_id")
+                        .and_then(Value::as_str)
+                    {
+                        explicit_ids.insert(id.to_owned());
+                    }
                 }
             }
         }
@@ -21943,6 +21951,127 @@ mission "example/zero-run" state="ready" {
             runtime_resources(&owner, true, &snapshot, &session).unwrap(),
         );
     }
+    fn sessionless_card(harness_state: Value) -> Value {
+        json!({
+            "id": "agent/cedar", "state": "desired", "harness_state": harness_state,
+            "silent_since": "2026-10-12T09:30:00.000Z",
+            "current_work": [{"id": "step-run/one/build", "state": "claimed"}],
+        })
+    }
+
+    #[test]
+    fn a_declared_seat_with_no_session_past_its_launch_window_is_down_since_it_began_waiting() {
+        let started = 1_790_000_000_000_u64;
+        let mut card = sessionless_card(Value::Null);
+        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS + 1);
+        assert_eq!(card["state"], "down");
+        assert_eq!(card["down_since"], client_timestamp(u128::from(started)));
+        assert_eq!(card["silent_since"], Value::Null, "a dead holder's activity is not shown as activity");
+        assert_eq!(card["harness_state"], "indeterminate", "a down seat never keeps a stale working report");
+        assert_eq!(card["current_work"][0]["holder_down_since"], card["down_since"]);
+    }
+
+    #[test]
+    fn a_seat_inside_its_launch_window_is_still_starting() {
+        let started = 1_790_000_000_000_u64;
+        let mut card = sessionless_card(Value::Null);
+        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS);
+        assert_eq!(card["state"], "desired");
+        assert!(card.get("down_since").is_none());
+        assert!(card["current_work"][0].get("holder_down_since").is_none());
+        let mut unknown = sessionless_card(Value::Null);
+        overlay_down(&mut unknown, None, "missing", started + 10 * LAUNCH_WINDOW_MS);
+        assert_eq!(unknown["state"], "desired", "no start time, no claim of how long");
+    }
+
+    #[test]
+    fn a_fresh_harness_report_beats_a_runtime_row_stuck_pending() {
+        let started = 1_790_000_000_000_u64;
+        for reported in ["ready", "idle", "working"] {
+            let mut card = sessionless_card(json!(reported));
+            overlay_down(&mut card, Some(started), "current", started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], "running", "{reported}");
+            assert!(card.get("down_since").is_none());
+        }
+        // A report that has gone stale proves nothing: the seat is down, not running.
+        let mut stale = sessionless_card(json!("indeterminate"));
+        overlay_down(&mut stale, Some(started), "stale", started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(stale["state"], "down");
+    }
+
+    #[test]
+    fn only_a_seat_without_a_session_can_be_down() {
+        let started = 1_790_000_000_000_u64;
+        for state in ["running", "waiting", "stopped", "failed", "suspended"] {
+            let mut card = sessionless_card(Value::Null);
+            card["state"] = json!(state);
+            overlay_down(&mut card, Some(started), "missing", started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], state);
+        }
+    }
+
+    #[test]
+    fn a_stale_working_report_stays_working_while_a_stale_idle_one_lapses() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-long-turn");
+        let append = |subject: &str, kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        for subject in ["agent/cedar", "agent/birch"] {
+            append(subject, "runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        }
+        append("agent/cedar", "harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
+        append("agent/birch", "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        let mut cards = client_agent_resources(&state.store, false, "", index).unwrap();
+        for card in &mut cards {
+            let subject = card["id"].as_str().unwrap().to_owned();
+            let mut harness = state.store.observed_harness_at(&subject, index).unwrap().unwrap();
+            harness.observed_at_unix_ms = client_now_ms() - 3_600_000;
+            card["_status_source"] = json!(harness);
+        }
+        overlay_agent_resources(&state.store, &mut cards, "").unwrap();
+        let cedar = cards.iter().find(|item| item["id"] == "agent/cedar").unwrap();
+        assert_eq!(cedar["observation"], "stale");
+        assert_eq!(cedar["harness_state"], "working", "a turn can outlast the freshness window");
+        assert_eq!(cedar["state"], "running");
+        let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
+        assert_eq!(birch["harness_state"], "indeterminate");
+        assert_eq!(birch["state"], "waiting");
+    }
+
+    #[test]
+    fn a_seat_whose_runtime_exits_mid_turn_stops_reading_working_with_its_row() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-died-mid-turn");
+        let subject = "agent/cedar";
+        let append = |kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append("harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
+        let running = client_agent_resources(&state.store, false, "", state.store.index().unwrap()).unwrap();
+        assert_eq!(running.iter().find(|item| item["id"] == subject).unwrap()["state"], "running");
+        // The reconciler on the owner host writes this when the pty or driver is gone.
+        append("runtime.observed", json!({"status":"exited", "runtime_id":"native", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        // This seat has no declaration, so the current roster drops it once its runtime ends;
+        // the history roster still carries the card.
+        let current = client_agent_resources(&state.store, false, "", index).unwrap();
+        assert!(current.iter().all(|item| item["id"] != subject), "an ended runtime is not a current seat");
+        let ended = client_agent_resources(&state.store, true, "", index).unwrap();
+        let ended = ended.iter().find(|item| item["id"] == subject).unwrap();
+        assert_eq!(ended["state"], "stopped", "{ended}");
+    }
+
     #[test]
     fn status_freshness_uses_cached_card_time_without_resetting_since() {
         let root = tempfile::tempdir().unwrap();
