@@ -6000,7 +6000,7 @@ impl Ui {
                 });
             }
             Hit::Split(right) => self.split(right),
-            Hit::GlassTab(group, tab) => self.show_in(group, tab),
+            Hit::GlassTab(group, tab) | Hit::GlassTabMore(group, tab) => self.show_in(group, tab),
             Hit::GlassAdd(group) => {
                 self.focus_group(group);
                 self.open_palette(None, glass::Open::Tab);
