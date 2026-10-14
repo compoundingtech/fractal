@@ -431,7 +431,7 @@ done`,
       extraLogs: '${{ runner.temp }}/perf/',
       before: [perfStoresCache('cost')],
     }),
-    // st2's transport-isolation cascade tests need a real systemd user manager, which the
+    // Retained st2 controls and current-runtime scope proofs need a real systemd user manager, which the
     // runner image lacks. A NixOS VM runs this job's prebuilt test binary; it compiles nothing.
     'isolation-vm': {
       name: 'isolation-vm',
@@ -452,7 +452,7 @@ nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackage
 printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
         },
         {
-          name: 'Run all three systemd-scope tests in the VM',
+          name: 'Run all six selected systemd-scope tests in the VM',
           env: {
             ST_ISOLATION_ARCHIVE: '${{ runner.temp }}/ci-test-archives/workspace.tar.zst',
             ST_ISOLATION_WORKSPACE: '${{ github.workspace }}',
