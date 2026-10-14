@@ -12,6 +12,12 @@ let
   # A stand-in for gh: it says what it was asked and whether it got a token, never the token.
   fakeGh = pkgs.writeShellScriptBin "gh" ''
     echo "gh $* token=''${GH_TOKEN:+set} home=$HOME"
+    if test -f checkout-marker; then
+      echo "checkout=$(pwd):$(cat checkout-marker)"
+      if touch forbidden-checkout-write 2>/dev/null; then exit 90; fi
+      echo "checkout-readonly"
+      cat
+    fi
   '';
   gatewayConfig = pkgs.writeText "gateway.toml" ''
     bwrap = "${pkgs.bubblewrap}/bin/bwrap"
@@ -21,6 +27,15 @@ let
     [people]
     "1000" = "person/ada"
     "1001" = "person/robin"
+
+    [programs."1002"]
+    principal = "program/ci1/evidence"
+    person = "person/ada"
+    unit = "ci-evidence-caller.service"
+    command = ["gh", "pr", "view", "1"]
+    [programs."1002".checkout]
+    backing_root = "/var/cache/evidence/work"
+    mount_root = "/w"
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -47,6 +62,12 @@ pkgs.testers.runNixOSTest {
       group = "sekrets";
     };
     users.groups.sekrets = { };
+    users.users.evidence-caller = {
+      isSystemUser = true;
+      uid = 1002;
+      group = "evidence-caller";
+    };
+    users.groups.evidence-caller = { };
     services.openssh.enable = true;
     environment.systemPackages = [
       pty
@@ -129,6 +150,41 @@ pkgs.testers.runNixOSTest {
         "ada", f"{st} sekrets -- gh pr list"
     )
     assert "token=set" in login("ada", f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
+
+    # A dedicated system UID + exact root-created unit, BEFORE any st daemon exists.
+    # It receives a command grant, never Ada's person/profile-management authority.
+    machine.succeed("install -d -m 0755 /var/cache/evidence /w && install -d -o evidence-caller -m 0700 /var/cache/evidence/work && install -d -o evidence-caller -m 0755 /var/cache/evidence/work/smalltalk && printf private-runner-checkout > /var/cache/evidence/work/smalltalk/checkout-marker && setfacl -m u:sekrets:x /var/cache/evidence/work")
+    login("ada", f"{st} sekrets grant ada/agent-gh --to program/ci1/evidence --allow 'gh pr view'")
+    def program(command, unit="ci-evidence-caller.service", user="evidence-caller", succeed=True,
+                cwd="/w/smalltalk", backing="/var/cache/evidence/work"):
+        call = (f"systemd-run --quiet --wait --pipe --collect --unit {unit} "
+                f"--property=User={user} --property=WorkingDirectory={cwd} "
+                f"--property=BindPaths={backing}:/w -- /bin/sh -c " + shlex.quote(command) + " 2>&1")
+        return machine.succeed(call) if succeed else machine.fail(call)
+    assert "run-only system service" in program(f"{st} sekrets whoami")
+    assert "token=set" in program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1")
+    output = program(f"printf 'structured-stdin-only' | {st} sekrets --profile ada/agent-gh -- gh pr view 1")
+    assert "checkout=/w/smalltalk:private-runner-checkout" in output
+    assert "checkout-readonly" in output and "structured-stdin-only" in output
+    machine.fail("test -e /var/cache/evidence/work/smalltalk/forbidden-checkout-write")
+    machine.fail("test -e /w/smalltalk") # the gateway host has only the empty mount anchor
+    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/tmp", succeed=False)
+    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/missing", succeed=False)
+    machine.succeed("install -d -m 0755 /var/cache/evidence/other/smalltalk && ln -s /var/cache/evidence/other /var/cache/evidence/work/escape")
+    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", cwd="/w/escape/smalltalk", succeed=False)
+    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", backing="/var/cache/evidence/other", succeed=False)
+    assert "program/ci1/evidence" in login("ada", f"{st} sekrets log --limit 200")
+    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 2", succeed=False)
+    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", unit="other-evidence.service", succeed=False)
+    program(f"{st} sekrets --profile ada/agent-gh -- gh pr view 1", user="robin", succeed=False)
+    program(f"{st} sekrets profile policy ada/agent-gh --preset everything", succeed=False)
+    program(f"{st} sekrets grant ada/agent-gh --to person/robin --preset everything", succeed=False)
+    program(f"printf refused | {st} sekrets put KEY --profile ada/agent-gh", succeed=False)
+    program(f"{st} sekrets log", succeed=False)
+    program("cat /var/lib/st-sekrets/sekrets.db", succeed=False)
+    program("ls /var/lib/st-sekrets/profiles/ada/agent-gh/home", succeed=False)
+    machine.succeed("printf throwaway > /var/lib/st-sekrets/profiles/ada/agent-gh/home/signing-key && chown sekrets:sekrets /var/lib/st-sekrets/profiles/ada/agent-gh/home/signing-key && chmod 0600 /var/lib/st-sekrets/profiles/ada/agent-gh/home/signing-key")
+    program("cat /var/lib/st-sekrets/profiles/ada/agent-gh/home/signing-key", succeed=False)
     assert "denied by rule `gh auth token`" in login("ada", f"{st} sekrets -- gh auth token", succeed=False)
 
     # No one but the sekrets user reads the store; the token appears in no output or log.

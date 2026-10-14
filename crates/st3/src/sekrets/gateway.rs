@@ -54,6 +54,52 @@ pub struct GatewayConfig {
     pub name: Option<String>,
     /// Unix user ID to person, such as `1000 = "person/ada"`.
     pub people: BTreeMap<String, String>,
+    /// Dedicated Unix UID to a root-controlled, run-only system service.
+    #[serde(default)]
+    pub programs: BTreeMap<String, ProgramConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramConfig {
+    pub principal: String,
+    pub person: String,
+    /// Exact system unit, not a user-manager unit or a caller-supplied label.
+    pub unit: String,
+    /// Exact installed command argv; profile and grant must also allow it.
+    pub command: Vec<String>,
+    /// A runner's private bind mount. Absent for ordinary host-path working directories.
+    #[serde(default)]
+    pub checkout: Option<ProgramCheckout>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramCheckout {
+    pub backing_root: PathBuf,
+    pub mount_root: PathBuf,
+}
+
+pub(super) fn program_principal(value: &str) -> bool {
+    let parts: Vec<_> = value.split('/').collect();
+    value.len() <= 256
+        && parts.len() == 3
+        && parts[0] == "program"
+        && parts[1..].iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        })
+}
+
+fn system_unit(value: &str) -> bool {
+    value.len() > ".service".len()
+        && value.len() <= 255
+        && value.ends_with(".service")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-@".contains(&byte))
 }
 
 fn default_socket() -> PathBuf {
@@ -80,14 +126,75 @@ impl GatewayConfig {
         let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         let config: Self =
             toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-        for (uid, person) in &config.people {
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (uid, person) in &self.people {
             uid.parse::<u32>()
                 .with_context(|| format!("people: `{uid}` is not a Unix user ID"))?;
             if person_name(person).is_none() {
                 bail!("people: `{person}` is not a person such as person/ada");
             }
         }
-        for root in &config.checkout_roots {
+        let mut principals = std::collections::BTreeSet::new();
+        for (uid, program) in &self.programs {
+            let number = uid.parse::<u32>().context("program UID must be numeric")?;
+            if number == 0
+                || uid != &number.to_string()
+                || self
+                    .people
+                    .keys()
+                    .any(|key| key.parse::<u32>().ok() == Some(number))
+            {
+                bail!("program UID must be non-root, canonical and separate from people");
+            }
+            if let Some(checkout) = &program.checkout {
+                for path in [&checkout.backing_root, &checkout.mount_root] {
+                    if !path.is_absolute()
+                        || path == Path::new("/")
+                        || path.components().any(|part| {
+                            !matches!(
+                                part,
+                                std::path::Component::RootDir | std::path::Component::Normal(_)
+                            )
+                        })
+                    {
+                        bail!("program checkout roots must be plain absolute directories, never /");
+                    }
+                }
+                if checkout.backing_root == checkout.mount_root
+                    || checkout.backing_root.starts_with(&self.store)
+                    || self.store.starts_with(&checkout.backing_root)
+                    || checkout.mount_root.starts_with(&self.store)
+                    || self.store.starts_with(&checkout.mount_root)
+                {
+                    bail!(
+                        "program checkout must not overlap the secret store or use the same physical/virtual root"
+                    );
+                }
+            }
+            if !program_principal(&program.principal)
+                || !principals.insert(&program.principal)
+                || !self.people.values().any(|person| person == &program.person)
+                || !system_unit(&program.unit)
+                || program.command.is_empty()
+                || program.command.len() > 16
+                || program
+                    .command
+                    .iter()
+                    .any(|word| word.is_empty() || word.len() > 1024 || word.contains('\0'))
+                || !program.command[0]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+            {
+                bail!(
+                    "program needs a unique program/HOST/NAME, an enrolled person and exact system service unit"
+                );
+            }
+        }
+        for root in &self.checkout_roots {
             if !root.is_absolute() || root == Path::new("/") {
                 bail!(
                     "checkout_roots: {} must be an absolute directory, not /",
@@ -95,7 +202,7 @@ impl GatewayConfig {
                 );
             }
         }
-        Ok(config)
+        Ok(())
     }
 
     fn person_for(&self, uid: u32) -> Option<&str> {
@@ -150,6 +257,10 @@ pub fn serve(config_path: &Path) -> Result<()> {
     }
     sandbox::trusted_path(config_path, uid).context("the gateway configuration must be root's")?;
     let config = GatewayConfig::load(config_path)?;
+    if !config.programs.is_empty() {
+        sandbox::trusted_path(config_path, 0)
+            .context("program enrollment must be controlled by root, not the profile user")?;
+    }
     check_store(&config.store, uid)?;
     sandbox::trusted_path(&config.bwrap, uid).context("bubblewrap must be root's")?;
     for directory in &config.path {
@@ -230,6 +341,7 @@ fn nonce() -> String {
 struct Caller {
     uid: u32,
     pid: i32,
+    pid_start: Option<u64>,
     person: String,
     view: CallerView,
 }
@@ -247,6 +359,9 @@ impl Caller {
             )),
             CallerView::Host { node, .. } => Err(format!(
                 "{node}'s st is not a person; only a person changes profiles, grants and keys, from a login session"
+            )),
+            CallerView::Program { program, .. } => Err(format!(
+                "{program} is run-only; only a person changes profiles, grants and keys"
             )),
             CallerView::Unidentified { reason, .. } => Err(reason.clone()),
         }
@@ -286,6 +401,7 @@ impl Gateway {
         own_uid: Option<u32>,
         kernel: Box<dyn Kernel>,
     ) -> Result<Self> {
+        config.validate()?;
         let git = sandbox::resolve_tool("git", &config.path, tool_owner).ok();
         let store = GatewayStore::open(&config.store)?;
         Ok(Self {
@@ -358,20 +474,42 @@ impl Gateway {
         if Some(uid) == self.own_uid {
             bail!("the sekrets user cannot call its own gateway");
         }
-        let Some(person) = self.config.person_for(uid) else {
+        let Some(person) = self
+            .config
+            .programs
+            .get(&uid.to_string())
+            .map(|program| program.person.as_str())
+            .or_else(|| self.config.person_for(uid))
+        else {
             bail!("Unix user {uid} is not a person this gateway serves");
         };
         let nonce = nonce();
         let mut caller = Caller {
             uid,
             pid,
+            pid_start: self.kernel.start(pid),
             person: person.to_owned(),
             view: self.classify(uid, pid, person, None, &nonce),
         };
         while let Some((request, fds)) = protocol::recv::<Request>(stream)? {
+            // A program may not keep an earlier classification after leaving its unit,
+            // or transfer a connection whose original process has exited/reused its PID.
+            if self.config.programs.contains_key(&uid.to_string()) {
+                caller.view =
+                    if caller.pid_start.is_some() && self.kernel.start(pid) == caller.pid_start {
+                        self.classify(uid, pid, person, None, &nonce)
+                    } else {
+                        CallerView::Unidentified {
+                            person: person.to_owned(),
+                            reason: "program process lifetime changed".into(),
+                        }
+                    };
+            }
             let reply = match request {
                 Request::Hello { attestation } => {
-                    caller.view = self.classify(uid, pid, person, attestation.as_ref(), &nonce);
+                    if !self.config.programs.contains_key(&uid.to_string()) {
+                        caller.view = self.classify(uid, pid, person, attestation.as_ref(), &nonce);
+                    }
                     Reply::Hello {
                         caller: caller.view.clone(),
                         nonce: nonce.clone(),
@@ -386,7 +524,17 @@ impl Gateway {
                     after,
                     limit,
                     wait_ms,
-                } => self.read_log(&caller.person, after, limit, wait_ms)?,
+                } => {
+                    if self.config.programs.contains_key(&uid.to_string()) {
+                        Reply::Refused {
+                            reason: "program callers are run-only; the person reads the audit log"
+                                .into(),
+                            call: None,
+                        }
+                    } else {
+                        self.read_log(&caller.person, after, limit, wait_ms)?
+                    }
+                }
                 Request::Authorized(call) => self.authorized(&caller, call)?,
                 other => match self.manage(&caller, other) {
                     Ok(value) => Reply::Ok { value },
@@ -413,6 +561,24 @@ impl Gateway {
         let Some(cgroup) = self.kernel.cgroup(pid) else {
             return unidentified(format!("cannot read the cgroup of process {pid}"));
         };
+        if let Some(program) = self.config.programs.get(&uid.to_string()) {
+            let unit = format!("/system.slice/{}", program.unit);
+            return if cgroup == unit
+                || cgroup
+                    .strip_prefix(&unit)
+                    .is_some_and(|rest| rest.starts_with('/'))
+            {
+                CallerView::Program {
+                    program: program.principal.clone(),
+                    person: program.person.clone(),
+                }
+            } else {
+                unidentified(format!(
+                    "program process is not in enrolled system unit {}",
+                    program.unit
+                ))
+            };
+        }
         match identity::placement(uid, &cgroup) {
             Placement::Session => CallerView::Person {
                 person: person.to_owned(),
@@ -536,6 +702,13 @@ impl Gateway {
             };
             return Ok(Err(format!("the caller is not identified: {reason}")));
         };
+        if let Some(program) = self.config.programs.get(&caller.uid.to_string())
+            && (run.login || run.argv != program.command)
+        {
+            return Ok(Err(
+                "program may only run its root-enrolled command, never login".into(),
+            ));
+        }
         let usable = self.usable(caller)?;
         if run.login {
             let Some(id) = &run.profile else {
@@ -697,7 +870,7 @@ impl Gateway {
             );
             return self.refuse(stream, caller, &run, Some(&owner), Some(&profile), reason);
         }
-        let mut prepared = match self.prepare(&usable.profile, &run, fds) {
+        let mut prepared = match self.prepare(caller, &usable.profile, &run, fds) {
             Ok(prepared) => prepared,
             Err(error) => {
                 return self.refuse(
@@ -751,11 +924,26 @@ impl Gateway {
         reachable(&path)
     }
 
-    fn prepare(&self, profile: &Profile, run: &RunRequest, fds: Vec<OwnedFd>) -> Result<Prepared> {
+    fn prepare(
+        &self,
+        caller: &Caller,
+        profile: &Profile,
+        run: &RunRequest,
+        fds: Vec<OwnedFd>,
+    ) -> Result<Prepared> {
         let Some(name) = run.argv.first() else {
             bail!("no command");
         };
-        let tool = sandbox::resolve_tool(name, &self.config.path, self.tool_owner)?;
+        let program = self.config.programs.get(&caller.uid.to_string());
+        let tool = sandbox::resolve_tool(
+            name,
+            &self.config.path,
+            if program.is_some() {
+                0
+            } else {
+                self.tool_owner
+            },
+        )?;
         let streams = if run.tty.is_some() { 0 } else { 3 };
         if fds.len() != streams + run.directories || run.directories == 0 {
             bail!(
@@ -772,21 +960,49 @@ impl Gateway {
         // otherwise (a 0700 home, or somewhere outside the checkout roots) in the profile's home,
         // with no checkout, and the caller is told.
         let mut note = None;
-        if let Err(reason) = self.servable(&fds[0]) {
+        if let Some(program) = program {
+            // Absolute fixed argv inputs (notably an interpreter's signer script) are
+            // installation inputs, never scripts supplied by the runner checkout.
+            for word in program.command.iter().skip(1) {
+                let path = Path::new(word);
+                if path.is_absolute() {
+                    sandbox::trusted_path(path, 0)?;
+                }
+            }
+        }
+        if program.is_some_and(|program| program.checkout.is_none()) {
+            // Signing has no meaningful HOME fallback: it must see the authorized checkout.
+            self.servable(&fds[0])?;
+        } else if program.is_none()
+            && let Err(reason) = self.servable(&fds[0])
+        {
             note = Some(format!(
                 "running in the profile's home, without your directory: {reason:#}"
             ));
             fds.clear();
         }
         let mut directories = Vec::new();
+        let mount_roots = self
+            .config
+            .programs
+            .values()
+            .filter_map(|program| program.checkout.as_ref())
+            .flat_map(|checkout| [checkout.backing_root.clone(), checkout.mount_root.clone()])
+            .collect();
         for fd in fds {
-            let path = sandbox::descriptor_path(&fd)?;
+            let path = if let Some(checkout) = program.and_then(|program| program.checkout.as_ref())
+            {
+                program_checkout_path(&fd, caller.uid, checkout)?
+            } else {
+                let path = sandbox::descriptor_path(&fd)?;
+                sandbox::check_checkout_path(&path, &self.config.checkout_roots)?;
+                reachable(&path)?;
+                path
+            };
             let metadata = fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
             if !metadata.is_dir() {
                 bail!("{} is not a directory", path.display());
             }
-            sandbox::check_checkout_path(&path, &self.config.checkout_roots)?;
-            reachable(&path)?;
             directories.push(BoundDirectory { fd, path });
         }
         let cwd = directories
@@ -814,6 +1030,7 @@ impl Gateway {
             view,
             cwd,
             env,
+            mount_roots,
             _scratch: scratch,
         })
     }
@@ -836,6 +1053,7 @@ impl Gateway {
                 .unwrap_or_default(),
         ];
         hidden.extend(self.config.checkout_roots.iter().cloned());
+        hidden.extend(prepared.mount_roots.iter().cloned());
         let sandbox = Sandbox {
             bwrap: &self.config.bwrap,
             tool: &prepared.tool,
@@ -951,6 +1169,11 @@ impl Gateway {
     ) -> Result<Reply> {
         use super::authorized::{GITHUB_TARGET, MAX_REQUEST_BODY, check_url, forwarded_headers};
         let refuse = |reason: String| Ok(Reply::Refused { reason, call: None });
+        if self.config.programs.contains_key(&caller.uid.to_string()) {
+            return refuse(
+                "program callers are run-only; authorized HTTP is not a command grant".into(),
+            );
+        }
         let Some(principal) = caller.principal() else {
             return refuse(caller.require_person().err().unwrap_or_default());
         };
@@ -1119,6 +1342,12 @@ impl Gateway {
     }
 
     fn manage(&self, caller: &Caller, request: Request) -> Result<serde_json::Value, String> {
+        if self.config.programs.contains_key(&caller.uid.to_string()) {
+            return Err(
+                "program callers are run-only; management is reserved for a login-session person"
+                    .into(),
+            );
+        }
         let text = |error: anyhow::Error| format!("{error:#}");
         match request {
             Request::ProfileList => {
@@ -1335,13 +1564,24 @@ impl Gateway {
                 if !(to.starts_with("agent/")
                     || to.starts_with("person/")
                     || to.starts_with("host/"))
+                    && !program_principal(&to)
                 {
                     return Err(format!(
-                        "grant to an agent, a person or a node's st (host/NAME), not `{to}`"
+                        "grant to an agent, a person, a node's st or exact program/HOST/NAME, not `{to}`"
                     ));
                 }
                 if to == person {
                     return Err(format!("{person} owns {profile} already"));
+                }
+                if to.starts_with("program/")
+                    && policy
+                        .allow
+                        .iter()
+                        .any(|rule| rule.prefix.iter().any(|part| part == "*"))
+                {
+                    return Err(
+                        "a program grant uses literal command prefixes, never wildcards".into(),
+                    );
                 }
                 if to.starts_with("agent/")
                     && let Some(rule) = policy.broad_allow()
@@ -1415,6 +1655,81 @@ fn reachable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Resolve below an already opened directory, never following a caller's symlink. Every
+/// component stays descriptor-relative even if the runner renames a parent during the walk.
+fn open_checkout_beneath(root: &Path, relative: &Path, uid: u32) -> Result<OwnedFd> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    #[cfg(target_os = "linux")]
+    let access = libc::O_PATH;
+    #[cfg(not(target_os = "linux"))]
+    let access = libc::O_RDONLY;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        bail!("checkout must be strictly below its configured root");
+    }
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root)
+        .context("open configured runner checkout root")?;
+    if directory.metadata()?.uid() != uid {
+        bail!("runner checkout root has the wrong owner");
+    }
+    let mut directory: OwnedFd = directory.into();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            unreachable!()
+        };
+        let name = std::ffi::CString::new(name.as_encoded_bytes())?;
+        let next = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                access | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if next < 0 {
+            return Err(io::Error::last_os_error())
+                .context("open checkout component without following symlinks");
+        }
+        directory = unsafe { OwnedFd::from_raw_fd(next) };
+    }
+    Ok(directory)
+}
+
+fn program_checkout_path(fd: &OwnedFd, uid: u32, checkout: &ProgramCheckout) -> Result<PathBuf> {
+    // The backing root's parent is operator-controlled. Only the root itself belongs to the
+    // runner; it cannot replace its parent or redirect this gateway-side anchor.
+    let parent = checkout
+        .backing_root
+        .parent()
+        .context("checkout root has no parent")?;
+    if sandbox::trusted_path(parent, 0)? != parent {
+        bail!("runner checkout parent must not be a symlink");
+    }
+    // This is an empty operator-created mount anchor, not the caller's private /w mount.
+    if sandbox::trusted_path(&checkout.mount_root, 0)? != checkout.mount_root
+        || !fs::metadata(&checkout.mount_root)?.is_dir()
+    {
+        bail!("program mount root must be an existing root-controlled directory");
+    }
+    let path = sandbox::descriptor_path(fd)?;
+    let relative = path
+        .strip_prefix(&checkout.mount_root)
+        .or_else(|_| path.strip_prefix(&checkout.backing_root))
+        .context("passed checkout is outside this runner's configured roots")?;
+    let opened = open_checkout_beneath(&checkout.backing_root, relative, uid)?;
+    let expected = fs::metadata(format!("/proc/self/fd/{}", opened.as_raw_fd()))?;
+    let received = fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
+    if !received.is_dir() || expected.dev() != received.dev() || expected.ino() != received.ino() {
+        bail!("passed checkout does not match the configured runner backing directory");
+    }
+    Ok(checkout.mount_root.join(relative))
+}
+
 fn check_policy(policy: &Policy) -> Result<(), String> {
     if policy.allow.is_empty() {
         return Err("a policy needs at least one allow rule or preset".into());
@@ -1432,6 +1747,7 @@ struct Prepared {
     view: sandbox::CheckoutView,
     cwd: PathBuf,
     env: Vec<(String, String)>,
+    mount_roots: Vec<PathBuf>,
     _scratch: tempfile::TempDir,
 }
 
@@ -1477,4 +1793,289 @@ fn open_pty(size: protocol::Winsize) -> Result<(OwnedFd, OwnedFd)> {
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
     Ok((master, slave))
+}
+
+#[cfg(test)]
+mod program_tests {
+    use super::*;
+
+    struct TestKernel(String);
+    impl Kernel for TestKernel {
+        fn cgroup(&self, _: i32) -> Option<String> {
+            Some(self.0.clone())
+        }
+        fn start(&self, _: i32) -> Option<u64> {
+            Some(123)
+        }
+    }
+
+    fn config(root: &Path) -> GatewayConfig {
+        toml::from_str(&format!(
+            r#"
+store = {root:?}
+[people]
+"1000" = "person/ada"
+[programs."1001"]
+principal = "program/ci1/evidence"
+person = "person/ada"
+unit = "ci-evidence.service"
+command = ["evidence-sign"]
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn program_enrollment_rejects_ambiguous_uid_principal_unit_and_command() {
+        let root = tempfile::tempdir().unwrap();
+        let valid = config(root.path());
+        valid.validate().unwrap();
+        for (field, value) in [
+            ("principal", "person/ada"),
+            ("principal", "program/ci1/*"),
+            ("person", "person/other"),
+            ("unit", "user@1001.service/app.slice/seat.scope"),
+            ("unit", "ci-evidence.service/child"),
+            ("unit", ".service"),
+            ("command", "/bin/sh"),
+            ("command", "*"),
+        ] {
+            let mut candidate = valid.clone();
+            let program = candidate.programs.get_mut("1001").unwrap();
+            match field {
+                "principal" => program.principal = value.into(),
+                "person" => program.person = value.into(),
+                "unit" => program.unit = value.into(),
+                _ => program.command = vec![value.into()],
+            }
+            assert!(candidate.validate().is_err(), "{field}={value}");
+        }
+        for uid in ["0", "01001", "1000"] {
+            let mut candidate = valid.clone();
+            let program = candidate.programs.remove("1001").unwrap();
+            candidate.programs.insert(uid.into(), program);
+            assert!(candidate.validate().is_err(), "uid={uid}");
+        }
+        let mut duplicate = valid.clone();
+        duplicate
+            .programs
+            .insert("1002".into(), duplicate.programs["1001"].clone());
+        assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
+    fn program_identification_uses_uid_and_exact_system_unit_never_person_or_agent() {
+        for (cgroup, allowed) in [
+            ("/system.slice/ci-evidence.service", true),
+            ("/system.slice/ci-evidence.service/child", true),
+            ("/system.slice/ci-evidence.service-other", false),
+            ("/system.slice/other.service", false),
+            ("/user.slice/user-1001.slice/session-1.scope", false),
+            (
+                "/user.slice/user-1001.slice/user@1001.service/ci-evidence.service",
+                false,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let gateway = Gateway::new(
+                config(root.path()),
+                1000,
+                None,
+                Box::new(TestKernel(cgroup.into())),
+            )
+            .unwrap();
+            let view = gateway.classify(1001, 7, "person/ada", None, "nonce");
+            assert_eq!(
+                matches!(view, CallerView::Program { .. }),
+                allowed,
+                "{cgroup}"
+            );
+            assert!(!matches!(
+                view,
+                CallerView::Person { .. } | CallerView::Agent { .. }
+            ));
+            assert!(matches!(
+                gateway.classify(1002, 7, "person/ada", None, "nonce"),
+                CallerView::Unidentified { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn program_needs_a_narrow_grant_and_cannot_manage_login_or_choose_another_tool() {
+        let root = tempfile::tempdir().unwrap();
+        let gateway = Gateway::new(
+            config(root.path()),
+            1000,
+            None,
+            Box::new(TestKernel("/system.slice/ci-evidence.service".into())),
+        )
+        .unwrap();
+        let caller = Caller {
+            uid: 1001,
+            pid: 7,
+            pid_start: Some(123),
+            person: "person/ada".into(),
+            view: gateway.classify(1001, 7, "person/ada", None, "nonce"),
+        };
+        let allow = Policy::build(&[], &["evidence-sign".into()], &[]).unwrap();
+        gateway
+            .store()
+            .create_profile("ada/evidence", "person/ada", None, &allow, false)
+            .unwrap();
+        let request = RunRequest {
+            profile: Some("ada/evidence".into()),
+            argv: vec!["evidence-sign".into()],
+            ..Default::default()
+        };
+        assert!(
+            gateway.choose(&caller, &request).unwrap().is_err(),
+            "ownership is not a grant"
+        );
+        let grant = gateway
+            .store()
+            .add_grant(
+                "ada/evidence",
+                "program/ci1/evidence",
+                &allow,
+                None,
+                "person/ada",
+            )
+            .unwrap();
+        assert!(gateway.choose(&caller, &request).unwrap().is_ok());
+        let wrong = RunRequest {
+            argv: vec!["sh".into()],
+            ..request.clone()
+        };
+        assert!(gateway.choose(&caller, &wrong).unwrap().is_err());
+        let extra = RunRequest {
+            argv: vec![
+                "evidence-sign".into(),
+                "--config".into(),
+                "/tmp/key.json".into(),
+            ],
+            ..request.clone()
+        };
+        assert!(gateway.choose(&caller, &extra).unwrap().is_err());
+        let login = RunRequest {
+            login: true,
+            ..request.clone()
+        };
+        assert!(gateway.choose(&caller, &login).unwrap().is_err());
+        for request in [
+            Request::ProfileList,
+            Request::GrantList,
+            Request::Put {
+                profile: "ada/evidence".into(),
+                name: "KEY".into(),
+                value: "replacement".into(),
+            },
+            Request::Register {
+                node: "host/ci1".into(),
+                key: "not-a-key".into(),
+            },
+            Request::Lock {
+                person: None,
+                reason: None,
+            },
+        ] {
+            assert!(gateway.manage(&caller, request).is_err());
+        }
+        let person = Caller {
+            uid: 1000,
+            pid: 8,
+            pid_start: Some(124),
+            person: "person/ada".into(),
+            view: CallerView::Person {
+                person: "person/ada".into(),
+            },
+        };
+        assert!(
+            gateway
+                .manage(
+                    &person,
+                    Request::GrantAdd {
+                        profile: "ada/evidence".into(),
+                        to: "program/ci1/*".into(),
+                        policy: allow.clone(),
+                        until_unix_ms: None
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            gateway
+                .manage(
+                    &person,
+                    Request::GrantAdd {
+                        profile: "ada/evidence".into(),
+                        to: "program/ci1/evidence".into(),
+                        policy: Policy::build(&["everything".into()], &[], &[]).unwrap(),
+                        until_unix_ms: None
+                    }
+                )
+                .is_err()
+        );
+        gateway
+            .store()
+            .revoke_grant(&grant.id, "person/ada")
+            .unwrap();
+        assert!(gateway.choose(&caller, &request).unwrap().is_err());
+    }
+
+    #[test]
+    fn program_checkout_walk_is_descriptor_relative_and_refuses_symlinks_and_other_owners() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("runner");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(root.join("smalltalk/repo")).unwrap();
+        let uid = fs::metadata(&root).unwrap().uid();
+        let fd = open_checkout_beneath(&root, Path::new("smalltalk/repo"), uid).unwrap();
+        let actual = fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd())).unwrap();
+        assert_eq!(
+            actual.ino(),
+            fs::metadata(root.join("smalltalk/repo")).unwrap().ino()
+        );
+        for path in [
+            "",
+            "..",
+            "../runner/smalltalk",
+            "/",
+            "missing",
+            "smalltalk/repo/../repo",
+        ] {
+            assert!(
+                open_checkout_beneath(&root, Path::new(path), uid).is_err(),
+                "{path}"
+            );
+        }
+        assert!(
+            open_checkout_beneath(&root, Path::new("smalltalk/repo"), uid.wrapping_add(1)).is_err()
+        );
+        let outside = fixture.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        symlink(root.join("smalltalk/repo"), root.join("inside-link")).unwrap();
+        for path in ["escape", "inside-link"] {
+            assert!(open_checkout_beneath(&root, Path::new(path), uid).is_err());
+        }
+        // A root symlink is refused too; checking only descendant components is insufficient.
+        symlink(&root, fixture.path().join("root-link")).unwrap();
+        assert!(
+            open_checkout_beneath(
+                &fixture.path().join("root-link"),
+                Path::new("smalltalk/repo"),
+                uid
+            )
+            .is_err()
+        );
+        fs::rename(root.join("smalltalk"), root.join("renamed")).unwrap();
+        assert_eq!(
+            fs::metadata(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+                .unwrap()
+                .ino(),
+            actual.ino()
+        );
+    }
 }
