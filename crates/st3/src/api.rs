@@ -1664,6 +1664,7 @@ fn client_error_code(code: Option<&str>) -> String {
         | "idempotency-conflict"
         | "idempotency-key-expired"
         | "issuer-required"
+        | "suspend-authored-session-selection"
         | "arrangement-exists"
         | "arrangement-folder-exists"
         | "arrangement-retired"
@@ -11451,7 +11452,7 @@ async fn restart_agent(
     {
         return Err(ApiError::bad(St3Error::new(
             "restart-suspended",
-            "the seat is suspended; resume it with `st agents resume`",
+            "the seat is suspended; resume it with `st agents resume`. If resume refuses an authored session selection, use `st agents stop` then `st agents start`; this ends the suspension and launches the declaration without preserving the suspended session",
         )));
     }
     let status = state
@@ -11773,6 +11774,15 @@ pub(crate) fn request_suspend(
             ))
         })?;
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
+    if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
+        return Err(ApiError::bad(
+            St3Error::new(
+                "suspend-authored-session-selection",
+                format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
+            )
+            .with_detail("selector", selector),
+        ));
+    }
     let blocking = crate::suspension::blockers(&state.store, &subject, incarnation)
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
