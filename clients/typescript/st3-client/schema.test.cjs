@@ -4,6 +4,26 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('terminal refusal and unconfirmed send envelopes preserve their applied answers', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.ErrorEnvelope);
+    for (const [code, applied, refusal] of [
+        ['recipient-retired', 'none', { variant: 'Retired', recipient: 'agent/example/worker' }],
+        ['lifecycle-unavailable', 'none', { variant: 'LifecycleUnavailable', recipient: 'agent/example/worker', reason: 'conflict' }],
+        ['message-send-unconfirmed', 'unknown', undefined],
+    ]) {
+        const wire = { api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/example',
+            code, message: 'The send outcome', retryable: false, applied,
+            details: { applied, scope: 'control.messages', future_detail: { version: 2 }, ...(refusal ? { refusal } : {}) } };
+        const roundTrip = Schema.encodeSync(Rich.ErrorEnvelope)(decode(wire));
+        assert.equal(roundTrip.applied, applied);
+        assert.equal(roundTrip.details.applied, applied);
+        assert.equal(roundTrip.details.scope, 'control.messages');
+        assert.deepEqual(roundTrip.details.future_detail, { version: 2 });
+        if (refusal) assert.deepEqual(roundTrip.details.refusal, refusal);
+    }
+});
+
 test('directive notes decode metadata and expiry without becoming gate evidence', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json').value;

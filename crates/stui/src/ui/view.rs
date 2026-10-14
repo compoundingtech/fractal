@@ -358,6 +358,7 @@ pub enum AgentState {
     /// details say since when. Never shown as starting or working.
     Down,
     Stopped,
+    Retired,
     Unknown,
 }
 
