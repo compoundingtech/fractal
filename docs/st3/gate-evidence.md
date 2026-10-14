@@ -459,8 +459,12 @@ its canaries passed), `isolation-vm` by its own note; both gate their first step
 build succeeded.
 
 `linux-gate` itself still runs always and still fails on anything but success, with one addition: it reads its gate's
-decision, and a member that reports `skipped` is accepted only when that decision was exactly `true`, never
-for a failure or a cancellation, and the stage counts are still enforced. A skipped job reports `skipped` to
+decision, and a member that reports `skipped` is accepted only when that decision was exactly `true`, only
+in the **positions** of the stages that are skipped at job level (the build, the test shards, clippy and fleet
+compatibility, derived in the generator from the very list that skips them), never for a failure or a
+cancellation, and the stage counts are still enforced. `upgrade-impact` and `mail-redelivery-canaries` are never
+accepted as skipped, so a condition that skipped them for any other reason cannot be waved through just because a
+note exists. A skipped job reports `skipped` to
 the aggregate evidence-note producers, which refuse to sign for a skipped member, so a skipped run writes no
 fresh `linux-gate` note.
 

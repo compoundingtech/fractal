@@ -295,13 +295,28 @@ assert gate('merge_group',['success']*7,['success']) != 0
 assert gate('pull_request',['success']*7,['success']*2) != 0
 print('passed: four merge shards preserve exact archive provenance, merge roles and strict event-qualified aggregation')
 
-# Evidence skip: a stage the gate skipped reports `skipped`, accepted only when the gate said skip, never a failure.
-for event, shards in (('merge_group', ['skipped'] * 2), ('pull_request', ['skipped'] * 2), ('workflow_dispatch', ['skipped'] * 2)):
-    assert gate(event, ['skipped'] * 7, shards, skip='true') == 0, event
-    assert gate(event, ['success'] * 3 + ['skipped'] * 4, shards, skip='true') == 0, event
-    # Without the gate's decision, skipped stays a failure, whatever the value of the variable.
-    for not_true in (None, '', 'false', 'True', '1', 'yes', 'true ', 'TRUE'):
-        assert gate(event, ['success'] * 6 + ['skipped'], shards, skip=not_true) != 0, (event, not_true)
+# Evidence skip: a stage the gate skipped at JOB level reports `skipped`. It is accepted only when this gate decided
+# skip, only in the positions of those stages, and never for a failure or a cancellation. RESULTS is, in order:
+# linux-test-build, upgrade-impact, linux-tests, linux-tests-shard-2, linux-clippy, linux-fleet-compat, canaries.
+SKIPPABLE = (0, 2, 3, 4, 5)      # build, tests, shard 2, clippy, fleet compat (zero-based)
+NEVER_SKIPPED = (1, 6)           # upgrade-impact and the canaries always run
+covered = ['skipped', 'success', 'skipped', 'skipped', 'skipped', 'skipped', 'success']
+for event in ('merge_group', 'pull_request', 'workflow_dispatch'):
+    assert gate(event, covered, ['skipped'] * 2, skip='true') == 0, event
+    assert gate(event, ['success'] * 7, ['skipped'] * 2, skip='true') == 0, event
+    # Each stage on its own: skipped is accepted exactly where a job-level skip is possible.
+    for i in range(7):
+        results = ['success'] * 7
+        results[i] = 'skipped'
+        assert (gate(event, results, ['skipped'] * 2, skip='true') == 0) == (i in SKIPPABLE), (event, i)
+        # ...and never without the gate's decision, whatever the value of the variable.
+        for not_true in (None, '', 'false', 'True', '1', 'yes', 'true ', 'TRUE'):
+            assert gate(event, results, ['skipped'] * 2, skip=not_true) != 0, (event, i, not_true)
+    # Every uncovered-position skip is refused even when every other stage was legitimately skipped.
+    for i in NEVER_SKIPPED:
+        results = list(covered)
+        results[i] = 'skipped'
+        assert gate(event, results, ['skipped'] * 2, skip='true') != 0, (event, i)
 for i in range(9):
     for bad in ('failure', 'cancelled'):
         results = ['skipped'] * 9
@@ -310,9 +325,12 @@ for i in range(9):
         results = ['success'] * 9
         results[i] = bad
         assert gate('merge_group', results[:7], results[7:], skip='true') != 0, (i, bad)
+# The merge-only shards may be skipped under a skip (they are job-level skips too) but not otherwise.
+assert gate('merge_group', covered, ['skipped', 'skipped'], skip='true') == 0
+assert gate('merge_group', covered, ['skipped', 'skipped'], skip=None) != 0
 assert gate('merge_group', ['skipped'] * 6, ['skipped'] * 2, skip='true') != 0   # a missing stage result still fails
-assert gate('merge_group', ['skipped'] * 7, ['skipped'], skip='true') != 0
-assert gate('pull_request', ['skipped'] * 7, ['success', 'skipped'], skip='true') != 0  # extra shards stay merge-only
+assert gate('merge_group', covered, ['skipped'], skip='true') != 0
+assert gate('pull_request', covered, ['success', 'skipped'], skip='true') != 0  # extra shards stay merge-only
 print('passed: an evidence skip lets the aggregate accept skipped stages only when its own gate decided, never failures')
 
 assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/public-repo.yml').read_text()
