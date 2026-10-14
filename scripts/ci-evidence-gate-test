@@ -1050,6 +1050,33 @@ class WorkflowStructure(unittest.TestCase):
                                                                    'GITHUB_OUTPUT': '/nonexistent/dir/out'}, capture_output=True)
             self.assertNotEqual(failing.returncode, 0)
 
+    def test_every_signing_step_learns_when_its_gate_skipped_and_the_aggregate_sees_every_gate(self):
+        blocks = self.blocks()
+        signed = 0
+        for name, block in blocks.items():
+            body = block.split('    steps:\n', 1)
+            if len(body) != 2:
+                continue
+            for chunk in re.split(r'^      - ', body[1], flags=re.M)[1:]:
+                found = self.fields(chunk)
+                if not str(found.get('name', '')).startswith(('Sign this stage result', 'Sign this job result')):
+                    continue
+                signed += 1
+                env = re.search(r'^          GATE_SKIP: (.*)$', chunk, re.M)
+                self.assertIsNotNone(env, f'{name} signs without being told when its gate skipped')
+                referenced = set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', env.group(1)))
+                self.assertTrue(referenced, name)
+                # Every gate it reads must be one of its needs, and the check's own gate must be among them.
+                self.assertTrue({f'evidence-gate-{g}' for g in referenced} <= self.needs_of(block), name)
+                expected = {'mail-redelivery-canaries': {'linux-gate', 'mail-redelivery-canaries'},
+                            'genie-freshness': {'genie-freshness'}, 'typescript-client': {'typescript-client'},
+                            'isolation-vm': {'isolation-vm'}}.get(name, {'linux-gate'})
+                self.assertEqual(referenced, expected, name)
+        self.assertGreaterEqual(signed, 10)  # the stage jobs, the canaries and the three step-outcome jobs
+        aggregate = self.needs_of(blocks['evidence-note-linux-gate'])
+        for check in CHECKS:
+            self.assertIn(f'evidence-gate-{check}', aggregate)
+
     def test_the_gate_jobs_can_write_nothing_and_start_nothing(self):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
         jobs = re.findall(r'^  (evidence-gate-[a-z-]+):\n((?:    .*\n|\n)+)', text, re.M)
