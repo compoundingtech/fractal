@@ -303,6 +303,9 @@ for raw in cache_conditions:
             for cancelled in (False, True):
                 for succeeded in (False, True):
                     for local in ('', '1'):
+                      # A check whose evidence gate decided to skip turns its cache steps off too; an ordinary
+                      # run (no skip decision) must behave exactly as before.
+                      for skip in ('', 'true'):
                         expression = condition
                         for token, value in {
                             '!cancelled()': not cancelled,
@@ -310,13 +313,16 @@ for raw in cache_conditions:
                             'github.event_name': event,
                             'vars.CI_OUTAGE_FAST_QUEUE': switch,
                             'env.CI_LOCAL_CACHES': local,
+                            'needs.evidence-gate-genie-freshness.outputs.skip': skip,
                         }.items():
                             expression = expression.replace(token, repr(value))
                         actual = eval(expression.replace('&&', ' and ').replace('||', ' or '), {'__builtins__': {}})
                         expected = not cancelled and (event != 'merge_group' or switch != 'on')
                         if 'success()' in condition:
                             expected = expected and succeeded and local != '1'
-                        assert actual == expected, (condition, event, switch, cancelled, succeeded, local)
+                        if skip == 'true' and 'evidence-gate' in condition:
+                            expected = False
+                        assert actual == expected, (condition, event, switch, cancelled, succeeded, local, skip)
 for job, block in blocks.items():
     assert 'CI_OUTAGE_FAST_QUEUE' not in block.split('    steps:', 1)[0], (job, 'outage switch must not skip jobs')
 for step in ('Download this run attempt’s successful test build', 'Verify source, hashes and extract test archives',
