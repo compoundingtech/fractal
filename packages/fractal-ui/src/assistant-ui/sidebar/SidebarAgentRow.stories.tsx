@@ -48,7 +48,6 @@ function CardPair({ row }: { readonly row: Row }) {
 
 /** Hover intent opens after 150ms and closes after 300ms; a saturated strict host can stretch that past waitFor's 1s default. */
 const hoverSettleTimeout = 5_000
-const fixtureByRef = new Map<string, Row>([knownRow, unreportedRow, ...cohortRows, ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr1` })), ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr3` })), ...parentRow.children, parentRow].map(row => [row.ref, row]))
 
 /** The visible title is the exact name; the complete reported facts are the exact description, carried by a mounted hidden span rather than a native title or the unsupported aria-description. */
 async function assertRowNames(canvasElement: HTMLElement) {
@@ -257,6 +256,7 @@ const metricRow: Row = { ...knownRow, ref: 'agent/metric', id: 'metric', context
   last24h: { _tag: 'Known', usd: 1.84, since: storyNow - 86_400_000, until: storyNow, observedAt: storyNow },
   last7d: { _tag: 'Known', usd: 9.25, since: storyNow - 604_800_000, until: storyNow, observedAt: storyNow },
 } }
+const fixtureByRef = new Map<string, Row>([knownRow, unreportedRow, ...cohortRows, ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr1` })), ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr3` })), ...parentRow.children, parentRow, ...contextRows, metricRow].map(row => [row.ref, row]))
 const metricWidths = [256, 320] as const
 function MetricWidths() {
   return <section data-metric-widths {...stylex.props(styles.metricPair)}>{metricWidths.map(width => <div key={width} data-metric-width={width} {...stylex.props(styles.metricFrame(width))}>
