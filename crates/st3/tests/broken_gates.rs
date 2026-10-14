@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 //! Exec gates that cannot answer hold their work for a revision instead of failing the run.
+//! Exit-code field gates fail when a terminal exec cannot satisfy them.
 //!
 //! Each step replays a gate that failed a run whose work was done: a cargo gate whose PATH lacked
 //! the linker (twice), a memory threshold that could never pass, a grep of a listing that showed
@@ -8,7 +9,7 @@
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -33,10 +34,9 @@ impl Daemon {
             executable(&bin.join(name), source);
         }
         let log = File::create(root.join("daemon.log")).unwrap();
-        let child = Command::new(assert_cmd::cargo::cargo_bin!("st3"))
+        let child = st3::test_support::command(test_bin!("st3-fixture"))
             .env_clear()
             .env("HOME", root)
-            .env("SHELL", "/bin/bash")
             .env(
                 "PATH",
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -83,17 +83,22 @@ impl Daemon {
     }
 
     fn run_cli(&self, args: &[&str]) -> std::process::Output {
-        Command::new(assert_cmd::cargo::cargo_bin!("st3"))
+        self.run_cli_format(args, true)
+    }
+
+    fn run_cli_format(&self, args: &[&str], json: bool) -> std::process::Output {
+        let mut command = st3::test_support::command(test_bin!("st3-fixture"));
+        command
             .env_clear()
             .env("HOME", &self.root)
             .env("ST3_DAEMON_WAIT", "0")
             .current_dir(&self.root)
             .args(["--endpoint"])
-            .arg(self.root.join("daemon.sock"))
-            .arg("--json")
-            .args(args)
-            .output()
-            .unwrap()
+            .arg(self.root.join("daemon.sock"));
+        if json {
+            command.arg("--json");
+        }
+        command.args(args).output().unwrap()
     }
 
     fn run(&self) -> Value {
@@ -198,14 +203,568 @@ fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
     }
 }
 
+#[test]
+fn mission_publish_dry_run_prints_the_preview_without_gates_or_publication() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("preview.kdl");
+    let source = r#"version 2
+agent "example/helper" {
+  workspace "."
+  command "touch helper-ran"
+  restart "never"
+  mission-authority { publish "example/*" }
+}
+mission "example/preview" state="ready" {
+  goal "Inspect publication without running commands."
+  step "work" {
+    agentless
+    gate "checked" {
+      exec "touch gate-ran; exit 2"
+      host "orchid"
+      workspace "."
+    }
+  }
+}
+"#;
+    std::fs::write(&file, source).unwrap();
+    let file = file.to_str().unwrap();
+    for (prefix, flag) in [
+        (vec!["apply"], "--dry-run"),
+        (vec!["apply"], "--preview"),
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
+        (vec!["agents", "apply"], "--dry-run"),
+        (vec!["missions", "publish"], "--dry-run"),
+        (vec!["missions", "publish"], "--preview"),
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
+    ] {
+        let mut args = prefix.clone();
+        args.extend([file, "--as", PUBLISHER, flag]);
+        let output = daemon.run_cli(&args);
+        assert!(output.status.success(), "{output:?}");
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            stderr.contains("is legacy; use st apply FILE"),
+            prefix.len() == 2
+        );
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
+        let preview = daemon.command(&args);
+        let resolved = preview["resolved_intent"]["kdl"].as_str().unwrap();
+        let intent = st3::graph::parse_intent(resolved, "orchid").unwrap();
+        assert!(resolved.contains("Inspect publication without running commands."));
+        assert!(preview["normalized"].is_object(), "{preview:#}");
+        let revision = preview["mission_revisions"]["mission/example/preview"]
+            .as_str()
+            .unwrap();
+        assert!(!revision.is_empty());
+        assert_eq!(intent.missions["example/preview"].revision, revision);
+        assert!(preview["changes"].as_array().unwrap().iter().any(|change| {
+            change["subject"] == "mission/example/preview" && change["new_revision"] == revision
+        }));
+        assert!(
+            preview["predicted_actions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| {
+                    action["subject"] == "mission/example/preview"
+                        && action["action"] == "publish-mission"
+                })
+        );
+        assert_eq!(preview["blockers"], serde_json::json!([]));
+        assert!(preview["warnings"].to_string().contains("free-mode"));
+        assert!(preview["subject_tokens"].is_object());
+
+        let human = daemon.run_cli_format(&args, false);
+        assert!(human.status.success(), "{human:?}");
+        let human = String::from_utf8_lossy(&human.stdout);
+        for expected in [
+            "RESOLVED INTENT",
+            "BLOCKERS",
+            "WARNINGS",
+            revision,
+            "Inspect publication without running commands.",
+        ] {
+            assert!(human.contains(expected), "{human}");
+        }
+        assert!(!root.path().join("gate-ran").exists());
+        assert!(!root.path().join("helper-ran").exists());
+        assert!(daemon.gate_results().is_empty());
+        let missions = daemon.command(&["missions", "ls", "--all"]);
+        assert!(
+            !missions.to_string().contains("example/preview"),
+            "{missions}"
+        );
+        let agents = daemon.command(&["agents", "ls", "--all"]);
+        assert!(!agents.to_string().contains("example/helper"), "{agents}");
+    }
+}
+
+#[test]
+fn mission_publish_dry_run_prints_blockers_before_refusing_publication() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("blocked.kdl");
+    std::fs::write(
+        &file,
+        "version 2\nmission \"example/blocked\" state=\"ready\" {\n  goal \"Find an unresolved seat.\"\n  step \"work\" { assigned-to \"agent/example/nobody\" }\n}\n",
+    )
+    .unwrap();
+    for prefix in [
+        vec!["apply"],
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
+        vec!["agents", "apply"],
+        vec!["missions", "publish"],
+        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
+    ] {
+        let mut args = prefix;
+        args.extend([file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run"]);
+        let refused = daemon.run_cli(&args);
+        assert!(!refused.status.success(), "{refused:?}");
+        let preview: Value = serde_json::from_slice(&refused.stdout).unwrap();
+        let blocker = preview["blockers"][0].as_str().unwrap();
+        assert!(blocker.contains("missing eligible agent `agent/example/nobody`"));
+        assert!(
+            preview["resolved_intent"]["kdl"]
+                .as_str()
+                .unwrap()
+                .contains("example/blocked")
+        );
+        assert!(String::from_utf8_lossy(&refused.stderr).contains(blocker));
+        let human = daemon.run_cli_format(&args, false);
+        assert!(!human.status.success());
+        assert!(String::from_utf8_lossy(&human.stdout).contains(blocker));
+        let missions = daemon.command(&["missions", "ls", "--all"]);
+        assert!(
+            !missions.to_string().contains("example/blocked"),
+            "{missions}"
+        );
+    }
+}
+
+#[test]
+fn apply_bundles_seats_missions_and_schedules_and_refuses_partial_publication() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let seat = root.path().join("seat.kdl");
+    let mission = root.path().join("mission.kdl");
+    let schedule = root.path().join("schedule.kdl");
+    std::fs::write(&seat, "version 2\nagent \"example/helper\" { workspace \".\"; command \"true\"; restart \"never\"; }\n").unwrap();
+    std::fs::write(&mission, "version 2\nmission \"example/mixed\" state=\"ready\" { goal \"Resolve a seat from another file.\"; step \"work\" { assigned-to \"agent/example/helper\"; } }\n").unwrap();
+    std::fs::write(&schedule, "version 2\nschedule \"example/daily\" { every \"24h\"; anchor \"2099-01-01T00:00:00Z\"; work { mission \"example/mixed\"; workspace \".\"; } }\n").unwrap();
+    let seat = seat.to_str().unwrap();
+    let mission = mission.to_str().unwrap();
+    let schedule = schedule.to_str().unwrap();
+    let missing = root.path().join("missing.kdl");
+    for bad in [missing.to_str().unwrap(), mission] {
+        // Unreadable files and unresolved references both reject the entire bundle.
+        let args = if bad == mission {
+            vec!["apply", mission, schedule, "--as", PUBLISHER]
+        } else {
+            vec!["apply", seat, bad, "--as", PUBLISHER]
+        };
+        assert!(!daemon.run_cli(&args).status.success());
+        assert!(
+            !daemon
+                .command(&["agents", "ls", "--all"])
+                .to_string()
+                .contains("example/helper")
+        );
+        assert!(
+            !daemon
+                .command(&["missions", "ls", "--all"])
+                .to_string()
+                .contains("example/mixed")
+        );
+    }
+    let preview = daemon.command(&[
+        "apply",
+        seat,
+        mission,
+        schedule,
+        "--as",
+        PUBLISHER,
+        "--dry-run",
+    ]);
+    assert_eq!(preview["blockers"], serde_json::json!([]));
+    for subject in [
+        "agent/example/helper",
+        "mission/example/mixed",
+        "schedule/example/daily",
+    ] {
+        assert!(
+            preview["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|change| change["subject"] == subject),
+            "{preview:#}"
+        );
+    }
+    assert!(
+        !daemon
+            .command(&["agents", "ls", "--all"])
+            .to_string()
+            .contains("example/helper")
+    );
+    let applied = daemon.command(&["apply", seat, mission, schedule, "--as", PUBLISHER]);
+    assert!(
+        applied.to_string().contains("schedule/example/daily"),
+        "{applied}"
+    );
+    let revision = applied["published_missions"][0]["revision"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        preview["mission_revisions"]["mission/example/mixed"],
+        revision
+    );
+    assert!(
+        daemon
+            .command(&["agents", "ls", "--all"])
+            .to_string()
+            .contains("example/helper")
+    );
+    assert!(
+        daemon
+            .command(&["missions", "ls", "--all"])
+            .to_string()
+            .contains("example/mixed")
+    );
+    // Plain publication is an upsert; omitting the schedule does not retire it.
+    let repeated = daemon.command(&["apply", seat, "--as", PUBLISHER]);
+    assert!(!repeated.to_string().contains("schedule/example/daily"));
+    let status = daemon.command(&["subject", "show", "schedule/example/daily"]);
+    assert!(
+        status.to_string().contains("2099-01-01T00:00:00Z"),
+        "{status}"
+    );
+}
+
+#[test]
+fn apply_can_check_exec_gates_during_plain_and_owned_dry_runs() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    for owned in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(root.path());
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let file = root.path().join("gates.kdl");
+        std::fs::write(
+            &file,
+            r#"version 2
+mission "example/check" state="ready" {
+  goal "Validate gates without publishing."
+  input "answer" kind="text"
+  step "work" {
+    agentless
+    gate "check" { exec "touch gate-ran; exit ${input.answer}"; host "orchid"; workspace "."; }
+  }
+}
+"#,
+        )
+        .unwrap();
+        let mut args = vec![
+            "apply",
+            file.to_str().unwrap(),
+            "--as",
+            PUBLISHER,
+            "--workspace",
+            workspace.to_str().unwrap(),
+        ];
+        if owned {
+            args.extend([
+                "--set",
+                "garden",
+                "--repository",
+                "acme/garden",
+                "--ref",
+                "refs/heads/main",
+                "--sha",
+                "0123456789abcdef0123456789abcdef01234567",
+                "--source-sequence",
+                "1",
+                "--expect-set",
+                "absent",
+            ]);
+        }
+        if owned {
+            // Retaining the owned-set route also retains intentional empty membership.
+            let mut empty = args.clone();
+            empty.remove(1);
+            let name = empty.iter().position(|arg| *arg == "garden").unwrap();
+            empty[name] = "empty-garden";
+            empty.extend(["--allow-empty", "--check"]);
+            let mut empty_dry = empty.clone();
+            empty_dry.push("--dry-run");
+            assert_eq!(daemon.command(&empty_dry)["empty"], true);
+            daemon.command(&empty);
+            assert!(
+                daemon
+                    .command(&["sets", "ls"])
+                    .to_string()
+                    .contains("empty-garden")
+            );
+        }
+        let mut dry = args.clone();
+        dry.push("--dry-run");
+        daemon.command(&dry);
+        assert!(!workspace.join("gate-ran").exists());
+        for answer in ["answer=0", "answer=1", "answer=2"] {
+            let mut checked = dry.clone();
+            checked.extend(["--check", "--input", answer]);
+            let output = daemon.run_cli(&checked);
+            assert_eq!(output.status.success(), answer != "answer=2", "{output:?}");
+            let preview: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(preview["blockers"], serde_json::json!([]));
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains(if answer == "answer=0" {
+                    "pass"
+                } else if answer == "answer=1" {
+                    "not yet"
+                } else {
+                    "broken"
+                })
+            );
+            assert!(workspace.join("gate-ran").exists());
+            std::fs::remove_file(workspace.join("gate-ran")).unwrap();
+            assert!(
+                !daemon
+                    .command(&["missions", "ls", "--all"])
+                    .to_string()
+                    .contains("example/check")
+            );
+        }
+        // A broken gate also refuses real publication; opting out publishes without execution.
+        let mut broken = args.clone();
+        broken.extend(["--input", "answer=2"]);
+        assert!(!daemon.run_cli(&broken).status.success());
+        std::fs::remove_file(workspace.join("gate-ran")).unwrap();
+        args.push("--no-gate-check");
+        daemon.command(&args);
+        assert!(!workspace.join("gate-ran").exists());
+        assert!(
+            daemon
+                .command(&["missions", "ls", "--all"])
+                .to_string()
+                .contains("example/check")
+        );
+    }
+}
+
+#[test]
+fn a_terminal_exec_fails_its_unsatisfied_field_gate() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("mission.kdl");
+    std::fs::write(
+        &file,
+        r#"version 2
+mission "orchid/replay" state="ready" {
+  goal "Fail an impossible exit-code predicate."
+  completion { when "all-steps-exhausted" }
+  step "prepare" {
+    agentless
+    exec "prepare" {
+      host "orchid"
+      workspace "."
+      command "exit 2"
+      restart "never"
+    }
+    gate "prepared" {
+      field "exit_code" "exec/${ST_MISSION_RUN}/prepare" is 0
+    }
+  }
+  step "ship" {
+    depends-on { step "prepare" completed }
+    agentless
+  }
+}
+"#,
+    )
+    .unwrap();
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
+    daemon.command(&[
+        "missions",
+        "start",
+        "orchid/replay",
+        "--id",
+        "orchid/replay",
+        "--workspace",
+        root.path().to_str().unwrap(),
+        "--as",
+        PUBLISHER,
+    ]);
+    wait_for("the failed field gate", || {
+        daemon.step("prepare")["status"] == "failed"
+    });
+    let step = daemon.step("prepare");
+    let reason = step["blocked_reason"].as_str().unwrap();
+    assert!(reason.contains("exec/orchid/replay/prepare"), "{step}");
+    assert!(reason.contains("exit code 2"), "{step}");
+    wait_for("the run to fail", || daemon.run()["status"] == "failed");
+    assert_ne!(daemon.step("ship")["status"], "completed");
+    let results = daemon.gate_results();
+    assert!(
+        results.iter().any(|claim| {
+            claim["body"]["fields"]["gate"] == "prepared"
+                && claim["body"]["fields"]["verdict"] == "fail"
+                && claim["body"]["fields"]["reason"] == reason
+        }),
+        "{results:?}"
+    );
+}
+
+#[test]
+fn missions_and_doctor_surface_a_terminal_field_gate_behind_a_pending_gate() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("mission.kdl");
+    std::fs::write(
+        &file,
+        r#"version 2
+mission "orchid/replay" state="ready" {
+  goal "Explain an impossible predicate behind a pending gate."
+  step "prepare" {
+    agentless
+    exec "prepare" {
+      host "orchid"
+      workspace "."
+      command "touch running; while [ ! -f release ]; do sleep 0.1; done; exit 2"
+      restart "never"
+    }
+    gate "an external result exists" { exists "resource/orchid/result" }
+    gate "prepared" { field "exit_code" "exec/${ST_MISSION_RUN}/prepare" is 0 }
+  }
+}
+"#,
+    )
+    .unwrap();
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
+    daemon.command(&[
+        "missions",
+        "start",
+        "orchid/replay",
+        "--id",
+        "orchid/replay",
+        "--workspace",
+        root.path().to_str().unwrap(),
+        "--as",
+        PUBLISHER,
+    ]);
+    let check = || {
+        // Other doctor checks can fail on a host without all runtime tools.
+        let output = daemon.run_cli(&["doctor"]);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "terminal-exec-gates")
+            .unwrap()
+            .clone()
+    };
+    wait_for("the exec to be running", || {
+        root.path().join("running").exists()
+    });
+    assert!(daemon.run()["stuck_gates"].is_null());
+    assert_eq!(check()["status"], "pass");
+    std::fs::write(root.path().join("release"), "go").unwrap();
+    wait_for("the terminal exec diagnostic", || {
+        daemon.run()["stuck_gates"]
+            .as_array()
+            .is_some_and(|gates| !gates.is_empty())
+    });
+    let run = daemon.run();
+    assert_eq!(run["status"], "running");
+    let stuck = run["stuck_gates"][0].as_str().unwrap();
+    assert!(
+        stuck.contains(daemon.step("prepare")["subject"].as_str().unwrap()),
+        "{stuck}"
+    );
+    assert!(stuck.contains("prepared"), "{stuck}");
+    assert!(stuck.contains("exec/orchid/replay/prepare"), "{stuck}");
+    assert!(stuck.contains("exit code 2"), "{stuck}");
+    let health = check();
+    assert_eq!(health["status"], "warn", "{health}");
+    assert!(
+        health["message"].as_str().unwrap().contains(stuck),
+        "{health}"
+    );
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
+        .env_clear()
+        .env("HOME", root.path())
+        .env("ST3_DAEMON_WAIT", "0")
+        .args([
+            "--endpoint",
+            root.path().join("daemon.sock").to_str().unwrap(),
+            "missions",
+            "show",
+            RUN,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let human = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        human.contains("STUCK GATES") && human.contains(stuck),
+        "{human}"
+    );
+    // Diagnostics must not decide the unreachable gate, and must drop an ended run.
+    assert!(
+        !daemon
+            .gate_results()
+            .iter()
+            .any(|claim| claim["body"]["fields"]["gate"] == "prepared")
+    );
+    daemon.command(&[
+        "missions",
+        "cancel",
+        RUN,
+        "--reason",
+        "the test is done",
+        "--as",
+        PUBLISHER,
+    ]);
+    wait_for("the run to be cancelled", || {
+        daemon.run()["status"] == "cancelled"
+    });
+    assert!(daemon.run()["stuck_gates"].is_null());
+    assert_eq!(check()["status"], "pass");
+}
+
 /// The replay mission. `fixed` selects the revised gates; nothing else differs.
 fn mission(root: &Path, fixed: bool) -> String {
     let tools = root.join("tools");
     let linker = root.join("linker");
     let path = if fixed {
-        format!("{}:{}:/usr/bin:/bin", tools.display(), linker.display())
+        format!("{}:{}", tools.display(), linker.display())
     } else {
-        format!("{}:/usr/bin:/bin", tools.display())
+        tools.display().to_string()
     };
     let suite = |name: &str| format!("export PATH={path}; cargo test -p orchid --test {name}");
     let threshold = if fixed { "8000000000" } else { "1200" };
@@ -259,6 +818,11 @@ fn replay_host(root: &Path) -> Daemon {
     // `cargo` needs the `mold` linker on PATH, as the gates' cargo builds did.
     std::fs::create_dir_all(root.join("tools")).unwrap();
     std::fs::create_dir_all(root.join("linker")).unwrap();
+    // Supply only the gate tools: mold must stay absent until the revision adds it.
+    for name in ["awk", "cat", "grep", "sh", "env"] {
+        let tool = st_runtime::resolve_executable(name, &std::env::vars().collect()).unwrap();
+        std::os::unix::fs::symlink(tool, root.join("tools").join(name)).unwrap();
+    }
     executable(
         &root.join("tools/cargo"),
         "#!/bin/sh\ncommand -v mold >/dev/null 2>&1 || { echo 'error: linker `mold` not found' >&2; exit 101; }\necho 'test result: ok. 12 passed'\n",
@@ -291,20 +855,19 @@ fn replay_host(root: &Path) -> Daemon {
 
 #[test]
 fn broken_gates_wait_for_a_revision_that_then_passes_their_steps() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let daemon = replay_host(root.path());
 
     // Publish the broken gates as their runs had them; publish would otherwise refuse them.
     let file = root.path().join("replay.kdl");
     std::fs::write(&file, mission(root.path(), false)).unwrap();
-    daemon.command(&[
-        "missions",
-        "publish",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -401,6 +964,9 @@ fn broken_gates_wait_for_a_revision_that_then_passes_their_steps() {
 
 #[test]
 fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let daemon = replay_host(root.path());
     let workspace = root.path().to_str().unwrap();
@@ -451,15 +1017,11 @@ fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
     }
 
     // Publish runs the same check and refuses the broken gates, naming each one.
-    let refused = daemon.run_cli(&[
-        "missions",
-        "publish",
-        file,
-        "--as",
-        PUBLISHER,
-        "--workspace",
-        workspace,
-    ]);
+    let refused = daemon.run_cli(&["apply", file,
+    "--as",
+    PUBLISHER,
+    "--workspace",
+    workspace,]);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -493,15 +1055,11 @@ fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
         };
         assert_eq!(gate["answer"], expected, "{gate:#}");
     }
-    daemon.command(&[
-        "missions",
-        "publish",
-        fixed,
-        "--as",
-        PUBLISHER,
-        "--workspace",
-        workspace,
-    ]);
+    daemon.command(&["apply", fixed,
+    "--as",
+    PUBLISHER,
+    "--workspace",
+    workspace,]);
     let listed = daemon.command(&["missions", "ls"]);
     assert!(listed.to_string().contains("orchid/replay"), "{listed}");
 
@@ -607,4 +1165,191 @@ mission "orchid/inputs" state="ready" {
     );
     let (_, view) = check(&["--input", "release=1.5.0"]);
     assert_eq!(view["gates"][0]["answer"], "not-yet", "{view:#}");
+}
+
+
+#[test]
+fn until_scripts_wait_for_round_outputs_in_preflight_and_still_run_each_round() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("until.kdl");
+    std::fs::write(&file, r#"version 2
+mission "orchid/round-output" state="ready" {
+  goal "Check a result only after a round produces it."
+  completion { when "all-steps-exhausted" }
+  gate "mission script" { exec "printf checked > mission-checked"; host "orchid"; workspace "."; }
+  loop "improve" {
+    max-rounds 2
+    until {
+      gate "round result" {
+        exec "printf '%s\\n' \"$ST_LOOP_ROUND\" >> until-evaluated; test -s result.json || exit 2; test \"$ST_LOOP_ROUND\" -ge 2"
+        host "orchid"
+        workspace "."
+      }
+    }
+    round {
+      completion { when "all-steps-exhausted" }
+      step "produce" {
+        assigned-to "person/avery"
+        goal "Write result.json for this round."
+        gate "round step script" { exec "printf checked > round-checked"; host "orchid"; workspace "."; }
+      }
+    }
+  }
+}
+"#).unwrap();
+    let file = file.to_str().unwrap();
+    let workspace = root.path().to_str().unwrap();
+
+    // This used to run until-evaluated before any round and reject the absent result with exit 2.
+    let dry = daemon.run_cli(&[
+        "apply",
+        file,
+        "--as",
+        PUBLISHER,
+        "--workspace",
+        workspace,
+        "--dry-run",
+        "--check",
+    ]);
+    assert!(dry.status.success(), "{dry:?}");
+    assert!(
+        String::from_utf8_lossy(&dry.stderr).contains("not checked, they run after each round")
+    );
+    assert!(!root.path().join("until-evaluated").exists());
+    assert!(!root.path().join("result.json").exists());
+    assert!(root.path().join("mission-checked").exists());
+    assert!(root.path().join("round-checked").exists());
+    assert!(
+        !daemon
+            .command(&["missions", "ls", "--all"])
+            .to_string()
+            .contains("orchid/round-output")
+    );
+
+    let checked = daemon.command(&["missions", "check", file, "--workspace", workspace]);
+    let gates = checked["gates"].as_array().unwrap();
+    // Normalization also lists the generated round mission; assert the relevant gates by name.
+    for name in ["mission script", "round step script", "round result"] {
+        assert!(gates.iter().any(|gate| gate["gate"] == name), "{checked:#}");
+    }
+    assert_eq!(
+        gates
+            .iter()
+            .filter(|gate| gate["gate"] == "round result")
+            .count(),
+        1,
+        "{checked:#}"
+    );
+    for gate in gates {
+        if gate["gate"] == "round result" {
+            assert_eq!(gate["answer"], "unchecked", "{gate:#}");
+            assert_eq!(gate["reason"], "not checked, they run after each round");
+            assert!(gate["exit_code"].is_null(), "{gate:#}");
+        } else {
+            assert_eq!(gate["answer"], "pass", "{gate:#}");
+        }
+    }
+    let human = daemon.run_cli_format(
+        &["missions", "check", file, "--workspace", workspace],
+        false,
+    );
+    assert!(human.status.success(), "{human:?}");
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("not checked, they run after each round")
+    );
+
+    // Real publication uses the same scope and displays the deferred reason, too.
+    let published = daemon.run_cli(&["apply", file, "--as", PUBLISHER, "--workspace", workspace]);
+    assert!(published.status.success(), "{published:?}");
+    assert!(
+        String::from_utf8_lossy(&published.stderr)
+            .contains("not checked, they run after each round")
+    );
+    assert!(!root.path().join("until-evaluated").exists());
+    assert!(!root.path().join("result.json").exists());
+
+    for args in [
+        vec!["apply", "--help"],
+        vec!["missions", "publish", "--help"],
+        vec!["missions", "check", "--help"],
+    ] {
+        let help = daemon.run_cli_format(&args, false);
+        assert!(help.status.success(), "{help:?}");
+        let text = String::from_utf8_lossy(&help.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("after each round"), "{text}");
+    }
+
+    let run_id = "mission-run/orchid/round-output-test";
+    daemon.command(&[
+        "missions",
+        "start",
+        "mission/orchid/round-output",
+        "--id",
+        run_id,
+        "--workspace",
+        workspace,
+        "--as",
+        PUBLISHER,
+    ]);
+    for round in 1..=2 {
+        let mut step = String::new();
+        wait_for("the round's producer step", || {
+            let work = daemon.command(&["work", "ls", "--as", "person/avery"]);
+            let found = work["value"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["state"] == "ready");
+            if let Some(item) = found {
+                step = item["id"].as_str().unwrap().to_owned();
+            }
+            !step.is_empty()
+        });
+        if round == 1 {
+            assert!(!root.path().join("until-evaluated").exists());
+        } else {
+            let evaluated = std::fs::read_to_string(root.path().join("until-evaluated")).unwrap();
+            assert!(!evaluated.is_empty());
+            assert!(evaluated.lines().all(|value| value == "1"), "{evaluated}");
+        }
+        std::fs::write(
+            root.path().join("result.json"),
+            format!("{{\"round\":{round}}}"),
+        )
+        .unwrap();
+        daemon.command(&[
+            "work",
+            "done",
+            &step,
+            "--as",
+            "person/avery",
+            "--summary",
+            "Produced result.json",
+        ]);
+    }
+    wait_for("the loop to finish after its second boundary", || {
+        daemon.command(&["missions", "show", run_id])["status"] == "completed"
+    });
+    // Verify both boundaries in order without imposing exactly-once execution on runtime.
+    let evaluated = std::fs::read_to_string(root.path().join("until-evaluated")).unwrap();
+    let rounds = evaluated.lines().collect::<Vec<_>>();
+    assert_eq!(rounds.first(), Some(&"1"), "{evaluated}");
+    let second = rounds.iter().position(|value| *value == "2").unwrap();
+    assert!(
+        rounds[..second].iter().all(|value| *value == "1"),
+        "{evaluated}"
+    );
+    assert!(
+        rounds[second..].iter().all(|value| *value == "2"),
+        "{evaluated}"
+    );
+    let run = daemon.command(&["missions", "show", run_id]);
+    assert_eq!(run["loops"][0]["round"], 2, "{run:#}");
 }

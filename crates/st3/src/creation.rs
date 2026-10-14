@@ -1,6 +1,23 @@
 //! Declaration builders shared by client actions and CLI creation.
 use kdl::{KdlDocument, KdlEntry, KdlNode};
 
+pub use st3_client::agent_branch;
+
+pub fn validate_agent_checkout(args: &st3_client::AgentCreateParameters) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        args.repo.is_some()
+            || (args.base.is_none() && args.branch.is_none() && args.remove_at_run_end.is_none()),
+        "base, branch and remove_at_run_end require a repository"
+    );
+    if let Some(repository) = &args.repo {
+        anyhow::ensure!(
+            std::path::Path::new(repository).is_absolute(),
+            "repo must be absolute on the selected host"
+        );
+    }
+    Ok(())
+}
+
 /// The Claude settings the fleet's Claude seats run with: st's own channel plugin on, and the
 /// plugins st2's marketplace shipped off.
 pub const CLAUDE_SEAT_SETTINGS: &str = r#"{"enabledPlugins":{"st2-channel@st2":false,"st3-channel@st2":false,"st3-channel@st3":false,"st-channel@st":true}}"#;
@@ -21,15 +38,31 @@ pub fn agent_document(
     if let Some(host) = &args.host {
         body.nodes_mut().push(kdl_node("host", [host.as_str()]));
     }
-    let mut workspace = kdl_node("workspace", [workspace]);
-    if create_workspace {
-        workspace
+    let mut workspace_node = kdl_node("workspace", [workspace]);
+    if create_workspace && args.repo.is_none() {
+        workspace_node
             .entries_mut()
             .push(KdlEntry::new_prop("create", true));
     }
-    body.nodes_mut().push(workspace);
-    let arguments: &[&str] = match args.harness.as_str() {
-        "claude" => {
+    body.nodes_mut().push(workspace_node);
+    if let Some(repository) = &args.repo {
+        let branch = args
+            .branch
+            .clone()
+            .unwrap_or_else(|| agent_branch(&args.name));
+        let mut checkout = kdl_node("checkout", [repository.as_str()]);
+        checkout.entries_mut().extend([
+            KdlEntry::new_prop("base", args.base.as_deref().unwrap_or("origin/main")),
+            KdlEntry::new_prop("branch", branch.as_str()),
+        ]);
+        if args.remove_at_run_end == Some(true) {
+            checkout
+                .entries_mut()
+                .push(KdlEntry::new_prop("remove-at-run-end", true));
+        }
+        body.nodes_mut().push(checkout);
+    }
+    if args.harness == "claude" {
             let mut environment = KdlNode::new("env");
             let mut variables = KdlDocument::new();
             variables
@@ -44,18 +77,7 @@ pub fn agent_document(
                     [".claude/settings.local.json", CLAUDE_SEAT_SETTINGS],
                 ),
             ]));
-            &[
-                "--dangerously-skip-permissions",
-                "--settings",
-                CLAUDE_SEAT_SETTINGS,
-            ]
-        }
-        "codex" => &[
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--dangerously-bypass-hook-trust",
-        ],
-        _ => &[],
-    };
+    }
     let mut harness = kdl_node("harness", [args.harness.as_str()]);
     let mut harness_body = KdlDocument::new();
     if let Some(model) = &args.model {
@@ -68,11 +90,6 @@ pub fn agent_document(
             .nodes_mut()
             .push(kdl_node("effort", [effort.as_str()]));
     }
-    if !arguments.is_empty() {
-        harness_body
-            .nodes_mut()
-            .push(kdl_node("args", arguments.iter().copied()));
-    }
     if let Some(message) = &args.message {
         let mut node = kdl_node("message", [message.as_str()]);
         node.entries_mut().push(KdlEntry::new_prop(
@@ -81,9 +98,8 @@ pub fn agent_document(
         ));
         harness_body.nodes_mut().push(node);
     }
-    if !harness_body.nodes().is_empty() {
-        harness.set_children(harness_body);
-    }
+    // The harness grammar requires a body even when the provider has no default flags.
+    harness.set_children(harness_body);
     body.nodes_mut().push(harness);
     if let Some(key) = creation_key {
         body.nodes_mut().push(creation_tags(key));
@@ -133,13 +149,20 @@ pub fn terminal_document(
     creation_key: &str,
 ) -> String {
     let identity = format!("{person}/{id}");
+    // With no directory named, the shell starts in the host user's home: a service's own working
+    // directory is `/` (Nathan, 2026-10-05). A home that is unset or missing leaves it where it is.
+    let command = if cwd == "." {
+        "cd \"${HOME:-.}\" 2>/dev/null; exec \"${SHELL:-/bin/sh}\" -i"
+    } else {
+        "exec \"${SHELL:-/bin/sh}\" -i"
+    };
     let mut terminal = kdl_node("pty", [identity.as_str()]);
     let mut body = KdlDocument::new();
     body.nodes_mut().extend([
         kdl_node("name", [args.name.as_str()]),
         kdl_node("host", [host]),
         kdl_node("workspace", [cwd]),
-        kdl_node("command", ["exec \"${SHELL:-/bin/sh}\" -i"]),
+        kdl_node("command", [command]),
         kdl_node("restart", ["never"]),
         creation_tags(creation_key),
     ]);
@@ -218,6 +241,132 @@ pub async fn claim_initial_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_with_no_directory_starts_in_home_and_one_with_a_directory_keeps_it() {
+        let args = st3_client::TerminalCreateParameters {
+            name: "scratch".into(),
+            ..Default::default()
+        };
+        let plain = terminal_document("person/example", "one", &args, "host", ".", "key");
+        // The command is quoted for KDL, so its own quotes are escaped.
+        assert!(
+            plain.contains("cd \\\"${HOME:-.}\\\" 2>/dev/null; exec"),
+            "{plain}"
+        );
+        assert!(plain.contains("${SHELL:-/bin/sh}"), "{plain}");
+        let placed = terminal_document("person/example", "two", &args, "host", "/srv/work", "key");
+        assert!(!placed.contains("HOME"), "{placed}");
+        assert!(placed.contains("workspace \"/srv/work\""), "{placed}");
+        // The command really lands in HOME, and falls back when HOME is unset or missing.
+        for (home, expected) in [(Some("/tmp"), "/tmp"), (Some("/no/such/dir"), "/")] {
+            let mut shell = std::process::Command::new("sh");
+            shell.current_dir("/");
+            shell.args(["-c", "cd \"${HOME:-.}\" 2>/dev/null; pwd"]);
+            match home {
+                Some(home) => shell.env("HOME", home),
+                None => shell.env_remove("HOME"),
+            };
+            let out = shell.output().unwrap();
+            let expected = std::fs::canonicalize(expected).unwrap();
+            let got = String::from_utf8(out.stdout).unwrap();
+            assert_eq!(
+                std::fs::canonicalize(got.trim()).unwrap(),
+                expected,
+                "HOME={home:?}"
+            );
+        }
+    }
+    #[test]
+    fn created_agents_use_checkout_for_new_and_existing_branches_and_keep_plain_workspaces() {
+        use crate::checkout::Checkout;
+        use crate::checkout::test_support::{git, repository};
+        let root = tempfile::tempdir().unwrap();
+        let repository = repository(root.path());
+        let parameters = st3_client::AgentCreateParameters {
+            name: "agent/example.parser".into(),
+            harness: "codex".into(),
+            repo: Some(repository.display().to_string()),
+            remove_at_run_end: Some(true),
+            ..Default::default()
+        };
+        let workspace = root.path().join("parser");
+        let source = agent_document(&parameters, &workspace.display().to_string(), true, None);
+        let intent = crate::graph::parse_intent(&source, "example").unwrap();
+        let desired = intent.subjects.values().next().unwrap();
+        let checkout = Checkout::from_desired(&desired.desired).unwrap();
+        assert_eq!(checkout.branch, "parser");
+        assert_eq!(checkout.base, "origin/main");
+        assert!(!desired.member.as_ref().unwrap().workspace_create);
+        checkout.create(&workspace).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("README")).unwrap(),
+            "second\n"
+        );
+        // Existing branches retain their own commits instead of resetting to the base.
+        std::fs::write(workspace.join("README"), "agent work\n").unwrap();
+        git(&workspace, &["commit", "--quiet", "-am", "agent work"]);
+        checkout.remove(&workspace).unwrap();
+        checkout.create(&workspace).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("README")).unwrap(),
+            "agent work\n"
+        );
+        checkout.remove(&workspace).unwrap();
+        let missing = st3_client::AgentCreateParameters {
+            repo: Some(root.path().join("missing").display().to_string()),
+            ..parameters.clone()
+        };
+        let source = agent_document(&missing, &workspace.display().to_string(), true, None);
+        let intent = crate::graph::parse_intent(&source, "example").unwrap();
+        let checkout =
+            Checkout::from_desired(&intent.subjects.values().next().unwrap().desired).unwrap();
+        assert!(
+            checkout
+                .create(&workspace)
+                .unwrap_err()
+                .to_string()
+                .contains("failed")
+        );
+        assert!(!workspace.exists());
+        let plain = st3_client::AgentCreateParameters {
+            repo: None,
+            remove_at_run_end: None,
+            ..parameters
+        };
+        let source = agent_document(&plain, &workspace.display().to_string(), true, None);
+        let intent = crate::graph::parse_intent(&source, "example").unwrap();
+        let desired = intent.subjects.values().next().unwrap();
+        assert!(Checkout::from_desired(&desired.desired).is_none());
+        assert!(desired.member.as_ref().unwrap().workspace_create);
+    }
+
+    #[test]
+    fn default_branches_are_simple_safe_seat_names() {
+        for (name, branch) in [
+            ("parser", "parser"),
+            ("agent/example.parser", "parser"),
+            ("fleet/example/--parser.lock", "parser-lock"),
+            ("agent/example/HEAD", "head"),
+            ("???", "agent"),
+        ] {
+            assert_eq!(agent_branch(name), branch);
+            let output = std::process::Command::new("git")
+                .args(["check-ref-format", "--branch", branch])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "Git rejected default branch {branch}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let args = st3_client::AgentCreateParameters {
+            branch: Some("parser".into()),
+            ..Default::default()
+        };
+        assert!(validate_agent_checkout(&args).is_err());
+    }
     #[test]
     fn pi_initial_text_does_not_expand_a_file_argument() {
         let mut argv = vec!["pi".into()];

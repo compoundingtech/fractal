@@ -77,15 +77,14 @@ impl Newcomer {
     }
 
     fn path(root: &Path) -> String {
-        format!("{}:/usr/bin:/bin", root.join("bin").display())
+        format!("{}:{}", root.join("bin").display(), std::env::var("PATH").unwrap())
     }
 
     fn command(root: &Path) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_st3"));
+        let mut command = st3::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
         command
             .env_clear()
             .env("PATH", Self::path(root))
-            .env("SHELL", "/bin/sh")
             .env("HOME", root.join("home"))
             .env("XDG_RUNTIME_DIR", root.join("run"))
             .env("XDG_STATE_HOME", root.join("home/.local/state"))
@@ -133,6 +132,9 @@ impl Drop for Newcomer {
 
 #[test]
 fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
     let Some(pty) = pty() else {
         assert!(
             std::env::var_os("CI_RUN_ID").is_none(),
@@ -149,13 +151,13 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
         &[
             "conversations",
             "send",
-            "person/ada",
+            "agent/garden/worker",
             "--from",
             "person/ada",
             "--body",
             "hello",
         ],
-        &["conversations", "ls", "person/ada"],
+        &["conversations", "ls", "agent/garden/worker"],
     ] {
         let output = newcomer
             .try_run(args)

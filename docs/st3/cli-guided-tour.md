@@ -38,6 +38,14 @@ discoverable rather than surprising.
 This pass answers three questions: what is happening, what needs Alex, and how does Alex launch
 new work?
 
+### Current person context: `note`
+
+Run `st note --help`, `st note`, and `st note --json` through the trusted local Unix socket. Check author, time, optional UTC expiry, revision and a clear empty state. A person's read returns their own current note; a harness defaults to its agent identity and reads only people it works for or who own it.
+
+Inspect `st note set --help` and `st note clear --help`; exercise these only against disposable state as the configured person. Set takes nonblank text bounded to 4096 UTF-8 bytes and optional `--expires-at RFC3339`; clear removes the current note. Neither command accepts another target person, and agents cannot write. Confirm expiry removes a note from reads.
+
+Notes inform, never assign work, approve gates, answer person asks or grant authority. Slice A provides explicit reads only, without launch delivery, notifications or UI. Publishing requires anchored membership and all active members advertising `features.person_directive_note=1`; fence legacy peers from replication before enabling notes, because advertisements do not prove complete legacy-peer discovery.
+
 ### 1. `now` — one bounded operational answer
 
 Why: this should be the first command a person runs, not a dashboard assembled from five other
@@ -49,7 +57,7 @@ st now --as person/alex
 st now --as person/alex --json
 ```
 
-The default lists human attention only. Mission work is in `work ls` and Control; an explicit
+The default lists alerts, then unread updates; with no alert it prints no alert line at all. Mission work is in `work ls` and Control; an explicit
 `--owner-run` opts it into this combined view. Fleet diagnostics are in `doctor` and Operations.
 Check whether the default is calm, current, and actionable. `--all`, `--owner-run`, `--cursor`, and
 `--limit` must make sense from help alone.
@@ -65,7 +73,8 @@ st missions ls --help
 st missions ls
 st missions show --help
 st missions show mission-run/64bcc9227e0166a571e09117d35c572e
-st missions publish --help
+st apply --help
+st apply mission.kdl --as person/alex --dry-run
 st missions check --help
 st missions start --help
 st missions cancel --help
@@ -76,6 +85,12 @@ st missions retire --help
 `ls` and `show` are live reads. Publication, start, cancel, setting a finished run's outcome, and
 retirement are reviewed through help here and are mutation-tested only in the disposable fixture
 run.
+
+`apply --dry-run` (alias `--preview`) prints the resolved intent and publication diagnostics,
+including blockers, without publishing or running exec gates. Add `--json` for the complete
+preview object. `apply FILE --dry-run --check` runs gate commands during the preview;
+`missions check FILE` checks gates alone. The legacy `missions publish` and `agents apply`
+commands still work and print a notice naming `st apply`.
 
 ### 3. `work` — the truthful queue and worker lifecycle
 
@@ -93,6 +108,9 @@ st work show step-run/e3e841ba011236a21fe8bd3e50c21a1d/walkthrough-and-followup
 Then inspect every lifecycle and revision action:
 
 ```sh
+st work start --help
+st work handoff --help
+st work acknowledge --help
 st work claim --help
 st work renew --help
 st work progress --help
@@ -114,15 +132,16 @@ st work revision cancel --help
 Check that a person can understand ownership, readiness, blockers, lease/incarnation, elapsed time,
 goals, constraints, and usage without learning internal graph vocabulary.
 
-### 4. `attention` — Alex's explicit inbox
+### 4. `alerts` — what waits on Alex
 
-Why: decisions and faults needing a person belong in one low-noise, actor-specific inbox.
+Why: asks, gates and approvals waiting on a person belong in one low-noise, actor-specific list,
+each in the conversation of the agent behind it. `st attention` is the older name.
 
 ```sh
-st attention --help
-st attention ls --help
-st attention ls --as person/alex
-st attention show --help
+st alerts --help
+st alerts ls --help
+st alerts ls --as person/alex
+st alerts show --help
 ```
 
 If `ls` returns an item, copy its ID into `show`. Inspect the mutation help without changing live
@@ -131,14 +150,14 @@ state:
 ```sh
 st work ask --help
 st work done --help
-st attention approve --help
-st attention reject --help
+st alerts approve --help
+st alerts reject --help
 ```
 
 Every row should say why Alex is involved, what happens if he does nothing, whether it is stale,
 and the exact actions available now.
 
-A subscription that holds mission requests for a person raises one attention item. Inspect the
+A subscription that holds mission requests for a person raises one alert. Inspect the
 subscription request commands without changing live state:
 
 ```sh
@@ -239,6 +258,9 @@ st agents new --help
 st agents new example --host HOST --print-kdl
 st agents suspend --help
 st agents resume --help
+st agents acknowledge-seed --help
+st agents handoff --help
+st agents handoff show AGENT
 st machines --help
 st machines
 ```
@@ -259,11 +281,26 @@ stayed held.
 
 `agents suspend` is a mutation. Suspend only a seat we agreed to stop. Check that a busy seat is
 refused with its reasons, that a quiet one shows `suspended` with its native session in `agents
-show`, and that `agents resume` reports the same session.
+show`, and that `agents resume` reports the same session. `agents resume --host HOST` carries a pi
+or omp snapshot to another fleet host under the same seat identity. The target needs the same
+absolute workspace path, unoccupied; non-Git workspaces refuse suspend. Follow `suspension.phase`
+and the typed refusal reason in `agents show`.
+
+`agents handoff show AGENT` prints the document a seat left for its next session (see
+[seat continuity](seat-continuity.md)); it errors with `has written no handoff` for a seat that wrote
+none. `agents handoff write` is the seat's own mutation: run it only as that seat.
 
 `agents new --print-kdl` shows the seat declaration without applying it. Check that its workspace is
 a new directory below that host's home and that the harness defaults match the fleet's existing
 seats. Run it without `--print-kdl` only for an agent we agreed to start.
+
+`agents acknowledge-seed AGENT --reason REASON` is a recorded recovery mutation for an interrupted
+OMP seed attempt. Review help here; use only disposable state for the mutation. Check that the
+claim cites the original receipt and records the actor and reason. With or without acknowledgement,
+the next launch is fresh without rearming seed, even if the declaration still carries it.
+An unacknowledged attempt prints and records a durable incomplete warning; acknowledgement
+suppresses later warnings, never gates launch. A plain fresh seat never needs this recovery,
+including a restart before its first message.
 
 ### 8. `terminals` — inspect and attach without shell nesting
 
@@ -348,11 +385,19 @@ converge known contradictions without rewriting history.
 st doctor --help
 st doctor
 st doctor --strict
+st doctor --developer
 st repair --help
 st repair dry-run --help
 st repair dry-run
 st repair apply --help
 ```
+
+Ordinary `st doctor` also reports the daemon's own `build-tools` check; a machine that only
+runs st can ignore its warning. `--developer` separately checks this account's login PATH for
+source-build tools, without contacting the daemon, compiling a crate, or looking up credentials.
+Use `--developer --strict` to fail when a source-build tool is absent. It cannot be combined
+with `--performance`. When the local daemon is down, a person at a terminal is told to run `st`
+or `st setup`; seats and native drivers keep their existing recovery text.
 
 Apply nothing unless the dry-run reports a real, understood plan. Check pass/warn/fail semantics,
 exit status, evidence, remediation, stable repair classes, approval token, and zero-change retry.
@@ -419,6 +464,22 @@ st trace wait --help
 We do not leave a wait running. Check the boundary between product detail (`agents show`) and expert
 history (`subject`/`trace`).
 
+`st trace show SUBJECT --follow`, `st missions show RUN --follow`, and the viewer started by
+`st missions start --follow` retry request timeouts with a 5–15 s initial delay, doubling with
+jitter up to a 60 s cap. Deadline backoff persists across successful reads for the lifetime of
+the viewer: timing out a client read does not cancel the server's work. Unreachable-daemon
+retries start at 100 ms with jitter, double up to 5 s, and exit nonzero after five continuous
+minutes without an answer, including refused or absent sockets. These follow policies take
+precedence over `--daemon-wait`, including `--daemon-wait 0`.
+
+One `follow gap` line on stderr reports the interruption's duration and next retry delay;
+after a complete page or snapshot is delivered, one `follow recovered after N s` line reports
+its total duration. Trace resumes after the last delivered index and uses a 30 s event long poll
+with a 35 s client deadline. Mission viewers retain their last displayed snapshot and keep the
+250 ms healthy polling interval. Authentication, not-found, validation, and other non-transient
+errors still stop the viewer immediately with a nonzero exit. Request timeouts may retry
+indefinitely; Ctrl-C stops either viewer.
+
 ### 16. `schema` and `claim` — discover and use the graph vocabulary
 
 Why: registered types and write policy must be inspectable; low-level observation remains explicit
@@ -467,11 +528,13 @@ st blobs get --help
 st conversations send --help
 ```
 
-`put` keeps a PNG, JPEG, GIF or WebP image of at most 10 MiB on this member and prints
-`blob/<sha256>`. `conversations send --attach FILE` uploads and attaches in one step, and
+`put` keeps an image on this member and prints `blob/<sha256>`. Like `conversations send
+--attach FILE`, which uploads and attaches in one step, it renders an SVG to PNG, converts a BMP,
+and scales an image over 10 MiB down to fit; `--media-type` uploads the bytes exactly instead.
 `conversations read` lists each attachment with the `blobs get` command that reads it. Exercise
-`get` with the `--message` that carries the image. Check that an image over 10 MiB, a text file
-named `.png`, and a fifth attachment are refused in words.
+`get` with the `--message` that carries the image. Check that a large screenshot is scaled and
+says so, that an SVG marking up a screenshot beside it arrives as a PNG, and that a HEIC photo, a
+text file named `.png`, and a fifth attachment are refused in words.
 
 ### 18. `diagnostic` — an agent's authorized harness-failure path
 
@@ -484,6 +547,26 @@ st diagnostic --help
 
 This is agent-only and mutating, so the live human tour reviews help and the already automated
 failure tests rather than publishing a fake fault.
+
+### 18a. `gh` — a seat's watch on a GitHub issue or pull request
+
+Why: a seat that asked a question on GitHub, or opened a pull request, needs to hear the answer and
+the checks without polling. A watch wakes it once for each comment or review by anyone else, each
+time the required checks on the head turn pass or fail, and when the thread closes or merges.
+The watch survives stop/start, suspend/resume and daemon restarts; wakes wait as mail while the
+seat is stopped. Retirement or an explicit fresh conversation ends it silently, and the deadline
+sends a final wake. The shared observer keeps polling until the last watch ends.
+
+```sh
+st gh --help
+st gh watch --help
+st gh ls --all
+```
+
+`comment` posts as the seat and records the new comment's GitHub ID as its own, so the seat's
+watches skip it; `own URL` records one posted some other way. `watch`, `unwatch`, `comment` and
+`own` are agent-only and mutating, and they reach GitHub, so the live human tour reviews help and
+`ls --all`; the automated watch tests cover the rest.
 
 ### 19. `skill` — how an agent seat uses st
 
@@ -500,16 +583,19 @@ Check that the skill describes st without rules of conduct, that its description
 
 ### 20. `completions` — shell discoverability
 
-Why: generated completion keeps the large but intentional command surface navigable.
+Why: completion keeps the large but intentional command surface navigable, and offers the live
+terminals, agents, missions, and other entities an argument accepts, each with a description
+([spec](cli-completion/spec.md)).
 
 ```sh
 st completions --help
-st completions bash >/dev/null
 st completions zsh >/dev/null
-st completions fish >/dev/null
+COMPLETE=fish st -- st terminals attach ''
+st terminals attach steward
 ```
 
-Check generation, installation guidance, and whether hidden/internal commands remain hidden.
+Check that each stub is printed, that entity candidates carry descriptions, that hidden/internal
+commands remain hidden, and that an ambiguous short name lists its matches.
 
 ## Exit criteria
 

@@ -1254,7 +1254,7 @@ fn write_notify_chain_profile(catalog: &Path) {
     let resolver_dir = catalog.join("resolvers");
     std::fs::create_dir_all(&resolver_dir).unwrap();
     std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
+        Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../agent-spec/tests/fixtures/demo_resolver.wasm"),
         resolver_dir.join("goal.wasm"),
     )
@@ -1612,6 +1612,30 @@ fn assert_up_loop_full_refresh_keeps_a_retired_middle_as_live_child_topology() {
 
 #[test]
 fn compile_invalid_seat_does_not_block_existing_live_resync_watch() {
+    // Correcting the MCP seat renders lifecycle-hook registration. Give this test its own
+    // installed set, and scope ST_HOOKS to a child so parallel tests keep their environment.
+    const CHILD: &str = "ST_TEST_COMPILE_INVALID_SEAT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let hooks = tempfile::tempdir().unwrap();
+        crate::hooks::install_at(hooks.path(), false).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "run::tests::compile_invalid_seat_does_not_block_existing_live_resync_watch",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("ST_HOOKS", hooks.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated resync fixture failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let catalog = tempfile::tempdir().unwrap();
     let (live_dir, live_goal) = write_resync_agent(catalog.path(), "live");
     let broken_dir = catalog.path().join("agents/example-linux/broken");
@@ -3525,6 +3549,17 @@ fn detect_host_returns_a_nonempty_short_name() {
     let h = detect_host();
     assert!(!h.is_empty());
     assert!(!h.contains('.'), "short name only, got {h}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detect_host_matches_kernel_hostname() {
+    let full = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+    let short = full.trim().split('.').next().unwrap();
+    let expected = if short.is_empty() { "localhost" } else { short };
+    let host = detect_host();
+    assert!(!host.is_empty());
+    assert_eq!(host, expected);
 }
 
 #[test]

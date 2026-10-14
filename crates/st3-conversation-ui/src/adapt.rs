@@ -1,7 +1,9 @@
-use crate::{Body, Entry, MailImage, ToolState, clean_message_text};
+use crate::{Body, Entry, MailImage, ToolState};
 use serde_json::Value;
 use st3_client::{TimelineBody, TimelineEntry, TimelineRole, TimelineToolStatus};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 /// Why a conversation cannot be shown whole, when st could not read the harness's transcript.
 /// st then sends only the Small Talk around it, which reads as a conversation with the agent's
@@ -12,7 +14,7 @@ pub fn unreadable_transcript(timeline: &[TimelineEntry]) -> Option<String> {
         TimelineBody::Error(error) if error.code == "transcript-not-bound" => Some(error),
         _ => None,
     })?;
-    // A seat that has said nothing since it started has no transcript yet; that is not a failure.
+    // Pending binding is shown as an availability notice alongside authorized live entries.
     if not_yet(error) {
         return None;
     }
@@ -20,6 +22,7 @@ pub fn unreadable_transcript(timeline: &[TimelineEntry]) -> Option<String> {
         .message
         .strip_prefix("transcript not bound: ")
         .unwrap_or(&error.message);
+    let reason = bounded_preview(reason, 256);
     Some(
         match error.details.get("transcript").and_then(Value::as_str) {
             Some(path) => {
@@ -30,7 +33,7 @@ pub fn unreadable_transcript(timeline: &[TimelineEntry]) -> Option<String> {
     )
 }
 
-/// st's notice that the seat's harness has written nothing since it started.
+/// st's notice that the transcript is not bound yet; this does not prove an idle harness.
 fn not_yet(error: &st3_client::TimelineErrorBody) -> bool {
     error.details.get("not_yet").and_then(Value::as_bool) == Some(true)
 }
@@ -38,7 +41,74 @@ fn not_yet(error: &st3_client::TimelineErrorBody) -> bool {
 /// One conversation: the harness transcript and Small Talk messages, in time order.
 /// Draw one conversation as st joined it: the harness's turns and the agent's Small Talk, in
 /// the order st sent them.
+/// How a message's signature reads beside its sender: the device that signed it and whether
+/// that checks ("✓ example phone (secure enclave)"). A message st holds no signature for is usually
+/// just old, so it says nothing and a conversation is not covered in "unsigned".
+pub fn signature_mark(provenance: &st3_client::MessageProvenance) -> Option<String> {
+    let who = provenance
+        .device
+        .clone()
+        .or_else(|| provenance.signer.clone())
+        .unwrap_or_default();
+    let reason = |text: &str| {
+        provenance
+            .reason
+            .as_deref()
+            .map(|reason| format!("{text}: {reason}"))
+            .unwrap_or_else(|| text.to_owned())
+    };
+    match provenance.verdict.as_str() {
+        "verified" => Some(format!("✓ {who}").trim_end().to_owned()),
+        "held" => Some(format!("⚠ {}", reason("signature held"))),
+        "invalid" => Some(format!("✕ {}", reason("signature invalid"))),
+        _ => None,
+    }
+}
+
+/// Said once at the start of a conversation st read only the newest part of.
+const NATIVE_PREFIX_NOTE: &str =
+    "Earlier history is not shown: st reads only the newest part of this agent's transcript";
+
 pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
+    conversation_with_filters(timeline, names, crate::DEFAULT_FILTERS)
+}
+
+pub fn conversation_with_filters(
+    timeline: &[TimelineEntry],
+    names: &BTreeMap<String, String>,
+    filters: &[crate::DisplayFilter],
+) -> Vec<Entry> {
+    conversation_with_output_mode(timeline, names, filters, false)
+}
+
+/// Explicitly fetched native content uses the normal typed projections without
+/// the timeline preview's line limit.
+pub fn conversation_full(timeline: &[TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
+    conversation_with_output_mode(timeline, names, crate::DEFAULT_FILTERS, true)
+}
+
+fn conversation_with_output_mode(
+    timeline: &[TimelineEntry],
+    names: &BTreeMap<String, String>,
+    filters: &[crate::DisplayFilter],
+    full_output: bool,
+) -> Vec<Entry> {
+    if filters.is_empty() {
+        // JSON escapes terminal controls reversibly; the data itself remains unchanged.
+        return timeline
+            .iter()
+            .map(|entry| Entry {
+                id: entry.id.clone(),
+                at: clock(&entry.timestamp),
+                body: Body::User(serde_json::to_string_pretty(entry).expect("timeline JSON")),
+            })
+            .collect();
+    }
+    let displayed = timeline
+        .iter()
+        .filter_map(|entry| filtered_entry(entry, filters))
+        .collect::<Vec<_>>();
+    let timeline = &displayed;
     let name = |id: &str| -> String {
         names.get(id).cloned().unwrap_or_else(|| match id {
             "daemon/runtime" => "st".into(),
@@ -48,13 +118,17 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
     };
     let mut stamped: Vec<(String, Entry)> = Vec::new();
     let mut tools: BTreeMap<String, usize> = BTreeMap::new();
+    // Claude emits a loaded skill as user content after the Skill result, without a call id.
+    // Match its base directory to a still-pending Skill call in this turn.
+    let mut skills: Vec<(String, usize)> = Vec::new();
+    let mut expanded_skills = BTreeSet::new();
     let mut delivery: BTreeMap<String, bool> = BTreeMap::new();
     // Graph messages the agent's harness received, from its own transcript.
     let mut delivered: BTreeSet<String> = BTreeSet::new();
     // A Small Talk message is two entries: who wrote to whom, then what they wrote. A
     // harness transcript heads its own turns with message entries too; only a graph message,
     // `message/…`, is Small Talk.
-    let mut mail: Option<&st3_client::TimelineMessageBody> = None;
+    let mut mail: Option<(&TimelineEntry, &st3_client::TimelineMessageBody)> = None;
     // A harness that wraps a delivery in its own prompt repeats mail the stream may already show.
     let shown = timeline
         .iter()
@@ -66,16 +140,94 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
         })
         .collect::<BTreeSet<_>>();
     for entry in timeline {
-        let at = clock(&entry.timestamp);
-        if let TimelineBody::Message(message) = &entry.body {
-            mail = message
-                .message_id
-                .starts_with("message/")
-                .then_some(message);
+        if is_routine_record(entry, filters) {
             continue;
         }
-        if let (Some(message), TimelineBody::Content(content)) = (mail.take(), &entry.body) {
-            let body = clean_message_text(content.text.as_deref().unwrap_or(""));
+        if mail.is_none() && is_bookkeeping(entry, filters) {
+            continue;
+        }
+        let at = clock(&entry.timestamp);
+        if let TimelineBody::Message(message) = &entry.body {
+            for block in message
+                .blocks
+                .iter()
+                .filter(|block| block.kind == "raw_text")
+            {
+                if let Some(text) = block.payload.get("text").and_then(Value::as_str) {
+                    stamped.push((
+                        entry.timestamp.clone(),
+                        Entry {
+                            id: block.id.clone(),
+                            at: at.clone(),
+                            body: Body::Event(format!(
+                                "[unreadable message]\n{}",
+                                crate::clean_message_text_with_filters(text, filters)
+                            )),
+                        },
+                    ));
+                }
+            }
+            if let Some((pending, message)) = mail.take() {
+                append_unpaired_media(&mut stamped, pending, message, &name);
+            }
+            if message.message_id.starts_with("message/") {
+                mail = Some((entry, message));
+            } else {
+                append_unpaired_media(&mut stamped, entry, message, &name);
+            }
+            continue;
+        }
+        if let TimelineBody::Content(content) = &entry.body
+            && let Some((_, message)) = mail.take()
+        {
+            // The harness's own echo of a delivery it received (`<channel>`, `<smalltalk-message>`,
+            // `<task-notification>`) is not the message's text: read it as such, never as raw markup.
+            let raw = content.text.as_deref().unwrap_or("");
+            if wraps_delivery(raw) {
+                let bodies = harness_bodies(true, raw, &shown, &mut delivered, filters);
+                for (index, mut body) in bodies.into_iter().enumerate() {
+                    if let Body::Mail { from, to, .. } = &mut body {
+                        *from = name(from);
+                        *to = name(to);
+                    }
+                    stamped.push((
+                        entry.timestamp.clone(),
+                        Entry {
+                            id: format!("{}#{index}", entry.id),
+                            at: at.clone(),
+                            body,
+                        },
+                    ));
+                }
+                continue;
+            }
+            let mut body = content_text(content);
+            for attachment in &message.attachments {
+                if !attachment.media_type.starts_with("image/")
+                    && !(message.body_bytes.is_some() && attachment.media_type == "text/plain")
+                    && content.attachment_id.as_deref() != Some(attachment.blob.as_str())
+                    && content.attachment_id.as_deref() != Some(attachment.sha256.as_str())
+                {
+                    if !body.is_empty() {
+                        body.push('\n');
+                    }
+                    body.push_str(&format!(
+                        "[media: {} · {}]",
+                        attachment.media_type, attachment.sha256
+                    ));
+                }
+            }
+            // A long message keeps only its start here; say so, and where the rest is read.
+            if let Some(bytes) = message.body_bytes {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(&format!(
+                    "[the start of a {} message · `st conversations read {}` shows all of it]",
+                    size_text(bytes),
+                    message.message_id
+                ));
+            }
             let from = message.from.as_deref().unwrap_or_default();
             let body = if from == "daemon/runtime" {
                 // Step-ready pings are graph events, not conversation.
@@ -115,6 +267,7 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
                     },
                     delivered: false,
                     dictated: message.tags.iter().any(|tag| tag == "dictated"),
+                    signed: message.provenance.as_ref().and_then(signature_mark),
                     images,
                 }
             };
@@ -128,15 +281,69 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
             ));
             continue;
         }
+        // A typed extension view (contract §2) replaces the text fallback for this entry.
+        if let TimelineBody::Content(content) = &entry.body
+            && let Some(bodies) = typed_content(content)
+        {
+            let single = bodies.len() == 1;
+            for (index, mut body) in bodies.into_iter().enumerate() {
+                if let Body::Mail { from, .. } = &mut body {
+                    *from = name(from);
+                }
+                stamped.push((
+                    entry.timestamp.clone(),
+                    Entry {
+                        id: if single {
+                            entry.id.clone()
+                        } else {
+                            format!("{}#{index}", entry.id)
+                        },
+                        at: at.clone(),
+                        body,
+                    },
+                ));
+            }
+            continue;
+        }
         let body = match (&entry.role, &entry.body) {
             (TimelineRole::User | TimelineRole::System, TimelineBody::Content(content)) => {
-                // Harness markup becomes what it means; context blocks disappear.
-                let bodies = harness_bodies(
+                let raw = content.text.as_deref().unwrap_or("");
+                if entry.role == TimelineRole::User
+                    && let Some(skill) = loaded_skill(raw)
+                    && let Some(pending) = skills.iter().rposition(|(name, _)| name == skill)
+                {
+                    let (_, index) = skills.remove(pending);
+                    if let Body::Tool { state, output, .. } = &mut stamped[index].1.body {
+                        *state = ToolState::Ok;
+                        *output = raw.trim().lines().map(str::to_owned).collect();
+                        expanded_skills.insert(index);
+                        continue;
+                    }
+                }
+                // Structural harness envelopes become what they mean.
+                if content.blocks.iter().any(|block| block.kind != "text") || raw.starts_with("[unrecognized ") {
+                    stamped.push((entry.timestamp.clone(), Entry { id:entry.id.clone(), at, body: if entry.role == TimelineRole::User { Body::User(crate::clean_message_text_with_filters(raw, filters)) } else { Body::Event(crate::clean_message_text_with_filters(raw, filters)) } }));
+                    continue;
+                }
+                let mut bodies = harness_bodies(
                     entry.role == TimelineRole::User,
                     content.text.as_deref().unwrap_or(""),
                     &shown,
                     &mut delivered,
+                    filters,
                 );
+                if bodies.iter().any(|body| matches!(body, Body::User(_))) {
+                    skills.clear();
+                }
+                if content.attachment_id.is_some()
+                    || (content.text.is_none() && content.media_type != "text/plain")
+                {
+                    bodies.push(Body::Event(format!(
+                        "[media: {} · {}]",
+                        content.media_type,
+                        content.attachment_id.as_deref().unwrap_or("reference unavailable")
+                    )));
+                }
                 for (index, mut body) in bodies.into_iter().enumerate() {
                     if let Body::Mail { from, to, .. } = &mut body {
                         *from = name(from);
@@ -154,14 +361,15 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
                 continue;
             }
             (TimelineRole::Assistant, TimelineBody::Content(content)) => {
-                let text = clean_message_text(content.text.as_deref().unwrap_or(""));
+                skills.clear();
+                let text = content_text(content);
                 if text.is_empty() {
                     continue;
                 }
                 Body::Assistant(text)
             }
             (TimelineRole::Tool, TimelineBody::Content(content)) => {
-                let text = clean_message_text(content.text.as_deref().unwrap_or(""));
+                let text = content_text(content);
                 if text.is_empty() {
                     continue;
                 }
@@ -174,19 +382,61 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
             }
             (_, TimelineBody::ToolCall(call)) => {
                 tools.insert(call.call_id.clone(), stamped.len());
+                if call.name == "Skill"
+                    && let Some(skill) = call.arguments.get("skill").and_then(Value::as_str)
+                {
+                    skills.push((
+                        skill.rsplit(':').next().unwrap_or(skill).to_owned(),
+                        stamped.len(),
+                    ));
+                }
+                let (title, output) = typed_call(&call.blocks, &call.name, &call.arguments);
                 Body::Tool {
-                    title: tool_title(&call.name, &call.arguments),
+                    title,
                     state: ToolState::Running,
-                    output: vec![],
+                    output,
                 }
             }
             (_, TimelineBody::ToolResult(result)) => {
-                let (output, command_failed) = tool_output(&result.content);
-                let state = match result.status {
+                let view = block_view(&result.blocks);
+                // A finished task is its agents' cards (q2), one per subagent, not one row.
+                if view.is_some_and(|view| view.get("type").and_then(Value::as_str) == Some("task")) {
+                    let view = view.unwrap();
+                    if let Some(index) = tools.get(&result.call_id).copied()
+                        && let Some((_, call)) = stamped.get_mut(index)
+                        && let Body::Tool { state, .. } = &mut call.body
+                    {
+                        *state = match result.status {
+                            TimelineToolStatus::Error => ToolState::Failed,
+                            _ => ToolState::Ok,
+                        };
+                    }
+                    for agent in view.get("agents").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
+                        stamped.push((
+                            entry.timestamp.clone(),
+                            Entry {
+                                id: format!("{}#{}", entry.id, agent_id(agent)),
+                                at: at.clone(),
+                                body: agent_card(agent),
+                            },
+                        ));
+                    }
+                    continue;
+                }
+                let (mut output, command_failed) = tool_output(&result.content, full_output);
+                let forced;
+                if let Some(view) = view {
+                    let rows = typed_result(view, output);
+                    output = rows.0;
+                    forced = rows.1;
+                } else {
+                    forced = None;
+                }
+                let state = forced.unwrap_or(match result.status {
                     TimelineToolStatus::Error => ToolState::Failed,
                     _ if command_failed => ToolState::Failed,
                     _ => ToolState::Ok,
-                };
+                });
                 if let Some(index) = tools.get(&result.call_id).copied()
                     && let Some((
                         _,
@@ -202,7 +452,15 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
                     )) = stamped.get_mut(index)
                 {
                     *slot = state;
-                    *out = output;
+                    // Transcript revisions can put the result after the expansion.
+                    if !expanded_skills.contains(&index) {
+                        if view.is_some_and(|view| view["type"] == "todo") {
+                            *out = output;
+                        } else {
+                            if let Some(view) = view { mark_selected(out, view); }
+                            out.extend(output);
+                        }
+                    }
                     continue;
                 }
                 Body::Tool {
@@ -220,20 +478,98 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
                         "delivery failing · retrying".into()
                     })
                 }
+                // A seat that has said nothing since it started has no transcript yet, which is
+                // not a fault, and not proof of an idle harness: one calm line, replaced by the
+                // conversation once the harness writes it.
                 "transcript-not-bound" if not_yet(error) => {
-                    Body::Event("nothing in the harness yet since this seat started".into())
+                    Body::Event("starting · transcript unavailable until the harness writes its first line".into())
+                }
+                "transcript-not-bound" => {
+                    Body::Event(format!(
+                        "transcript unavailable: {}",
+                        bounded_preview(&error.message, 256)
+                    ))
                 }
                 "native-delivery-recovered" => {
                     delivery.insert(entry.id.clone(), true);
                     Body::Event("delivery resumed".into())
                 }
+                // Claude's channel could not be confirmed attached for a moment (usually about a
+                // second), so st held the mail; confirming it releases the mail. The same pause
+                // and resume as above, so a pair reads as one quiet line, not two errors.
+                "claude-channel-unattached" => {
+                    delivery.insert(entry.id.clone(), false);
+                    Body::Event("delivery paused · channel not verified yet".into())
+                }
+                "claude-channel-attached" => {
+                    delivery.insert(entry.id.clone(), true);
+                    Body::Event("delivery resumed".into())
+                }
                 // A warning is st noting something it is handling, not a failure.
                 _ if error.details.get("severity").and_then(Value::as_str) == Some("warning") => {
-                    Body::Event(error.message.clone())
+                    Body::Event(bounded_preview(&error.message, 256).into_owned())
                 }
-                _ => Body::Event(format!("error: {}", error.message)),
+                _ => Body::Event(format!("error: {}", bounded_preview(&error.message, 256))),
             },
-            _ => continue,
+            (_, TimelineBody::Status(status)) => Body::Event(format!(
+                "status: {}{}",
+                match status.status {
+                    st3_client::TimelineStatus::Queued => "queued",
+                    st3_client::TimelineStatus::Running => "running",
+                    st3_client::TimelineStatus::Waiting => "waiting",
+                    st3_client::TimelineStatus::Completed => "completed",
+                    st3_client::TimelineStatus::Failed => "failed",
+                    st3_client::TimelineStatus::Cancelled => "cancelled",
+                    st3_client::TimelineStatus::Unknown => "unknown",
+                },
+                status
+                    .detail
+                    .as_ref()
+                    .map(|detail| format!(" · {detail}"))
+                    .unwrap_or_default()
+            )),
+            (_, TimelineBody::Usage(usage)) => Body::Event(usage_line(usage)),
+            (_, TimelineBody::Redaction(redaction)) => Body::Event(format!(
+                "content withheld: {} ({} bytes{})",
+                redaction.reason,
+                redaction.withheld_bytes,
+                redaction
+                    .withheld_items
+                    .map(|items| format!(", {items} items"))
+                    .unwrap_or_default()
+            )),
+            // st reads only the newest part of a long native transcript. That is how it works, not
+            // a fault, so it is said in plain words with no sequence numbers (Nathan, 2026-10-06).
+            (_, TimelineBody::Truncation(truncation))
+                if truncation.reason.contains("native transcript prefix") =>
+            {
+                let mut notice = NATIVE_PREFIX_NOTE.to_owned();
+                if truncation.reason.contains("not fetchable") {
+                    notice.push_str("; earlier history is not fetchable through this read");
+                }
+                Body::Event(notice)
+            }
+            (_, TimelineBody::Truncation(truncation)) => Body::Event(format!(
+                "history omitted: {} (sequences {}–{}{})",
+                truncation.reason,
+                truncation.omitted_from_sequence,
+                truncation.omitted_to_sequence,
+                if truncation.continuation_cursor.is_some() {
+                    "; older history available"
+                } else {
+                    ""
+                }
+            )),
+            (_, TimelineBody::Unknown { entry_type, body }) => Body::Event(format!(
+                "[unknown {}]\n{body}", bounded_preview(entry_type,64)
+            )),
+            (_, TimelineBody::Content(content)) => {
+                // Attribution may be unknown; authorized conversation content is still visible.
+                let text=content_text(content);
+                if text.trim().is_empty() {continue;}
+                Body::Event(format!("[unknown role]\n{text}"))
+            }
+            (_, TimelineBody::Message(_)) => unreachable!("messages are handled above"),
         };
         stamped.push((
             entry.timestamp.clone(),
@@ -244,7 +580,15 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
             },
         ));
     }
+    if let Some((pending, message)) = mail {
+        append_unpaired_media(&mut stamped, pending, message, &name);
+    }
     stamped.sort_by(|a, b| a.0.cmp(&b.0));
+    // That earlier history is not shown is said at the start, where the history would be, not at
+    // the time st stamped the note with (the session's last update: the bottom, by the box).
+    stamped.sort_by_key(|(_, entry)| {
+        !matches!(&entry.body, Body::Event(text) if text.starts_with(NATIVE_PREFIX_NOTE))
+    });
     for (_, entry) in &mut stamped {
         if let Body::Mail {
             delivered: mark, ..
@@ -254,6 +598,331 @@ pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>
         }
     }
     fold_events(stamped.into_iter().map(|(_, entry)| entry), &delivery)
+}
+
+/// Flush refs only after the next message or end proves that no content paired with this envelope.
+fn append_unpaired_media(
+    stamped: &mut Vec<(String, Entry)>,
+    entry: &TimelineEntry,
+    message: &st3_client::TimelineMessageBody,
+    name: &impl Fn(&str) -> String,
+) {
+    if message.attachments.is_empty() {
+        return;
+    }
+    let mut text = format!(
+        "media from {}: ",
+        name(message.from.as_deref().unwrap_or("Small Talk"))
+    );
+    for (index, attachment) in message.attachments.iter().enumerate() {
+        if index != 0 {
+            text.push_str(", ");
+        }
+        write!(text, "{} · {}", attachment.media_type, attachment.sha256).unwrap();
+    }
+    stamped.push((
+        entry.timestamp.clone(),
+        Entry {
+            id: message.message_id.clone(),
+            at: clock(&entry.timestamp),
+            body: Body::Event(text),
+        },
+    ));
+}
+
+fn usage_line(usage: &st3_client::TimelineUsageBody) -> String {
+    let semantics = match usage.semantics {
+        st3_client::TimelineUsageSemantics::Response => "response",
+        st3_client::TimelineUsageSemantics::SessionCumulative => "session cumulative",
+        st3_client::TimelineUsageSemantics::ContextOccupancy => "context occupancy",
+        st3_client::TimelineUsageSemantics::Unknown => "unknown",
+    };
+    let mut line = format!("usage: {semantics}");
+    for (label, value) in [
+        ("input", usage.input_tokens),
+        ("output", usage.output_tokens),
+        ("cached", usage.cached_tokens),
+        ("cache write", usage.cache_write_tokens),
+        ("total", usage.total_tokens),
+        ("context used", usage.context_used_tokens),
+        ("context window", usage.context_window_tokens),
+    ] {
+        if let Some(value) = value {
+            write!(line, " · {label} {value}").unwrap();
+        }
+    }
+    if let Some(cost) = usage.cost {
+        if let Some(currency) = &usage.currency {
+            write!(line, " · cost {currency} {cost}").unwrap();
+        } else {
+            write!(line, " · cost {cost} (currency unknown)").unwrap();
+        }
+    }
+    line
+}
+
+/// omp's `custom` entries that only repeat what the conversation already shows: a tool call's
+/// start (its call is an entry of its own) and the end of the session. Other custom entries stay.
+const OMP_BOOKKEEPING_CUSTOM: &[&str] = &["tool_execution_start", "session_exit"];
+
+fn omp_bookkeeping(block: &st3_client::TimelineBlock) -> bool {
+    block.source_type == "custom"
+        && block.payload["raw"]["customType"]
+            .as_str()
+            .is_some_and(|kind| OMP_BOOKKEEPING_CUSTOM.contains(&kind))
+}
+
+/// Harness records that carry no conversation: the transcript's own titles and modes, and a
+/// reasoning step whose text the model did not share. Unknown records stay visible.
+const BOOKKEEPING_RECORDS: &[&str] = &[
+    // Claude's own entries, system records and attachments.
+    "last-prompt",
+    "ai-title",
+    "mode",
+    "permission-mode",
+    "atis-latch",
+    "pr-link",
+    "frame-link",
+    "bridge-session",
+    "queue-operation",
+    "cost-state",
+    "stop_hook_summary",
+    "turn_duration",
+    "total_tokens_reminder",
+    "deferred_tools_record",
+    "silent_turn_reminder",
+    "environment",
+    "date",
+    "skill_listing",
+    "command_permissions",
+    "edited_text_file",
+    // Codex's turn bookkeeping: the messages and calls they mention are entries of their own.
+    "event_msg",
+    "token_usage_record",
+    "turn_context",
+    "world_state",
+];
+
+/// A record Claude writes about its own session, in kinds that keep appearing (instructions,
+/// session context, prompt snapshots, deferred tools, credential organisation, hook summaries):
+/// an attachment, a system record or a transcript entry that no renderer knows by name. Claude's
+/// own screen shows none of them as conversation, so they are bookkeeping as a class, not one
+/// name at a time.
+fn claude_context_record(text: &str) -> bool {
+    ["attachment", "system", "entry"]
+        .iter()
+        .any(|kind| text.starts_with(&format!("[unrecognized claude {kind} `")))
+}
+
+/// Status, usage and withheld-content records that repeat every turn and say nothing to read.
+/// A failure, a cancellation, a status with any detail beyond the plain `working` and `idle`, and
+/// any withholding reason other than the routine `sensitive-content` are still shown.
+fn is_routine_record(entry: &TimelineEntry, filters: &[crate::DisplayFilter]) -> bool {
+    use st3_client::TimelineStatus;
+    filters.contains(&crate::DisplayFilter::Telemetry)
+        && match &entry.body {
+            TimelineBody::Usage(_) => true,
+            // A harness status st does not name becomes `waiting` with only its detail kept, so
+            // blocked, rate limited and waiting on approval arrive as `waiting` plus a detail:
+            // only the plain heartbeats are routine.
+            TimelineBody::Status(status) => {
+                let detail = status.detail.as_deref().map(str::trim).filter(|d| !d.is_empty());
+                // A status that carries blocks carries content, whatever it is called.
+                status.blocks.is_empty()
+                    && match status.status {
+                        TimelineStatus::Queued | TimelineStatus::Completed => true,
+                        TimelineStatus::Running => matches!(detail, None | Some("working")),
+                        TimelineStatus::Waiting => matches!(detail, None | Some("idle")),
+                        _ => false,
+                    }
+            }
+            TimelineBody::Redaction(redaction) => redaction.reason == "sensitive-content",
+            _ => false,
+        }
+}
+
+/// Whether harness-recorded text carries one of the delivery wrappers st reads.
+fn wraps_delivery(raw: &str) -> bool {
+    ["<channel", "<smalltalk-message", "<task-notification"]
+        .iter()
+        .any(|tag| raw.contains(tag))
+}
+
+fn is_bookkeeping(entry: &TimelineEntry, filters: &[crate::DisplayFilter]) -> bool {
+    let TimelineBody::Content(content) = &entry.body else {
+        return false;
+    };
+    if !filters.contains(&crate::DisplayFilter::Bookkeeping) || content.blocks.is_empty() {
+        return false;
+    }
+    let shown = content.blocks.iter().filter(|block| {
+        !matches!(
+            block.visibility.as_deref(),
+            Some("internal" | "hidden-by-harness")
+        )
+    });
+    match entry.role {
+        TimelineRole::Assistant => {
+            shown.clone().next().is_some()
+                && shown.into_iter().all(|block| {
+                    block.kind == "reasoning"
+                        && block.payload["text"]
+                            .as_str()
+                            .is_none_or(|text| text.trim().is_empty())
+                })
+        }
+        TimelineRole::System => {
+            shown.clone().next().is_some()
+                && shown.into_iter().all(|block| {
+                    block.kind == "unknown"
+                        && (BOOKKEEPING_RECORDS.contains(&block.source_type.as_str())
+                            || omp_bookkeeping(block)
+                            || claude_context_record(content.text.as_deref().unwrap_or("")))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn filtered_entry(entry: &TimelineEntry, filters: &[crate::DisplayFilter]) -> Option<TimelineEntry> {
+    use crate::DisplayFilter;
+    let mut value = serde_json::to_value(entry).expect("timeline JSON");
+    let body = &mut value["body"];
+    if filters.contains(&DisplayFilter::InternalBlocks)
+        && let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut)
+    {
+        // Provenance alone does not hide visible prose; only internal content has no row.
+        let mut content_blocks = blocks
+            .iter()
+            .filter(|block| block["kind"] != "source_record")
+            .peekable();
+        if content_blocks.peek().is_some()
+            && content_blocks.all(|block| {
+                matches!(
+                    block["visibility"].as_str(),
+                    Some("internal" | "hidden-by-harness")
+                )
+            })
+        {
+            return None;
+        }
+        blocks.retain(|block| {
+            !matches!(
+                block["visibility"].as_str(),
+                Some("internal" | "hidden-by-harness")
+            )
+        });
+    }
+    if let Some(raw) = body["text"].as_str() {
+        let mut text = raw.to_owned();
+        if filters.contains(&DisplayFilter::ContextBlocks)
+            && !matches!(entry.role, TimelineRole::User | TimelineRole::System)
+        {
+            filter_context_blocks(&mut text)
+        }
+        if !matches!(entry.role, TimelineRole::User | TimelineRole::System) {
+            text = crate::clean_message_text_with_filters(&text, filters);
+        }
+        // The harness's label for a reasoning step is not part of what it said: thinking it did
+        // share reads as "Thinking · ..." (empty steps are hidden as bookkeeping).
+        if filters.contains(&DisplayFilter::Bookkeeping)
+            && entry.role == TimelineRole::Assistant
+            && let Some(thought) = raw.strip_prefix("[reasoning]")
+        {
+            text = format!("Thinking · {}", thought.trim());
+        }
+        if filters.contains(&DisplayFilter::Excerpts) && raw.starts_with("[unrecognized ") {
+            text = bounded_preview(&text, 512).into_owned();
+        }
+        body["text"] = Value::String(text);
+    }
+    // The default still shows an unreadable record, with its readable approximation.
+    if matches!(&entry.body, TimelineBody::Error(_))
+        && let Some(blocks) = body["blocks"].as_array()
+    {
+        let raw = blocks
+            .iter()
+            .filter(|block| block["kind"] == "raw_text")
+            .filter_map(|block| block["payload"]["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !raw.is_empty() {
+            body["message"] = Value::String(format!(
+                "{}\n{}",
+                body["message"].as_str().unwrap_or(""),
+                crate::clean_message_text_with_filters(&raw, filters)
+            ));
+        }
+    }
+    Some(serde_json::from_value(value).expect("display copy retains timeline shape"))
+}
+
+// Context wrappers may mention their own closing tag in inline code.
+fn filter_context_blocks(text: &mut String) {
+    for tag in CONTEXT_BLOCKS {
+        let open = format!("<{tag}");
+        let close = format!("</{tag}>");
+        let mut from = 0;
+        while let Some(offset) = text[from..].find(&open) {
+            let start = from + offset;
+            if crate::clean::in_inline_code(text, start)
+                || !text[start + open.len()..].starts_with(['>', ' ', '/', '\n'])
+            {
+                from = start + open.len();
+                continue;
+            }
+            let Some(head_end) = text[start..].find('>').map(|n| start + n + 1) else {
+                text.truncate(start);
+                break;
+            };
+            let end = text[head_end..]
+                .match_indices(&close)
+                .map(|(n, _)| head_end + n)
+                .find(|n| !crate::clean::in_inline_code(text, *n));
+            text.replace_range(start..end.map_or(text.len(), |n| n + close.len()), "");
+            from = start;
+        }
+    }
+}
+
+const CONTEXT_BLOCKS: &[&str] = &[
+    "system-reminder",
+    "local-command-caveat",
+    "environment_context",
+    "permissions",
+    "collaboration_mode",
+    "multi_agent_mode",
+    "apps_instructions",
+    "plugins_instructions",
+    "skills_instructions",
+    "user_instructions",
+    "developer_instructions",
+    "command-message",
+    "command-args",
+];
+
+fn bounded_preview(text: &str, max: usize) -> Cow<'_, str> {
+    let Some((end, _)) = text.char_indices().nth(max) else {
+        return Cow::Borrowed(text);
+    };
+    let mut preview = String::with_capacity(end + '…'.len_utf8());
+    preview.push_str(&text[..end]);
+    preview.push('…');
+    Cow::Owned(preview)
+}
+
+/// Preserve authorized attachment references without fetching payloads or decoding unknown bodies.
+fn content_text(content: &st3_client::TimelineContentBody) -> String {
+    let mut text = content.text.as_deref().unwrap_or("").to_owned();
+    if let Some(reference) = &content.attachment_id {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("[media: {} · {reference}]", content.media_type));
+    } else if text.is_empty() && content.media_type != "text/plain" {
+        text = format!("[media: {} · reference unavailable]", content.media_type);
+    }
+    text
 }
 
 /// A delivery pause that recovered is one quiet line, and a run of the same event line is one
@@ -313,24 +982,8 @@ fn self_closing_tag(line: &str) -> bool {
 }
 
 /// Blocks harnesses add to a transcript for the model's benefit. None of it is conversation.
-const CONTEXT_BLOCKS: &[&str] = &[
-    "system-reminder",
-    "local-command-caveat",
-    "environment_context",
-    "permissions",
-    "collaboration_mode",
-    "multi_agent_mode",
-    "apps_instructions",
-    "plugins_instructions",
-    "skills_instructions",
-    "user_instructions",
-    "developer_instructions",
-    "command-message",
-    "command-args",
-];
-
 /// Take every `<tag …>…</tag>` block out of `text`, returning the inner texts. A block that
-/// never closes runs to the end, so a truncated wrapper cannot leak either.
+/// never closes runs to the end. Only structural delivery/command wrappers are parsed.
 fn take_blocks(text: &mut String, tag: &str) -> Vec<String> {
     let mut found = Vec::new();
     let open = format!("<{tag}");
@@ -395,29 +1048,121 @@ fn unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
-/// Every `<tag …>` head in `text`, in order, so the blocks `take_blocks` returns can be matched
-/// with their attributes.
-fn heads(text: &str, tag: &str) -> Vec<String> {
-    let open = format!("<{tag}");
-    let mut found = Vec::new();
-    let mut from = 0;
-    while let Some(offset) = text[from..].find(&open) {
-        let start = from + offset;
-        let end = text[start..]
-            .find('>')
-            .map(|index| start + index + 1)
-            .unwrap_or(text.len());
-        found.push(text[start..end].to_owned());
-        from = end;
+/// Take only delivery wrappers that begin a line outside Markdown code fences. A mention
+/// in prose or inline code is content, even if it contains a complete example envelope.
+fn take_deliveries(text: &mut String, tag: &str) -> Vec<(String, String)> {
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    let mut fence: Option<(char, usize)> = None;
+    let mut consumed = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        if start < consumed {
+            continue;
+        }
+        let trimmed = line.trim();
+        if let Some(marker @ ('`' | '~')) = trimmed.chars().next() {
+            let length = trimmed.chars().take_while(|c| *c == marker).count();
+            if length >= 3 {
+                match fence {
+                    Some((open, count))
+                        if open == marker
+                            && length >= count
+                            && trimmed[length..].trim().is_empty() =>
+                    {
+                        fence = None
+                    }
+                    None => fence = Some((marker, length)),
+                    _ => {}
+                }
+                continue;
+            }
+        }
+        if fence.is_some() || !line.starts_with(&format!("<{tag} ")) {
+            continue;
+        }
+        let Some(head_end) = line.find('>') else {
+            continue;
+        };
+        let head = line[..=head_end].trim();
+        let valid = match tag {
+            "smalltalk-message" => {
+                let id = attribute(head, "id").filter(|id| !id.is_empty());
+                line[head_end + 1..].trim().is_empty()
+                    && ["from", "to", "sha256"]
+                        .iter()
+                        .all(|key| attribute(head, key).is_some_and(|value| !value.is_empty()))
+                    && attribute(head, "subject").is_some()
+                    && id
+                        .is_some_and(|id| attribute(head, "graph") == Some(format!("message/{id}")))
+            }
+            "channel" => {
+                attribute(head, "source").is_some_and(|source| channel_source(&source))
+                    && attribute(head, "from").is_some()
+            }
+            _ => false,
+        };
+        if !valid {
+            continue;
+        }
+        let inner_start = start + head_end + 1;
+        let close = format!("</{tag}>");
+        let end = text[inner_start..].find(&close).map(|i| inner_start + i);
+        let inner_end = end.unwrap_or(text.len());
+        consumed = end.map(|end| end + close.len()).unwrap_or(text.len());
+        ranges.push((
+            start,
+            consumed,
+            text[inner_start..inner_end].to_owned(),
+            head.to_owned(),
+        ));
+    }
+    let found = ranges
+        .iter()
+        .map(|(_, _, body, head)| (body.clone(), head.clone()))
+        .collect();
+    for (start, end, _, _) in ranges.into_iter().rev() {
+        text.replace_range(start..end, "");
     }
     found
+}
+
+/// Whether a `<channel source=…>` is st's own plugin, under any of the names it has had:
+/// `plugin:st-channel:st` now, `st3-channel:st3` and `st2-channel:st2` before. Only the name
+/// changes; an unrecognised one would leave an empty `<channel>` shell on screen after its
+/// message was taken out (Nathan, 2026-10-05).
+pub fn channel_source(source: &str) -> bool {
+    source
+        .strip_prefix("plugin:")
+        .and_then(|name| name.split_once("-channel:"))
+        .is_some_and(|(left, right)| {
+            matches!(left, "st" | "st2" | "st3") && matches!(right, "st" | "st2" | "st3")
+        })
+}
+
+/// Claude's skill expansion starts with its base directory, whose basename is the skill name.
+fn loaded_skill(raw: &str) -> Option<&str> {
+    raw.lines()
+        .next()?
+        .strip_prefix("Base directory for this skill: ")?
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
 }
 
 /// A user or system entry from a harness transcript, turned into what a person should see.
 /// `shown` holds the graph messages the stream already draws as mail: a delivery of one of
 /// those is a line, and a delivery of any other is the mail itself.
 pub fn from_harness(is_user: bool, raw: &str, shown: &BTreeSet<String>) -> Vec<Body> {
-    harness_bodies(is_user, raw, shown, &mut BTreeSet::new())
+    harness_bodies(
+        is_user,
+        raw,
+        shown,
+        &mut BTreeSet::new(),
+        crate::DEFAULT_FILTERS,
+    )
 }
 
 /// The graph message a `[PING from st3] message/ID from …` line announces.
@@ -429,6 +1174,15 @@ fn ping_id(line: &str) -> Option<&str> {
         .filter(|id| id.starts_with("message/"))
 }
 
+/// The lines st adds beside a delivery for the agent (st-drivers `ding`): how to answer the
+/// person, and that a message was dictated. The earlier sentence stays recognized for agents that
+/// still carry it in their history.
+const ST_DELIVERY_NOTES: &[&str] = &[
+    "Answer the person in this conversation; people have no inbox, so do not reply with st.",
+    "The person reads replies in st, not in the agent's session.",
+    "(dictated by voice; it may contain transcription mistakes)",
+];
+
 /// `from_harness`, also noting in `delivered` each shown message the harness received: that
 /// message is marked delivered instead of announced again.
 fn harness_bodies(
@@ -436,6 +1190,7 @@ fn harness_bodies(
     raw: &str,
     shown: &BTreeSet<String>,
     delivered: &mut BTreeSet<String>,
+    filters: &[crate::DisplayFilter],
 ) -> Vec<Body> {
     let mut text = raw.replace("\r\n", "\n");
     // A harness that ran out of context continues from a summary it writes as the person's turn.
@@ -458,11 +1213,7 @@ fn harness_bodies(
     // is that message, already read or shown, never a line of its own.
     let mut enveloped = BTreeSet::new();
     // st's own envelope, as codex and the pi family receive it.
-    let envelopes = heads(&text, "smalltalk-message");
-    for (block, head) in take_blocks(&mut text, "smalltalk-message")
-        .into_iter()
-        .zip(envelopes)
-    {
+    for (block, head) in take_deliveries(&mut text, "smalltalk-message") {
         let from = attribute(&head, "from").unwrap_or_default();
         let subject = attribute(&head, "subject").unwrap_or_default();
         let graph = attribute(&head, "graph").unwrap_or_default();
@@ -475,35 +1226,17 @@ fn harness_bodies(
             from,
             to: attribute(&head, "to").unwrap_or_default(),
             subject,
-            body: clean_message_text(&unescape(&block)),
+            body: crate::clean_message_text_with_filters(&unescape(&block), filters),
             delivered: false,
             dictated: false,
+            signed: None,
             images: Vec::new(),
         });
     }
     // A `<channel>` delivery announces mail that is already in the stream, so it becomes one line.
-    let mut deliveries = Vec::new();
-    let mut from = 0;
-    while let Some(offset) = text[from..].find("<channel") {
-        let start = from + offset;
-        let head_end = text[start..]
-            .find('>')
-            .map(|index| start + index + 1)
-            .unwrap_or(text.len());
-        let head = text[start..head_end].to_owned();
-        let sender = head
-            .split("from=\"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .unwrap_or("someone")
-            .to_owned();
-        deliveries.push((sender, attribute(&head, "messageId")));
-        from = start + 1;
-    }
-    for (block, (sender, message_id)) in take_blocks(&mut text, "channel")
-        .into_iter()
-        .zip(deliveries)
-    {
+    for (block, head) in take_deliveries(&mut text, "channel") {
+        let sender = attribute(&head, "from").unwrap_or_else(|| "someone".into());
+        let message_id = attribute(&head, "messageId");
         // A delivery of mail the stream shows marks that mail delivered; its PING line inside,
         // or the message the channel names (`messageId`), is the same delivery, not another.
         let id = block
@@ -527,7 +1260,9 @@ fn harness_bodies(
             .lines()
             .find_map(|line| line.trim().strip_prefix("Subject:").map(str::trim))
             .map(str::to_owned)
-            .unwrap_or_else(|| shorten(&clean_message_text(&block), 70));
+            .unwrap_or_else(|| {
+                shorten(&crate::clean_message_text_with_filters(&block, filters), 70)
+            });
         bodies.push(Body::Event(format!(
             "delivered to the agent: {} · from {sender}",
             shorten(&subject, 80)
@@ -602,12 +1337,25 @@ fn harness_bodies(
             bodies.push(Body::User(answers.join("\n")));
         }
     }
-    for tag in CONTEXT_BLOCKS {
-        take_blocks(&mut text, tag);
+    if raw.contains("<command-name") {
+        take_blocks(&mut text, "command-args"); // already displayed with the parsed command
     }
-    let rest = clean_message_text(&text);
-    if is_user && !rest.is_empty() {
-        bodies.insert(0, Body::User(rest));
+    // st's own notes beside a delivery tell the agent something; the person never typed them.
+    let mut text = text
+        .lines()
+        .filter(|line| !ST_DELIVERY_NOTES.contains(&line.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if filters.contains(&crate::DisplayFilter::ContextBlocks) {
+        filter_context_blocks(&mut text)
+    }
+    let rest = crate::clean_message_text_with_filters(&text, filters);
+    if !rest.is_empty() {
+        if is_user {
+            bodies.insert(0, Body::User(rest));
+        } else {
+            bodies.push(Body::Event(rest));
+        }
     }
     bodies
 }
@@ -644,6 +1392,7 @@ fn tool_title(name: &str, arguments: &Value) -> String {
         "url",
         "query",
         "description",
+        "skill",
     ]
     .iter()
     .find_map(|key| arguments.get(key).and_then(Value::as_str));
@@ -653,6 +1402,489 @@ fn tool_title(name: &str, arguments: &Value) -> String {
         }
         (_, Some(detail)) => format!("{name} {}", first_line(detail)),
         _ => name.to_owned(),
+    }
+}
+
+/// The typed view a block carries (contract §1): the first block with one wins.
+fn block_view(blocks: &[st3_client::TimelineBlock]) -> Option<&Value> {
+    blocks.iter().find_map(|block| block.view.as_ref())
+}
+
+/// A call's title and opening rows from its typed view, when it has one; otherwise the title
+/// today's rendering would draw.
+fn typed_call(
+    blocks: &[st3_client::TimelineBlock],
+    name: &str,
+    arguments: &Value,
+) -> (String, Vec<String>) {
+    let Some(view) = block_view(blocks) else {
+        return (tool_title(name, arguments), Vec::new());
+    };
+    let string = |field: &str| view.get(field).and_then(Value::as_str).unwrap_or("");
+    let kind = view.get("type").and_then(Value::as_str).unwrap_or("");
+    let title = match kind {
+        "bash" => format!("$ {}", first_line(string("command"))),
+        "edit" => match string("path") {
+            "" => "edit".into(),
+            path => format!("edit {path}"),
+        },
+        "write" => {
+            let lines = view.get("line_count").and_then(Value::as_u64)
+                .map_or_else(String::new, |count| format!(" · {count} lines"));
+            format!("write {}{lines} · {} bytes", string("path"), view.get("bytes").and_then(Value::as_u64).unwrap_or(0))
+        },
+        "read" => match string("range") {
+            "" => format!("read {}", string("path")),
+            range => format!("read {}:{range}", string("path")),
+        },
+        "search" => {
+            let needle = {
+                let pattern = string("pattern");
+                if pattern.is_empty() {
+                    string("query")
+                } else {
+                    pattern
+                }
+            };
+            match string("path") {
+                "" => format!("{} {}", string("engine"), first_line(needle)),
+                path => format!("{} {} {path}", string("engine"), first_line(needle)),
+            }
+        }
+        "todo" => match string("op") {
+            "" => "todo".into(),
+            op => format!("todo {op}"),
+        },
+        "ask" => "ask".into(),
+        "task" => match view.get("tasks").and_then(Value::as_array) {
+            Some(tasks) if !tasks.is_empty() => format!("task · {} agents", tasks.len()),
+            _ => "task".into(),
+        },
+        "hub" => {
+            let who = {
+                let name = string("name");
+                if name.is_empty() {
+                    string("target")
+                } else {
+                    name
+                }
+            };
+            match who {
+                "" => format!("hub {}", string("op")),
+                who => format!("hub {} {who}", string("op")),
+            }
+        }
+        "eval" => match string("title") {
+            "" => format!("eval {}", string("language")),
+            title => format!("eval {} · {title}", string("language")),
+        },
+        "generic" => match string("name") {
+            "" => name.to_owned(),
+            found => found.to_owned(),
+        },
+        _ => return (tool_title(name, arguments), Vec::new()),
+    };
+    let output = match kind {
+        "bash" | "search" | "eval" => {
+            let mut rows = Vec::new();
+            for field in match kind {
+                "bash" => &["cwd", "timeout_s"][..],
+                "search" => &["case", "hidden", "gitignore", "limit", "skip"][..],
+                _ => &["language", "timeout_s", "reset"][..],
+            } {
+                if let Some(value) = view.get(*field) {
+                    let label = if *field == "timeout_s" { "timeout" } else { field };
+                    let value = value.as_str().map_or_else(|| value.to_string(), str::to_owned);
+                    rows.push(format!("{label}: {value}{}", if *field == "timeout_s" { "s" } else { "" }));
+                }
+            }
+            if kind == "eval" {
+                rows.extend(string("code").lines().map(str::to_owned));
+            }
+            rows
+        }
+        "write" => string("content").lines().map(str::to_owned).collect(),
+        "hub" => string("message").lines().map(str::to_owned).collect(),
+        "task" => {
+            let mut rows = Vec::new();
+            if !string("context").is_empty() {
+                rows.push("parent context / contract:".into());
+                rows.extend(string("context").lines().map(str::to_owned));
+            }
+            for task in view.get("tasks").and_then(Value::as_array).into_iter().flatten() {
+                let named = task.get("name").and_then(Value::as_str).unwrap_or("");
+                let agent = task.get("agent").and_then(Value::as_str).unwrap_or("");
+                rows.push(format!("{named} · {agent}"));
+                rows.extend(task.get("task").and_then(Value::as_str).unwrap_or("").lines().map(str::to_owned));
+            }
+            rows
+        }
+        "todo" => view
+            .get("items")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().map(todo_row).collect())
+            .unwrap_or_default(),
+        "ask" => view
+            .get("questions")
+            .and_then(Value::as_array)
+            .map(|questions| questions.iter().flat_map(question_rows).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    (title, output)
+}
+
+/// A result's rows from its typed view, and a forced outcome when the view settles it.
+fn typed_result(view: &Value, fallback: Vec<String>) -> (Vec<String>, Option<ToolState>) {
+    match view.get("type").and_then(Value::as_str).unwrap_or("") {
+        "bash" => {
+            let mut rows = fallback;
+            let mut exit = Vec::new();
+            if let Some(code) = view.get("exit_code").and_then(Value::as_i64) {
+                exit.push(format!("exit {code}"));
+            }
+            if let Some(ms) = view.get("wall_ms").and_then(Value::as_u64) {
+                exit.push(format!("{ms}ms"));
+            }
+            if !exit.is_empty() {
+                rows.push(exit.join(" · "));
+            }
+            let timed_out = view.get("timed_out").and_then(Value::as_bool) == Some(true);
+            if timed_out {
+                rows.push(match view.get("timeout_s").and_then(Value::as_u64) {
+                    Some(seconds) => format!("timed out after {seconds}s"),
+                    None => "timed out".into(),
+                });
+            }
+            let failed = timed_out
+                || view
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|code| code != 0);
+            (rows, failed.then_some(ToolState::Failed))
+        }
+        "search" => {
+            let mut rows = Vec::new();
+            let mut summary = Vec::new();
+            if let Some(count) = view.get("match_count").and_then(Value::as_u64) {
+                summary.push(format!("{count} matches"));
+            }
+            if let Some(count) = view.get("file_count").and_then(Value::as_u64) {
+                summary.push(format!("{count} files"));
+            }
+            if !summary.is_empty() { rows.push(summary.join(" / ")); }
+            if view.get("truncated").and_then(Value::as_bool) == Some(true) {
+                rows.push("warning: search results truncated".into());
+            }
+            for (field, label) in [("file_limit_reached", "file limit reached"), ("per_file_limit_reached", "per-file limit reached")] {
+                if let Some(count) = view.get(field).and_then(Value::as_u64) {
+                    rows.push(format!("warning: {label} ({count})"));
+                }
+            }
+            if let Some(warning) = view.get("warning").and_then(Value::as_str) {
+                rows.extend(warning.lines().map(str::to_owned));
+            }
+            rows.extend(fallback);
+            (rows, None)
+        }
+        "edit" => match view.get("diff").and_then(Value::as_str) {
+            Some(diff) => (diff.lines().map(str::to_owned).collect(), None),
+            None => (fallback, None),
+        },
+        "todo" => {
+            let mut rows = Vec::new();
+            for phase in view
+                .get("phases")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                let name = phase.get("name").and_then(Value::as_str).unwrap_or("");
+                if !name.is_empty() {
+                    rows.push(name.to_owned());
+                }
+                for item in phase
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                {
+                    rows.push(todo_row(item));
+                }
+            }
+            (rows, None)
+        }
+        "ask" => {
+            let mut rows = Vec::new();
+            for answer in view
+                .get("answers")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+            {
+                rows.push(
+                    answer
+                        .get("question")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
+                let selected = answer
+                    .get("selected")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if !selected.is_empty() {
+                    let labels = selected.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+                    rows.push(format!("  selected: {}", labels.join(", ")));
+                }
+                if let Some(custom) = answer.get("custom").and_then(Value::as_str) {
+                    rows.push(format!("  custom: {custom}"));
+                }
+                if let Some(note) = answer.get("note").and_then(Value::as_str) {
+                    rows.push(format!("  note: {note}"));
+                }
+            }
+            (rows, None)
+        }
+        "hub" => {
+            let rows = view
+                .get("jobs")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .map(job_line)
+                .collect();
+            (rows, None)
+        }
+        _ => (fallback, None),
+    }
+}
+
+/// The rows a typed extension view (contract §2) draws, when a block carries one; `None`
+/// keeps today's rendering. `tool_start` draws nothing: it belongs to its call.
+fn typed_content(content: &st3_client::TimelineContentBody) -> Option<Vec<Body>> {
+    let view = content
+        .blocks
+        .iter()
+        .find_map(|block| block.view.as_ref())?;
+    let string = |field: &str| view.get(field).and_then(Value::as_str).unwrap_or("");
+    let event = |parts: Vec<String>| {
+        Some(vec![Body::Event(
+            parts.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · "),
+        )])
+    };
+    match view.get("type").and_then(Value::as_str).unwrap_or("") {
+        "irc" => Some(vec![Body::Mail {
+            from: string("from").to_owned(),
+            to: String::new(),
+            subject: String::new(),
+            body: string("message").to_owned(),
+            delivered: true,
+            dictated: false,
+            images: Vec::new(),
+            signed: None,
+        }]),
+        "job" => Some(
+            view.get("jobs")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .map(|job| Body::Event(job_line(job)))
+                .collect(),
+        ),
+        "assistant_error" => {
+            if string("presentation") == "none" { return Some(Vec::new()); }
+            let mut output: Vec<String> = string("message").lines().map(str::to_owned).collect();
+            if let Some(note) = view.pointer("/retry/note").and_then(Value::as_str) {
+                output.extend(note.lines().map(str::to_owned));
+            }
+            Some(vec![Body::Tool {
+                title: format!("assistant error · {} · {}", string("status"), string("label")),
+                state: if view.get("is_error").and_then(Value::as_bool) == Some(true) { ToolState::Failed } else { ToolState::Ok },
+                output,
+            }])
+        }
+        "compaction" => {
+            let mut parts = vec!["compaction".to_owned(), string("method").to_owned()];
+            if let (Some(before), Some(after)) = (
+                view.get("tokens_before").and_then(Value::as_u64),
+                view.get("tokens_after").and_then(Value::as_u64),
+            ) {
+                parts.push(format!("{before} → {after} tokens"));
+            }
+            Some(vec![Body::Tool {
+                title: parts.into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · "),
+                state: ToolState::Ok,
+                output: string("summary").lines().map(str::to_owned).collect(),
+            }])
+        }
+        "model_change" => {
+            let mut parts = vec!["model".to_owned(), string("model").to_owned()];
+            if !string("role").is_empty() {
+                parts.push(string("role").to_owned());
+            }
+            if view.get("fallback").and_then(Value::as_bool) == Some(true) {
+                parts.push("fallback".into());
+            }
+            event(parts)
+        }
+        "thinking_level" => {
+            let mut parts = vec!["thinking".to_owned(), string("level").to_owned()];
+            if view.get("configured").and_then(Value::as_bool) == Some(true) {
+                parts.push("configured".into());
+            }
+            event(parts)
+        }
+        "reset_boundary" => event(vec!["session reset".into()]),
+        "credential_pin" => event(vec!["credential pin".into(), string("provider").into()]),
+        "title" => event(vec!["title".into(), string("title").into()]),
+        "session_exit" => event(vec![
+            "session exit".into(),
+            string("kind").into(),
+            string("reason").into(),
+        ]),
+        "skill" => event(vec!["skill".into(), string("name").into()]),
+        "tool_start" => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+fn todo_row(item: &Value) -> String {
+    let status = item.get("status").and_then(Value::as_str).unwrap_or("");
+    format!(
+        "{} {}",
+        todo_mark(status),
+        item.get("content").and_then(Value::as_str).unwrap_or_default()
+    )
+}
+
+fn todo_mark(status: &str) -> &'static str {
+    match status {
+        "completed" => "[x]",
+        "in_progress" => "[~]",
+        "pending" => "[ ]",
+        "blocked" => "[!]",
+        "abandoned" => "[/]",
+        _ => "[-]",
+    }
+}
+
+fn question_rows(question: &Value) -> Vec<String> {
+    let mut rows = vec![
+        question
+            .get("question")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    ];
+    for (index, option) in question
+        .get("options")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+    {
+        rows.push(format!(
+            "  {}. {}",
+            index + 1,
+            option.get("label").and_then(Value::as_str).unwrap_or_default()
+        ));
+        if let Some(description) = option.get("description").and_then(Value::as_str) {
+            rows.extend(description.lines().map(|line| format!("     {line}")));
+        }
+    }
+    rows
+}
+
+fn job_line(job: &Value) -> String {
+    let who = job
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .or_else(|| job.get("id").and_then(Value::as_str))
+        .unwrap_or_default();
+    let mut line = format!(
+        "{} · {}",
+        who,
+        job.get("state").and_then(Value::as_str).unwrap_or_default()
+    );
+    if let Some(code) = job.get("exit_code").and_then(Value::as_i64) {
+        line.push_str(&format!(" · exit {code}"));
+    }
+    if let Some(ms) = job.get("duration_ms").and_then(Value::as_u64) {
+        line.push_str(&format!(" · {ms}ms"));
+    }
+    line
+}
+
+/// One subagent's result card (q2): outcome, usage, and transcript link; assignment stays on the call.
+fn agent_card(agent: &Value) -> Body {
+    let string = |field: &str| agent.get(field).and_then(Value::as_str).unwrap_or("");
+    let named = {
+        let agent_name = string("name");
+        if agent_name.is_empty() {
+            string("agent")
+        } else {
+            agent_name
+        }
+    };
+    let who = if named.is_empty() {
+        string("id")
+    } else {
+        named
+    };
+    let status = string("status");
+    let mut output = Vec::new();
+    if let Some(ms) = agent.get("duration_ms").and_then(Value::as_u64) {
+        output.push(format!("duration {ms}ms"));
+    }
+    if let Some(tokens) = agent.get("tokens").and_then(Value::as_u64) {
+        output.push(format!("tokens {tokens}"));
+    }
+    if let Some(cost) = agent.get("cost_usd").and_then(Value::as_f64) {
+        output.push(format!("cost ${cost:.2}"));
+    }
+    if let Some(session) = agent.pointer("/conversation/session_id").and_then(Value::as_str) {
+        output.push(format!("open {session}"));
+    }
+    let state = if status.contains("fail") {
+        ToolState::Failed
+    } else if status.contains("run") || status.contains("work") {
+        ToolState::Running
+    } else {
+        ToolState::Ok
+    };
+    Body::Tool {
+        title: if !string("name").is_empty() && !string("agent").is_empty() {
+            format!("{who} · {status} · {}", string("agent"))
+        } else { format!("{who} · {status}") },
+        state,
+        output,
+    }
+}
+
+fn agent_id(agent: &Value) -> String {
+    agent
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn mark_selected(rows: &mut [String], view: &Value) {
+    if view.get("type").and_then(Value::as_str) != Some("ask") { return; }
+    for answer in view.get("answers").and_then(Value::as_array).into_iter().flatten() {
+        for selected in answer.get("selected").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+            for row in rows.iter_mut() {
+                if row.trim_start().split_once(". ").is_some_and(|(number, label)| number.chars().all(|c| c.is_ascii_digit()) && label == selected) {
+                    row.push_str(" [selected]");
+                }
+            }
+        }
     }
 }
 
@@ -701,7 +1933,7 @@ fn script_commands(script: &str) -> Vec<String> {
 /// What a tool printed, and whether a command in it failed. Codex's code mode reports each
 /// command as JSON (`{"exit_code":…,"output":…}`, inside `{"status":…,"value":…}` when the
 /// script awaited several); those become the command's own output.
-fn tool_output(content: &Value) -> (Vec<String>, bool) {
+fn tool_output(content: &Value, full: bool) -> (Vec<String>, bool) {
     if is_redacted(content) {
         return (vec!["output not recorded".into()], false);
     }
@@ -713,7 +1945,7 @@ fn tool_output(content: &Value) -> (Vec<String>, bool) {
             cut = whole.is_some();
             let text = whole.unwrap_or(text);
             match serde_json::from_str::<Value>(text) {
-                Ok(inner @ Value::Array(_)) if !cut => return tool_output(&inner),
+                Ok(inner @ Value::Array(_)) if !cut => return tool_output(&inner, full),
                 _ if text.trim_start().starts_with("[{") => {
                     let mut texts = string_fields(text, "text");
                     texts.extend(std::iter::repeat_n(
@@ -784,12 +2016,21 @@ fn tool_output(content: &Value) -> (Vec<String>, bool) {
     while lines.last().is_some_and(|line| line.trim().is_empty()) {
         lines.pop();
     }
-    lines.truncate(400);
+    if !full && lines.len() > PREVIEW_LINES {
+        let hidden = lines.len() - PREVIEW_LINES;
+        lines.truncate(PREVIEW_LINES);
+        lines.push(format!(
+            "… {hidden} more lines not shown in the timeline preview"
+        ));
+    }
     if cut {
         lines.push("… st kept only the start of this output".into());
     }
     (lines, failed)
 }
+
+/// How many output lines a timeline preview keeps; the rest is named, not dropped silently.
+const PREVIEW_LINES: usize = 400;
 
 /// How an image a tool returned is drawn in text.
 const IMAGE: &str = "[image]";
@@ -915,4 +2156,17 @@ fn short(id: &str) -> String {
     id.trim_start_matches("mission/")
         .trim_start_matches("agent/")
         .to_owned()
+}
+
+/// A message size as a person reads it: `812 bytes`, `12.5 KiB`, `256 KiB`.
+fn size_text(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} bytes");
+    }
+    let kib = bytes as f64 / 1024.0;
+    if (kib - kib.round()).abs() < 0.05 {
+        format!("{} KiB", kib.round() as u64)
+    } else {
+        format!("{kib:.1} KiB")
+    }
 }

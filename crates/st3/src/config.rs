@@ -15,6 +15,12 @@ use crate::model::PlannerSpec;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub node: String,
+    /// Absent in legacy installs: preserve their bypass policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_mode: Option<st_drivers::access::AccessMode>,
+    /// How seats rank against the daemon for CPU and IO. Absent means `background`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_priority: Option<st_runtime::SeatPriority>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     pub fleet_id: Option<String>,
@@ -24,6 +30,11 @@ pub struct Config {
     pub socket: PathBuf,
     pub client_gateway_socket: PathBuf,
     pub peer_listen: Option<String>,
+    /// The one folder agents work in when nothing names another: new agents get a subfolder of
+    /// it. Absent, it is `~/st` (`~/.st-instance/NAME/work` for an instance). Must be absolute
+    /// and may not be the home folder or inside Documents, Desktop or Downloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_root: Option<PathBuf>,
     /// Lets `peer_listen` bind an address other than loopback or Tailscale, such as
     /// `0.0.0.0` or a LAN IP. st cannot tell whether such a path is encrypted, and the
     /// listener carries plain HTTP: replication, terminal input and attach grants.
@@ -34,6 +45,12 @@ pub struct Config {
     pub planner: PlannerSpec,
     /// The local observation log of this node.
     pub observations: ObservationsConfig,
+    /// Daemon GitHub HTTP authentication. Omitted unless an explicit credential source is configured.
+    #[serde(skip_serializing_if = "GithubConfig::is_default")]
+    pub github: GithubConfig,
+    /// Git change pilot: explicit repositories and one designated discovery owner.
+    #[serde(skip_serializing_if = "crate::changes::config::Config::is_default")]
+    pub changes: crate::changes::config::Config,
     /// Checkpoints that trim replicated history. Written only when it differs from the
     /// default, so a config this build writes still loads in a build without checkpoints.
     #[serde(skip_serializing_if = "CheckpointConfig::is_default")]
@@ -41,9 +58,44 @@ pub struct Config {
     /// What this node does when an account nears its weekly limit. Off unless enabled.
     #[serde(skip_serializing_if = "LimitsConfig::is_default")]
     pub limits: LimitsConfig,
+    /// Background reconciliation start cap, reloaded with daemon policies.
+    #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
+    pub reconcile: ReconcileConfig,
+    /// The setup screen's "Let Codex work without asking" box. Unset and `true` give Codex the
+    /// install's access mode; `false` makes Codex ask. Written only by the setup screen when Codex
+    /// is found. A build that does not know the key rejects a config that has it, so a config
+    /// without the line still loads in older builds and one with it needs the line deleted first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codex_work_without_asking: Option<bool>,
     /// `STATE/fleet/fleet.toml`, merged by `apply_fleet_file` after command-line overrides.
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
+}
+
+/// `[github]`: an explicit token file, or gateway-authorized requests with a sekrets profile.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GithubConfig {
+    /// A single-token file readable only by its owner.
+    pub token_file: Option<PathBuf>,
+    pub sekrets_profile: Option<String>,
+}
+
+impl GithubConfig {
+    pub fn is_default(&self) -> bool { self == &Self::default() }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        anyhow::ensure!(self.token_file.is_none() || self.sekrets_profile.is_none(),
+            "github.token_file and github.sekrets_profile are mutually exclusive");
+        if let Some(profile) = &self.sekrets_profile {
+            anyhow::ensure!(!profile.trim().is_empty() && profile.trim() == profile,
+                "github.sekrets_profile must name a non-empty profile without surrounding whitespace");
+        }
+        if let Some(path) = &self.token_file {
+            crate::github_http::open_token_file(path)?;
+        }
+        Ok(())
+    }
 }
 
 /// Whether this node takes part in checkpoints. A node that does not never seals, and every
@@ -67,7 +119,7 @@ impl CheckpointConfig {
     }
 }
 
-/// `[limits]`: when an account's freshest weekly reading reaches `stop_at_weekly_percent`, this
+/// `[limits]`: when an account's selected weekly reading reaches `stop_at_weekly_percent`, this
 /// node stops the seats it hosts that use that account, except those in `keep`, once per weekly
 /// window, and notifies the operations agent in `notify`. A seat a person starts again stays up
 /// until the next window. Every node that hosts seats needs the same settings.
@@ -78,6 +130,11 @@ pub struct LimitsConfig {
     pub stop_at_weekly_percent: u32,
     /// Seats never stopped, such as the seat that coordinates the fleet.
     pub keep: Vec<String>,
+    /// Accounts whose seats are never stopped, by the name `st usage` shows: the declared
+    /// account (`ada/codex`) or the provider's label. A seat started later on one is covered too.
+    pub exempt_accounts: Vec<String>,
+    /// Harnesses (`claude`, `codex`) whose seats are never stopped, whatever their account.
+    pub exempt_harnesses: Vec<String>,
     /// The operations agent that receives one message per account window.
     pub notify: Option<String>,
     /// Legacy setting, accepted for migration but never used for person delivery.
@@ -92,6 +149,8 @@ impl Default for LimitsConfig {
             enabled: false,
             stop_at_weekly_percent: 95,
             keep: Vec::new(),
+            exempt_accounts: Vec::new(),
+            exempt_harnesses: Vec::new(),
             notify: None,
             ask: None,
             fresh: "1h".into(),
@@ -107,6 +166,136 @@ impl LimitsConfig {
     pub fn fresh_ms(&self) -> Result<u64> {
         parse_duration_ms(&self.fresh, "limits.fresh")
     }
+
+    /// Check an enabled policy. A disabled one is not read, so it may be half written.
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        self.fresh_ms()?;
+        anyhow::ensure!(
+            (1..=100).contains(&self.stop_at_weekly_percent),
+            "limits.stop_at_weekly_percent must be between 1 and 100"
+        );
+        anyhow::ensure!(
+            self.keep.iter().all(|seat| seat.starts_with("agent/")),
+            "limits.keep lists agent/... subjects"
+        );
+        anyhow::ensure!(
+            self.exempt_accounts
+                .iter()
+                .chain(&self.exempt_harnesses)
+                .all(|name| !name.is_empty() && !name.chars().any(char::is_whitespace)),
+            "limits.exempt_accounts and limits.exempt_harnesses list names without spaces"
+        );
+        anyhow::ensure!(
+            self.notify.as_deref().is_some_and(|agent| {
+                agent.starts_with("agent/")
+                    && agent.split('/').skip(1).all(|part| !part.is_empty())
+                    && !agent.chars().any(char::is_whitespace)
+            }),
+            "limits needs an operations agent: set limits.notify to agent/... (limits.ask and person never receive raw limit events)"
+        );
+        Ok(())
+    }
+}
+
+/// `[reconcile]`: maximum background pass starts per minute, default30, and when a seat that
+/// holds claimed work and has nothing set to wake it is nudged.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReconcileConfig {
+    pub max_passes_per_minute: u32,
+    /// How long a seat idles holding a claimed step, with nothing set to wake it, before st nudges
+    /// it: a duration such as `30m`, or `off`.
+    pub idle_nudge_after: String,
+    /// How long a watched thread may stay still and its watch still count as something that will
+    /// wake the seat.
+    pub idle_nudge_quiet_watch: String,
+}
+
+impl Default for ReconcileConfig {
+    fn default() -> Self {
+        Self {
+            max_passes_per_minute: 30,
+            idle_nudge_after: "30m".into(),
+            idle_nudge_quiet_watch: "2h".into(),
+        }
+    }
+}
+
+impl ReconcileConfig {
+    pub fn is_default(&self) -> bool { self == &Self::default() }
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!((1..=600).contains(&self.max_passes_per_minute),
+            "reconcile.max_passes_per_minute must be between 1 and 600");
+        self.idle_nudge()?;
+        Ok(())
+    }
+
+    /// The idle-nudge settings these values name.
+    pub fn idle_nudge(&self) -> Result<crate::reconcile::IdleNudgeSettings> {
+        let at_least_a_minute = |value: &str, name: &str| -> Result<u64> {
+            let ms = parse_duration_ms(value, name)?;
+            anyhow::ensure!(ms >= 60_000, "{name} must be at least 1m");
+            Ok(ms)
+        };
+        let after_ms = match self.idle_nudge_after.trim() {
+            "off" => None,
+            after => Some(at_least_a_minute(after, "reconcile.idle_nudge_after")?),
+        };
+        Ok(crate::reconcile::IdleNudgeSettings {
+            after_ms,
+            quiet_watch_ms: at_least_a_minute(
+                &self.idle_nudge_quiet_watch,
+                "reconcile.idle_nudge_quiet_watch",
+            )?,
+        })
+    }
+}
+
+/// The config file the running daemon was started with, so its `[limits]` can be read again.
+static DAEMON_CONFIG: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Remember the daemon's config file. `None` is the default path.
+pub fn set_daemon_config(path: Option<&Path>) {
+    let _ = DAEMON_CONFIG.set(path.map(Path::to_path_buf));
+}
+
+/// The daemon's `[limits]` as the config file says now, so an edit applies without a restart.
+/// `None` outside a daemon.
+pub fn reload_daemon_limits() -> Option<Result<LimitsConfig>> {
+    let path = DAEMON_CONFIG.get()?;
+    Some(read_limits(path.as_deref()))
+}
+
+/// Read both policies once on the existing two-minute reload loop, outside database work.
+pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig)>> {
+    let path = DAEMON_CONFIG.get()?;
+    Some(read_daemon_policies(path.as_deref()))
+}
+
+fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig)> {
+    let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
+    anyhow::ensure!(selected.exists(), "st config {} is missing", selected.display());
+    let config = Config::load_unvalidated(Some(&selected))?;
+    config.limits.validate()?;
+    config.reconcile.validate()?;
+    Ok((config.limits, config.reconcile))
+}
+
+/// `[limits]` from a config file that must exist: a file that is missing for a moment must not
+/// read as the default, which has the policy off.
+fn read_limits(path: Option<&Path>) -> Result<LimitsConfig> {
+    let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
+    anyhow::ensure!(
+        selected.exists(),
+        "st config {} is missing",
+        selected.display()
+    );
+    let limits = Config::load_unvalidated(Some(&selected))?.limits;
+    limits.validate()?;
+    Ok(limits)
 }
 
 /// Observations of `local` retention stay on the node that made them. The daemon trims
@@ -172,6 +361,8 @@ impl Default for Config {
         let client_gateway_socket = runtime_dir.join("st3-client.sock");
         Self {
             node: host_name(),
+            access_mode: None,
+            seat_priority: None,
             person: None,
             fleet_id: None,
             shared_secret_file: None,
@@ -180,18 +371,49 @@ impl Default for Config {
             socket,
             client_gateway_socket,
             peer_listen: None,
+            work_root: None,
             peer_listen_allow_plain_http: false,
             peers: Vec::new(),
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
+            github: GithubConfig::default(),
+            changes: crate::changes::config::Config::default(),
             checkpoint: CheckpointConfig::default(),
             limits: LimitsConfig::default(),
+            reconcile: ReconcileConfig::default(),
+            codex_work_without_asking: None,
             fleet: None,
         }
     }
 }
 
 impl Config {
+    pub fn active_access_mode(&self) -> st_drivers::access::AccessMode {
+        self.access_mode.unwrap_or_default()
+    }
+
+    pub fn active_seat_priority(&self) -> st_runtime::SeatPriority {
+        self.seat_priority.unwrap_or_default()
+    }
+
+    /// Service installation writes a new config once, never upgrading a legacy missing mode.
+    pub fn initialize_install_config(&self, path: &Path) -> Result<()> {
+        let mut fresh = self.clone();
+        fresh.access_mode = Some(self.access_mode.unwrap_or(st_drivers::access::AccessMode::Auto));
+        let bytes = toml::to_string(&fresh)?;
+        let parent = path.parent().context("the install config path has no directory")?;
+        fs::create_dir_all(parent)?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+        use std::io::Write as _;
+        staged.write_all(bytes.as_bytes())?;
+        staged.as_file().sync_all()?;
+        match fs::hard_link(staged.path(), path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("initialize st config {}", path.display())),
+        }
+    }
+
     pub fn default_path() -> PathBuf {
         xdg_dir("XDG_CONFIG_HOME", ".config")
             .join("st3")
@@ -219,7 +441,7 @@ impl Config {
         let bytes = match fs::read_to_string(&selected) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && path.is_none() => {
-                return Ok(Self::default());
+                return Ok(Self { access_mode: Some(st_drivers::access::AccessMode::Auto), ..Self::default() });
             }
             Err(error) => {
                 return Err(error)
@@ -293,6 +515,12 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.reconcile.validate()?;
+        self.github.validate()?;
+        if self.work_root.is_some() {
+            self.work_root()?;
+        }
+        self.changes.validate()?;
         anyhow::ensure!(
             matches!(
                 self.planner.provider.as_str(),
@@ -328,28 +556,7 @@ impl Config {
         if let Some(otlp) = &self.observations.otlp {
             otlp.validate()?;
         }
-        if self.limits.enabled {
-            self.limits.fresh_ms()?;
-            anyhow::ensure!(
-                (1..=100).contains(&self.limits.stop_at_weekly_percent),
-                "limits.stop_at_weekly_percent must be between 1 and 100"
-            );
-            anyhow::ensure!(
-                self.limits
-                    .keep
-                    .iter()
-                    .all(|seat| seat.starts_with("agent/")),
-                "limits.keep lists agent/... subjects"
-            );
-            anyhow::ensure!(
-                self.limits.notify.as_deref().is_some_and(|agent| {
-                    agent.starts_with("agent/")
-                        && agent.split('/').skip(1).all(|part| !part.is_empty())
-                        && !agent.chars().any(char::is_whitespace)
-                }),
-                "limits needs an operations agent: set limits.notify to agent/... (limits.ask and person never receive raw limit events)"
-            );
-        }
+        self.limits.validate()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")
@@ -442,6 +649,12 @@ fn state_socket(state_dir: &Path) -> PathBuf {
     state_dir.join("run/st3.sock")
 }
 
+/// The daemon's Fabric terminal socket, which `st terminals expose-fabric` has Fabric forward
+/// each terminal tunnel to.
+pub fn terminal_socket(state_dir: &Path) -> PathBuf {
+    state_dir.join("run/terminals.sock")
+}
+
 /// The terminating NUL also occupies a byte in sockaddr_un.sun_path.
 #[cfg(target_os = "macos")]
 const SUN_PATH_BYTES: usize = 104;
@@ -459,9 +672,119 @@ pub fn validate_unix_socket_path(socket: &Path, flag: &str) -> Result<()> {
     Ok(())
 }
 
+/// Folders that make macOS ask for permission the first time something lists them.
+const PROTECTED_HOME_FOLDERS: [&str; 3] = ["Documents", "Desktop", "Downloads"];
+
+/// The work root when nothing configures one: `~/st`, which is also where st has always put
+/// the workspaces of new agents, or the instance's own `work` folder.
+pub fn default_work_root() -> Result<PathBuf> {
+    if let Some(instance) = crate::instance::current() {
+        return Ok(instance.work_dir());
+    }
+    Ok(home_dir()?.join("st"))
+}
+
+fn home_dir() -> Result<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .context("HOME is not set to an absolute directory")
+}
+
+/// Refuse a work root that would make agents start in the home folder itself or in a folder
+/// macOS guards with a permission prompt. Links are followed as far as the path exists, so a
+/// linked `~/Documents` is caught, and a folder that does not exist yet below a link is judged
+/// where it will be made; the path as written is refused as well.
+fn check_work_root(root: &Path) -> Result<()> {
+    let Ok(home) = home_dir() else {
+        anyhow::ensure!(
+            root.is_absolute(),
+            "work_root must be an absolute path, not {}",
+            root.display()
+        );
+        return Ok(());
+    };
+    check_work_root_in(root, &home)
+}
+
+/// `path` with links followed as far as it exists: the deepest existing ancestor is resolved and
+/// the part that does not exist yet is appended, so a new folder below a link is seen where it
+/// will be made.
+fn resolve_existing(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut base = path;
+    loop {
+        if let Ok(real) = fs::canonicalize(base) {
+            return rest.iter().rev().fold(real, |resolved, name| resolved.join(name));
+        }
+        match (base.file_name(), base.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                base = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+fn check_work_root_in(root: &Path, home: &Path) -> Result<()> {
+    anyhow::ensure!(
+        root.is_absolute(),
+        "work_root must be an absolute path, not {}",
+        root.display()
+    );
+    // The folder is refused when it is guarded as written or once links are followed. A guarded
+    // folder that is itself a link is resolved too, so the folder it points to is refused.
+    let (resolved_root, resolved_home) = (resolve_existing(root), resolve_existing(home));
+    for (root, home, resolve_guarded) in [
+        (root, home, false),
+        (resolved_root.as_path(), resolved_home.as_path(), true),
+    ] {
+        anyhow::ensure!(
+            root != home,
+            "work_root cannot be the home folder; name a folder inside it"
+        );
+        for protected in PROTECTED_HOME_FOLDERS {
+            let guarded = home.join(protected);
+            let guarded = if resolve_guarded {
+                resolve_existing(&guarded)
+            } else {
+                guarded
+            };
+            anyhow::ensure!(
+                !root.starts_with(&guarded),
+                "work_root cannot be inside {protected}: macOS asks permission before a program lists it"
+            );
+        }
+    }
+    Ok(())
+}
+
+impl Config {
+    /// The folder agents work in: the configured one, else the default.
+    pub fn work_root(&self) -> Result<PathBuf> {
+        match &self.work_root {
+            Some(root) => {
+                check_work_root(root)?;
+                Ok(root.clone())
+            }
+            None => default_work_root(),
+        }
+    }
+}
+
+/// The work root of the running daemon, read from its config file again each time so an edit
+/// applies to the next agent without a restart. Outside a daemon it is the default.
+pub fn work_root() -> Result<PathBuf> {
+    match DAEMON_CONFIG.get() {
+        Some(path) => Config::load_unvalidated(path.as_deref())?.work_root(),
+        None => default_work_root(),
+    }
+}
+
 /// Where `st agents new` puts an agent that names no workspace: a new directory for the agent
-/// below this account's home, `~/st/agents/IDENTITY`. The host that runs the agent answers, so
-/// the path is right for that host's home.
+/// inside the work root, `~/st/agents/IDENTITY` by default. The host that runs the agent
+/// answers, so the path is right for that host's home.
 pub fn default_agent_workspace(identity: &str) -> Result<PathBuf> {
     let identity = identity.strip_prefix("agent/").unwrap_or(identity);
     anyhow::ensure!(
@@ -471,11 +794,7 @@ pub fn default_agent_workspace(identity: &str) -> Result<PathBuf> {
                 .all(|part| !part.is_empty() && part != "." && part != ".."),
         "agent identity `{identity}` cannot name a workspace directory"
     );
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
-        .context("HOME is not set to an absolute directory")?;
-    Ok(home.join("st/agents").join(identity))
+    Ok(work_root()?.join("agents").join(identity))
 }
 
 fn xdg_dir(variable: &str, home_suffix: &str) -> PathBuf {
@@ -488,6 +807,14 @@ fn xdg_dir(variable: &str, home_suffix: &str) -> PathBuf {
 }
 
 fn host_name() -> String {
+    let host = machine_host_name();
+    match crate::instance::current() {
+        Some(instance) => instance.node_name(&host),
+        None => host,
+    }
+}
+
+fn machine_host_name() -> String {
     env::var("HOSTNAME")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -499,8 +826,162 @@ fn host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_work_root_defaults_to_a_folder_inside_home_that_macos_does_not_guard() {
+        let Ok(home) = super::home_dir() else { return };
+        if crate::instance::current().is_some() {
+            return;
+        }
+        let root = Config::default().work_root().unwrap();
+        assert_eq!(root, home.join("st"));
+        assert_eq!(
+            super::default_agent_workspace("agent/site").unwrap(),
+            root.join("agents/site")
+        );
+        for guarded in ["Documents", "Desktop", "Downloads"] {
+            assert!(!root.starts_with(home.join(guarded)));
+        }
+    }
+
+    #[test]
+    fn a_configured_work_root_must_be_absolute_and_not_a_guarded_folder() {
+        let config = |root: &str| -> Config {
+            toml::from_str(&format!("work_root=\"{root}\"\n")).unwrap()
+        };
+        assert_eq!(
+            config("/var/work").work_root().unwrap(),
+            PathBuf::from("/var/work")
+        );
+        assert!(config("work").work_root().unwrap_err().to_string().contains("absolute"));
+        let Ok(home) = super::home_dir() else { return };
+        let home = home.display();
+        assert!(config(&home.to_string()).work_root().is_err());
+        for guarded in ["Documents", "Desktop", "Downloads"] {
+            let error = config(&format!("{home}/{guarded}/projects")).validate().unwrap_err();
+            assert!(error.to_string().contains(guarded), "{error}");
+        }
+        assert!(config(&format!("{home}/Smalltalk")).validate().is_ok());
+    }
+
+    #[test]
+    fn a_linked_guarded_folder_is_still_refused() {
+        let home = tempdir().unwrap();
+        let elsewhere = tempdir().unwrap();
+        fs::create_dir(elsewhere.path().join("projects")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), home.path().join("Documents")).unwrap();
+        // Through the link, and straight at the folder the link points to.
+        let through = home.path().join("Documents/projects");
+        assert!(super::check_work_root_in(&through, home.path()).is_err());
+        let direct = elsewhere.path().join("projects");
+        assert!(super::check_work_root_in(&direct, home.path()).is_err());
+        // A folder that does not exist yet, below the link, is refused too.
+        let new_through = home.path().join("Documents/newwork");
+        assert!(super::check_work_root_in(&new_through, home.path()).is_err());
+        let new_direct = elsewhere.path().join("newwork/deeper");
+        assert!(super::check_work_root_in(&new_direct, home.path()).is_err());
+        assert!(super::check_work_root_in(&home.path().join("Smalltalk"), home.path()).is_ok());
+        assert!(super::check_work_root_in(home.path(), home.path()).is_err());
+    }
+
+    #[test]
+    fn a_config_without_a_work_root_stays_without_one() {
+        let config: Config = toml::from_str("node=\"example\"\n").unwrap();
+        assert!(config.work_root.is_none());
+        assert!(!toml::to_string(&config).unwrap().contains("work_root"));
+    }
+
+    #[test]
+    fn seat_priority_defaults_to_background_and_accepts_normal() {
+        use st_runtime::SeatPriority;
+        assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
+        let background: Config = toml::from_str("seat_priority=\"background\"").unwrap();
+        assert_eq!(background.active_seat_priority(), SeatPriority::Background);
+        let normal: Config = toml::from_str("seat_priority=\"normal\"").unwrap();
+        assert_eq!(normal.active_seat_priority(), SeatPriority::Normal);
+        assert!(toml::from_str::<Config>("seat_priority=\"high\"").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_priority"));
+    }
+
+    #[test]
+    fn install_access_mode_preserves_legacy_config_and_writes_auto_once() {
+        use st_drivers::access::AccessMode;
+        let root = tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let legacy: Config = toml::from_str("node=\"example\"\n").unwrap();
+        assert_eq!(legacy.active_access_mode(), AccessMode::Bypass);
+        legacy.initialize_install_config(&path).unwrap();
+        assert_eq!(Config::load(Some(&path)).unwrap().active_access_mode(), AccessMode::Auto);
+        fs::write(&path, "node=\"example\"\n").unwrap();
+        legacy.initialize_install_config(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "node=\"example\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().active_access_mode(), AccessMode::Bypass);
+        assert!(toml::from_str::<Config>("access_mode=\"guess\"").is_err());
+        let bypass: Config = toml::from_str("access_mode=\"bypass\"").unwrap();
+        assert_eq!(bypass.active_access_mode(), AccessMode::Bypass);
+    }
+
+    #[test]
+    fn reconcile_rate_defaults_and_bad_reload_preserves_the_callers_effective_value() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let (_, mut effective) = read_daemon_policies(Some(&path)).unwrap();
+        assert_eq!(effective.max_passes_per_minute, 30);
+        std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=60\n").unwrap();
+        effective = read_daemon_policies(Some(&path)).unwrap().1;
+        for bad in ["0", "-1", "601", "4294967296", "\"bad\""] {
+            std::fs::write(&path, format!("[reconcile]\nmax_passes_per_minute={bad}\n")).unwrap();
+            assert!(read_daemon_policies(Some(&path)).is_err());
+            assert_eq!(effective.max_passes_per_minute, 60);
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_daemon_policies(Some(&path)).is_err());
+        assert_eq!(effective.max_passes_per_minute, 60);
+        std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=15\n").unwrap();
+        effective = read_daemon_policies(Some(&path)).unwrap().1;
+        assert_eq!(effective.max_passes_per_minute, 15);
+    }
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn github_profile_is_opt_in_and_rejects_empty_configuration() {
+        let config = Config::default();
+        assert!(config.github.sekrets_profile.is_none());
+        assert!(!toml::to_string(&config).unwrap().contains("[github]"));
+        let configured: Config = toml::from_str(r#"[github]
+sekrets_profile = "nathan/daemon-gh"
+"#).unwrap();
+        configured.validate().unwrap();
+        assert_eq!(configured.github.sekrets_profile.as_deref(), Some("nathan/daemon-gh"));
+        for profile in ["", " ", " nathan/daemon-gh", "nathan/daemon-gh "] {
+            let mut invalid = Config::default();
+            invalid.github.sekrets_profile = Some(profile.into());
+            assert!(invalid.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn github_token_file_permissions_are_checked_at_startup() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempdir().unwrap();
+        let path = root.path().join("token");
+        fs::write(&path, b"fixture-token\n").unwrap();
+        let mut config = Config::default();
+        config.github.token_file = Some(path.clone());
+        for mode in [0o640, 0o604, 0o644] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(config.validate().unwrap_err().to_string().contains("group or others"));
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        config.validate().unwrap();
+        config.github.sekrets_profile = Some("owner/daemon-gh".into());
+        assert!(config.validate().unwrap_err().to_string().contains("mutually exclusive"));
+        config.github.sekrets_profile = None;
+        fs::remove_file(&path).unwrap();
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn unix_socket_path_reports_byte_limit_and_override() {
@@ -523,6 +1004,40 @@ mod tests {
         );
         assert!(error.contains("--client-gateway-socket"), "{error}");
         assert!(error.contains("XDG_RUNTIME_DIR"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_config_file_is_an_error_not_a_disabled_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let error = read_limits(Some(&path)).unwrap_err().to_string();
+        assert!(error.contains("is missing"), "{error}");
+        fs::write(
+            &path,
+            "person = \"person/avery\"\n[limits]\nenabled = true\nnotify = \"agent/example/operations\"\n",
+        )
+        .unwrap();
+        assert!(read_limits(Some(&path)).unwrap().enabled);
+        fs::remove_file(&path).unwrap();
+        assert!(read_limits(Some(&path)).is_err());
+    }
+
+    #[test]
+    fn the_limits_policy_names_exempt_accounts_and_harnesses() {
+        let config: Config = toml::from_str(
+            "person = \"person/avery\"\n[limits]\nenabled = true\nnotify = \"agent/example/operations\"\n\
+             exempt_accounts = [\"ada/codex\"]\nexempt_harnesses = [\"codex\"]\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.limits.exempt_accounts, ["ada/codex"]);
+        assert_eq!(config.limits.exempt_harnesses, ["codex"]);
+        assert!(Config::default().limits.exempt_accounts.is_empty());
+        let mut invalid = config.clone();
+        invalid.limits.exempt_accounts = vec!["ada codex".into()];
+        assert!(invalid.validate().is_err());
+        invalid.limits.exempt_accounts = vec![String::new()];
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
@@ -559,6 +1074,37 @@ mod tests {
             ))
             .unwrap();
             assert!(parsed.validate().is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn idle_nudges_default_to_thirty_minutes_and_a_two_hour_quiet_watch() {
+        let config = Config::default();
+        let settings = config.reconcile.idle_nudge().unwrap();
+        assert_eq!(settings.after_ms, Some(30 * 60_000));
+        assert_eq!(settings.quiet_watch_ms, 2 * 3_600_000);
+        assert!(!toml::to_string(&config).unwrap().contains("[reconcile]"));
+
+        let parsed: Config = toml::from_str(
+            "[reconcile]\nidle_nudge_after = \"45m\"\nidle_nudge_quiet_watch = \"3h\"\n",
+        )
+        .unwrap();
+        parsed.validate().unwrap();
+        let settings = parsed.reconcile.idle_nudge().unwrap();
+        assert_eq!(settings.after_ms, Some(45 * 60_000));
+        assert_eq!(settings.quiet_watch_ms, 3 * 3_600_000);
+
+        let off: Config = toml::from_str("[reconcile]\nidle_nudge_after = \"off\"\n").unwrap();
+        assert_eq!(off.reconcile.idle_nudge().unwrap().after_ms, None);
+
+        for (field, value) in [
+            ("idle_nudge_after", "30s"),
+            ("idle_nudge_after", "soon"),
+            ("idle_nudge_quiet_watch", "off"),
+        ] {
+            let parsed: Config =
+                toml::from_str(&format!("[reconcile]\n{field} = \"{value}\"\n")).unwrap();
+            assert!(parsed.validate().is_err(), "{field} = {value}");
         }
     }
 

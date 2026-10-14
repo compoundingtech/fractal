@@ -42,6 +42,18 @@ fn lease_ms() -> u64 {
         .map_or(SUBAGENT_LEASE_MS, |cap| cap.min(SUBAGENT_LEASE_MS))
 }
 
+/// How long a subagent its harness reports while it runs may go unreported.
+/// `ST3_SUBAGENT_SILENCE_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does the lease.
+fn silence_ms() -> u64 {
+    std::env::var("ST3_SUBAGENT_SILENCE_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|cap| *cap > 0)
+        .map_or(ledger::SILENT_GRACE_MS, |cap| {
+            cap.min(ledger::SILENT_GRACE_MS)
+        })
+}
+
 /// What this driver has recorded, kept beside the ledger so a driver replaced in place carries on.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Published {
@@ -60,10 +72,13 @@ pub struct Publisher {
     incarnation: String,
     agent_dir: PathBuf,
     home: Option<PathBuf>,
+    /// `$CLAUDE_CONFIG_DIR`, when the seat runs on its own Claude login directory.
+    claude_config: Option<PathBuf>,
     codex_home: Option<PathBuf>,
     /// The incarnation stamped on the harness timeline, which a subagent's usage joins.
     timeline_incarnation: Option<String>,
     lease_ms: u64,
+    silence_ms: u64,
     published: Published,
 }
 
@@ -115,9 +130,13 @@ impl Publisher {
             incarnation: incarnation.into(),
             agent_dir: agent_dir.into(),
             home: std::env::var_os("HOME").map(PathBuf::from),
+            claude_config: std::env::var_os("CLAUDE_CONFIG_DIR")
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from),
             codex_home: st_drivers::codex_app_server::codex_home(),
             timeline_incarnation: None,
             lease_ms: lease_ms(),
+            silence_ms: silence_ms(),
             published,
         }
     }
@@ -125,6 +144,7 @@ impl Publisher {
     /// Read transcripts beneath these homes instead of this process's (`HOME`, `CODEX_HOME`).
     pub fn with_homes(mut self, home: Option<PathBuf>, codex_home: Option<PathBuf>) -> Self {
         self.home = home;
+        self.claude_config = None;
         self.codex_home = codex_home;
         self
     }
@@ -153,6 +173,7 @@ impl Publisher {
         let now = ledger::now_ms();
         let current = ledger::update(&self.agent_dir, |ledger| {
             ledger.end_unlisted(now);
+            ledger.end_silent(now, self.silence_ms);
             ledger.clone()
         })?;
         let before = self.published.clone();
@@ -516,7 +537,13 @@ impl Publisher {
             return ended.tokens;
         }
         let transcript = ended.subagent.transcript.as_deref()?;
-        match ledger::claude_transcript_tokens(transcript, self.home.as_deref()?) {
+        // A seat bound to an account runs with its own `CLAUDE_CONFIG_DIR`, and Claude writes its
+        // transcripts there.
+        let claude_config = match &self.claude_config {
+            Some(config) => config.clone(),
+            None => self.home.as_deref()?.join(".claude"),
+        };
+        match ledger::claude_transcript_tokens(transcript, &claude_config) {
             Ok(tokens) => Some(tokens),
             Err(error) => {
                 tracing::debug!(

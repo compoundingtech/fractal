@@ -66,7 +66,14 @@ struct ParseContext {
 }
 
 pub fn parse_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, St3Error> {
-    let intent = parse_intent_with_owner(source, default_host, None, false)?;
+    let intent = parse_intent_with_owner(source, default_host, None, false, false)?;
+    validate_mission_runtimes(&intent, default_host)?;
+    Ok(intent)
+}
+
+/// Empty membership is meaningful only on the owned-set route; apply still requires explicit intent.
+pub fn parse_owned_set_intent(source: &str, default_host: &str) -> Result<NormalizedIntent, St3Error> {
+    let intent = parse_intent_with_owner(source, default_host, None, true, true)?;
     validate_mission_runtimes(&intent, default_host)?;
     Ok(intent)
 }
@@ -75,7 +82,7 @@ pub(crate) fn parse_internal_intent(
     source: &str,
     default_host: &str,
 ) -> Result<NormalizedIntent, St3Error> {
-    parse_intent_with_owner(source, default_host, None, true)
+    parse_intent_with_owner(source, default_host, None, true, false)
 }
 
 #[cfg(test)]
@@ -95,7 +102,7 @@ pub(crate) fn parse_execution_intent(
         "mission-run/{}",
         run_id.strip_prefix("mission-run/").unwrap_or(run_id)
     );
-    parse_intent_with_owner(source, default_host, Some(&owner), true)
+    parse_intent_with_owner(source, default_host, Some(&owner), true, false)
 }
 
 /// The placeholder variables a mission's declarations are interpolated with when they are
@@ -238,6 +245,7 @@ fn parse_intent_with_owner(
     default_host: &str,
     owner_run: Option<&str>,
     allow_execution_root: bool,
+    allow_empty: bool,
 ) -> Result<NormalizedIntent, St3Error> {
     if source.len() > 16 * 1024 * 1024 {
         return Err(St3Error::new(
@@ -259,7 +267,7 @@ fn parse_intent_with_owner(
         .iter()
         .filter(|node| node.name().value() != "version")
         .collect::<Vec<_>>();
-    if declarations.is_empty() {
+    if declarations.is_empty() && !allow_empty {
         return Err(St3Error::new(
             "invalid-root",
             "an st publication must contain at least one declaration after `version 2`",
@@ -274,6 +282,7 @@ fn parse_intent_with_owner(
             "`subgraph` is not part of st KDL; publish declarations directly after `version 2`",
         ));
     }
+    let mission_provenance = crate::provenance::parse(&document)?;
     let missions = crate::mission::parse_missions(&document, default_host)?;
     let mut context = ParseContext {
         default_host: default_host.to_owned(),
@@ -304,10 +313,15 @@ fn parse_intent_with_owner(
     let normalized = json!({ "version": 2, "declarations": normalized_nodes });
     let source_hash = hash_json(&normalized);
     Ok(NormalizedIntent {
+        direct_message_registrations: declarations.iter()
+            .filter(|node| !allow_execution_root && public_message_subscription(node))
+            .map(|node| namespaced("subscription", &one_string_with_children(node).expect("validated subscription")))
+            .collect(),
         schema: "st3.v1".into(),
         source_hash,
         subjects: context.subjects,
         missions,
+        mission_provenance,
         mission_runs: context.mission_runs,
         planning_sessions: context.planning_sessions,
         resource_refreshes: context.resource_refreshes,
@@ -374,9 +388,10 @@ fn resolve_node_documents(node: &mut KdlNode, bindings: &BTreeMap<String, String
         }
     }
     let gate = node.name().value() == "gate";
+    let mission = node.name().value() == "mission";
     if let Some(children) = node.children_mut() {
         for child in children.nodes_mut() {
-            if !(gate && is_document_gate(child)) {
+            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
                 resolve_node_documents(child, bindings);
             }
         }
@@ -409,9 +424,10 @@ fn parse_desired_node(
             .is_some();
     if !context.allow_execution_root
         && !owned_terminal
+        && !public_message_subscription(node)
         && matches!(
             kind,
-            "exec" | "pty" | "lane" | "observer" | "subscription" | "schedule"
+            "exec" | "pty" | "lane" | "observer" | "subscription"
         )
     {
         return Err(St3Error::new(
@@ -439,6 +455,26 @@ fn parse_desired_node(
     }
 }
 
+/// Public registration may attach a simple message delivery to an existing observer.
+/// Observer/recipient existence and actor authority are checked at preview/publication.
+/// Execution, batching, missions and new observers stay on their existing runtime routes.
+fn public_message_subscription(node: &KdlNode) -> bool {
+    if node.name().value() != "subscription" { return false }
+    let Some(body) = node.children() else { return false };
+    if body.nodes().iter().any(|child| !matches!(child.name().value(), "observer" | "on" | "to" | "delivery")) {
+        return false;
+    }
+    if body.nodes().iter().filter(|child| child.name().value() == "on").count() != 1
+        || !body.nodes().iter().find(|child| child.name().value() == "on")
+        .is_some_and(|field| field.children().is_none()
+            && one_string(field).ok().as_deref() == Some(crate::resource::github_workflows::PERFORMANCE_FAILURES_FIELD)) {
+        return false;
+    }
+    body.nodes().iter().find(|child| child.name().value() == "delivery")
+        .is_some_and(|delivery| delivery.children().is_none()
+            && one_string(delivery).ok().as_deref() == Some("message"))
+}
+
 fn parse_mission_run_declaration(
     node: &KdlNode,
     context: &mut ParseContext,
@@ -462,6 +498,8 @@ fn parse_mission_run_declaration(
             "mode",
             "input",
             "after",
+            "report-to",
+            "report-completed",
             "revision",
             "reset",
             "cancellation",
@@ -472,7 +510,14 @@ fn parse_mission_run_declaration(
     let has_creation = body.nodes().iter().any(|child| {
         matches!(
             child.name().value(),
-            "mission" | "workspace" | "requester" | "mode" | "input" | "after"
+            "mission"
+                | "workspace"
+                | "requester"
+                | "mode"
+                | "input"
+                | "after"
+                | "report-to"
+                | "report-completed"
         )
     });
     let creation = if has_creation {
@@ -534,6 +579,26 @@ fn parse_mission_run_declaration(
                 ));
             }
         }
+        let report_to = child_string(body, "report-to")?;
+        if let Some(report_to) = &report_to {
+            crate::mission::validate_report_to(report_to)?;
+        }
+        let report_completed = match child_string(body, "report-completed")?.as_deref() {
+            None => false,
+            Some("true") => true,
+            Some(other) => {
+                return Err(St3Error::new(
+                    "invalid-report-completed",
+                    format!("`report-completed` is `true` when present, not `{other}`"),
+                ));
+            }
+        };
+        if report_completed && report_to.is_none() {
+            return Err(St3Error::new(
+                "report-without-recipient",
+                format!("mission run `{subject}` sets `report-completed` but no `report-to` agent"),
+            ));
+        }
         Some(MissionRunCreation {
             mission,
             revision,
@@ -542,6 +607,8 @@ fn parse_mission_run_declaration(
             inputs,
             mode,
             after,
+            report_to,
+            report_completed,
         })
     } else {
         None
@@ -1112,21 +1179,6 @@ fn parse_planning_session_declaration(
             if let Some(effort) = &creation.planner.effort {
                 harness_body.nodes_mut().push(string_node("effort", effort));
             }
-            let arguments: &[&str] = match creation.planner.provider.as_str() {
-                "codex" => &[
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--dangerously-bypass-hook-trust",
-                ],
-                "claude" => &["--permission-mode", "bypassPermissions"],
-                _ => &[],
-            };
-            if !arguments.is_empty() {
-                let mut args = KdlNode::new("args");
-                for argument in arguments {
-                    args.entries_mut().push(kdl::KdlEntry::new(*argument));
-                }
-                harness_body.nodes_mut().push(args);
-            }
             harness.set_children(harness_body);
             agent_body.nodes_mut().push(harness);
             agent.set_children(agent_body);
@@ -1173,6 +1225,7 @@ fn parse_host(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: "host".into(),
             desired: canonical_node(&normalized)?,
@@ -1224,6 +1277,15 @@ fn parse_agent(
         )
     })?;
     validate_agent_body(children, &node_name)?;
+    if let Some(policy) = unique_child(children, "rollout")? {
+        ensure_no_properties(policy)?;
+        if one_string(policy)? != "manual" {
+            return Err(St3Error::new(
+                "invalid-seat-rollout",
+                "seat rollout must be manual",
+            ));
+        }
+    }
     let fresh_context = unique_child(children, "fresh-context")?
         .map(|child| ensure_bare(child))
         .transpose()?
@@ -1318,14 +1380,77 @@ fn parse_agent(
             tags: BTreeMap::new(),
             display_name: display_name.clone(),
             lifecycle: lifecycle.clone(),
+            terminal_binding: None,
+            one_shot: false,
             restart: restart.clone(),
             restart_intensity: restart_intensity.clone(),
             shutdown_timeout_ms,
             driver: None,
+            terminal_size: None,
+        });
+    }
+
+    if let Some(binding) = unique_child(children, "bind-terminal")? {
+        if context.owner_run.is_some()
+            || driver_nodes.is_empty()
+            || [
+                "checkout",
+                "render",
+                "fresh-context",
+                "one-shot",
+                "pty",
+                "exec",
+                "rollout",
+            ]
+            .iter()
+            .any(|name| children.nodes().iter().any(|n| n.name().value() == *name))
+        {
+            return Err(St3Error::new(
+                "invalid-terminal-binding",
+                "bind-terminal requires a top-level harness seat without managed side effects",
+            ));
+        }
+        ensure_only_properties(binding, &["incarnation", "id", "runtime-id"])?;
+        let terminal = one_string(binding)?;
+        if st3_schema::owned_terminals::owner(&terminal)
+            .map_err(|e| St3Error::new(e.code, e.message))?
+            .is_none_or(|owner| !owner.starts_with("person/"))
+        {
+            return Err(St3Error::new(
+                "invalid-terminal-binding",
+                "bind-terminal needs a person's terminal subject",
+            ));
+        }
+        let incarnation = property_string(binding, "incarnation")?
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+            .ok_or_else(|| {
+                St3Error::new(
+                    "invalid-terminal-binding",
+                    "bind-terminal needs its PTY incarnation",
+                )
+            })?;
+        let id = property_string(binding, "id")?
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .ok_or_else(|| {
+                St3Error::new(
+                    "invalid-terminal-binding",
+                    "bind-terminal needs a unique invocation UUID",
+                )
+            })?;
+        let member = primary.as_mut().expect("a bound seat has a harness");
+        member.runtime_id =
+            property_string(binding, "runtime-id")?.unwrap_or_else(|| terminal.replace('/', "."));
+        member.lifecycle = MemberLifecycle::TerminalBound;
+        member.restart = RestartType::Never;
+        member.terminal_binding = Some(crate::model::TerminalBinding {
+            subject: terminal,
+            incarnation,
+            id,
         });
     }
 
     if let Some(member) = primary.as_mut() {
+        member.one_shot = unique_child(children, "one-shot")?.is_some();
         member.tags.extend(parse_tags(children)?);
         member.tags.insert("st3.subject".into(), subject.clone());
         if fresh_context {
@@ -1337,9 +1462,15 @@ fn parse_agent(
 
     let mut desired = canonical_node(node)?;
     normalize_agent_under(&mut desired, &host, context.owner_run.as_deref());
+    let accountable = st3_schema::accountable::from_desired(&desired)
+        .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
+    if accountable.is_some() && context.owner_run.is_some() {
+        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+    }
     insert_subject(
         context,
         DesiredSubject {
+            accountable,
             subject: subject.clone(),
             kind: "agent".into(),
             desired,
@@ -1393,6 +1524,7 @@ fn parse_agent(
         insert_subject(
             context,
             DesiredSubject {
+                accountable: None,
                 subject: task_subject,
                 kind: child.name().value().into(),
                 desired: canonical_node(child)?,
@@ -1469,6 +1601,7 @@ fn parse_standalone_member(
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: kind.into(),
             desired: canonical_node(node)?,
@@ -1512,6 +1645,7 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: kind.into(),
             desired: canonical_node(node)?,
@@ -1540,17 +1674,159 @@ fn validate_account(node: &KdlNode) -> Result<(), St3Error> {
         .ok_or_else(|| St3Error::new("missing-account-body", "an account needs a body"))?;
     reject_unknown_children(
         body,
-        &["provider", "external-account", "auth-type"],
+        &[
+            "provider",
+            "external-account",
+            "auth-type",
+            "owner",
+            "plan",
+            "login",
+        ],
         "account",
         "account",
     )?;
     required_child_string(body, "provider", "account")?;
-    required_child_string(body, "external-account", "account")?;
-    let auth = required_child_string(body, "auth-type", "account")?;
-    if !matches!(auth.as_str(), "subscription" | "api-key") {
+    child_string(body, "external-account")?;
+    if let Some(auth) = child_string(body, "auth-type")?
+        && !matches!(auth.as_str(), "subscription" | "api-key")
+    {
         return Err(St3Error::new(
             "invalid-auth-type",
             format!("invalid account auth type `{auth}`"),
+        ));
+    }
+    if let Some(owner) = child_string(body, "owner")? {
+        if !owner.starts_with("person/") {
+            return Err(St3Error::new(
+                "invalid-account-owner",
+                format!("an account owner is a person, like `person/ada`; got `{owner}`"),
+            ));
+        }
+        validate_name(&owner, true)?;
+    }
+    if let Some(plan) = child_string(body, "plan")?
+        && (plan.trim().is_empty() || plan.len() > 64)
+    {
+        return Err(St3Error::new(
+            "invalid-account-plan",
+            "an account plan is a short nonempty name",
+        ));
+    }
+    // A login is a credential directory, never a credential: its path is all an account holds.
+    let mut hosts = BTreeSet::new();
+    for login in body
+        .nodes()
+        .iter()
+        .filter(|child| child.name().value() == "login")
+    {
+        ensure_only_properties(login, &["host"])?;
+        ensure_no_children(login)?;
+        let path = one_string(login)?;
+        if !(path.starts_with('/') || path.starts_with("~/"))
+            || path.len() > 1024
+            || path.contains('\0')
+        {
+            return Err(St3Error::new(
+                "invalid-account-login",
+                format!(
+                    "an account login is an absolute directory or one under `~/`; got `{path}`"
+                ),
+            ));
+        }
+        let host = property_string(login, "host")?;
+        if let Some(host) = &host {
+            validate_name(host, false)?;
+        }
+        if !hosts.insert(host) {
+            return Err(St3Error::new(
+                "duplicate-account-login",
+                "an account has one login per host, and at most one for every host",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A harness block binds its seat to one account or a pool of its owner's accounts. Only a
+/// harness that st launches with a login directory can bind one.
+fn validate_account_binding(
+    harness: &KdlNode,
+    agent: &KdlDocument,
+    owner: &str,
+) -> Result<(), St3Error> {
+    let Some(body) = harness.children() else {
+        return Ok(());
+    };
+    let account = unique_child(body, "account")?;
+    let pool = unique_child(body, "account-pool")?;
+    if account.is_none() && pool.is_none() {
+        return Ok(());
+    }
+    if account.is_some() && pool.is_some() {
+        return Err(St3Error::new(
+            "account-and-pool",
+            format!("agent `{owner}` binds an account and a pool; choose one"),
+        ));
+    }
+    let provider = one_string_with_children(harness)?;
+    let variable = crate::accounts::login_environment_name(&provider).ok_or_else(|| {
+        St3Error::new(
+            "account-unsupported-harness",
+            format!("harness `{provider}` has no login directory st can select"),
+        )
+    })?;
+    if let Some(account) = account {
+        ensure_no_properties(account)?;
+        ensure_no_children(account)?;
+        validate_name(&one_string(account)?, false)?;
+    }
+    if let Some(pool) = pool {
+        ensure_no_properties(pool)?;
+        ensure_no_children(pool)?;
+        let person = one_string(pool)?;
+        if !person.starts_with("person/") {
+            return Err(St3Error::new(
+                "invalid-account-pool",
+                format!("an account pool names its owner, like `person/ada`; got `{person}`"),
+            ));
+        }
+        validate_name(&person, true)?;
+        // A pooled seat can restart on another account, whose login directory holds none of the
+        // old account's native sessions, so it cannot ask a harness to resume one.
+        if let Some(args) = unique_child(body, "args")? {
+            let resumes = positional_strings(args)?
+                .iter()
+                .take_while(|argument| argument.as_str() != "--")
+                .any(|argument| {
+                    if provider == "codex" {
+                        return matches!(argument.as_str(), "resume" | "fork");
+                    }
+                    matches!(
+                        argument.as_str(),
+                        "-c" | "--continue" | "-r" | "--resume" | "--session-id"
+                    ) || argument.starts_with("--resume=")
+                        || argument.starts_with("--session-id=")
+                });
+            if resumes {
+                return Err(St3Error::new(
+                    "account-pool-resume",
+                    format!(
+                        "agent `{owner}` is bound to a pool and cannot resume a native session: a restart on another account starts fresh, since its work lives in the graph"
+                    ),
+                ));
+            }
+        }
+    }
+    if let Some(env) = unique_child(agent, "env")?
+        && env.children().is_some_and(|map| {
+            map.nodes()
+                .iter()
+                .any(|entry| entry.name().value() == variable)
+        })
+    {
+        return Err(St3Error::new(
+            "account-env-conflict",
+            format!("agent `{owner}` binds an account, so st sets {variable}; remove it from env"),
         ));
     }
     Ok(())
@@ -1581,6 +1857,7 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject: subject.clone(),
             kind: "stop".into(),
             desired: json!({ "stop": subject }),
@@ -2327,6 +2604,17 @@ fn driver_member(
             property_string(message, "id")?.expect("validated message ID"),
         ]);
     }
+    if let Some(seed) = child_string(children, "seed")? {
+        if name != "omp" || !std::path::Path::new(&seed).is_absolute()
+            || seed.contains('\0') || seed.trim().is_empty()
+            || crate::native_resume::selector_scope(&name, &provider).is_some()
+            || [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV]
+                .iter().any(|key| environment.contains_key(*key))
+        {
+            return Err(St3Error::new("invalid-native-seed", "seed requires an absolute OMP transcript path and cannot accompany session selectors or resume environment"));
+        }
+        wrapper.extend(["--seed".into(), seed]);
+    }
     wrapper.push("--".into());
     wrapper.extend(provider);
     Ok(MemberSpec {
@@ -2342,10 +2630,13 @@ fn driver_member(
         tags: BTreeMap::from([("st3.subject".into(), subject.into())]),
         display_name,
         lifecycle,
+        terminal_binding: None,
+        one_shot: false,
         restart,
         restart_intensity,
         shutdown_timeout_ms,
         driver: Some(name),
+        terminal_size: None,
     })
 }
 
@@ -2431,10 +2722,13 @@ fn task_member(
         tags: parse_tags(body)?,
         display_name: None,
         lifecycle,
+        terminal_binding: None,
+        one_shot: false,
         restart,
         restart_intensity,
         shutdown_timeout_ms,
         driver: None,
+        terminal_size: None,
     })
 }
 
@@ -2538,11 +2832,13 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "identity",
         "name",
         "description",
+        "lifecycle",
         "host",
         "workspace",
         "checkout",
         "under",
         "restart",
+        "rollout",
         "shutdown-timeout",
         "command",
         "argv",
@@ -2551,7 +2847,10 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "render",
         "harness",
         "fresh-context",
+        "bind-terminal",
+        "one-shot",
         "handles-faults",
+        "accountable",
         "mission-authority",
         "queue-authority",
         "seat-authority",
@@ -2578,9 +2877,11 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "identity",
         "name",
         "description",
+        "lifecycle",
         "host",
         "workspace",
         "checkout",
+        "rollout",
         "shutdown-timeout",
         "command",
         "argv",
@@ -2589,7 +2890,10 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "render",
         "harness",
         "fresh-context",
+        "bind-terminal",
+        "one-shot",
         "handles-faults",
+        "accountable",
         "mission-authority",
         "queue-authority",
         "seat-authority",
@@ -2597,8 +2901,31 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
     ] {
         unique_child(document, child)?;
     }
+    if let Some(accountable) = unique_child(document, "accountable")? {
+        ensure_no_properties(accountable)?;
+        ensure_no_children(accountable)?;
+        let person = one_string(accountable)?;
+        if !st3_schema::accountable::person(&person) {
+            return Err(St3Error::new("invalid-accountable-root", "accountable must name one concrete person/NAME"));
+        }
+    }
+    if let Some(lifecycle) = unique_child(document, "lifecycle")? {
+        ensure_no_properties(lifecycle)?;
+        ensure_no_children(lifecycle)?;
+        let value = one_string(lifecycle)?;
+        if crate::model::AgentLifecycle::parse(&value).is_none() {
+            return Err(St3Error::new(
+                "invalid-agent-lifecycle",
+                format!("agent lifecycle `{value}` must be standing, owner, or bounded"),
+            ));
+        }
+    }
     if let Some(flag) = unique_child(document, "handles-faults")? {
         ensure_bare(flag)?;
+    }
+    if let Some(flag) = unique_child(document, "one-shot")? {
+        ensure_bare(flag)?;
+        ensure_no_children(flag)?;
     }
     if let Some(tags) = unique_child(document, "tags")? {
         validate_tags(tags)?;
@@ -2708,6 +3035,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         .filter(|node| node.name().value() == "harness")
     {
         validate_driver(driver)?;
+        validate_account_binding(driver, document, owner)?;
     }
     Ok(())
 }
@@ -2990,8 +3318,25 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
         )
     })?;
     let allowed: &[&str] = match provider.as_str() {
-        "claude" => &["model", "effort", "dev-channels", "args", "message"],
-        "codex" | "pi" | "omp" => &["model", "effort", "args", "message"],
+        "claude" => &[
+            "model",
+            "effort",
+            "dev-channels",
+            "args",
+            "message",
+            "account",
+            "account-pool",
+        ],
+        "codex" => &[
+            "model",
+            "effort",
+            "args",
+            "message",
+            "account",
+            "account-pool",
+        ],
+        "pi" => &["model", "effort", "args", "message"],
+        "omp" => &["model", "effort", "args", "message", "seed"],
         "opencode" => &["model", "args", "message"],
         _ => return Err(St3Error::new("unknown-driver", "unknown typed driver")),
     };
@@ -3382,6 +3727,71 @@ fn validate_subscription(node: &KdlNode) -> Result<(), St3Error> {
                     "invalid-subscription-mention",
                     "only a batched delivery hears the mentions a `mention` names",
                 ));
+            }
+        }
+        // A seat's watch on one issue or pull request: every comment and review, each move of the
+        // required checks into pass or fail, and a final wake when it closes.
+        "watch" => {
+            let target = required_child_string(body, "to", "subscription")?;
+            validate_full_subject(&target)?;
+            if !target.starts_with("agent/") {
+                return Err(St3Error::new(
+                    "invalid-watch-delivery",
+                    "a watch wakes one agent",
+                ));
+            }
+            if unique_child(body, "when")?.is_some() || !logins.is_empty() {
+                return Err(St3Error::new(
+                    "invalid-watch-delivery",
+                    "a watch hears every event of its item, with no `when` or `mention`",
+                ));
+            }
+            if let Some(field) = fields
+                .iter()
+                .find(|field| !crate::github_watch::WATCH_FIELDS.contains(&field.as_str()))
+            {
+                return Err(St3Error::new(
+                    "invalid-watch-delivery",
+                    format!("a watch hears comments, issues and pull requests, not `{field}`"),
+                ));
+            }
+            let delivery_body = delivery.children().ok_or_else(|| {
+                St3Error::new(
+                    "invalid-watch-delivery",
+                    "a watch delivery names its `item` and `since`",
+                )
+            })?;
+            reject_unknown_children(
+                delivery_body,
+                &["item", "since", "until"],
+                "watch delivery",
+                "delivery",
+            )?;
+            let item = unique_child(delivery_body, "item")?
+                .and_then(|node| {
+                    positional_values(node)
+                        .first()
+                        .and_then(|value| value.as_integer())
+                })
+                .filter(|item| *item > 0);
+            if item.is_none() {
+                return Err(St3Error::new(
+                    "invalid-watch-delivery",
+                    "a watch delivery names one positive `item` number",
+                ));
+            }
+            for (name, required) in [("since", true), ("until", false)] {
+                unique_child(delivery_body, name)?;
+                match child_string(delivery_body, name)? {
+                    Some(at) if crate::github_watch::parse_rfc3339_ms(&at).is_some() => {}
+                    None if !required => {}
+                    _ => {
+                        return Err(St3Error::new(
+                            "invalid-watch-delivery",
+                            format!("a watch delivery's `{name}` is an RFC 3339 time"),
+                        ));
+                    }
+                }
             }
         }
         "mission" => {
@@ -3897,7 +4307,14 @@ fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3Error
 }
 
 pub(crate) fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Error> {
-    if node.name().value() == "account" {
+    validate_deferred_declaration_in(node, None)
+}
+
+/// `parent` is the enclosing node's name. An `account "NAME"` inside a harness block names an
+/// account a root declaration owns, the same reference a top-level seat makes, so a mission's agent
+/// may carry it; an `account` that declares one must stay at the root.
+fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Result<(), St3Error> {
+    if node.name().value() == "account" && parent != Some("harness") {
         return Err(St3Error::new(
             "account-inside-mission",
             "an account declaration must be at the root",
@@ -3912,7 +4329,7 @@ pub(crate) fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Err
     }
     if let Some(children) = node.children() {
         for child in children.nodes() {
-            validate_deferred_declaration(child)?;
+            validate_deferred_declaration_in(child, Some(node.name().value()))?;
         }
     }
     Ok(())
@@ -4191,6 +4608,7 @@ pub fn subscription_spec(value: &Value) -> Option<SubscriptionSpec> {
             mentions: Vec::new(),
             text_input: None,
             batch_every_ms: None,
+            watch: None,
             stopped: true,
         });
     }
@@ -4211,6 +4629,19 @@ pub fn subscription_spec(value: &Value) -> Option<SubscriptionSpec> {
             |(mission, revision)| (Some(mission.to_owned()), Some(revision.to_owned())),
         )
     });
+    let watch = (delivery == "watch")
+        .then(|| {
+            Some(crate::model::WatchSpec {
+                item: canonical_child_value(delivery_node, "item")?.as_u64()?,
+                since_unix_ms: canonical_child_value(delivery_node, "since")
+                    .and_then(Value::as_str)
+                    .and_then(crate::github_watch::parse_rfc3339_ms)?,
+                until_unix_ms: canonical_child_value(delivery_node, "until")
+                    .and_then(Value::as_str)
+                    .and_then(crate::github_watch::parse_rfc3339_ms),
+            })
+        })
+        .flatten();
     Some(SubscriptionSpec {
         observer: canonical_child_value(value, "observer")?
             .as_str()?
@@ -4255,6 +4686,7 @@ pub fn subscription_spec(value: &Value) -> Option<SubscriptionSpec> {
         batch_every_ms: canonical_child_value(delivery_node, "every")
             .and_then(Value::as_str)
             .and_then(|value| parse_duration(value, true).ok()),
+        watch,
         stopped: false,
     })
 }
@@ -4486,8 +4918,9 @@ fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Resul
     }
     if let Some(children) = node.children() {
         let gate = node.name().value() == "gate";
+        let mission = node.name().value() == "mission";
         for child in children.nodes() {
-            if !(gate && is_document_gate(child)) {
+            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
                 collect_document_refs(child, output)?;
             }
         }
@@ -4590,9 +5023,13 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
         for child in children.as_array().ok_or_else(invalid)? {
             document.nodes_mut().push(render_desired_node(child)?);
         }
-        if !document.nodes().is_empty() {
+        if !document.nodes().is_empty() || name == "harness" {
             node.set_children(document);
         }
+    } else if name == "harness" {
+        // Older normalized trees omitted empty children. A validated harness
+        // always has a body, so recover that required syntax when rendering it.
+        node.set_children(KdlDocument::new());
     }
     Ok(node)
 }
@@ -5187,7 +5624,7 @@ agent "dotfiles/steward" {
 
     #[test]
     fn every_st3_eval_uses_the_current_graph_grammar() {
-        let evals = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let evals = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("evals/st3");
         let mut parsed = 0;
@@ -5221,7 +5658,7 @@ agent "dotfiles/steward" {
 
     #[test]
     fn work_wake_revision_fixtures_use_the_current_graph_grammar() {
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixtures = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("evals/st3/work-wake-reliability/fixtures");
         for name in ["revisable-v1.kdl", "revisable-v2.kdl", "revisable-v3.kdl"] {
@@ -5371,6 +5808,260 @@ version 2
             parse_intent(&unknown_field, "node").unwrap_err().code,
             "unknown-child"
         );
+    }
+
+    #[test]
+    fn a_missions_agent_names_an_account_the_way_a_top_level_seat_does() {
+        let mission = |harness_body: &str| {
+            format!(
+                r#"
+version 2
+
+mission "pinned" state="ready" {{
+  goal "Run on an account."
+  step "start" {{
+    agentless
+    agent "worker" {{
+      workspace "/tmp/example"
+      harness "claude" {{
+        model "claude-sonnet-5"
+        {harness_body}
+      }}
+    }}
+  }}
+}}
+"#
+            )
+        };
+        for body in [r#"account "example/claude-2""#, r#"account-pool "person/example""#] {
+            let source = mission(body);
+            parse_intent(&source, "node").unwrap_or_else(|error| panic!("{body}: {error:?}"));
+            parse_execution_intent(&source, "node", "run-1")
+                .unwrap_or_else(|error| panic!("{body} in a run: {error:?}"));
+        }
+
+        // The same reference at the top level is what a seat already does.
+        let top = r#"
+version 2
+
+agent "seat" {
+  workspace "/tmp/example"
+  harness "claude" {
+    model "claude-sonnet-5"
+    account "example/claude-2"
+  }
+}
+"#;
+        parse_intent(top, "node").unwrap();
+
+        // Declaring an account, in a step or beside a harness, stays root-only.
+        let declared = mission(r#"account "example/claude-2""#).replace(
+            "agentless",
+            "agentless\n    account \"example/claude-3\" {\n      provider \"anthropic\"\n    }",
+        );
+        assert_eq!(parse_intent(&declared, "node").unwrap_err().code, "account-inside-mission");
+        let beside = mission("").replace(
+            "      harness \"claude\"",
+            "      account \"example/claude-3\"\n      harness \"claude\"",
+        );
+        assert_eq!(parse_intent(&beside, "node").unwrap_err().code, "account-inside-mission");
+    }
+
+    #[test]
+    fn an_account_declares_an_owner_a_plan_and_a_login_per_host_and_never_a_credential() {
+        let account = |body: &str| {
+            format!("version 2\naccount \"ada/claude\" {{\n  provider \"anthropic\"\n{body}\n}}\n")
+        };
+        let intent = parse_intent(
+            &account(
+                "owner \"person/ada\"\nplan \"max\"\nlogin \"/srv/logins/ada\" host=\"alder\"\nlogin \"~/.claude-ada\"",
+            ),
+            "node",
+        )
+        .unwrap();
+        let declared = crate::accounts::parse_account(
+            "account/ada/claude",
+            &intent.subjects["account/ada/claude"].desired,
+        )
+        .unwrap();
+        assert_eq!(declared.owner.as_deref(), Some("person/ada"));
+        assert_eq!(declared.login_for("alder"), Some("/srv/logins/ada"));
+        assert_eq!(declared.login_for("birch"), Some("~/.claude-ada"));
+
+        for (body, code) in [
+            ("owner \"ada\"", "invalid-account-owner"),
+            ("login \"relative/dir\"", "invalid-account-login"),
+            (
+                "login \"/a\" host=\"alder\"\nlogin \"/b\" host=\"alder\"",
+                "duplicate-account-login",
+            ),
+            ("login \"/a\"\nlogin \"/b\"", "duplicate-account-login"),
+            ("token \"sk-not-a-field\"", "unknown-child"),
+        ] {
+            assert_eq!(
+                parse_intent(&account(body), "node").unwrap_err().code,
+                code,
+                "{body}"
+            );
+        }
+        // A declaration that predates owners and logins still parses.
+        parse_intent(
+            "version 2\naccount \"claude/team-a\" { provider \"anthropic\" }\n",
+            "node",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_harness_binds_an_account_or_a_pool_for_claude_and_codex_only() {
+        let seat = |harness: &str, extra: &str| {
+            format!(
+                "version 2\nagent \"worker\" {{\n  workspace \"/tmp\"\n{extra}\n  harness {harness}\n}}\n"
+            )
+        };
+        for ok in [
+            seat("\"claude\" { account \"ada/claude\" }", ""),
+            seat("\"codex\" { account-pool \"person/ada\" }", ""),
+            seat("\"codex\" { account-pool \"person/ada\"; args \"-c\" \"model=\\\"example\\\"\" }", ""),
+            seat(
+                "\"claude\" { account \"ada/claude\"; args \"--continue\" }",
+                "",
+            ),
+        ] {
+            parse_intent(&ok, "node").unwrap_or_else(|error| panic!("{ok}: {error:?}"));
+        }
+        for (source, code) in [
+            (
+                seat(
+                    "\"claude\" { account \"ada/a\"; account-pool \"person/ada\" }",
+                    "",
+                ),
+                "account-and-pool",
+            ),
+            (
+                seat("\"claude\" { account-pool \"ada\" }", ""),
+                "invalid-account-pool",
+            ),
+            (seat("\"pi\" { account \"ada/a\" }", ""), "unknown-child"),
+            (
+                seat(
+                    "\"codex\" { account \"ada/a\" }",
+                    "env { CODEX_HOME \"/x\" }",
+                ),
+                "account-env-conflict",
+            ),
+            (
+                seat(
+                    "\"claude\" { account-pool \"person/ada\"; args \"--resume\" \"x\" }",
+                    "",
+                ),
+                "account-pool-resume",
+            ),
+            (
+                seat("\"codex\" { account-pool \"person/ada\"; args \"resume\" \"x\" }", ""),
+                "account-pool-resume",
+            ),
+            (
+                seat("\"codex\" { account-pool \"person/ada\"; args \"fork\" \"x\" }", ""),
+                "account-pool-resume",
+            ),
+        ] {
+            assert_eq!(
+                parse_intent(&source, "node").unwrap_err().code,
+                code,
+                "{source}"
+            );
+        }
+        // A seat with no account runs on the harness's default login, and may set its own.
+        parse_intent(&seat("\"codex\" {}", "env { CODEX_HOME \"/x\" }"), "node").unwrap();
+    }
+
+    #[test]
+    fn one_shot_is_an_explicit_seat_flag_and_does_not_change_restart_or_tasks() {
+        for launch in [r#"command "true""#, r#"harness "omp" {}"#] {
+            let source = format!(
+                "version 2\nagent \"example/once\" {{ one-shot; {launch}; exec \"helper\" {{ command \"true\" }} }}"
+            );
+            let intent = parse_intent(&source, "node").unwrap();
+            let seat = intent.subjects["agent/example/once"]
+                .member
+                .as_ref()
+                .unwrap();
+            assert!(seat.one_shot);
+            assert_eq!(seat.restart, RestartType::Always);
+            assert!(
+                !intent.subjects["exec/example/once/helper"]
+                    .member
+                    .as_ref()
+                    .unwrap()
+                    .one_shot
+            );
+            let legacy = serde_json::to_value(
+                parse_intent(&source.replace("one-shot; ", ""), "node")
+                    .unwrap()
+                    .subjects["agent/example/once"]
+                    .member
+                    .as_ref()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(legacy.get("one_shot").is_none());
+            assert!(
+                !serde_json::from_value::<MemberSpec>(legacy)
+                    .unwrap()
+                    .one_shot
+            );
+        }
+        for invalid in [
+            "one-shot #true",
+            "one-shot value=1",
+            "one-shot {}",
+            "one-shot; one-shot",
+        ] {
+            assert!(
+                parse_intent(
+                    &format!("version 2\nagent \"example/once\" {{ {invalid}; command \"true\" }}"),
+                    "node"
+                )
+                .is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_lifecycle_is_optional_and_closed() {
+        for value in ["standing", "owner", "bounded"] {
+            let intent = parse_intent(
+                &format!("version 2\nagent \"example/purpose\" {{ lifecycle \"{value}\"; command \"true\" }}"),
+                "node",
+            ).unwrap();
+            let desired = &intent.subjects["agent/example/purpose"].desired;
+            assert_eq!(
+                crate::model::declared_agent_lifecycle(Some(desired)),
+                crate::model::AgentLifecycle::parse(value),
+            );
+        }
+        let intent = parse_intent(
+            "version 2\nagent \"example/purpose\" { command \"true\" }", "node",
+        ).unwrap();
+        assert_eq!(crate::model::declared_agent_lifecycle(
+            Some(&intent.subjects["agent/example/purpose"].desired),
+        ), None);
+        let invalid = parse_intent(
+            "version 2\nagent \"example/purpose\" { lifecycle \"unknown\"; command \"true\" }",
+            "node",
+        ).unwrap_err();
+        assert_eq!(invalid.code, "invalid-agent-lifecycle");
+        for invalid in [
+            "lifecycle #true", "lifecycle", "lifecycle \"owner\" extra=\"bounded\"",
+            "lifecycle \"standing\" {}", "lifecycle \"owner\"; lifecycle \"bounded\"",
+        ] {
+            assert!(parse_intent(
+                &format!("version 2\nagent \"example/purpose\" {{ {invalid}; command \"true\" }}"),
+                "node",
+            ).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -5555,6 +6246,53 @@ message "external" {
             canonical_child_value(&intent.subjects["message/external"].desired, "to"),
             Some(&Value::String("agent/other/run/peer".into()))
         );
+    }
+
+    #[test]
+    fn native_seed_parser_is_omp_only_and_rejects_selection_conflicts() {
+        let declaration = |driver: &str, seed: &str, args: &str, env: &str| format!(
+            "version 2\nagent \"worker\" {{ workspace \"/tmp\"; {env} harness {driver:?} {{ seed {seed:?}; {args} }} }}\n"
+        );
+        let intent = parse_test_intent(&declaration("omp", "/transcript.jsonl", "", ""), "node").unwrap();
+        let member = intent.subjects.values().find_map(|subject| subject.member.as_ref()).unwrap();
+        let LaunchSpec::Argv(argv) = &member.launch else { panic!("typed launch expected"); };
+        assert!(argv.windows(2).any(|args| args == ["--seed", "/transcript.jsonl"]));
+        for driver in ["pi", "claude", "codex", "opencode"] {
+            assert!(parse_test_intent(&declaration(driver, "/transcript.jsonl", "", ""), "node").is_err());
+        }
+        assert_eq!(parse_test_intent(&declaration("omp", "relative.jsonl", "", ""), "node").unwrap_err().code, "invalid-native-seed");
+        for args in ["args \"--resume\" \"/other\";", "args \"--continue\";", "args \"--resume=/other\";", "args \"-r\" \"/other\";", "args \"--session\" \"native\";"] {
+            assert_eq!(parse_test_intent(&declaration("omp", "/transcript.jsonl", args, ""), "node").unwrap_err().code, "invalid-native-seed");
+        }
+        for key in [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV] {
+            assert_eq!(parse_test_intent(&declaration("omp", "/transcript.jsonl", "", &format!("env {{\n {key} \"native\"\n}}\n")), "node").unwrap_err().code, "invalid-native-seed");
+        }
+    }
+
+    #[test]
+    fn plain_harness_bodies_survive_normalization_and_legacy_rendering() {
+        for harness in ["claude", "codex", "pi", "omp", "opencode"] {
+            let source = format!(
+                "version 2\nagent \"worker\" {{ workspace \"/work\"; harness {harness:?} {{}} }}\n"
+            );
+            let intent = parse_test_intent(&source, "node").unwrap();
+            assert!(parse_test_intent(&source.replace("{}", ""), "node").is_err());
+            let desired = &intent.subjects["agent/node.worker"].desired;
+            let body = desired["children"].as_array().unwrap()
+                .iter().find(|child| child["name"] == "harness").unwrap();
+            assert!(body.get("children").is_none());
+            for explicit_empty in [false, true] {
+                let mut tree = desired.clone();
+                if explicit_empty {
+                    let body = tree["children"].as_array_mut().unwrap()
+                        .iter_mut().find(|child| child["name"] == "harness").unwrap();
+                    body.as_object_mut().unwrap().insert("children".into(), json!([]));
+                }
+                let node = render_desired_node(&tree).unwrap();
+                let restored = parse_test_intent(&format!("version 2\n{node}\n"), "node").unwrap();
+                assert_eq!(restored.subjects["agent/node.worker"].desired, *desired);
+            }
+        }
     }
 
     #[test]
@@ -6122,14 +6860,15 @@ schedule "daily" {
     catch-up "latest"
     work { mission "work@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; workspace "/tmp/work" }
 }"#;
-        let intent = parse_test_intent(source, "node").unwrap();
+        let intent = parse_intent(source, "node").unwrap();
+        assert!(intent.subjects["schedule/daily"].owner_run.is_none());
         let spec = schedule_spec(&intent.subjects["schedule/daily"].desired, "node").unwrap();
         assert_eq!(spec.calendar.as_ref().unwrap().at_minute, 480);
         assert_eq!(spec.calendar.as_ref().unwrap().weekday, None);
         assert_eq!(spec.calendar.as_ref().unwrap().timezone, "Europe/Berlin");
         assert!(spec.at_unix_ms.is_none());
         assert!(spec.every_ms.is_none());
-        let weekly = parse_test_intent(&source.replace("08:00", "Mon 09:00"), "node").unwrap();
+        let weekly = parse_intent(&source.replace("08:00", "Mon 09:00"), "node").unwrap();
         let weekly = schedule_spec(&weekly.subjects["schedule/daily"].desired, "node").unwrap();
         assert_eq!(weekly.calendar.as_ref().unwrap().weekday, Some(1));
         assert_eq!(weekly.calendar.as_ref().unwrap().at_minute, 540);
@@ -6139,10 +6878,37 @@ schedule "daily" {
             (source.replace("08:00", "Funday 08:00"), "invalid-schedule-calendar"),
             (source.replace("calendar {", "every \"1d\"; anchor \"2026-01-01T00:00:00Z\"; calendar {"), "invalid-schedule-time"),
         ] {
-            assert_eq!(parse_test_intent(&changed, "node").unwrap_err().code, code);
+            assert_eq!(parse_intent(&changed, "node").unwrap_err().code, code);
         }
     }
 
+    #[test]
+    fn manual_rollout_is_a_strict_declaration_field_and_changes_the_digest() {
+        let source = "version 2\nagent \"garden/orchard\" { rollout \"manual\"; harness \"claude\" { model \"example-model\"; } }";
+        let parsed = parse_owned_set_intent(source, "amber").unwrap();
+        assert!(crate::rollout::manual(
+            &parsed.subjects["agent/garden/orchard"]
+        ));
+        let automatic =
+            parse_owned_set_intent(&source.replace("rollout \"manual\";", ""), "amber").unwrap();
+        assert_ne!(
+            smallclaims::hash::canonical_hash(&parsed.subjects).unwrap(),
+            smallclaims::hash::canonical_hash(&automatic.subjects).unwrap()
+        );
+        for field in [
+            "rollout \"automatic\";",
+            "rollout 1;",
+            "rollout \"manual\"; rollout \"manual\";",
+            "rollout \"manual\" { ignored; }",
+            "rollout \"manual\" ignored=\"value\";",
+        ] {
+            assert!(
+                parse_owned_set_intent(&source.replace("rollout \"manual\";", field), "amber")
+                    .is_err(),
+                "{field}"
+            );
+        }
+    }
 
     #[test]
     fn strict_grammar_rejects_unknown_children_and_properties() {

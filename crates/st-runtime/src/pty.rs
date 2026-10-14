@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use pty_client::{PeekScreenOptions, SendOptions, StopError};
 use pty_core::registry::SessionInfo;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -52,6 +52,13 @@ impl std::error::Error for PtySpawnTimeout {}
 pub enum Launch {
     Shell(String),
     Argv(Vec<String>),
+}
+
+/// The rows and columns a PTY starts at. Without one, `pty run` picks its own default.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalSize {
+    pub rows: u16,
+    pub columns: u16,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -176,6 +183,7 @@ impl PtyRuntime {
             .with_context(|| format!("PTY `{id}` is not present"))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         &self,
         id: &str,
@@ -184,6 +192,101 @@ impl PtyRuntime {
         env: &BTreeMap<String, String>,
         display_name: Option<&str>,
         tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+    ) -> Result<()> {
+        self.spawn_guarded(id, launch, cwd, env, display_name, tags, size, None, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_checked(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        self.spawn_guarded(
+            id,
+            launch,
+            cwd,
+            env,
+            display_name,
+            tags,
+            size,
+            None,
+            Some(guard),
+        )
+    }
+
+    /// Start a cutover only after its predecessor exited. A replay can reuse only the exact
+    /// operation's tagged replacement; an unrelated live incarnation is never adopted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_after(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        predecessor: &str,
+        operation: &str,
+    ) -> Result<()> {
+        self.spawn_guarded(
+            id,
+            launch,
+            cwd,
+            env,
+            display_name,
+            tags,
+            size,
+            Some((predecessor, operation)),
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_after_checked(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        predecessor: &str,
+        operation: &str,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        self.spawn_guarded(
+            id,
+            launch,
+            cwd,
+            env,
+            display_name,
+            tags,
+            size,
+            Some((predecessor, operation)),
+            Some(guard),
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_guarded(
+        &self,
+        id: &str,
+        launch: &Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        display_name: Option<&str>,
+        tags: &BTreeMap<String, String>,
+        size: Option<TerminalSize>,
+        cutover: Option<(&str, &str)>,
+        guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
         let _spawn_lock = self.acquire_spawn_lock(id)?;
         let fence = self.spawn_state_path(id, "pending");
@@ -194,7 +297,16 @@ impl PtyRuntime {
         if fence.is_file() {
             let previous = std::fs::read_to_string(&fence)
                 .with_context(|| format!("read PTY publication fence {}", fence.display()))?;
-            self.wait_for_publication(id, (!previous.is_empty()).then_some(previous.as_str()))?;
+            // Give the unknown launch one recovery window to publish. If it still has not,
+            // retire its fence and let this pass replace it with `pty run --force`.
+            match self.wait_for_publication(id, (!previous.is_empty()).then_some(previous.as_str())) {
+                Ok(_) => {}
+                Err(error)
+                    if error.downcast_ref::<PtySpawnTimeout>().is_some_and(|timeout| {
+                        timeout.phase == PtySpawnTimeoutPhase::Publication
+                    }) => {}
+                Err(error) => return Err(error),
+            }
             std::fs::remove_file(&fence)
                 .with_context(|| format!("clear PTY publication fence {}", fence.display()))?;
             before = self
@@ -202,7 +314,34 @@ impl PtyRuntime {
                 .into_iter()
                 .find(|observation| observation.name == id);
         }
+        if let Some((predecessor, operation)) = cutover
+            && let Some(observed) = before.as_ref() {
+                anyhow::ensure!(
+                    observed.status != "unknown",
+                    "rollout cannot spawn while the PTY identity is unknown"
+                );
+                if observation_is_live(observed) {
+                    anyhow::ensure!(
+                        observed.tags.get("st3.rollout").map(String::as_str) == Some(operation)
+                            && observation_incarnation(observed)
+                                .as_deref()
+                                .is_some_and(|inc| inc != predecessor),
+                        "rollout cannot adopt another live PTY incarnation"
+                    );
+                } else {
+                    let same = observation_incarnation(observed).as_deref() == Some(predecessor)
+                        || (observed.pid.is_none()
+                            && predecessor.split_once(':').is_some_and(|(_, created)| {
+                                observed.created_at.as_deref() == Some(created)
+                            }));
+                    anyhow::ensure!(same, "rollout predecessor changed before spawn");
+                }
+        }
         if before.as_ref().is_some_and(observation_is_live) {
+            anyhow::ensure!(
+                guard.is_none() || cutover.is_some(),
+                "guarded start cannot attribute an existing incarnation to a new launch"
+            );
             return Ok(());
         }
         // What the previous incarnation left running ends before its replacement starts. Each
@@ -248,6 +387,9 @@ impl PtyRuntime {
             ]);
         }
         let mut effective_tags = tags.clone();
+        if let Some((_, operation)) = cutover {
+            effective_tags.insert("st3.rollout".into(), operation.into());
+        }
         effective_tags.insert(
             "st3.isolation".into(),
             isolation_name(crate::isolation_mode()).into(),
@@ -261,8 +403,17 @@ impl PtyRuntime {
                 OsString::from(format!("{key}={value}")),
             ]);
         }
+        // A live session keeps its size: this only reaches a launch.
+        if let Some(TerminalSize { rows, columns }) = size {
+            arguments.extend([
+                OsString::from("--rows"),
+                OsString::from(rows.to_string()),
+                OsString::from("--cols"),
+                OsString::from(columns.to_string()),
+            ]);
+        }
         arguments.push(OsString::from("--"));
-        arguments.extend(crate::work_prefix().into_iter().map(OsString::from));
+        arguments.extend(crate::work_prefix(env).into_iter().map(OsString::from));
         match launch {
             Launch::Shell(source) => {
                 arguments.extend([OsString::from("sh"), OsString::from("-c"), source.into()]);
@@ -282,7 +433,25 @@ impl PtyRuntime {
                 command.env_clear().envs(environment);
             }
             command.env("PTY_ROOT", &self.root);
-            let output = match output_within(command, self.command_timeout) {
+            // A later failed attempt cannot close a producer created by an earlier
+            // attempt. Only failure to create the first launcher proves rejection.
+            let operation = (attempt == 0)
+                .then(|| env.get("ST3_START_OPERATION").map(String::as_str))
+                .flatten();
+            if let Some(guard) = guard
+                && let Err(error) = guard()
+            {
+                let _ = std::fs::remove_file(&fence);
+                // Only rejection before the first launcher proves there is no
+                // producer. An earlier launcher may still publish after returning.
+                return Err(match operation {
+                    Some(operation) => error.context(crate::StartRejected {
+                        operation: Some(operation.to_owned()),
+                    }),
+                    None => error,
+                });
+            }
+            let output = match output_for_start(command, self.command_timeout, operation) {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = std::fs::remove_file(&fence);
@@ -738,12 +907,29 @@ impl PtyRuntime {
 }
 
 /// A wedged PTY command must not stall the reconciler indefinitely.
-pub(crate) fn output_within(mut command: Command, timeout: Duration) -> Result<Output> {
+pub(crate) fn output_within(command: Command, timeout: Duration) -> Result<Output> {
+    output_for_start(command, timeout, None)
+}
+
+fn output_for_start(
+    mut command: Command,
+    timeout: Duration,
+    operation: Option<&str>,
+) -> Result<Output> {
     let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(|error| {
+            let error = anyhow::Error::from(error);
+            match operation {
+                Some(operation) => error.context(crate::StartRejected {
+                    operation: Some(operation.to_owned()),
+                }),
+                None => error,
+            }
+        })?;
     let pid = child.id();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -952,6 +1138,66 @@ exit 0
         fs::write(registry.join(format!("{name}.pid")), pid.to_string()).unwrap();
     }
 
+    #[test]
+    fn rollout_spawn_refuses_an_unrelated_live_incarnation_and_reuses_only_its_own_marker() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        let binary = fake_pty(root.path(), "rollout-pty", "  publish replacement");
+        let runtime = PtyRuntime::new(registry.clone()).with_binary(binary.to_string_lossy());
+        for marker in ["someone-else", "cutover-one"] {
+            write_record(
+                &registry,
+                "work",
+                serde_json::json!({"createdAt":"replacement","tags":{"st3.rollout":marker}}),
+            );
+            write_pid(&registry, "work", std::process::id());
+            fs::write(registry.join("work.sock"), "").unwrap();
+            let result = runtime.spawn_after(
+                "work",
+                &Launch::Argv(vec!["true".into()]),
+                root.path(),
+                &BTreeMap::new(),
+                None,
+                &BTreeMap::new(),
+                None,
+                "42:original",
+                "cutover-one",
+            );
+            assert_eq!(result.is_ok(), marker == "cutover-one");
+            assert!(
+                !binary.with_extension("args").exists(),
+                "a replay must not execute a second spawn"
+            );
+        }
+    }
+
+    #[test]
+    fn rollout_spawn_rechecks_its_source_guard_inside_the_spawn_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "rollout-source", "  publish replacement");
+        let runtime =
+            PtyRuntime::new(root.path().join("registry")).with_binary(binary.to_string_lossy());
+        let refusal = runtime.spawn_after_checked(
+            "work",
+            &Launch::Argv(vec!["true".into()]),
+            root.path(),
+            &BTreeMap::new(),
+            None,
+            &BTreeMap::new(),
+            None,
+            "42:original",
+            "cutover-one",
+            &|| anyhow::bail!("source superseded"),
+        );
+        assert!(
+            refusal
+                .unwrap_err()
+                .to_string()
+                .contains("source superseded")
+        );
+        assert!(!binary.with_extension("args").exists());
+    }
+
     /// A daemon socket for `name` that answers STATUS with `status` and PEEK with `screen`, and
     /// records the payload of every DATA packet it reads.
     fn fake_daemon(
@@ -998,6 +1244,7 @@ exit 0
             env,
             None,
             &BTreeMap::new(),
+            None,
         )
     }
 
@@ -1253,6 +1500,7 @@ exit 0
                 &BTreeMap::new(),
                 None,
                 &BTreeMap::new(),
+                None,
             )
             .unwrap();
         let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
@@ -1281,6 +1529,65 @@ exit 0
         let arguments = fs::read_to_string(binary.with_extension("args")).unwrap();
         assert!(arguments.contains("TERM=screen-256color"));
         assert!(!arguments.contains("TERM=xterm-256color"));
+    }
+
+    #[test]
+    fn spawn_starts_the_session_at_the_requested_size_or_at_pty_default() {
+        let launched_arguments = |name: &str, size: Option<TerminalSize>| {
+            let root = tempfile::tempdir().unwrap();
+            let binary = fake_pty(root.path(), name, "  publish new");
+            PtyRuntime::new(root.path().join("registry"))
+                .with_binary(binary.to_string_lossy())
+                .spawn(
+                    "work",
+                    &Launch::Argv(vec!["harness".into(), "--rows".into(), "1".into()]),
+                    root.path(),
+                    &BTreeMap::new(),
+                    None,
+                    &BTreeMap::new(),
+                    size,
+                )
+                .unwrap();
+            fs::read_to_string(binary.with_extension("args"))
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let options = |arguments: &[String]| {
+            let separator = arguments
+                .iter()
+                .position(|argument| argument == "--")
+                .unwrap();
+            arguments[..separator].to_vec()
+        };
+
+        let sized = launched_arguments(
+            "fake-pty-sized",
+            Some(TerminalSize {
+                rows: 48,
+                columns: 160,
+            }),
+        );
+        let sized_options = options(&sized);
+        let rows = sized_options
+            .iter()
+            .position(|argument| argument == "--rows")
+            .unwrap();
+        assert_eq!(sized_options[rows + 1], "48");
+        let columns = sized_options
+            .iter()
+            .position(|argument| argument == "--cols")
+            .unwrap();
+        assert_eq!(sized_options[columns + 1], "160");
+        assert!(sized.ends_with(&["harness".into(), "--rows".into(), "1".into()]));
+
+        let unsized_options = options(&launched_arguments("fake-pty-unsized", None));
+        assert!(
+            !unsized_options
+                .iter()
+                .any(|argument| argument == "--rows" || argument == "--cols")
+        );
     }
 
     #[test]
@@ -1411,32 +1718,89 @@ exit 0
     }
 
     #[test]
-    fn an_unresolved_publication_fences_followup_launches() {
+    fn an_unresolved_publication_gets_only_one_recovery_window_before_respawn() {
         let root = tempfile::tempdir().unwrap();
         let binary = fake_pty(root.path(), "fake-pty-unresolved-publication", "");
         let runtime = PtyRuntime::new(root.path().join("registry"))
             .with_binary(binary.to_string_lossy())
+            // Parallel tests may briefly inherit the lock while forking their fake PTYs.
+            // Allow that contention without changing production deadlines.
+            .with_spawn_timeout(Duration::from_secs(1));
+        let fence = runtime.spawn_state_path("work", "pending");
+
+        for expected_launches in 1..=3 {
+            let error = spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<PtySpawnTimeout>().unwrap().phase,
+                PtySpawnTimeoutPhase::Publication
+            );
+            assert!(fence.is_file(), "keep the new launch's recovery window");
+            assert_eq!(
+                fs::read_to_string(binary.with_extension("count"))
+                    .unwrap()
+                    .trim(),
+                expected_launches.to_string(),
+                "an unresolved fence must not permanently block new launches"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_publication_fence_respawns_in_the_same_pass() {
+        let root = tempfile::tempdir().unwrap();
+        let binary = fake_pty(root.path(), "fake-pty-stale-fence", "  publish new");
+        let runtime = PtyRuntime::new(root.path().join("registry"))
+            .with_binary(binary.to_string_lossy())
             .with_spawn_timeout(Duration::from_millis(30));
-        let spawn = || spawn_work(&runtime, root.path(), &BTreeMap::new());
+        fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
+        let fence = runtime.spawn_state_path("work", "pending");
+        fs::write(&fence, "42:old").unwrap();
 
-        let first = spawn().unwrap_err();
-        let second = spawn().unwrap_err();
+        spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap();
 
-        assert_eq!(
-            first.downcast_ref::<PtySpawnTimeout>().unwrap().phase,
-            PtySpawnTimeoutPhase::Publication
-        );
-        assert_eq!(
-            second.downcast_ref::<PtySpawnTimeout>().unwrap().phase,
-            PtySpawnTimeoutPhase::Publication
-        );
+        assert!(!fence.exists());
         assert_eq!(
             fs::read_to_string(binary.with_extension("count"))
                 .unwrap()
                 .trim(),
-            "1",
-            "the unresolved first launch must fence later callers"
+            "1"
         );
+        assert_eq!(
+            runtime.snapshot().unwrap()[0].created_at.as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn a_late_publication_is_adopted_during_fence_recovery_without_respawn() {
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        let binary = fake_pty(root.path(), "fake-pty-late-fence", "");
+        let runtime = PtyRuntime::new(registry.clone())
+            .with_binary(binary.to_string_lossy())
+            .with_spawn_timeout(Duration::from_secs(1));
+        fs::create_dir_all(runtime.spawn_state_directory()).unwrap();
+        let fence = runtime.spawn_state_path("work", "pending");
+        fs::write(&fence, "42:old").unwrap();
+        let publisher_runtime = runtime.clone();
+        let publisher = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while publisher_runtime.try_spawn_lock("work").unwrap().is_some() {
+                assert!(Instant::now() < deadline, "spawn never acquired its lock");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            write_record(&registry, "work", serde_json::json!({"createdAt":"late"}));
+            write_pid(&registry, "work", std::process::id());
+            fs::write(registry.join("work.sock"), "").unwrap();
+        });
+
+        spawn_work(&runtime, root.path(), &BTreeMap::new()).unwrap();
+        publisher.join().unwrap();
+
+        assert!(!fence.exists());
+        assert!(!binary.with_extension("count").exists(), "do not double spawn");
+        assert_eq!(runtime.snapshot().unwrap()[0].created_at.as_deref(), Some("late"));
     }
 
     #[test]
@@ -1554,6 +1918,7 @@ exit 0
                 &environment,
                 None,
                 &BTreeMap::new(),
+                None,
             )
             .unwrap();
         let harness = read_pid(&pid_file);
@@ -1688,6 +2053,7 @@ exit 0
                     &environment,
                     None,
                     &tags,
+                    None,
                 )
                 .unwrap();
         }
@@ -1815,5 +2181,99 @@ exit 0
         assert!(process_runs(replacement), "the replacement ended");
         session.runtime.stop(&session.id).unwrap();
         assert_gone_soon(replacement, "replacement harness");
+    }
+
+    /// The installed `pty`, with or without systemd user scopes.
+    fn installed_pty() -> Option<PathBuf> {
+        let environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").ok()?)]);
+        crate::resolve_executable("pty", &environment).ok()
+    }
+
+    fn parent_of(pid: u32) -> u32 {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        // The fields after the parenthesized name: state, then the parent.
+        let after_name = &stat[stat.rfind(')').unwrap() + 2..];
+        after_name
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn nice_of(pid: u32) -> i32 {
+        unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) }
+    }
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// A seat's parent is its PTY server, never the process that asked for it, so the priority
+    /// prefix leaves its lifetime alone: after the asking process is gone and a new one takes over
+    /// the registry, the background harness and what it started are still running.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_background_seat_and_its_children_outlive_the_process_that_started_them() {
+        let Some(pty) = installed_pty() else {
+            assert!(std::env::var_os("CI").is_none(), "CI must provide pty");
+            eprintln!("skipped: no pty binary");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("r");
+        let pid_file = root.path().join("harness.pid");
+        let child_file = root.path().join("child.pid");
+        let launch = Launch::Argv(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "echo $$ > '{}'; sleep 60 & echo $! > '{}'; wait",
+                pid_file.display(),
+                child_file.display()
+            ),
+        ]);
+        let environment = BTreeMap::from([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            (crate::PRIORITY_ENV.into(), "background".into()),
+        ]);
+        let starter = PtyRuntime::new(registry.clone()).with_binary(pty.to_string_lossy());
+        starter
+            .spawn(
+                "background-survivor",
+                &launch,
+                root.path(),
+                &environment,
+                None,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        let harness = read_pid(&pid_file);
+        let child = read_pid(&child_file);
+        let base = nice_of(std::process::id());
+        assert_eq!(nice_of(harness), (base + 10).min(19));
+        assert_eq!(nice_of(child), (base + 10).min(19));
+        let server = starter.session("background-survivor").unwrap().pid.unwrap() as u32;
+        assert_ne!(parent_of(harness), std::process::id());
+        assert_eq!(
+            nice_of(server),
+            base,
+            "the PTY server keeps normal priority"
+        );
+
+        // The daemon restarts: nothing of the old one remains, and a new one reads the registry.
+        drop(starter);
+        let restarted = PtyRuntime::new(registry).with_binary(pty.to_string_lossy());
+        let seat = restarted
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|seat| seat.name == "background-survivor")
+            .unwrap();
+        assert_eq!(seat.status, "running");
+        assert!(alive(harness) && alive(child));
+
+        restarted.stop("background-survivor").unwrap();
     }
 }

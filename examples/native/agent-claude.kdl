@@ -138,6 +138,16 @@ agent "<identity>" {
           }
         ]
       }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$ST_HOOKS/claude-observe.sh\" PostToolUseFailure"
+          }
+        ]
+      }
     ]
   },
   "statusLine": {

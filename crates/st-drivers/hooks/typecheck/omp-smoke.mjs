@@ -25,7 +25,20 @@ const hello = () => process.stdout.write(JSON.stringify({ type: "hello", protoco
 if (fs.existsSync(${JSON.stringify(delayedHelloPath)})) setTimeout(hello, 6000);
 else hello();
 process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => fs.appendFileSync(${JSON.stringify(framesPath)}, chunk));
+let pending = "";
+const record = (chunk) => {
+  pending += chunk;
+  const boundary = pending.lastIndexOf("\\n");
+  if (boundary < 0) return;
+  fs.appendFileSync(${JSON.stringify(framesPath)}, pending.slice(0, boundary + 1));
+  pending = pending.slice(boundary + 1);
+};
+// Pipe chunks can end inside JSON. Exercise that boundary deliberately and publish only
+// complete frames, so an assertion cannot read a half-written transport chunk.
+process.stdin.on("data", (chunk) => {
+  record(chunk.slice(0, 7));
+  record(chunk.slice(7));
+});
 process.stdin.on("end", () => process.exit(0));
 let sent = 0;
 setInterval(() => {
@@ -43,11 +56,20 @@ setInterval(() => {
 `,
   { mode: 0o755 },
 );
-const readFrames = () =>
-  (fs.existsSync(framesPath) ? fs.readFileSync(framesPath, "utf8") : "")
+const completeFrames = (snapshot) =>
+  // A live file snapshot can also stop inside an append. Parse only terminated frames;
+  // the next snapshot includes the remainder. Invalid terminated JSON must still fail.
+  snapshot.slice(0, snapshot.lastIndexOf("\n") + 1)
     .split("\n")
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line));
+assert.deepStrictEqual(completeFrames('{"type":"ready"}\n{"type":"con'), [{ type: "ready" }]);
+assert.deepStrictEqual(completeFrames('{"type":"ready"}\n{"type":"context"}\n'),
+  [{ type: "ready" }, { type: "context" }]);
+assert.throws(() => completeFrames('{broken}\n'), SyntaxError);
+const readFrames = () => completeFrames(
+  fs.existsSync(framesPath) ? fs.readFileSync(framesPath, "utf8") : "",
+);
 
 process.env.ST_OMP_CHANNEL_BIN = recorder;
 process.env.ST_OMP_CHANNEL_CATALOG = "/tmp/st2-smoke-catalog";
@@ -59,14 +81,19 @@ process.env.ST_OMP_CHANNEL_SEQ = "1";
 const mod = await import(process.argv[2] ?? "./smoke-out/omp-channel.mjs");
 assert.strictEqual(typeof mod.default, "function", "extension exports its entry point");
 
+const expectedState = state => ({ type: "state", state,
+  ...(process.argv[2]?.includes("st-omp") ? { backgroundJobs: null } : {}),
+});
 const handlers = new Map();
 // Every message the extension hands to omp, with the options it chose.
 const handedOver = [];
 const sessionMessages = [];
+let handoffWait;
 const pi = {
   on: (name, handler) => handlers.set(name, handler),
   sendUserMessage: (content, options) => {
     handedOver.push(options === undefined ? { content } : { content, options });
+    return handoffWait;
   },
   sendMessage: (message, options) => sessionMessages.push({ message, options }),
 };
@@ -107,6 +134,7 @@ const fullCtx = {
   getContextUsage: () => ({ tokens: 22500, contextWindow: 4000, percent: 562.5 }),
   sessionManager: {
     getSessionId: () => "session-smoke",
+    getSessionFile: () => path.join(dir, "session-smoke.jsonl"),
     getEntries: () => [{ type: "message" }, { type: "compaction" }],
   },
 };
@@ -137,8 +165,16 @@ const messageEvent = {
 
 for (const ctx of [bareCtx, fullCtx, throwingCtx]) {
   // Two session starts in a row: the second exercises the predecessor close-and-await path.
+  const bindingStart = readFrames().length;
   await handlers.get("session_start")({}, ctx);
   await handlers.get("session_start")({}, ctx);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  for (const type of ["session", "ready"]) {
+    const binding = readFrames().slice(bindingStart).find((frame) => frame.type === type);
+    assert.deepStrictEqual(binding, { type, sessionId: "session-smoke",
+      ...(ctx === fullCtx ? { sessionFile: path.join(dir, "session-smoke.jsonl") } : {}),
+    }, `${type} binds the native transcript when available and tolerates an absent getter`);
+  }
   await handlers.get("tool_approval_requested")({ toolName: "bash" }, ctx);
   await handlers.get("tool_approval_resolved")({ approved: true }, ctx);
   await handlers.get("agent_start")({}, ctx);
@@ -174,8 +210,7 @@ let askStates = readFrames()
   .slice(beforeAsk);
 assert.deepStrictEqual(askStates, [
   {
-    type: "state",
-    state: "active",
+    ...expectedState("active"),
     blockedOn: "human",
     ask: "question",
     reason: "Which deployment target?",
@@ -184,7 +219,7 @@ assert.deepStrictEqual(askStates, [
 await handlers.get("tool_result")({ toolName: "ask", toolCallId: "ask-1" }, activeCtx);
 await new Promise((resolve) => setTimeout(resolve, 50));
 askStates = readFrames().filter((frame) => frame.type === "state").slice(beforeAsk);
-assert.deepStrictEqual(askStates.at(-1), { type: "state", state: "active" });
+assert.deepStrictEqual(askStates.at(-1), expectedState("active"));
 
 // Every poll is generation-fenced. New activity, an automatic continuation, and a terminal error
 // each retire an older settle poll before it can publish a stale idle frame.
@@ -201,7 +236,7 @@ settleIdle = true;
 await new Promise((resolve) => setTimeout(resolve, 250));
 assert.deepStrictEqual(
   readFrames().filter((frame) => frame.type === "state").slice(beforeSettleCase),
-  [{ type: "state", state: "active" }],
+  [expectedState("active")],
   "new activity must cancel the older settle poll",
 );
 
@@ -218,10 +253,10 @@ await handlers.get("agent_end")(
 );
 settleIdle = true;
 await new Promise((resolve) => setTimeout(resolve, 250));
-assert.strictEqual(
-  readFrames().filter((frame) => frame.type === "state").length,
-  beforeSettleCase,
-  "willContinue must cancel the older poll and start no new settle",
+assert.deepStrictEqual(
+  readFrames().filter((frame) => frame.type === "state").slice(beforeSettleCase),
+  process.argv[2]?.includes("st-omp-channel") ? [expectedState("idle")] : [],
+  "willContinue cancels the older poll; managed delivery observes fresh positive idle",
 );
 // A retried turn has not ended, so it claims neither credential edge: only the ordinary end
 // before it may emit a turn result.
@@ -281,7 +316,7 @@ settleIdle = true;
 await new Promise((resolve) => setTimeout(resolve, 250));
 assert.deepStrictEqual(
   readFrames().filter((frame) => frame.type === "state").slice(beforeSettleCase),
-  [{ type: "state", state: "idle" }],
+  [expectedState("idle")],
   "native idle after a slow unwind must replace working without another turn",
 );
 
@@ -323,6 +358,27 @@ const acknowledged = () =>
   readFrames()
     .filter((frame) => frame.type === "delivered")
     .map((frame) => frame.meta?.messageId);
+// The recorder consumes an IPC pipe in another process. Subscribe before checking the
+// snapshot so an ACK arriving between those operations cannot be missed.
+const awaitAcknowledgement = (messageId) => new Promise((resolve, reject) => {
+  const finish = (error) => {
+    clearTimeout(deadline);
+    watcher.close();
+    if (error) reject(error);
+    else resolve();
+  };
+  const check = () => {
+    try {
+      if (acknowledged().includes(messageId)) finish();
+    } catch (error) {
+      finish(error);
+    }
+  };
+  const watcher = fs.watch(framesPath, check);
+  const deadline = setTimeout(() => finish(new Error(`Recorder did not acknowledge ${messageId}`)), 5_000);
+  watcher.on("error", finish);
+  check();
+});
 const toolCall = (id) =>
   handlers.get("tool_call")({ toolName: "bash", toolCallId: id, input: {} }, holdCtx);
 const toolResult = (id) =>
@@ -397,6 +453,157 @@ assert.deepStrictEqual(
   "every message is acknowledged exactly once",
 );
 fs.rmSync(outboxPath, { force: true });
+
+// A native human hold overrides even a cap armed before the modal opened. The unrelated
+// batch result and a foreground continuation ending must not release or acknowledge mail.
+for (const modal of ["ask", "approval"]) {
+  await handlers.get("session_start")({}, holdCtx);
+  await handlers.get("agent_start")({}, holdCtx);
+  await toolCall(`before-${modal}`);
+  const beforeModal = handedOver.length;
+  const modalIds = [`message/hold-${mailSequence + 1}`, `message/hold-${mailSequence + 2}`];
+  sendMail(`before ${modal}`);
+  await pause(150);
+  if (modal === "ask") {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: "held-ask",
+      input: { questions: [{ question: "Proceed?" }] } }, holdCtx);
+  } else {
+    await handlers.get("tool_approval_requested")({ toolName: "bash" }, holdCtx);
+  }
+  sendMail(`during ${modal}`);
+  await toolResult(`before-${modal}`);
+  await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, holdCtx);
+  await pause(10_500);
+  assert.strictEqual(handedOver.length, beforeModal, `${modal} stays outside omp past the cap`);
+  assert.deepStrictEqual(acknowledged().filter(id => modalIds.includes(id)), [],
+    `${modal} mail is not delivered; unrelated receipt recovery is independent`);
+  if (modal === "ask") {
+    await handlers.get("tool_result")({ toolCallId: "unrelated" }, holdCtx);
+    assert.strictEqual(handedOver.length, beforeModal, "only the matching answer releases an ask");
+    await handlers.get("tool_result")({ toolCallId: "held-ask" }, holdCtx);
+  } else {
+    await handlers.get("tool_approval_resolved")({ approved: true }, holdCtx);
+  }
+  assert.deepStrictEqual(handedOver.slice(beforeModal), [{
+    content: `before ${modal}\n\nduring ${modal}`, options: { deliverAs: "steer" },
+  }], `${modal} answer delivers one FIFO batch before its handler returns`);
+  await pause(100);
+  assert.deepStrictEqual(acknowledged().filter(id => modalIds.includes(id)), modalIds);
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Ask cancellation and timeout use the same correlated tool-result boundary. A terminal
+// abort can end without a result. Idle-looking modal contexts must still retain mail.
+for (const resolution of ["cancel", "timeout", "abort", "denied"]) {
+  await handlers.get("session_start")({}, bareCtx);
+  if (resolution === "denied") {
+    await handlers.get("tool_approval_requested")({ toolName: "bash" }, bareCtx);
+  } else {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: `ask-${resolution}`,
+      input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+  }
+  const beforeResolution = handedOver.length;
+  sendMail(`after ${resolution}`);
+  await pause(150);
+  assert.strictEqual(handedOver.length, beforeResolution, "idle proof cannot override a modal");
+  if (resolution === "abort") {
+    await handlers.get("agent_end")({ messages: [{ role: "assistant", stopReason: "aborted" }] }, bareCtx);
+  } else if (resolution === "denied") {
+    await handlers.get("tool_approval_resolved")({ approved: false }, bareCtx);
+  } else {
+    await handlers.get("tool_result")({ toolCallId: `ask-${resolution}`, isError: resolution === "cancel" }, bareCtx);
+  }
+  await pause(100);
+  assert.deepStrictEqual(handedOver.slice(beforeResolution), [{ content: `after ${resolution}` }]);
+  assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Independent ask and approval surfaces both need resolution, regardless of answer order.
+for (const first of ["ask", "approval"]) {
+  await handlers.get("session_start")({}, bareCtx);
+  await handlers.get("tool_call")({ toolName: "ask", toolCallId: "overlapping-ask",
+    input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+  await handlers.get("tool_approval_requested")({ toolName: "bash" }, bareCtx);
+  const beforeOverlap = handedOver.length;
+  sendMail("after both answers");
+  await pause(150);
+  const answerAsk = () => handlers.get("tool_result")({ toolCallId: "overlapping-ask" }, bareCtx);
+  const answerApproval = () => handlers.get("tool_approval_resolved")({}, bareCtx);
+  await (first === "ask" ? answerAsk() : answerApproval());
+  assert.strictEqual(handedOver.length, beforeOverlap, "one open modal still holds mail");
+  await (first === "ask" ? answerApproval() : answerAsk());
+  assert.deepStrictEqual(handedOver.slice(beforeOverlap), [{ content: "after both answers" }]);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Session restart drops the retired channel copy, not the durable mail. Its successor
+// re-sends the unacknowledged identity with no inherited human hold.
+await handlers.get("session_start")({}, bareCtx);
+await handlers.get("tool_call")({ toolName: "ask", toolCallId: "restart-ask",
+  input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+const restartMail = { type: "message", deliverAs: "steer", content: "after session restart",
+  meta: { messageId: "message/human-restart" } };
+const beforeHumanRestart = handedOver.length;
+fs.appendFileSync(outboxPath, JSON.stringify(restartMail) + "\n");
+await pause(150);
+assert.strictEqual(handedOver.length, beforeHumanRestart);
+fs.rmSync(outboxPath, { force: true });
+await handlers.get("session_start")({}, bareCtx);
+fs.appendFileSync(outboxPath, JSON.stringify(restartMail) + "\n");
+await pause(200);
+assert.deepStrictEqual(handedOver.slice(beforeHumanRestart), [{ content: "after session restart" }]);
+assert.strictEqual(acknowledged().filter(id => id === "message/human-restart").length, 1);
+fs.rmSync(outboxPath, { force: true });
+
+// An earlier asynchronous native handoff can delay a release beyond its boundary.
+// That release must not take mail held for a newer tool batch or a newly opened modal.
+for (const newerBoundary of ["batch", "ask"]) {
+  holdIdle = true;
+  await handlers.get("session_start")({}, holdCtx);
+  let finishHandoff;
+  handoffWait = new Promise(resolve => { finishHandoff = resolve; });
+  const beforeDeferred = handedOver.length;
+  sendMail("pending native handoff");
+  await pause(150);
+  assert.strictEqual(handedOver.length, beforeDeferred + 1);
+  holdIdle = false;
+  await handlers.get("agent_start")({}, holdCtx);
+  sendMail("eligible at old boundary");
+  await pause(150);
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  await handlers.get("agent_start")({}, holdCtx);
+  if (newerBoundary === "batch") {
+    await toolCall("newer-batch");
+  } else {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: "deferred-ask",
+      input: { questions: [{ question: "Proceed?" }] } }, holdCtx);
+  }
+  sendMail("held at new boundary");
+  await pause(150);
+  handoffWait = undefined;
+  finishHandoff();
+  await pause(150);
+  if (newerBoundary === "batch") {
+    assert.deepStrictEqual(handedOver.slice(beforeDeferred), [
+      { content: "pending native handoff" },
+      { content: "eligible at old boundary", options: { deliverAs: "steer" } },
+    ], "a deferred release cannot drain the new batch's mail");
+    await toolResult("newer-batch");
+    assert.deepStrictEqual(handedOver.at(-1),
+      { content: "held at new boundary", options: { deliverAs: "steer" } });
+  } else {
+    assert.deepStrictEqual(handedOver.slice(beforeDeferred), [{ content: "pending native handoff" }],
+      "a newly opened modal fences an already queued release");
+    await handlers.get("tool_result")({ toolCallId: "deferred-ask" }, holdCtx);
+    assert.deepStrictEqual(handedOver.at(-1),
+      { content: "eligible at old boundary\n\nheld at new boundary", options: { deliverAs: "steer" } });
+  }
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  fs.rmSync(outboxPath, { force: true });
+}
+
 
 // A channel that dies during a hold must be replaced. The successor re-sends the unacknowledged
 // message; the retired channel's held copy must never be handed off or acknowledged.
@@ -475,7 +682,7 @@ for (const modal of ["ask", "approval"]) {
   await pause(50);
   assert.deepStrictEqual(
     readFrames().filter((frame) => frame.type === "state").at(-1),
-    { type: "state", state: "idle" },
+    expectedState("idle"),
     `${modal} resolution permits a positive idle observation`,
   );
 }
@@ -490,8 +697,9 @@ fs.rmSync(delayedHelloPath, { force: true });
 
 // omp loads this extension into every in-process subagent, as a second instance sharing the
 // process-wide stash (compoundingtech/smalltalk#852). A subagent's lifecycle must leave the seat's
-// channel alone: no channel of its own, no frames from its turns, and its shutdown does not close
-// the seat's channel. Mail that arrives afterwards still reaches the top-level session.
+// channel alone: no channel of its own, and its shutdown does not close the seat's channel. Mail
+// that arrives afterwards still reaches the top-level session. st's asset reports the subagent's
+// runs on the seat's channel and nothing else of it; the legacy asset sends no frame at all.
 const subHandlers = new Map();
 const subHandedOver = [];
 mod.default({
@@ -511,11 +719,156 @@ await subHandlers.get("session_start")({}, subCtx);
 await subHandlers.get("agent_start")({}, subCtx);
 await subHandlers.get("tool_call")({ toolName: "bash", toolCallId: "sub-call", input: {} }, subCtx);
 await subHandlers.get("message_end")(messageEvent, subCtx);
+await subHandlers.get("turn_end")(messageEvent, subCtx);
+await subHandlers.get("agent_end")({ ...successfulEnd, willContinue: true }, subCtx);
 await subHandlers.get("agent_end")(successfulEnd, subCtx);
+// Delayed completion of a turn is not a new run after the run has ended.
+await subHandlers.get("turn_end")(messageEvent, subCtx);
 await subHandlers.get("session_shutdown")({}, subCtx);
+// A second run fails; a third is cut short when its session shuts down first.
+await subHandlers.get("agent_start")({}, subCtx);
+await subHandlers.get("agent_end")({ messages: [{ role: "assistant", stopReason: "error" }] }, subCtx);
+await subHandlers.get("agent_start")({}, subCtx);
+await subHandlers.get("session_shutdown")({}, subCtx);
+// A subagent omp does not name reports nothing.
+await subHandlers.get("agent_start")({}, { ...subCtx, agent: { kind: "sub", depth: 1 } });
 await pause(300);
 assert.strictEqual(fs.readFileSync(pidPath, "utf8"), pidsBeforeSubagent, "a subagent opens no channel");
-assert.deepStrictEqual(readFrames().slice(framesBeforeSubagent), [], "a subagent's events reach no channel");
+const run = (event, outcome) => ({ type: "subagent", id: "0-Review", name: "task", event,
+  ...(outcome ? { outcome } : {}) });
+assert.deepStrictEqual(
+  readFrames().slice(framesBeforeSubagent),
+  process.argv[2]?.includes("st-omp-channel")
+    ? [run("start"), run("progress"), run("end", "completed"), run("start"), run("end", "failed"),
+      run("start"), run("end", "interrupted")]
+    : [],
+  "a subagent's events reach the channel only as its runs",
+);
+// While its runs last, st's asset reports each minute every subagent omp says is busy, as in a long
+// tool call. A subagent whose session went idle without its end reports nothing, so st ends it once
+// it has been quiet long enough.
+const heartbeats = [];
+const realSetInterval = globalThis.setInterval;
+globalThis.setInterval = (callback, ms) => {
+  heartbeats.push({ callback, ms });
+  return realSetInterval(() => {}, 2 ** 30);
+};
+const busyCtx = { ...subCtx, isIdle: () => false };
+const quietCtx = { ...subCtx, isIdle: () => true, agent: { ...subCtx.agent, id: "1-Quiet" } };
+const framesBeforeHeartbeat = readFrames().length;
+await subHandlers.get("agent_start")({}, busyCtx);
+await subHandlers.get("agent_start")({}, quietCtx);
+globalThis.setInterval = realSetInterval;
+assert.deepStrictEqual(
+  heartbeats.map(({ ms }) => ms),
+  process.argv[2]?.includes("st-omp-channel") ? [60_000] : [],
+  "one heartbeat serves every running subagent",
+);
+heartbeats[0]?.callback();
+await subHandlers.get("agent_end")(successfulEnd, busyCtx);
+await subHandlers.get("session_shutdown")({}, quietCtx);
+await pause(300);
+const quiet = (event, outcome) => ({ ...run(event, outcome), id: "1-Quiet" });
+assert.deepStrictEqual(
+  readFrames().slice(framesBeforeHeartbeat).filter((frame) => frame.type === "subagent"),
+  process.argv[2]?.includes("st-omp-channel")
+    ? [run("start"), quiet("start"), run("progress"), run("end", "completed"),
+      quiet("end", "interrupted")]
+    : [],
+  "a heartbeat reports only the subagents whose sessions are busy",
+);
+
+// A foreground human wait stays busy in omp. Cached waits must stop reporting as soon as the
+// live session becomes idle, even if the extension lost the matching result or resolution.
+globalThis.setInterval = (callback, ms) => {
+  heartbeats.push({ callback, ms });
+  return realSetInterval(() => {}, 2 ** 30);
+};
+let waitIdle = false;
+const waitCtx = { ...quietCtx, isIdle: () => waitIdle };
+const framesBeforeWait = readFrames().length;
+await subHandlers.get("agent_start")({}, waitCtx);
+globalThis.setInterval = realSetInterval;
+if (process.argv[2]?.includes("st-omp-channel")) {
+  for (const name of ["tool_execution_start", "tool_approval_requested", "tool_approval_resolved"]) {
+    assert.strictEqual(typeof subHandlers.get(name), "function", `${name} is registered`);
+  }
+}
+const tickWait = async (expected, label) => {
+  const before = readFrames().filter((frame) => frame.type === "subagent").length;
+  heartbeats.at(-1)?.callback();
+  await pause(30);
+  const after = readFrames().filter((frame) => frame.type === "subagent").length;
+  assert.strictEqual(after - before, process.argv[2]?.includes("st-omp-channel") ? expected : 0, label);
+};
+await pause(100);
+await subHandlers.get("tool_call")({ toolName: "ask", toolCallId: "ask-child" }, waitCtx);
+await subHandlers.get("tool_execution_start")?.({ toolName: "ask", toolCallId: "ask-child" }, waitCtx);
+await subHandlers.get("agent_end")(successfulEnd, waitCtx);
+await subHandlers.get("tool_result")({ toolCallId: "unrelated" }, waitCtx);
+const realNow = Date.now;
+let waitNow = realNow();
+Date.now = () => waitNow;
+for (let minute = 0; minute < 6; minute += 1) {
+  waitNow += 60_000;
+  await tickWait(1, "a live busy ask reports beyond the silence bound");
+}
+// The tool actually finished, but the extension never received its result.
+waitIdle = true;
+await tickWait(0, "a lost ask result and idle child stop reporting at the next heartbeat");
+waitIdle = false;
+await subHandlers.get("tool_call")({ toolName: "ask", toolCallId: "ask-next" }, waitCtx);
+await tickWait(1, "a new live ask reports");
+await subHandlers.get("tool_result")({ toolCallId: "ask-next" }, waitCtx);
+waitIdle = true;
+await tickWait(0, "a resolved and idle ask stops reporting");
+waitIdle = false;
+await subHandlers.get("tool_approval_requested")?.({ toolName: "bash" }, waitCtx);
+await tickWait(1, "a live approval reports");
+waitIdle = true;
+await tickWait(0, "a lost approval resolution and idle child stop reporting at the next heartbeat");
+waitIdle = false;
+await subHandlers.get("tool_approval_requested")?.({ toolName: "bash" }, waitCtx);
+await tickWait(1, "a new live approval reports");
+await subHandlers.get("tool_approval_resolved")?.({}, waitCtx);
+waitIdle = true;
+await tickWait(0, "a resolved and idle approval stops reporting");
+await tickWait(0, "a resolved idle child stays quiet");
+Date.now = realNow;
+await subHandlers.get("session_shutdown")({}, waitCtx);
+await pause(300);
+assert.deepStrictEqual(
+  readFrames().slice(framesBeforeWait).filter((frame) => frame.type === "subagent"),
+  process.argv[2]?.includes("st-omp-channel")
+    ? [quiet("start"), ...Array.from({ length: 9 }, () => quiet("progress")), quiet("end", "interrupted")]
+    : [],
+  "human waits renew only while their own session has live busy evidence",
+);
+
+// Bounds are UTF-8 bytes, not characters. Oversized IDs are rejected, not truncated into an
+// existing identity; oversized names are omitted. Exact-limit values still work.
+const framesBeforeBounds = readFrames().length;
+const boundedCtx = { ...subCtx, agent: { ...subCtx.agent, id: "é".repeat(128), name: "é".repeat(64) } };
+await subHandlers.get("agent_start")({}, boundedCtx);
+await subHandlers.get("agent_end")(successfulEnd, boundedCtx);
+const oversizedIdCtx = { ...boundedCtx, agent: { ...boundedCtx.agent, id: `${boundedCtx.agent.id}x` } };
+await subHandlers.get("agent_start")({}, oversizedIdCtx);
+await subHandlers.get("agent_end")(successfulEnd, oversizedIdCtx);
+const oversizedNameCtx = { ...subCtx, agent: { ...subCtx.agent, name: `${boundedCtx.agent.name}x` } };
+await subHandlers.get("agent_start")({}, oversizedNameCtx);
+await subHandlers.get("agent_end")(successfulEnd, oversizedNameCtx);
+await pause(300);
+const boundedRun = (event) => ({ type: "subagent", id: boundedCtx.agent.id, name: boundedCtx.agent.name, event,
+  ...(event === "end" ? { outcome: "completed" } : {}) });
+const unnamedRun = (event) => ({ type: "subagent", id: subCtx.agent.id, event,
+  ...(event === "end" ? { outcome: "completed" } : {}) });
+assert.deepStrictEqual(
+  readFrames().slice(framesBeforeBounds).filter((frame) => frame.type === "subagent"),
+  process.argv[2]?.includes("st-omp-channel")
+    ? [boundedRun("start"), boundedRun("end"), unnamedRun("start"), unnamedRun("end")]
+    : [],
+  "subagent identity and name are bounded without merging identities",
+);
 // Still mid-turn from the subagent's point of view; the seat's session is idle, so mail goes now.
 fs.appendFileSync(outboxPath, JSON.stringify({
   type: "message",
@@ -532,9 +885,335 @@ const mainCtx = { ...fullCtx, agent: { kind: "main", id: "Main", name: "main", d
 const framesBeforeMain = readFrames().length;
 await handlers.get("agent_start")({}, mainCtx);
 await pause(50);
-assert.deepStrictEqual(readFrames().slice(framesBeforeMain), [{ type: "state", state: "active" }]);
+assert.deepStrictEqual(readFrames().slice(framesBeforeMain), [expectedState("active")]);
 await handlers.get("agent_end")(successfulEnd, mainCtx);
 fs.rmSync(outboxPath, { force: true });
+
+// st3's dedicated todo observation is deliberately absent from the legacy st2 asset.
+if (process.argv[2]?.includes("st-omp-channel") || process.argv.includes("--todo")) {
+  const totals = (pending = 0, in_progress = 0, completed = 0, blocked = 0, abandoned = 0) =>
+    ({ pending, in_progress, completed, blocked, abandoned });
+  const todos = () => readFrames().filter((frame) => frame.type === "todo");
+  const sourceTime = "2026-10-03T12:00:00.000Z";
+  const phase = (status = "in_progress", content = "Review", blocker) => [{
+    name: "Work", tasks: [{ content, status, ...(blocker === undefined ? {} : { blocker }) }],
+  }];
+  const toolEntry = (id, op, phases, isError = false) => ({
+    id, type: "message", timestamp: sourceTime,
+    message: { role: "toolResult", toolName: "todo", isError, details: { op, phases } },
+  });
+  let branch = [
+    toolEntry("init", "init", phase()),
+    toolEntry("failed", "done", phase("completed"), true),
+    toolEntry("view", "view", phase("completed")),
+    { id: "unstructured", type: "message", timestamp: sourceTime,
+      message: { role: "toolResult", toolName: "todo", details: { op: "done" } } },
+  ];
+  let nativeSession = "session-todo";
+  let branchReads = 0;
+  const todoCtx = {
+    ...bareCtx,
+    sessionManager: {
+      getSessionId: () => nativeSession,
+      getSessionFile: () => path.join(dir, `${nativeSession}.jsonl`),
+      getLeafId: () => branch.at(-1)?.id ?? null,
+      getBranch: () => { branchReads++; return branch; },
+      // A newer result on a different branch MUST NOT seed this binding.
+      getEntries: () => [...branch, toolEntry("unrelated", "block", phase("blocked", "Wrong branch", "No"))],
+    },
+  };
+  const startCount = todos().length;
+  await handlers.get("session_start")({}, todoCtx);
+  await pause(50);
+  assert.deepStrictEqual(todos().slice(startCount), [{
+    type: "todo", session: nativeSession, source_op: "hydrate", observed_at: sourceTime,
+    phases: phase(), totals: totals(0, 1), truncated: false,
+  }], "hydrate newest successful structured non-view result from current branch");
+  const firstTodo = readFrames().findIndex((frame) => frame.type === "todo" && frame.session === nativeSession);
+  assert.ok(readFrames().slice(0, firstTodo).some((frame) => frame.type === "ready" && frame.sessionId === nativeSession));
+  const execute = async (op, phases, flags = {}) => handlers.get("tool_execution_end")({
+    toolName: "todo", toolCallId: `todo-${op}`, result: { details: { op, phases } }, ...flags,
+  }, todoCtx);
+  await execute("done", phase("completed"), { isError: true });
+  await execute("done", phase("completed"), {
+    result: { isError: true, details: { op: "done", phases: phase("completed") } },
+  });
+  await execute("view", phase("completed"));
+  await execute("start", phase());
+  await pause(50);
+  assert.strictEqual(todos().length, startCount + 1, "error/view/unchanged mutations do not replace snapshot");
+  branch.push(toolEntry("done", "done", phase("completed")));
+  await execute("done", phase("completed"));
+  await pause(50);
+  assert.deepStrictEqual(todos().at(-1).totals, totals(0, 0, 1));
+  assert.strictEqual(todos().at(-1).source_op, "done");
+  assert.ok(Number.isFinite(Date.parse(todos().at(-1).observed_at)));
+  assert.strictEqual(todos().at(-1).session, nativeSession);
+  branch.push(toolEntry("block", "block", phase("blocked", "Review", "Waiting for approval")));
+  await execute("block", phase("blocked", "Review", "Waiting for approval"));
+  await pause(50);
+  assert.deepStrictEqual(todos().at(-1).phases, phase("blocked", "Review", "Waiting for approval"));
+
+  const readsBeforeIdle = branchReads;
+  await pause(2100);
+  assert.strictEqual(branchReads, readsBeforeIdle, "unchanged idle leaf never rebuilds the branch");
+  // /todo writes a custom entry without emitting an extension event. Polling its O(1) leaf
+  // indicator must observe it even while idle, including an explicit clear.
+  branch.push({ id: "human", type: "custom", customType: "user_todo_edit", timestamp: sourceTime,
+    data: { phases: phase("pending", "Human task") } });
+  await pause(1100);
+  assert.strictEqual(todos().at(-1).source_op, "user_edit");
+  assert.deepStrictEqual(todos().at(-1).phases, phase("pending", "Human task"));
+  branch.push({ id: "human-clear", type: "custom", customType: "user_todo_edit", timestamp: sourceTime,
+    data: { phases: [] } });
+  await pause(1100);
+  assert.deepStrictEqual(todos().at(-1).phases, []);
+  assert.deepStrictEqual(todos().at(-1).totals, totals());
+  assert.strictEqual(todos().at(-1).truncated, false);
+  await handlers.get("session_start")({}, todoCtx);
+  await pause(50);
+  assert.strictEqual(todos().at(-1).source_op, "hydrate", "clear survives a new binding");
+  assert.strictEqual(todos().at(-1).observed_at, sourceTime);
+
+  branch = [toolEntry("older-branch", "init", phase("pending", "Branch task"))];
+  await handlers.get("session_tree")({}, todoCtx);
+  await pause(50);
+  assert.deepStrictEqual(todos().at(-1).phases, phase("pending", "Branch task"));
+  assert.strictEqual(todos().at(-1).source_op, "hydrate");
+  branch = [];
+  await handlers.get("session_tree")({}, todoCtx);
+  await pause(50);
+  assert.deepStrictEqual(todos().at(-1).phases, [], "no branch snapshot clears another branch's work");
+  const branchIsIdle = todoCtx.isIdle;
+  todoCtx.isIdle = () => false;
+  await handlers.get("agent_start")({}, todoCtx);
+  const beforeBranchMail = handedOver.length;
+  fs.appendFileSync(outboxPath, JSON.stringify({
+    type: "message", deliverAs: "steer", content: "held across branch",
+    meta: { messageId: "message/todo-branch" },
+  }) + "\n");
+  await pause(100);
+  assert.strictEqual(handedOver.length, beforeBranchMail, "branch fixture has a held delivery");
+  const pidsBeforeBranch = fs.readFileSync(pidPath, "utf8");
+  nativeSession = "session-todo-next";
+  const beforeNewSession = readFrames().length;
+  await handlers.get("session_branch")({}, todoCtx);
+  await pause(50);
+  const newSessionFrames = readFrames().slice(beforeNewSession);
+  assert.strictEqual(newSessionFrames[0].type, "session");
+  assert.strictEqual(newSessionFrames[0].sessionId, nativeSession);
+  assert.strictEqual(newSessionFrames[0].sessionFile, path.join(dir, `${nativeSession}.jsonl`));
+  assert.strictEqual(todos().at(-1).session, nativeSession);
+  assert.deepStrictEqual(todos().at(-1).totals, totals());
+  assert.strictEqual(fs.readFileSync(pidPath, "utf8"), pidsBeforeBranch, "branch hydration does not reopen delivery");
+  assert.ok(!newSessionFrames.some((frame) => frame.type === "ready"), "branch hydration does not rerun delivery readiness");
+  assert.strictEqual(handedOver.length, beforeBranchMail, "branch hydration preserves held mail");
+  todoCtx.isIdle = branchIsIdle;
+  await handlers.get("agent_end")(successfulEnd, todoCtx);
+  await pause(100);
+  assert.deepStrictEqual(handedOver.at(-1), {
+    content: "held across branch",
+  }, "held mail survives native-session provenance binding");
+  assert.strictEqual(acknowledged().filter((id) => id === "message/todo-branch").length, 1);
+  fs.rmSync(outboxPath, { force: true });
+
+  // OMP 18.4.4 eval/js/tool-bridge persists committed nested todo calls through the
+  // same user_todo_edit path; the enclosing eval event need not expose nested results.
+  branch.push({ id: "eval-todo", type: "custom", customType: "user_todo_edit", timestamp: sourceTime,
+    data: { phases: phase("in_progress", "Nested eval task") } });
+  await handlers.get("tool_execution_end")({ toolName: "eval", result: {} }, todoCtx);
+  await pause(50);
+  assert.deepStrictEqual(todos().at(-1).phases, phase("in_progress", "Nested eval task"));
+  const beforeReconnect = todos().length;
+  const todoPid = Number(fs.readFileSync(pidPath, "utf8").trim().split("\n").at(-1));
+  process.kill(todoPid, "SIGKILL");
+  await pause(1100);
+  assert.strictEqual(todos().length, beforeReconnect + 1, "reconnect reseeds identical snapshot");
+  assert.strictEqual(todos().at(-1).source_op, "hydrate");
+  assert.strictEqual(todos().at(-1).observed_at, sourceTime);
+
+  const large = Array.from({ length: 17 }, (_, index) => ({
+    name: "🦀".repeat(40), tasks: Array.from({ length: index === 0 ? 101 : 1 }, () => ({
+      content: "Task", status: "pending", blocker: "Waiting",
+    })).concat([{ content: "Dropped", status: "abandoned", blocker: "No longer needed" }]),
+  }));
+  await execute("init", large);
+  await pause(50);
+  const bounded = todos().at(-1);
+  assert.strictEqual(bounded.truncated, true);
+  assert.deepStrictEqual(bounded.totals, totals(117, 0, 0, 0, 17));
+  assert.strictEqual(bounded.phases.length, 16);
+  assert.strictEqual(bounded.phases.flatMap((item) => item.tasks).length, 100);
+  assert.strictEqual(bounded.phases[0].name, "🦀".repeat(32));
+  await execute("init", [{ name: "Unicode", tasks: [{
+    content: "🦀".repeat(160), status: "pending", blocker: "🦀".repeat(160),
+  }] }]);
+  await pause(50);
+  assert.strictEqual(todos().at(-1).truncated, true);
+  assert.strictEqual(todos().at(-1).phases[0].tasks[0].content, "🦀".repeat(128));
+  assert.strictEqual(todos().at(-1).phases[0].tasks[0].blocker, "🦀".repeat(128));
+  const escaping = [{ name: "Escaping", tasks: Array.from({ length: 100 }, () => ({
+    content: "\u0000".repeat(512), status: "blocked", blocker: "\u0000".repeat(512),
+  })) }];
+  await execute("init", escaping);
+  await pause(50);
+  const capped = todos().at(-1);
+  assert.strictEqual(capped.truncated, true);
+  assert.deepStrictEqual(capped.totals, totals(0, 0, 0, 100));
+  assert.ok(Buffer.byteLength(JSON.stringify(capped)) < 64 * 1024);
+  assert.ok(capped.phases[0].tasks.length < 100, "escaping drops trailing tasks instead of reporting partial totals");
+  await execute("drop", [{ name: "Dropped", tasks: [
+    { content: "Dropped task", status: "abandoned" }, { content: "Live", status: "pending" },
+  ] }]);
+  await pause(50);
+  assert.deepStrictEqual(todos().at(-1).phases, [{ name: "Dropped", tasks: [{ content: "Live", status: "pending" }] }]);
+  assert.deepStrictEqual(todos().at(-1).totals, totals(1, 0, 0, 0, 1));
+  assert.strictEqual(todos().at(-1).truncated, false);
+  await execute("drop", [{ name: "Dropped only", tasks: [
+    { content: "Dropped task", status: "abandoned" },
+  ] }]);
+  await pause(50);
+  assert.deepStrictEqual(todos().at(-1).phases, [{ name: "Dropped only", tasks: [] }]);
+  assert.deepStrictEqual(todos().at(-1).totals, totals(0, 0, 0, 0, 1));
+  assert.strictEqual(todos().at(-1).truncated, false);
+  await execute("rm", []);
+  await pause(50);
+  assert.deepStrictEqual(todos().at(-1).phases, []);
+  assert.deepStrictEqual(todos().at(-1).totals, totals());
+  assert.strictEqual(todos().at(-1).truncated, false);
+  await handlers.get("session_shutdown")({}, todoCtx);
+}
+
+// An idle model turn does not prove that the native session owns no jobs.
+if (process.argv[2]?.includes("st-omp")) {
+  let jobs = [{ id: "bg-fixture" }];
+  const jobCtx = { ...fullCtx, getAsyncJobSnapshot: () => ({ running: jobs }) };
+  await handlers.get("session_start")({}, jobCtx);
+  await handlers.get("agent_end")({}, jobCtx);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.ok(readFrames().some(frame => frame.type === "state" && frame.state === "idle" && frame.backgroundJobs === 1));
+  jobs = [];
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.strictEqual(readFrames().filter(frame => frame.type === "state").at(-1).backgroundJobs, 0);
+  const unknownCtx = { ...fullCtx, getAsyncJobSnapshot: () => { throw new Error("unavailable"); } };
+  await handlers.get("agent_end")({}, unknownCtx);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.strictEqual(readFrames().filter(frame => frame.type === "state").at(-1).backgroundJobs, null);
+  await handlers.get("session_shutdown")({}, unknownCtx);
+}
+
+if (process.argv[2]?.includes("st-omp-channel")) {
+  // A pending background job ends foreground work with willContinue=true, then ctx proves
+  // idle. No further tool result or terminal agent_end need arrive to release managed mail.
+  let backgroundIdle = false;
+  const backgroundCtx = { ...fullCtx, isIdle: () => backgroundIdle };
+  await handlers.get("session_start")({}, backgroundCtx);
+  await handlers.get("agent_start")({}, backgroundCtx);
+  const beforeBackgroundMail = handedOver.length;
+  const beforeBackgroundTurns = readFrames().filter(frame => frame.type === "turn").length;
+  sendMail("held while background continues");
+  await pause(100);
+  await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, backgroundCtx);
+  await pause(150);
+  assert.strictEqual(handedOver.length, beforeBackgroundMail, "not released without positive idle");
+  backgroundIdle = true;
+  await pause(250);
+  assert.deepStrictEqual(handedOver.slice(beforeBackgroundMail), [
+    { content: "held while background continues" },
+  ], "positive idle releases background continuation mail without another tool boundary");
+  assert.strictEqual(readFrames().filter(frame => frame.type === "turn").length,
+    beforeBackgroundTurns, "background continuation does not invent a terminal result");
+  const backgroundId = `message/hold-${mailSequence}`;
+  assert.strictEqual(acknowledged().filter(id => id === backgroundId).length, 1);
+  await pause(200);
+  assert.strictEqual(handedOver.length, beforeBackgroundMail + 1, "idle poll delivers once");
+
+  // Mail can arrive after the continuation's poll was fenced. Its own fresh idle proof
+  // overrides the stale running flag without waiting for a tool event.
+  backgroundIdle = false;
+  await handlers.get("agent_start")({}, backgroundCtx);
+  const beforeDirectIdle = handedOver.length;
+  backgroundIdle = true;
+  sendMail("arriving after positive idle");
+  await pause(200);
+  assert.deepStrictEqual(handedOver.slice(beforeDirectIdle), [
+    { content: "arriving after positive idle" },
+  ], "receive uses fresh positive idle despite stale running flag");
+  assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
+
+  const backgroundIdleProof = backgroundCtx.isIdle;
+  for (const proof of ["active", "throws"]) {
+    let throwing = proof === "throws";
+    const inFlightCtx = { ...fullCtx, isIdle: () => {
+      if (throwing) throw new Error("idle proof unavailable");
+      return false;
+    } };
+    backgroundCtx.isIdle = inFlightCtx.isIdle;
+    await handlers.get("agent_start")({}, inFlightCtx);
+    await handlers.get("tool_call")({ toolName: "bash", toolCallId: `foreground-${proof}`, input: {} }, inFlightCtx);
+    await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, inFlightCtx);
+    const beforeInFlight = handedOver.length;
+    sendMail(`held behind real tool ${proof}`);
+    await pause(250);
+    assert.strictEqual(handedOver.length, beforeInFlight, `${proof} proof retains in-flight hold`);
+    throwing = false;
+    await handlers.get("tool_result")({ toolName: "bash", toolCallId: `foreground-${proof}` }, inFlightCtx);
+    await awaitAcknowledgement(`message/hold-${mailSequence}`);
+    assert.strictEqual(handedOver.length, beforeInFlight + 1, "matching real tool result releases once");
+    assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
+    await handlers.get("agent_end")(successfulEnd, inFlightCtx);
+  }
+  backgroundCtx.isIdle = backgroundIdleProof;
+
+  // A new foreground turn fences the background settle poll, even if its retired context
+  // subsequently claims idle. Only the new turn's real boundary can release this mail.
+  backgroundIdle = false;
+  await handlers.get("agent_start")({}, backgroundCtx);
+  sendMail("held across newer foreground activity");
+  await pause(100);
+  await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, backgroundCtx);
+  await handlers.get("agent_start")({}, activeCtx);
+  const beforeNewTurn = handedOver.length;
+  backgroundIdle = true;
+  await pause(250);
+  assert.strictEqual(handedOver.length, beforeNewTurn, "new activity fences retired idle proof");
+  await handlers.get("agent_end")(successfulEnd, activeCtx);
+  await pause(100);
+  assert.strictEqual(handedOver.length, beforeNewTurn + 1);
+
+  // Positive idle cannot override a structured human-blocking guard, either in the poll or
+  // when mail arrives after the foreground continuation ended.
+  for (const guard of ["ask", "approval"]) {
+    backgroundIdle = false;
+    await handlers.get("agent_start")({}, backgroundCtx);
+    if (guard === "ask") {
+      await handlers.get("tool_call")({ toolName: "ask", toolCallId: "background-ask",
+        input: { questions: [{ question: "Preserve the pending question?" }] } }, backgroundCtx);
+    } else {
+      await handlers.get("tool_approval_requested")({ toolName: "bash" }, backgroundCtx);
+    }
+    await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, backgroundCtx);
+    backgroundIdle = true;
+    const guardedMailCount = handedOver.length;
+    const guardedFrameCount = readFrames().length;
+    sendMail(`held behind ${guard}`);
+    await pause(250);
+    assert.strictEqual(handedOver.length, guardedMailCount, `${guard} prevents idle handoff`);
+    assert.ok(!readFrames().slice(guardedFrameCount).some(frame =>
+      frame.type === "state" && frame.state === "idle"), `${guard} prevents idle publication`);
+    backgroundIdle = false;
+    if (guard === "ask") {
+      await handlers.get("tool_result")({ toolName: "ask", toolCallId: "background-ask" }, backgroundCtx);
+    } else {
+      await handlers.get("tool_approval_resolved")({}, backgroundCtx);
+    }
+    await handlers.get("agent_end")(successfulEnd, backgroundCtx);
+    await pause(100);
+    assert.strictEqual(handedOver.length, guardedMailCount + 1, `${guard} mail released once after answer`);
+    const guardedId = `message/hold-${mailSequence}`;
+    assert.strictEqual(acknowledged().filter(id => id === guardedId).length, 1);
+    }
+}
 
 // `session_shutdown` has no reason field upstream and always denotes process exit. Closing must
 // make a later observational frame a no-op.
@@ -550,6 +1229,7 @@ assert.strictEqual(
 
 // Give the recorder a moment to drain, then assert the wire the Rust decoder reads.
 await new Promise((resolve) => setTimeout(resolve, 500));
+assert.ok(fs.readFileSync(framesPath, "utf8").endsWith("\n"), "the drained recorder has no partial frame");
 const frames = readFrames();
 assert.ok(
   frames.some(

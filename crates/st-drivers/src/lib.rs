@@ -12,13 +12,20 @@
 //! declared task running and delivers native messages. Harness-specific behavior stays explicit in
 //! each declaration's command, environment, hooks, and workspace materialization block.
 
+#[cfg(test)]
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 pub mod account;
+pub mod access;
 pub mod catalog;
 pub mod catalog_archive;
 pub mod catalog_lock;
 pub mod catalog_transaction;
 pub mod claude_channel;
 pub mod claude_mcp;
+pub mod claude_prompts;
 pub mod claude_session;
 pub mod codex_app_server;
 pub mod context;
@@ -40,8 +47,10 @@ mod flock;
 /// Atomic filesystem publication shared with the root st2 request API.
 #[doc(hidden)]
 pub mod fsatomic;
+pub mod harness_admission;
 pub mod harness_context;
 pub mod harness_events;
+pub mod blocking_screen;
 pub mod harness_state;
 pub mod harness_timeline;
 pub mod harness_version;
@@ -85,6 +94,7 @@ pub mod task_inventory;
 pub mod telemetry;
 pub mod validate;
 pub mod version;
+pub mod work_claim_failure;
 mod watch;
 
 // The declaration model and the catalog walk live in the `agent-spec` crate, so st2 and any other

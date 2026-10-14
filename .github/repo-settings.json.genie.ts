@@ -1,8 +1,8 @@
 import { githubRepoSettings, githubRuleset } from '../repos/effect-utils/genie/external.ts'
 
-// Landing goes through GitHub's merge queue, gated on the three Namespace checks. Apply only after the
-// `merge_group` trigger is on main (without it the queue never receives its checks and merges freeze).
-// Keep the live main ruleset's other protections; only replace the CI check and add the queue.
+// Landing goes through GitHub's merge queue. Apply the fifth required check only after
+// mail-redelivery-canaries has passed on main; keep the existing live checks until then.
+// Every required job must run on merge_group, or the queue never receives its checks and merges freeze.
 export default githubRepoSettings({
   repository: { allow_auto_merge: true, delete_branch_on_merge: true },
   rulesets: [githubRuleset({
@@ -39,6 +39,8 @@ export default githubRepoSettings({
             { context: 'linux-gate', integration_id: 15368 },
             { context: 'isolation-vm', integration_id: 15368 },
             { context: 'genie-freshness', integration_id: 15368 },
+            { context: 'typescript-client', integration_id: 15368 },
+            { context: 'mail-redelivery-canaries', integration_id: 15368 },
           ],
         },
       },
@@ -48,15 +50,15 @@ export default githubRepoSettings({
           // The repository merges with merge commits today (the st train did).
           merge_method: 'MERGE',
           grouping_strategy: 'ALLGREEN',
-          // Namespace's measured Linux limit is 320 vCPU / 640 GiB. Each full Workspace CI group
-          // initially requests 64 vCPU / 128 GiB, so five groups fit; PR and main jobs share capacity.
-          max_entries_to_build: 5,
+          // Start three groups with Namespace overflow; retain shared capacity for PRs.
+          // Live tuning changes only this field, preserving the live grouping strategy.
+          max_entries_to_build: 3,
           max_entries_to_merge: 5,
           min_entries_to_merge: 1,
           min_entries_to_merge_wait_minutes: 5,
-          // A required check that never reports (a lost Namespace job) fails the entry after this
-          // long instead of blocking the queue for the default hour.
-          check_response_timeout_minutes: 30,
+          // Preserve the incident's hour-long response window: a finished stage must not expire
+          // merely because its dependent gate was waiting for a runner.
+          check_response_timeout_minutes: 60,
         },
       },
     ],

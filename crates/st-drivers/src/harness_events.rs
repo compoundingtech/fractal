@@ -13,6 +13,13 @@ use serde_json::Value;
 
 use crate::harness_timeline::{Operation, Record};
 
+#[cfg(test)]
+#[path = "harness_output_model_controls.rs"]
+mod output_model;
+#[cfg(test)]
+#[path = "harness_events_output_controls.rs"]
+mod output_controls;
+
 pub const WAKE_PIPE: &str = ".st-harness-events-wake";
 pub const DATABASE: &str = "st-harness-events.sqlite";
 const MAX_PENDING_BYTES: u64 = 64 * 1024 * 1024;
@@ -181,7 +188,15 @@ fn append_event(tx: &Connection, kind: &str, body: &Value) -> Result<()> {
         [format!("provider-runtime:{token}")],
         |r| r.get(0),
     )?;
-    let body = serde_json::to_string(body)?;
+    // Capture the binding at the producer. A successor may drain this event after switching
+    // accounts, so its own environment cannot supply the event's paying account.
+    let mut body = body.clone();
+    body["account_ref"] = std::env::var("ST3_ACCOUNT")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    let body = serde_json::to_string(&body)?;
     anyhow::ensure!(
         bytes.saturating_add(body.len() as u64) <= MAX_PENDING_BYTES,
         "harness event spool is full; observation was not committed"
@@ -205,6 +220,52 @@ pub fn read_snapshot(agent_dir: &Path, kind: &str) -> Result<Option<Vec<u8>>> {
         .optional()?)
 }
 
+/// Read saved provider state only when its producer belongs to `runtime`.
+/// A new runtime retains its predecessor's snapshot for durable history, but must not use it
+/// as evidence that its own provider has launched. A driver re-exec keeps the same runtime.
+pub fn read_runtime_state(agent_dir: &Path, runtime: &str) -> Result<Option<Vec<u8>>> {
+    let mut connection = open(agent_dir)?;
+    let tx = connection.transaction()?;
+    let raw: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT body FROM snapshots WHERE kind='harness-state'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else { return Ok(None) };
+    let state: Value = serde_json::from_slice(&raw)?;
+    let Some(token) = state["incarnation"].as_str() else {
+        return Ok(None);
+    };
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            [format!("provider-runtime:{token}")],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok((owner.as_deref() == Some(runtime)).then_some(raw))
+}
+
+/// Capture the provider snapshot and its physical runtime binding together. Unlike a
+/// filtered read, this distinguishes a retained predecessor from missing/corrupt authority.
+pub fn read_bound_provider_state(agent_dir: &Path) -> Result<Option<(String, Vec<u8>)>> {
+    let mut connection = open(agent_dir)?;
+    let tx = connection.transaction()?;
+    let raw: Option<Vec<u8>> = tx.query_row(
+        "SELECT body FROM snapshots WHERE kind='harness-state'", [], |row| row.get(0),
+    ).optional()?;
+    let Some(raw) = raw else { return Ok(None); };
+    let state: Value = serde_json::from_slice(&raw)?;
+    let token = state["incarnation"].as_str().filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("provider snapshot has no ownership token"))?;
+    let runtime: String = tx.query_row(
+        "SELECT value FROM metadata WHERE key=?1", [format!("provider-runtime:{token}")], |row| row.get(0),
+    )?;
+    Ok(Some((runtime, raw)))
+}
+
 fn current_token(connection: &Connection) -> Result<Option<String>> {
     let raw: Option<Vec<u8>> = connection
         .query_row(
@@ -220,7 +281,7 @@ fn current_token(connection: &Connection) -> Result<Option<String>> {
 
 pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
     anyhow::ensure!(
-        matches!(kind, "harness-state" | "harness-context"),
+        matches!(kind, "harness-state" | "harness-context" | "harness-todo"),
         "unsupported observation kind"
     );
     let value: Value = serde_json::from_slice(body)?;
@@ -244,10 +305,10 @@ pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
     }
     // Context writers used to have no ownership fence. Refuse a delayed predecessor now that
     // its snapshot and event are admitted in the same transaction as the ownership check.
-    if kind == "harness-context" {
+    if matches!(kind, "harness-context" | "harness-todo") {
         anyhow::ensure!(
             current_token(&tx)?.as_deref() == value["incarnation"].as_str(),
-            "harness context owner was superseded"
+            "harness observation owner was superseded"
         );
     }
     tx.execute(
@@ -256,6 +317,32 @@ pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
         params![kind, body],
     )?;
     append_event(&tx, kind, &value)?;
+    tx.commit()?;
+    signal_wake(agent_dir);
+    Ok(())
+}
+
+/// Graph-native channels have no provider record writer. Their spool is scoped to one
+/// authenticated runtime incarnation; daemon publication still applies the runtime fence.
+pub fn write_channel_todo(agent_dir: &Path, runtime: &str, fields: &Value) -> Result<()> {
+    let mut value = fields.clone();
+    value["incarnation"] = runtime.into();
+    let mut connection = open(agent_dir)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let bound: String = tx.query_row(
+        "SELECT value FROM metadata WHERE key='runtime'", [], |row| row.get(0),
+    )?;
+    anyhow::ensure!(bound == runtime, "channel todo runtime was superseded");
+    tx.execute(
+        "INSERT OR IGNORE INTO metadata(key,value) VALUES (?1,?2)",
+        params![format!("provider-runtime:{runtime}"), runtime],
+    )?;
+    append_event(&tx, "harness-todo", &value)?;
+    tx.execute(
+        "INSERT INTO snapshots VALUES ('harness-todo',?1)
+        ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
+        [serde_json::to_vec(&value)?],
+    )?;
     tx.commit()?;
     signal_wake(agent_dir);
     Ok(())
@@ -369,6 +456,14 @@ pub fn prepare_publication(
         "INSERT OR IGNORE INTO prepared VALUES (?1,?2,?3)",
         params![sequence, slot, serde_json::to_string(claim)?],
     )?;
+    // Rebuild rejected todo claims from their retained event without keeping the malformed
+    // pre-normalization slot as a retry target. Preparation and retirement commit together.
+    if slot == "harness.todo.observed:normalized" {
+        tx.execute(
+            "DELETE FROM prepared WHERE sequence=?1 AND slot='harness.todo.observed:'",
+            [sequence],
+        )?;
+    }
     let body: String = tx.query_row(
         "SELECT body FROM prepared WHERE sequence=?1 AND slot=?2",
         params![sequence, slot],
@@ -453,6 +548,21 @@ pub(crate) fn write_timeline(
         current_token(&tx)?.as_deref() == Some(&record.incarnation_id),
         "harness timeline owner was superseded"
     );
+    append_timeline_operations(&tx, record, new_operations)?;
+    tx.commit()?;
+    signal_wake(agent_dir);
+    Ok(())
+}
+
+// Append within an already admitted writer transaction. Each caller keeps its
+// own ownership checks and is responsible for commit and wake; this helper does
+// not acquire a connection or admit an owner. The test-only output prototype
+// shares this body so its timeline SQL cannot drift from the production writer.
+fn append_timeline_operations(
+    tx: &rusqlite::Transaction<'_>,
+    record: &Record,
+    new_operations: &[Operation],
+) -> Result<()> {
     tx.execute(
         "INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![
@@ -469,14 +579,12 @@ pub(crate) fn write_timeline(
                 serde_json::to_string(operation)?
             ],
         )?;
-        append_event(&tx, "harness-timeline", &serde_json::to_value(operation)?)?;
+        append_event(tx, "harness-timeline", &serde_json::to_value(operation)?)?;
     }
     tx.execute("DELETE FROM timeline WHERE id NOT IN (SELECT id FROM timeline ORDER BY id DESC LIMIT 4096)", [])?;
     tx.execute("DELETE FROM timeline WHERE id IN (
         SELECT id FROM (SELECT id, SUM(length(CAST(body AS BLOB))) OVER (ORDER BY id DESC) AS retained FROM timeline)
         WHERE retained > 2097152)", [])?;
-    tx.commit()?;
-    signal_wake(agent_dir);
     Ok(())
 }
 
@@ -812,6 +920,42 @@ mod protocol_tests {
             io::ErrorKind::WouldBlock
         );
     }
+    #[test]
+    fn account_capture_child() {
+        let Some(directory) = std::env::var_os("ST_ACCOUNT_TEST_DIRECTORY") else {
+            return;
+        };
+        let runtime = std::env::var("ST_ACCOUNT_TEST_RUNTIME").unwrap();
+        let directory = Path::new(&directory);
+        enable(directory, &runtime).unwrap();
+        claim(directory, "example/seat", "claude", &runtime).unwrap();
+    }
+
+    #[test]
+    fn account_switch_keeps_the_source_account_on_queued_events() {
+        let root = tempfile::tempdir().unwrap();
+        for (runtime, account) in [("runtime-one", "ada/one"), ("runtime-two", "ada/two")] {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "harness_events::protocol_tests::account_capture_child"])
+                .env("ST_ACCOUNT_TEST_DIRECTORY", root.path())
+                .env("ST_ACCOUNT_TEST_RUNTIME", runtime)
+                .env("ST3_ACCOUNT", account)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let events = pending(root.path(), 100).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].runtime_incarnation, "runtime-one");
+        assert_eq!(events[0].payload["account_ref"], "ada/one");
+        assert_eq!(events[1].runtime_incarnation, "runtime-two");
+        assert_eq!(events[1].payload["account_ref"], "ada/two");
+    }
+
     #[test]
     fn new_runtime_does_not_relabel_unacknowledged_history_or_accept_unknown_formats() {
         let root = tempfile::tempdir().unwrap();
