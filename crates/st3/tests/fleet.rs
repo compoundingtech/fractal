@@ -1228,13 +1228,12 @@ async fn invite_and_join_sync_full_history() {
     }
 
     let b = joined(root.path(), &a, "b", &[]).await;
-    // A newcomer's first sync ends by checking that it projects its sponsor's graph.
+    // A newcomer's first sync ends once it holds and has admitted its sponsor's claims.
     let waited = b.st_ok(&["fleet", "wait", "--timeout", "90s"]);
     assert!(waited.contains("first sync verified"), "{waited}");
     let first = b.st_json(&["replication", "status"])["first_sync"].clone();
     assert_eq!(first["state"], "verified", "{first}");
-    assert_eq!(first["healed"], false, "{first}");
-    assert_eq!(first["graph_digest"], first["peer_graph_digest"], "{first}");
+    assert!(first.get("healed").is_none(), "{first}");
     wait_for_notes(&b, &expected, 60, &[&a, &b]).await;
     b.wait_listening().await;
     b.note("b-0").await;
@@ -1366,14 +1365,14 @@ fn peer_sync(node: &Node, peer: &str) -> Value {
 /// Two members can hold the same envelopes and still project different graphs, as when one of
 /// them lost claims it had admitted. No exchange fixes that, so neither may call the pair in
 /// sync: replication status says diverged, doctor fails, and every client page carries it.
-/// Then they heal: they find the claims one lacks and admit their envelopes again.
+/// Sync never repairs one member's claims or graph from the other.
 #[tokio::test(flavor = "multi_thread")]
-async fn members_with_the_same_envelopes_but_different_claims_report_divergence_and_heal() {
+async fn members_with_the_same_envelopes_but_different_claims_report_divergence() {
     if st3::test_support::supervise_test() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let mut a = anchor(root.path(), "a").await;
+    let a = anchor(root.path(), "a").await;
     let mut b = joined(root.path(), &a, "b", &[]).await;
     let mission = root.path().join("probe.kdl");
     fs::write(
@@ -1400,16 +1399,6 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence_
         },
     )
     .await;
-
-    let in_sync_tables = a.st_json(&["replication", "status"])["projection_digests"].clone();
-    // Heals wait while the divergence is inspected.
-    let hold = (
-        "ST3_REPLICATION_HEAL_AFTER_MS".to_owned(),
-        "3600000".to_owned(),
-    );
-    a.env.push(hold.clone());
-    a.restart().await;
-    b.env.push(hold);
 
     // B loses the mission's claims but keeps their envelopes, so both inventories still match.
     b.stop();
@@ -1479,47 +1468,7 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence_
         );
     }
 
-    // Without the hold, the members heal soon after they find the graphs different.
-    for node in [&mut a, &mut b] {
-        node.env = vec![(
-            "ST3_REPLICATION_HEAL_AFTER_MS".to_owned(),
-            "1000".to_owned(),
-        )];
-        node.restart().await;
-    }
-    wait_until("the members heal", 120, || async {
-        a.st_json(&["replication", "status"])["graph_digest"]
-            == b.st_json(&["replication", "status"])["graph_digest"]
-            && [(&a, "b"), (&b, "a")]
-                .iter()
-                .all(|(node, peer)| peer_sync(node, peer)["diverged"] != true)
-    })
-    .await;
-    let restored_tables = b.st_json(&["replication", "status"])["projection_digests"].clone();
-    for (table, digest) in in_sync_tables.as_object().unwrap() {
-        // Restarts and healing append durable recovery claims and their retry operations.
-        // Both modern peers must agree on their complete maps above; materialized business
-        // tables must also recover the exact pre-fault contents.
-        if !matches!(table.as_str(), "claim_sources" | "operations") {
-            assert_eq!(
-                &restored_tables[table], digest,
-                "b restores the pre-fault shared table {table}"
-            );
-        }
-    }
-    let heals = [(&a, "b"), (&b, "a")]
-        .iter()
-        .filter_map(|(node, peer)| {
-            let heal = peer_sync(node, peer)["heal"].clone();
-            (!heal.is_null()).then_some((node.name.clone(), heal))
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        heals.iter().any(|(_, heal)| heal["healed"] == true
-            && heal["refetched"].as_u64().unwrap_or(0) + heal["pushed"].as_u64().unwrap_or(0) > 0),
-        "{heals:?}"
-    );
-    let restored = b
+    let lost = b
         .claims()
         .await
         .into_iter()
@@ -1530,19 +1479,7 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence_
                 .contains("divergence-probe")
         })
         .count();
-    assert!(restored > 0, "b admitted the mission's claims again");
-    for node in [&a, &b] {
-        let doctor = node.st(&["--json", "doctor"]);
-        let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
-        let check = report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|check| check["name"] == "replication")
-            .cloned()
-            .unwrap();
-        assert_ne!(check["status"], "fail", "{check}");
-    }
+    assert_eq!(lost, 0, "sync does not admit the lost claims' envelopes again");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2550,12 +2487,13 @@ async fn rejoining_under_a_new_name_reports_post_leave_history_as_divergent() {
             .contains("admitted beyond high water"),
         "{admission}"
     );
+    // The wait compares no graphs; it refuses on the admissions themselves.
     assert!(
         !waited.status.success(),
         "fleet wait accepted retained fenced history"
     );
     assert!(
-        String::from_utf8_lossy(&waited.stderr).contains("projects a different graph"),
+        String::from_utf8_lossy(&waited.stderr).contains("beyond the writer's high water"),
         "{}",
         String::from_utf8_lossy(&waited.stderr)
     );

@@ -18,17 +18,13 @@ use crate::store::{CheckpointAction, CheckpointManifestNeed};
 use crate::store::{Runtime as _, Store};
 use crate::sync::Local;
 
-/// A store on the plain runtime that heals without waiting, as the tests of smalltalk's stores do.
+/// A store on the plain runtime.
 fn plain_memory(origin: &str) -> anyhow::Result<Store> {
-    let mut store = Store::open_memory(origin, Arc::new(Plain))?;
-    store.heal_replay_backoff_ms = 0;
-    Ok(store)
+    Store::open_memory(origin, Arc::new(Plain))
 }
 
 fn plain_open(path: &Path, origin: &str) -> anyhow::Result<Store> {
-    let mut store = Store::open(path, origin, Arc::new(Plain))?;
-    store.heal_replay_backoff_ms = 0;
-    Ok(store)
+    Store::open(path, origin, Arc::new(Plain))
 }
 
 /// Different checkpoint lineages leave payloadless ranges that can never settle through
@@ -141,7 +137,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
     .await
     .unwrap();
     assert!(
-        result.0,
+        result,
         "a divergent compact exchange must reach live ranges beyond the tombstones"
     );
     {
@@ -192,8 +188,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
             &fleet_context
         )
         .await
-        .unwrap()
-        .0,
+        .unwrap(),
         "tombstone-only divergence must let the worker rest"
     );
     note(&left, "published-after-quiet-comparison");
@@ -208,7 +203,6 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         )
         .await
         .unwrap()
-        .0
     );
     assert!(
         right
@@ -656,8 +650,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(pushed, "the peer stored what this node pushed");
     assert!(
         target
@@ -686,8 +679,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(pulled, "this node stored what the peer sent");
     assert!(
         source
@@ -715,8 +707,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         &FleetContext::legacy(BTreeSet::from(["target".into()])),
     )
     .await
-    .unwrap()
-    .0;
+    .unwrap();
     assert!(
         !moved,
         "converged nodes store nothing, so the worker may rest"
@@ -2050,21 +2041,6 @@ impl Backend for SlowExport {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(result)
     }
-    async fn heal_answer(
-        &self,
-        peer: &str,
-        fleet_id: &str,
-        query: &ReplicationHealQuery,
-    ) -> Result<ReplicationHealAnswer> {
-        self.local.heal_answer(peer, fleet_id, query).await
-    }
-    async fn heal_next(
-        &self,
-        peer: &str,
-        answer: ReplicationHealAnswer,
-    ) -> Result<ReplicationHealStep> {
-        self.local.heal_next(peer, answer).await
-    }
     async fn checkpoint_manifest(
         &self,
         request: &CheckpointManifestRequest,
@@ -2371,7 +2347,7 @@ async fn worker_phase_status_is_local_and_reports_retry_deadline() {
     let store = Arc::new(plain_memory("birch").unwrap());
     let index = store.index().unwrap();
     let attempt = crate::store::now_ms();
-    for phase in ["exchange", "heal", "backoff", "idle"] {
+    for phase in ["exchange", "backoff", "idle"] {
         let retry = (phase == "backoff").then_some(Duration::from_secs(30));
         record_worker(&Local(store.clone()), "cedar", phase, attempt, retry).await;
         let status = store
