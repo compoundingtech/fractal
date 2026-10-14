@@ -134,8 +134,8 @@ pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
 mod attention_snapshot;
 pub(crate) use attention_snapshot::{
-    NativePromptState, native_prompt_gone_key, plan_approval, screen_prompt_delivered_key,
-    screen_prompt_gone_key, screen_prompt_undelivered_key,
+    CLAUDE_PROMPT_ANSWER_WAIT_MS, NativePromptState, native_prompt_gone_key, plan_approval,
+    screen_prompt_delivered_key, screen_prompt_gone_key, screen_prompt_undelivered_key,
 };
 pub(crate) mod attention_list;
 pub(crate) mod owner_lists;
@@ -15005,7 +15005,7 @@ impl Store {
         let mut items = self.mission_run_attention_items(person)?;
         items.extend(self.person_attention_items(person, as_of)?);
         items.extend(self.harness_login_attention_items(person)?);
-        items.extend(self.harness_prompt_attention_items(person)?);
+        items.extend(self.harness_prompt_attention_items(person, as_of)?);
         items.extend(self.custom_attention_items(person)?);
         // A person who published a broken gate is the one to correct it.
         items.extend(
@@ -56998,6 +56998,93 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
                 .code,
             "stale-fence"
         );
+    }
+
+    /// A Claude prompt is answered from a client only while its permission hook still waits: one
+    /// that has waited longer is answered in the terminal, so no answer is recorded that nothing
+    /// would deliver. The hook still waiting on it is told it is gone, and exits.
+    #[test]
+    fn a_claude_prompt_older_than_its_hook_is_answered_in_the_terminal() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "late-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let prompt = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        let now = now_ms() as u64;
+        let window = CLAUDE_PROMPT_ANSWER_WAIT_MS as u64;
+        let asked = |observed_at: u64, transition: u64| {
+            append(
+                "harness.observed",
+                json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                    "blocked_on":"human", "ask":"permission", "reason":"Read",
+                    "observed_at_ms": observed_at,
+                    "ownership_sequence":1, "transition_sequence":transition}),
+            )
+        };
+        // Within the hook's wait, the prompt is answered here.
+        asked(now - window + 60_000, 3);
+        assert_eq!(prompt().unwrap().answers, vec!["allow".to_owned(), "deny".to_owned()]);
+        // The next prompt opened before the hook's wait: still an alert, answered in the terminal,
+        // and so is each restatement of it, which keeps when it opened.
+        append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":null, "ask":null, "ownership_sequence":1, "transition_sequence":4}),
+        );
+        asked(now - window - 1_000, 5);
+        let late = asked(now, 5);
+        let shown = prompt().expect("a late prompt is still an alert");
+        assert!(shown.answers.is_empty(), "{:?}", shown.answers);
+        assert!(shown.detail.contains("waited longer than st can answer it"), "{}", shown.detail);
+        assert_eq!(
+            shown.requested_at_unix_ms,
+            u128::from(now - window - 1_000),
+            "it has waited since it opened, not since its latest restatement"
+        );
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &late.id, "allow", "person/avery")
+                .unwrap_err()
+                .code,
+            "stale-fence"
+        );
+        assert_eq!(store.native_prompt_state(seat, 1, 5).unwrap(), NativePromptState::Gone);
     }
 
     /// A driver writes each prompt as its own transition, so a later prompt for the same tool is
