@@ -2810,16 +2810,15 @@ impl Ui {
             KeyCode::Char('e') if control && conversation.is_some() => self.toggle_all_tools(),
             KeyCode::Char('p') if control && conversation.is_some() => self.toggle_simple(),
             KeyCode::Char('d') if control && conversation.is_some() => self.toggle_details(),
-            // Ctrl+R sends a message st never had again; with none to send it speaks into the box,
-            // as it does once the box is open (Nathan, 2026-10-05: it did nothing until a letter
-            // had opened the box).
+            // Ctrl+R tries again: it sends a message st never had again. Speaking into the box is
+            // Ctrl+Y, with the box open or not (Nathan, 2026-10-05: it did nothing until a letter
+            // had opened the box; 2026-10-14: Ctrl+R means retry, so voice moved off it).
             KeyCode::Char('r') if control && conversation.is_some() && self.live => {
                 if let Some(entry) = self.undelivered() {
                     self.effects.push(Effect::Resend { entry });
-                } else {
-                    self.start_voice();
                 }
             }
+            KeyCode::Char('y') if control && conversation.is_some() && self.live => self.start_voice(),
             // Backspace takes a message st never had back into the box, to change or delete.
             KeyCode::Backspace
                 if quiet
@@ -4743,7 +4742,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_speaks_in_a_conversation_without_the_box_open_first() {
+    fn ctrl_y_speaks_in_a_conversation_without_the_box_open_first() {
         let mut ui = glass();
         ui.live = true;
         ui.open_in_glass(
@@ -4751,12 +4750,12 @@ mod tests {
             Open::Tab,
         );
         assert!(!ui.editing, "the box is closed");
-        ctrl(&mut ui, 'r');
+        ctrl(&mut ui, 'y');
         // Without a speech helper (this test has none) it says so; before, it did nothing.
         let flash = ui.flash.as_ref().map(|(message, _)| message.as_str());
         assert!(
             flash.is_some_and(|message| message.contains("voice")),
-            "ctrl+r reached voice: {flash:?}"
+            "ctrl+y reached voice: {flash:?}"
         );
     }
 
