@@ -759,11 +759,12 @@ mod tests {
     async fn claude_new_notification_gate_uses_current_prompt_resolution_and_fails_closed() {
         use axum::{Json, Router, routing::get};
         use crate::store::NativePromptState;
+        use st_drivers::harness_state::{Activity, Ask, BlockedOn, InputBuffer, Observation, Writer};
 
         let (prompt, response) = tokio::sync::watch::channel(NativePromptState::Open);
         let app = Router::new().route("/v1/harness-prompts/state", get(move || {
             let response = response.clone();
-            async move { Json(response.borrow().clone()) }
+            async move { Json(json!({"api_version":"st3.v1", "value":response.borrow().clone()})) }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = Client::new(crate::client::Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
@@ -778,18 +779,27 @@ mod tests {
             "sinceMs":now, "writtenAtMs":written
         });
         assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await);
-        for ask in ["permission", "question", "review"] {
-            std::fs::write(&path, serde_json::to_vec(&record(ask, "human", "current", now)).unwrap()).unwrap();
+        let mut writer = Writer::new(dir.path(), "worker", "claude", None).with_session("current");
+        for ask in [Ask::Permission, Ask::Question, Ask::Review] {
+            writer.observe(Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)
+                .with_ask(ask)).unwrap();
+            let observed = st_drivers::harness_state::read(&path, None).unwrap();
+            assert!(current_notification_observation(&observed, "current"), "{observed:?}");
+            assert_eq!(observed.ask, ask);
+            let episode = format!("/v1/harness-prompts/state?agent=agent%2Fworker&ownership={}&transition={}",
+                observed.ownership_sequence.unwrap(), observed.transition_sequence.unwrap());
             prompt.send_replace(NativePromptState::Open);
-            assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
+            assert_eq!(client.get::<NativePromptState>(&episode).await.unwrap(), NativePromptState::Open);
+            assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask:?}");
             for answer in ["allow", "deny"] {
                 // The permission hook may have expired before this answer was
                 // recorded. The still-open native dialog remains authoritative.
                 prompt.send_replace(NativePromptState::Answered { answer: answer.into() });
-                assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
+                assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask:?}");
             }
             prompt.send_replace(NativePromptState::Gone);
-            assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
+            assert_eq!(client.get::<NativePromptState>(&episode).await.unwrap(), NativePromptState::Gone);
+            assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask:?}");
         }
         for ask in ["none", "future-ask"] {
             std::fs::write(&path, serde_json::to_vec(&record(ask, "human", "current", now)).unwrap()).unwrap();
