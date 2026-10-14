@@ -2807,6 +2807,13 @@ impl Ui {
             KeyCode::Up if control && quiet && conversation.is_some() => self.focus_tool(-1),
             KeyCode::Down if control && quiet && conversation.is_some() => self.focus_tool(1),
             KeyCode::Char('u') if control && quiet && conversation.is_some() => self.toggle_focused_images(),
+            // Ctrl+N opens the alerts box from a conversation (in a terminal the key is the
+            // program's: the badge and a click are the way in there).
+            KeyCode::Char('n') if control && conversation.is_some() => {
+                if let Some(agent) = &conversation {
+                    self.open_alerts(agent);
+                }
+            }
             KeyCode::Char('e') if control && conversation.is_some() => self.toggle_all_tools(),
             KeyCode::Char('p') if control && conversation.is_some() => self.toggle_simple(),
             KeyCode::Char('d') if control && conversation.is_some() => self.toggle_details(),
@@ -4453,14 +4460,19 @@ mod tests {
         let input = line("Message Atlas Builder");
         assert!(band < rule && rule < input, "{shown}");
         assert!(input + 3 >= lines.len(), "the box sits at the bottom: {shown}");
-        // Expanded on a click: the cards fill the room the conversation gives up.
+        // A click opens the list; a click on an alert in it opens the alerts box: Home over the
+        // glass, on that alert.
         ui.click(Hit::Alert("agent/example/atlas/builder".into(), AlertTap::Toggle));
+        let list = screen(&ui);
+        assert!(list.contains("▾ hide") && list.contains("waiting for a permission"), "{list}");
+        assert!(!ui.home_open());
+        ui.click(Hit::Alert("attention/one".into(), AlertTap::Open));
+        assert!(ui.home_open());
+        assert_eq!(ui.attention_focus().as_deref(), Some("attention/one"));
         let shown = screen(&ui);
-        assert!(shown.contains("1 alert") && shown.contains("deny") && shown.contains("open in Now"), "{shown}");
-        let lines: Vec<&str> = shown.lines().collect();
-        let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
-        assert!(line("open in Now") < line("Message Atlas Builder"), "{shown}");
-        assert!(line("Message Atlas Builder") + 3 >= lines.len(), "{shown}");
+        assert!(shown.contains("Now · esc closes") && shown.contains("waiting for a permission"), "{shown}");
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.home_open());
         // Another agent's conversation shows none of it.
         ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Tab);
         let other = screen(&ui);
@@ -4483,9 +4495,6 @@ mod tests {
             typed(&mut ui, paragraph);
             if round % 3 == 0 {
                 press(&mut ui, KeyCode::Enter, KeyModifiers::ALT);
-            }
-            if round % 10 == 0 {
-                ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
             }
             for (width, height) in [(20, 6), (24, 8), (40, 12), (80, 24), (120, 32), (200, 60), (33, 7)] {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -6683,26 +6692,38 @@ mod tests {
     }
 
     #[test]
-    fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
+    fn ctrl_n_opens_the_alerts_box_from_a_conversation_and_a_badge_does_over_a_terminal() {
         let agent = "agent/example/atlas/builder";
         let mut ui = glass();
         ui.world.attention = Load::Ready(vec![
             alert_prompt("attention/one", agent),
-            alert_prompt("attention/two", agent),
+            alert_prompt("attention/two", "agent/example/docs/writer"),
         ]);
         ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
-        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        press(&mut ui, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert!(ui.home_open(), "Ctrl+N opens the box");
+        assert_eq!(ui.attention_focus().as_deref(), Some("attention/one"));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        // Over an attached terminal there is a badge with the count, bottom right; a click opens.
+        let shell = "terminal/example-shell".to_owned();
+        ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
+        ui.terminal = Some(crate::ui::TerminalView {
+            agent: shell.clone(),
+            title: "shell".into(),
+            name: "shell".into(),
+            lines: Vec::new(),
+            cursor: None,
+            stale: None,
+            ended: None,
+            native: None,
+        });
         let shown = screen(&ui);
         let lines: Vec<&str> = shown.lines().collect();
-        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ hide")).expect(&shown);
-        let rule = lines.iter().position(|line| line.contains("┄┄┄┄")).expect(&shown);
-        let input = lines.iter().position(|line| line.contains("Message Atlas Builder")).expect(&shown);
-        assert!(title < rule && rule < input, "{shown}");
-        // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
-        let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
-        assert!(barred >= 6, "{shown}");
-        assert!(shown.matches("terminal (Ctrl+]) or open it in Now").count() == 2, "{shown}");
-        assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
+        let badge = lines.iter().rposition(|line| line.contains("◆ 2") && !line.contains("alerts")).expect(&shown);
+        assert!(badge >= lines.len() - 6, "the badge sits at the bottom: {shown}");
+        ui.click(Hit::Alert(shell.clone(), AlertTap::Box));
+        assert!(ui.home_open());
+        assert_eq!(ui.attention_focus().as_deref(), Some("attention/one"));
     }
 
     #[test]
