@@ -22,6 +22,25 @@ const capabilityFixture = require('../../../docs/st3/client-v0/fixtures/capabili
 const cursorGapFixture = require('../../../docs/st3/client-v0/fixtures/cursor-gap-error.json');
 const capabilities = { ...capabilityFixture.value, limits: { ...capabilityFixture.value.limits, max_page_items: 2, max_event_items: 3, max_wait_ms: 10 } };
 
+test('notesList reads the typed advisory current notes endpoint', async () => {
+    const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json');
+    const calls = [];
+    const client = new St3Client({
+        baseUrl: 'https://example.test',
+        credential: () => 'test-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            return response(String(url).endsWith('/capabilities') ? capabilityFixture : wire);
+        },
+    });
+    const result = await client.notesList();
+    assert.deepEqual(result, wire);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0][0], 'https://example.test/v1/client/capabilities');
+    assert.equal(calls[1][0], 'https://example.test/v1/client/notes');
+    assert.equal(calls[1][1].headers.Authorization, 'Bearer test-credential');
+});
+
 const validTraceparent = '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01';
 const traceCases = [
     ['absent callback', undefined, undefined],
@@ -586,4 +605,24 @@ test('owner content chunk route encodes session identities and retains continuat
     assert.equal(calls.at(-1).url, `https://example.test/v1/client/conversations/session%2Fnative%2Fone/content/${chunk.ref}/chunk?offset=262144`);
     assert.equal(calls.at(-1).init.headers['x-st3-features'], 'custom-subjects.v1, conversation-blocks.v1');
     assert.deepEqual(result.value, chunk);
+});
+
+test('phone observation command retries identical tagged intervals and accepts without snapshot', async () => {
+    const calls = [];
+    const report = {report_id:'019a1234-0000-7000-8000-000000000001',samples:[
+        {kind:'live-share',target:'ios-live-share',carrier:'lan',interval_start:'2026-10-10T15:00:00Z',interval_end:'2026-10-10T15:01:00Z',foreground_ms:10000,live_ms:9900},
+    ]};
+    const client = new St3Client({baseUrl:'https://example.test',credential:()=> 'paired',fetchImpl:async (url,init)=>{
+        calls.push({url,init});
+        return response({api_version:'st3.client.v0',request_id:'request/test',value:{accepted:true}});
+    }});
+    for (let n=0;n<2;n++) {
+        const accepted = await client.observationsReport(report);
+        assert.equal(accepted.value.accepted,true);
+        assert.equal(Object.hasOwn(accepted,'snapshot'),false);
+    }
+    assert.equal(calls[0].url,'https://example.test/v1/client/observations');
+    assert.equal(calls[0].init.headers.Authorization,'Bearer paired');
+    assert.equal(calls[0].init.body,calls[1].init.body);
+    assert.deepEqual(JSON.parse(calls[0].init.body),report);
 });

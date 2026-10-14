@@ -17,6 +17,135 @@ use crate::harness_timeline::{Operation, Record};
 const SNAPSHOT_KIND: &str = "harness-output";
 const MAX_BATCH: usize = 128;
 const MAX_BATCH_BYTES: usize = 256 * 1024;
+const MAX_IDENTITY_BYTES: usize = 4096;
+const MAX_INPUT_STRING_BYTES: usize = 3 * MAX_BATCH_BYTES;
+const MAX_INPUT_NODES: usize = 4096;
+const MAX_INPUT_DEPTH: usize = 32;
+
+// Private proposed input bounds, checked before membership equality or serde.
+// References in record/new/progress are each charged, even when duplicated.
+// This neither prevents their earlier allocation nor qualifies numeric/serde
+// scan cost, adapters, persisted input decoding or physical provenance.
+struct InputBudget {
+    bytes: usize,
+    nodes: usize,
+}
+
+impl InputBudget {
+    fn text(&mut self, text: &str, field_limit: usize) -> Result<()> {
+        anyhow::ensure!(
+            text.len() <= field_limit,
+            "native output input field is too wide"
+        );
+        anyhow::ensure!(
+            text.len() <= self.bytes,
+            "native output input strings exceed budget"
+        );
+        self.bytes -= text.len();
+        Ok(())
+    }
+
+    fn value(&mut self, value: &Value, depth: usize) -> Result<()> {
+        anyhow::ensure!(depth <= MAX_INPUT_DEPTH, "native output input is too deep");
+        anyhow::ensure!(self.nodes > 0, "native output input nodes exceed budget");
+        self.nodes -= 1;
+        match value {
+            Value::String(text) => self.text(text, MAX_BATCH_BYTES)?,
+            Value::Array(values) => {
+                for value in values {
+                    self.value(value, depth + 1)?;
+                }
+            }
+            Value::Object(values) => {
+                for (key, value) in values {
+                    self.text(key, MAX_BATCH_BYTES)?;
+                    self.value(value, depth + 1)?;
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+        Ok(())
+    }
+}
+
+fn check_input_bounds(
+    record: &Record,
+    new_operations: &[Operation],
+    batch: &OutputBatch<'_>,
+) -> Result<()> {
+    anyhow::ensure!(
+        record.operations.len() <= MAX_BATCH
+            && new_operations.len() <= MAX_BATCH
+            && batch.progress.len() <= MAX_BATCH,
+        "native output input has too many operations"
+    );
+    let mut budget = InputBudget {
+        bytes: MAX_INPUT_STRING_BYTES,
+        nodes: MAX_INPUT_NODES,
+    };
+    for text in [
+        record.schema.as_str(),
+        record.driver.as_str(),
+        record.incarnation_id.as_str(),
+        batch.runtime_incarnation,
+        batch.provider_incarnation,
+        batch.driver,
+        batch.component,
+        batch.capability,
+    ] {
+        budget.text(text, MAX_IDENTITY_BYTES)?;
+    }
+    for operation in record
+        .operations
+        .iter()
+        .chain(new_operations)
+        .chain(batch.progress.iter().map(|progress| progress.operation))
+    {
+        for text in [
+            operation.operation.as_str(),
+            operation.entry_id.as_str(),
+            operation.role.as_str(),
+            operation.entry_type.as_str(),
+            operation.driver.as_str(),
+            operation.incarnation_id.as_str(),
+            operation.source_id.as_deref().unwrap_or(""),
+        ] {
+            budget.text(text, MAX_IDENTITY_BYTES)?;
+        }
+        budget.value(&operation.body, 0)?;
+    }
+    Ok(())
+}
+
+// Count serializer output without retaining an encoded copy of each operation.
+// This bounds accepted serialized bytes, not the already allocated input Value,
+// serializer scan work, recursion, later admitted serialization or native input.
+#[derive(Default)]
+struct SerializedByteCounter {
+    used: usize,
+}
+
+impl std::io::Write for SerializedByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > MAX_BATCH_BYTES - self.used {
+            return Err(std::io::Error::other("native output batch is too wide"));
+        }
+        self.used += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_batch_size(operations: &[Operation]) -> Result<usize> {
+    let mut counter = SerializedByteCounter::default();
+    for operation in operations {
+        serde_json::to_writer(&mut counter, operation)?;
+    }
+    Ok(counter.used)
+}
 
 /// Proposed producer-callback input, authored directly by these controls.
 /// A future adapter must establish its provenance before normalization/queueing.
@@ -62,6 +191,7 @@ pub(crate) fn write_timeline_with_output(
     new_operations: &[Operation],
     batch: &OutputBatch<'_>,
 ) -> Result<()> {
+    check_input_bounds(record, new_operations, batch)?;
     anyhow::ensure!(
         crate::contracts::schema_matches(&record.schema, "st.harness-timeline.v1")
             && !batch.runtime_incarnation.is_empty()
@@ -101,16 +231,7 @@ pub(crate) fn write_timeline_with_output(
         }),
         "output progress must belong to the same admitted timeline batch"
     );
-    new_operations
-        .iter()
-        .try_fold(0_usize, |bytes, operation| {
-            let operation_bytes = serde_json::to_vec(operation)?.len();
-            let total = bytes
-                .checked_add(operation_bytes)
-                .ok_or_else(|| anyhow::anyhow!("native output batch byte count overflow"))?;
-            anyhow::ensure!(total <= MAX_BATCH_BYTES, "native output batch is too wide");
-            Ok::<_, anyhow::Error>(total)
-        })?;
+    serialized_batch_size(new_operations)?;
     crate::harness_state::with_current_ownership(
         agent_dir,
         batch.provider_incarnation,
@@ -237,7 +358,7 @@ pub(crate) fn write_timeline_with_output(
                 preceding.insert(source.into(), operation.clone());
             }
             if !new_operations.is_empty() {
-                append_timeline_operations(&tx, record, new_operations)?;
+                super::append_timeline_operations(&tx, record, new_operations)?;
             }
             if previous.as_ref() != Some(&envelope) {
                 tx.execute(
@@ -252,39 +373,6 @@ pub(crate) fn write_timeline_with_output(
             Ok(())
         },
     )
-}
-
-// Prototype-only copy of the current timeline append body. A future runtime
-// caller must compose and review its actual shared transaction; these controls
-// do not certify a producer adapter or an unmodified separate timeline write.
-fn append_timeline_operations(
-    tx: &rusqlite::Connection,
-    record: &Record,
-    new_operations: &[Operation],
-) -> Result<()> {
-    tx.execute(
-        "INSERT INTO metadata VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![
-            format!("timeline-next:{}", record.incarnation_id),
-            record.next_sequence.to_string()
-        ],
-    )?;
-    for operation in new_operations {
-        tx.execute(
-            "INSERT INTO timeline(incarnation,source,body) VALUES (?1,?2,?3)",
-            params![
-                record.incarnation_id,
-                operation.source_id.as_deref().unwrap_or(""),
-                serde_json::to_string(operation)?
-            ],
-        )?;
-        super::append_event(tx, "harness-timeline", &serde_json::to_value(operation)?)?;
-    }
-    tx.execute("DELETE FROM timeline WHERE id NOT IN (SELECT id FROM timeline ORDER BY id DESC LIMIT 4096)", [])?;
-    tx.execute("DELETE FROM timeline WHERE id IN (
-        SELECT id FROM (SELECT id, SUM(length(CAST(body AS BLOB))) OVER (ORDER BY id DESC) AS retained FROM timeline)
-        WHERE retained > 2097152)", [])?;
-    Ok(())
 }
 
 fn preceding_operations(
@@ -418,6 +506,929 @@ mod tests {
                 .unwrap()
         })
         .collect()
+    }
+
+    // Compare persisted shared effects. Queue time and outbox sequence belong to
+    // each independent spool; output events intentionally consume extra sequence
+    // numbers, so timeline event ordering and content are compared instead.
+    fn shared_timeline_image(root: &Path) -> Vec<Vec<String>> {
+        let connection = super::super::open(root).unwrap();
+        [
+            "SELECT json_array(key,value) FROM metadata WHERE key LIKE 'timeline-next:%' ORDER BY key",
+            "SELECT json_array(id,incarnation,source,body) FROM timeline ORDER BY id",
+            "SELECT json_array(runtime_incarnation,kind,body) FROM events WHERE kind='harness-timeline' ORDER BY sequence",
+        ]
+        .into_iter()
+        .map(|sql| {
+            connection
+                .prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        })
+        .collect()
+    }
+
+    fn pending_bytes(root: &Path) -> u64 {
+        super::super::open(root)
+            .unwrap()
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM metadata WHERE key='pending-bytes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn output_event_bytes(root: &Path) -> u64 {
+        super::super::open(root)
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(SUM(length(CAST(body AS BLOB))),0) FROM events WHERE kind=?1",
+                [SNAPSHOT_KIND],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    // Seed a finite retained history without fabricating historical callback or
+    // outbox evidence. These rows are authored fixtures, not submitted batches;
+    // the byte-boundary fixture can contain a retained row wider than MAX_BATCH.
+    fn seed_retained_timeline(root: &Path, operations: &[Operation]) {
+        let mut connection = super::super::open(root).unwrap();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        for operation in operations {
+            tx.execute(
+                "INSERT INTO timeline(incarnation,source,body) VALUES (?1,?2,?3)",
+                params![
+                    operation.incarnation_id,
+                    operation.source_id,
+                    serde_json::to_string(operation).unwrap()
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    fn retained_timeline_sizes(root: &Path) -> Vec<(u64, u64, u64)> {
+        super::super::open(root)
+            .unwrap()
+            .prepare("SELECT id,length(CAST(body AS BLOB)),length(body) FROM timeline ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn retention_operation(template: &Operation, sequence: u64) -> Operation {
+        let mut operation = template.clone();
+        operation.sequence = sequence;
+        operation.entry_id = format!("retained-{sequence}");
+        operation.source_id = Some(format!("source/retained-{sequence}"));
+        operation
+    }
+
+    fn operation_with_serialized_size(template: &Operation, size: usize) -> Operation {
+        let mut operation = template.clone();
+        operation.body = serde_json::json!({"text":""});
+        let overhead = serde_json::to_vec(&operation).unwrap().len();
+        assert!(size >= overhead);
+        // ASCII padding makes each added byte exact. The submitted boundary
+        // operation below deliberately uses multibyte UTF-8 instead.
+        operation.body = serde_json::json!({"text":"x".repeat(size - overhead)});
+        assert_eq!(serde_json::to_vec(&operation).unwrap().len(), size);
+        operation
+    }
+
+    fn assert_input_refused(
+        root: &Path,
+        record: &Record,
+        operations: &[Operation],
+        batch: &OutputBatch<'_>,
+        expected: &str,
+    ) {
+        let before = spool_image(root);
+        let error = write_timeline_with_output(root, record, operations, batch).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error:#}");
+        assert_eq!(spool_image(root), before);
+    }
+
+    fn nested_input(depth: usize) -> Value {
+        (0..depth).fold(Value::Null, |value, _| Value::Array(vec![value]))
+    }
+
+    #[test]
+    fn private_output_bounds_object_keys_before_spool_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, mut operation, seq) = prepare(root.path(), "omp");
+        operation.body = Value::Object(
+            [("λ".repeat(MAX_BATCH_BYTES / 2) + "x", Value::Null)]
+                .into_iter()
+                .collect(),
+        );
+        record.operations = vec![operation.clone()];
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+            "native output input field is too wide",
+        );
+
+        // The key limit counts UTF-8 bytes, not characters. This exact key
+        // passes the input walker only; JSON overhead prevents a claim that
+        // it also fits the separate serialized-operation limit.
+        let exact = Value::Object(
+            [("λ".repeat(MAX_BATCH_BYTES / 2), Value::Null)]
+                .into_iter()
+                .collect(),
+        );
+        let mut budget = InputBudget {
+            bytes: MAX_BATCH_BYTES,
+            nodes: 2,
+        };
+        budget.value(&exact, 0).unwrap();
+        assert_eq!((budget.bytes, budget.nodes), (0, 0));
+
+        operation.body = serde_json::json!({"small-key": "admitted"});
+        record.operations = vec![operation.clone()];
+        write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::read_timeline(root.path())
+                .unwrap()
+                .unwrap()
+                .operations,
+            vec![operation]
+        );
+    }
+
+    #[test]
+    fn private_output_node_budget_accepts_exact_total_and_refuses_one_extra() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, mut operation, seq) = prepare(root.path(), "omp");
+        // The root array and its null children cost 2,048 nodes per reference.
+        // Record and new each visit it once; no progress reference is supplied.
+        operation.body = Value::Array(vec![Value::Null; MAX_INPUT_NODES / 2 - 1]);
+        let mut retained = retention_operation(&operation, 2);
+        retained.body = Value::Null;
+        record.operations = vec![retained, operation.clone()];
+        record.next_sequence = 3;
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+            "native output input nodes exceed budget",
+        );
+
+        // Removing only the retained null removes exactly one node.
+        record.operations = vec![operation.clone()];
+        write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::read_timeline(root.path())
+                .unwrap()
+                .unwrap()
+                .operations,
+            vec![operation]
+        );
+    }
+
+    #[test]
+    fn private_output_string_budget_accepts_exact_total_and_refuses_one_extra() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, template, seq) = prepare(root.path(), "omp");
+        let mut submitted = retention_operation(&template, 4);
+        submitted.body = Value::Null;
+        record.operations = (1..=3)
+            .map(|sequence| {
+                let mut retained = retention_operation(&template, sequence);
+                retained.body = Value::String(String::new());
+                retained
+            })
+            .collect();
+        record.operations.push(submitted.clone());
+        record.next_sequence = 5;
+
+        // All body strings are empty initially, with no object keys. Compute
+        // the fixture's fixed header/identity bytes independently of the walker;
+        // the submitted identity is charged in both record and new.
+        let input = batch(&record, seq, &[]);
+        let header_bytes: usize = [
+            record.schema.as_str(),
+            record.driver.as_str(),
+            record.incarnation_id.as_str(),
+            input.runtime_incarnation,
+            input.provider_incarnation,
+            input.driver,
+            input.component,
+            input.capability,
+        ]
+        .into_iter()
+        .map(str::len)
+        .sum();
+        let identity_bytes: usize = record
+            .operations
+            .iter()
+            .chain(std::iter::once(&submitted))
+            .map(|operation| {
+                [
+                    operation.operation.as_str(),
+                    operation.entry_id.as_str(),
+                    operation.role.as_str(),
+                    operation.entry_type.as_str(),
+                    operation.driver.as_str(),
+                    operation.incarnation_id.as_str(),
+                    operation.source_id.as_deref().unwrap(),
+                ]
+                .into_iter()
+                .map(str::len)
+                .sum::<usize>()
+            })
+            .sum();
+        let fixed_bytes = header_bytes + identity_bytes;
+        assert!(fixed_bytes > 0 && fixed_bytes < MAX_BATCH_BYTES);
+        for retained in &mut record.operations[..2] {
+            retained.body = Value::String("x".repeat(MAX_BATCH_BYTES));
+        }
+        let last_bytes = MAX_BATCH_BYTES - fixed_bytes;
+        record.operations[2].body = Value::String("x".repeat(last_bytes + 1));
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&submitted),
+            &batch(&record, seq, &[]),
+            "native output input strings exceed budget",
+        );
+
+        record.operations[2].body = Value::String("x".repeat(last_bytes));
+        assert_eq!(
+            fixed_bytes + 2 * MAX_BATCH_BYTES + last_bytes,
+            MAX_INPUT_STRING_BYTES
+        );
+        write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&submitted),
+            &batch(&record, seq, &[]),
+        )
+        .unwrap();
+        // Retained fixture inputs are scanned, not appended or certified as
+        // prior provider output. Only the small submitted operation is stored.
+        assert_eq!(
+            super::super::read_timeline(root.path())
+                .unwrap()
+                .unwrap()
+                .operations,
+            vec![submitted]
+        );
+    }
+
+    #[test]
+    fn private_output_refuses_wide_identity_and_body_before_owner_lookup() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, original, template, seq) = prepare(root.path(), "omp");
+        let wide = "x".repeat(MAX_IDENTITY_BYTES + 1);
+        let mut input = batch(&original, seq, &[]);
+        input.runtime_incarnation = &wide;
+        assert_input_refused(
+            root.path(),
+            &original,
+            std::slice::from_ref(&template),
+            &input,
+            "native output input field is too wide",
+        );
+        let mut operation = template.clone();
+        operation.entry_id = wide;
+        let mut record = original.clone();
+        record.operations = vec![operation.clone()];
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+            "native output input field is too wide",
+        );
+        operation = template.clone();
+        operation.body = serde_json::json!({"text": "x".repeat(MAX_BATCH_BYTES + 1)});
+        record.operations = vec![operation.clone()];
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+            "native output input field is too wide",
+        );
+        write_timeline_with_output(
+            root.path(),
+            &original,
+            std::slice::from_ref(&template),
+            &batch(&original, seq, &[]),
+        )
+        .unwrap();
+        assert_eq!(retained_timeline_sizes(root.path()).len(), 1);
+    }
+
+    #[test]
+    fn private_output_refuses_deep_values_but_accepts_exact_depth_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, mut operation, seq) = prepare(root.path(), "omp");
+        operation.body = nested_input(MAX_INPUT_DEPTH + 1);
+        record.operations = vec![operation.clone()];
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+            "native output input is too deep",
+        );
+        operation.body = nested_input(MAX_INPUT_DEPTH);
+        record.operations = vec![operation.clone()];
+        write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::read_timeline(root.path())
+                .unwrap()
+                .unwrap()
+                .operations,
+            vec![operation]
+        );
+    }
+
+    #[test]
+    fn private_output_refuses_node_budget_exhaustion_without_spool_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, mut operation, seq) = prepare(root.path(), "omp");
+        operation.body = Value::Array(vec![Value::Null; MAX_INPUT_NODES]);
+        record.operations = vec![operation.clone()];
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+            "native output input nodes exceed budget",
+        );
+        operation.body = Value::Array(vec![Value::Null; 1024]);
+        record.operations = vec![operation.clone()];
+        write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::read_timeline(root.path())
+                .unwrap()
+                .unwrap()
+                .operations,
+            vec![operation]
+        );
+    }
+
+    #[test]
+    fn private_output_bounds_retained_and_foreign_progress_inputs_cumulatively() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, template, seq) = prepare(root.path(), "omp");
+        let mut submitted = retention_operation(&template, 5);
+        record.next_sequence = 6;
+        record.operations = (1..=4)
+            .map(|sequence| {
+                let mut operation = retention_operation(&template, sequence);
+                operation.body = serde_json::json!({"text":"x".repeat(200 * 1024)});
+                operation
+            })
+            .collect();
+        record.operations.push(submitted.clone());
+        assert!(serialized_batch_size(std::slice::from_ref(&submitted)).unwrap() < MAX_BATCH_BYTES);
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&submitted),
+            &batch(&record, seq, &[]),
+            "native output input strings exceed budget",
+        );
+        record.operations = vec![submitted.clone()];
+        let mut foreign = template.clone();
+        foreign.body = serde_json::json!({"text":"x".repeat(MAX_BATCH_BYTES + 1)});
+        let progress = [OutputProgress {
+            operation: &foreign,
+            original_at_ms: 10,
+            body_changed: true,
+            tool_identity_complete: true,
+        }];
+        assert_input_refused(
+            root.path(),
+            &record,
+            std::slice::from_ref(&submitted),
+            &batch(&record, seq, &progress),
+            "native output input field is too wide",
+        );
+        // A small valid same-owner callback stays admissible after both refusals.
+        submitted.body = serde_json::json!({"text":"small admitted output"});
+        record.operations = vec![submitted.clone()];
+        let progress = [OutputProgress {
+            operation: &submitted,
+            original_at_ms: 10,
+            body_changed: true,
+            tool_identity_complete: true,
+        }];
+        write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&submitted),
+            &batch(&record, seq, &progress),
+        )
+        .unwrap();
+        let image: Envelope = serde_json::from_slice(
+            &super::super::read_snapshot(root.path(), SNAPSHOT_KIND)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(image.output.last_output.unwrap().at_unix_ms, 10);
+    }
+
+    #[test]
+    fn serialized_batch_counter_matches_utf8_and_escaped_json_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, _, template, _) = prepare(root.path(), "omp");
+        let mut first = retention_operation(&template, 1);
+        first.body = serde_json::json!({
+            "text": "λ🙂\n\"\\\t", "nested": [null, true, 123, {"key": "多字节"}]
+        });
+        first.entry_id = "entry-λ\n\"".into();
+        let mut second = retention_operation(&template, 2);
+        second.body = serde_json::json!({"text": "\u{0000}\r\n".repeat(64)});
+        let operations = [first, second];
+        let expected = operations
+            .iter()
+            .map(|operation| serde_json::to_vec(operation).unwrap().len())
+            .sum::<usize>();
+        assert_eq!(serialized_batch_size(&operations).unwrap(), expected);
+        let first_json = serde_json::to_string(&operations[0]).unwrap();
+        assert!(first_json.len() > first_json.chars().count());
+    }
+
+    #[test]
+    fn private_output_batch_byte_limit_is_inclusive_and_one_extra_byte_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, template, seq) = prepare(root.path(), "omp");
+        let oversized = operation_with_serialized_size(&template, MAX_BATCH_BYTES + 1);
+        record.operations = vec![oversized.clone()];
+        let before = spool_image(root.path());
+        let error = write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&oversized),
+            &batch(&record, seq, &[]),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("native output batch is too wide")
+        );
+        assert_eq!(spool_image(root.path()), before);
+
+        // A same-owner batch at the exact limit must still be accepted; refusing
+        // every large operation would otherwise satisfy the negative assertion.
+        let exact = operation_with_serialized_size(&template, MAX_BATCH_BYTES);
+        record.operations = vec![exact.clone()];
+        let progress = [OutputProgress {
+            operation: &exact,
+            original_at_ms: 10,
+            body_changed: true,
+            tool_identity_complete: true,
+        }];
+        assert_eq!(
+            serialized_batch_size(std::slice::from_ref(&exact)).unwrap(),
+            MAX_BATCH_BYTES
+        );
+        write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&exact),
+            &batch(&record, seq, &progress),
+        )
+        .unwrap();
+        assert_eq!(
+            retained_timeline_sizes(root.path()),
+            vec![(1, MAX_BATCH_BYTES as u64, MAX_BATCH_BYTES as u64)]
+        );
+        let image: Envelope = serde_json::from_slice(
+            &super::super::read_snapshot(root.path(), SNAPSHOT_KIND)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(image.output.last_output.unwrap().at_unix_ms, 10);
+    }
+
+    #[test]
+    fn private_output_batch_byte_limit_is_cumulative_across_operations() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, template, seq) = prepare(root.path(), "omp");
+        let oversized = [1, 2].map(|sequence| {
+            operation_with_serialized_size(
+                &retention_operation(&template, sequence),
+                MAX_BATCH_BYTES / 2 + 1,
+            )
+        });
+        for operation in &oversized {
+            assert_eq!(
+                serialized_batch_size(std::slice::from_ref(operation)).unwrap(),
+                MAX_BATCH_BYTES / 2 + 1
+            );
+        }
+        record.next_sequence = 3;
+        record.operations = oversized.to_vec();
+        let before = spool_image(root.path());
+        let error =
+            write_timeline_with_output(root.path(), &record, &oversized, &batch(&record, seq, &[]))
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("native output batch is too wide")
+        );
+        assert_eq!(spool_image(root.path()), before);
+
+        let exact = [1, 2].map(|sequence| {
+            operation_with_serialized_size(
+                &retention_operation(&template, sequence),
+                MAX_BATCH_BYTES / 2,
+            )
+        });
+        record.operations = exact.to_vec();
+        assert_eq!(serialized_batch_size(&exact).unwrap(), MAX_BATCH_BYTES);
+        write_timeline_with_output(root.path(), &record, &exact, &batch(&record, seq, &[]))
+            .unwrap();
+        let sizes = retained_timeline_sizes(root.path());
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(
+            sizes.iter().map(|row| row.1).sum::<u64>(),
+            MAX_BATCH_BYTES as u64
+        );
+    }
+
+    #[test]
+    fn shared_timeline_retention_keeps_4096_rows_and_prunes_only_the_oldest() {
+        let production = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
+        prepare(production.path(), "omp");
+        let (_, mut record, template, seq) = prepare(private.path(), "omp");
+        let history = (1..4096)
+            .map(|sequence| retention_operation(&template, sequence))
+            .collect::<Vec<_>>();
+        for root in [production.path(), private.path()] {
+            seed_retained_timeline(root, &history);
+            let sizes = retained_timeline_sizes(root);
+            assert_eq!(sizes.len(), 4095);
+            assert!(sizes.iter().map(|row| row.1).sum::<u64>() < 2_097_152);
+        }
+        let production_before = pending_bytes(production.path());
+        let private_before = pending_bytes(private.path());
+        for sequence in [4096, 4097] {
+            let operation = retention_operation(&template, sequence);
+            record.next_sequence = sequence + 1;
+            record.operations = vec![operation.clone()];
+            super::super::write_timeline(
+                production.path(),
+                &record,
+                std::slice::from_ref(&operation),
+            )
+            .unwrap();
+            write_timeline_with_output(
+                private.path(),
+                &record,
+                std::slice::from_ref(&operation),
+                &batch(&record, seq, &[]),
+            )
+            .unwrap();
+            assert_eq!(
+                shared_timeline_image(production.path()),
+                shared_timeline_image(private.path())
+            );
+            let sizes = retained_timeline_sizes(private.path());
+            assert_eq!(sizes.len(), 4096);
+            assert_eq!(sizes.first().unwrap().0, sequence - 4095);
+            assert_eq!(sizes.last().unwrap().0, sequence);
+            assert!(sizes.iter().map(|row| row.1).sum::<u64>() < 2_097_152);
+            assert_eq!(
+                pending_bytes(production.path()) - production_before,
+                pending_bytes(private.path()) - private_before - output_event_bytes(private.path())
+            );
+        }
+    }
+
+    #[test]
+    fn shared_timeline_retention_keeps_exact_utf8_byte_limit_then_prunes_whole_rows() {
+        const LIMIT: usize = 2_097_152;
+        let production = tempfile::tempdir().unwrap();
+        let private = tempfile::tempdir().unwrap();
+        prepare(production.path(), "omp");
+        let (_, mut record, template, seq) = prepare(private.path(), "omp");
+        let mut first = retention_operation(&template, 3);
+        first.body = serde_json::json!({"text":"λ🙂".repeat(256)});
+        let first_bytes = serde_json::to_vec(&first).unwrap().len();
+        let old_first = operation_with_serialized_size(&retention_operation(&template, 1), 700_000);
+        let old_second = operation_with_serialized_size(
+            &retention_operation(&template, 2),
+            LIMIT - 700_000 - first_bytes,
+        );
+        let history = [old_first, old_second];
+        for root in [production.path(), private.path()] {
+            seed_retained_timeline(root, &history);
+            assert_eq!(
+                retained_timeline_sizes(root)
+                    .iter()
+                    .map(|row| row.1)
+                    .sum::<u64>(),
+                (LIMIT - first_bytes) as u64
+            );
+        }
+        let second = retention_operation(&template, 4);
+        let second_bytes = serde_json::to_vec(&second).unwrap().len();
+        let production_before = pending_bytes(production.path());
+        let private_before = pending_bytes(private.path());
+        for operation in [first, second] {
+            record.next_sequence = operation.sequence + 1;
+            record.operations = vec![operation.clone()];
+            super::super::write_timeline(
+                production.path(),
+                &record,
+                std::slice::from_ref(&operation),
+            )
+            .unwrap();
+            write_timeline_with_output(
+                private.path(),
+                &record,
+                std::slice::from_ref(&operation),
+                &batch(&record, seq, &[]),
+            )
+            .unwrap();
+            assert_eq!(
+                shared_timeline_image(production.path()),
+                shared_timeline_image(private.path())
+            );
+            let sizes = retained_timeline_sizes(private.path());
+            let ids = sizes.iter().map(|row| row.0).collect::<Vec<_>>();
+            let bytes = sizes.iter().map(|row| row.1).sum::<u64>();
+            if operation.sequence == 3 {
+                assert_eq!(ids, vec![1, 2, 3]);
+                assert_eq!(bytes, LIMIT as u64, "exact byte limit is inclusive");
+            } else {
+                assert_eq!(ids, vec![2, 3, 4]);
+                assert_eq!(bytes, (LIMIT - 700_000 + second_bytes) as u64);
+            }
+            assert!(sizes.iter().map(|row| row.2).sum::<u64>() < bytes);
+            assert_eq!(
+                pending_bytes(production.path()) - production_before,
+                pending_bytes(private.path()) - private_before - output_event_bytes(private.path())
+            );
+        }
+    }
+
+    #[test]
+    fn failed_output_event_restores_rows_pruned_by_shared_timeline_retention() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, mut record, template, seq) = prepare(root.path(), "omp");
+        let history = (1..=4096)
+            .map(|sequence| retention_operation(&template, sequence))
+            .collect::<Vec<_>>();
+        seed_retained_timeline(root.path(), &history);
+        assert!(
+            retained_timeline_sizes(root.path())
+                .iter()
+                .map(|row| row.1)
+                .sum::<u64>()
+                < 2_097_152
+        );
+        let operation = retention_operation(&template, 4097);
+        record.next_sequence = 4098;
+        record.operations = vec![operation.clone()];
+        let progress = [OutputProgress {
+            operation: &operation,
+            original_at_ms: 10,
+            body_changed: true,
+            tool_identity_complete: true,
+        }];
+        let before = spool_image(root.path());
+        super::super::open(root.path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_output_retention BEFORE INSERT ON events
+             WHEN NEW.kind='harness-output'
+             BEGIN SELECT RAISE(ABORT,'output retention failure'); END;",
+            )
+            .unwrap();
+        let error = write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &progress),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("output retention failure"));
+        assert_eq!(spool_image(root.path()), before);
+        super::super::open(root.path())
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_output_retention")
+            .unwrap();
+        // The same admitted batch now succeeds and actually crosses retention,
+        // so a guard refusal before append cannot satisfy the rollback control.
+        write_timeline_with_output(
+            root.path(),
+            &record,
+            std::slice::from_ref(&operation),
+            &batch(&record, seq, &progress),
+        )
+        .unwrap();
+        let sizes = retained_timeline_sizes(root.path());
+        assert_eq!(sizes.len(), 4096);
+        assert_eq!(sizes.first().unwrap().0, 2);
+        assert_eq!(sizes.last().unwrap().0, 4097);
+    }
+
+    #[test]
+    fn production_and_private_writes_match_shared_timeline_effects() {
+        for driver in ["codex", "claude", "pi", "omp", "opencode"] {
+            let production = tempfile::tempdir().unwrap();
+            let private = tempfile::tempdir().unwrap();
+            let (_, _, _, production_seq) = prepare(production.path(), driver);
+            let (_, mut record, mut operation, seq) = prepare(private.path(), driver);
+            assert_eq!(production_seq, seq);
+            let production_before = pending_bytes(production.path());
+            let private_before = pending_bytes(private.path());
+            let production_state = super::super::read_snapshot(production.path(), "harness-state")
+                .unwrap()
+                .unwrap();
+            let private_state = super::super::read_snapshot(private.path(), "harness-state")
+                .unwrap()
+                .unwrap();
+
+            // First append then finalization of unchanged content: both actual
+            // writer entry points process the identical submitted operation.
+            for revision in [1, 2] {
+                operation.revision = revision;
+                operation.final_entry = revision == 2;
+                operation.operation = if revision == 1 { "append" } else { "finalize" }.into();
+                record.operations = vec![operation.clone()];
+                super::super::write_timeline(
+                    production.path(),
+                    &record,
+                    std::slice::from_ref(&operation),
+                )
+                .unwrap();
+                let progress = [OutputProgress {
+                    operation: &operation,
+                    original_at_ms: revision * 10,
+                    body_changed: true,
+                    tool_identity_complete: true,
+                }];
+                write_timeline_with_output(
+                    private.path(),
+                    &record,
+                    std::slice::from_ref(&operation),
+                    &batch(&record, seq, &progress),
+                )
+                .unwrap();
+                assert_eq!(
+                    shared_timeline_image(production.path()),
+                    shared_timeline_image(private.path()),
+                    "{driver}: revision {revision}"
+                );
+                assert_eq!(
+                    pending_bytes(production.path()) - production_before,
+                    pending_bytes(private.path())
+                        - private_before
+                        - output_event_bytes(private.path()),
+                    "{driver}: shared outbox byte accounting at revision {revision}"
+                );
+            }
+            assert_eq!(
+                super::super::read_snapshot(production.path(), "harness-state")
+                    .unwrap()
+                    .unwrap(),
+                production_state
+            );
+            assert_eq!(
+                super::super::read_snapshot(private.path(), "harness-state")
+                    .unwrap()
+                    .unwrap(),
+                private_state
+            );
+            assert!(
+                super::super::read_snapshot(production.path(), SNAPSHOT_KIND)
+                    .unwrap()
+                    .is_none()
+            );
+            let image: Envelope = serde_json::from_slice(
+                &super::super::read_snapshot(private.path(), SNAPSHOT_KIND)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(image.output.last_output.unwrap().at_unix_ms, 10);
+        }
+    }
+
+    #[test]
+    fn superseded_token_is_refused_by_production_and_private_timeline_writes() {
+        for private in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (_, mut record, mut operation, old_seq) = prepare(root.path(), "omp");
+            let successor = claim(root.path(), "agent/example", "omp", "provider-b").unwrap();
+            assert!(successor > old_seq);
+            let mut writer = Writer::new(
+                root.path(),
+                "agent/example",
+                "omp",
+                Some("private-control-pty".into()),
+            )
+            .with_ownership("provider-b", successor);
+            writer
+                .observe(Observation::new(
+                    Activity::Active,
+                    BlockedOn::None,
+                    InputBuffer::Unknown,
+                ))
+                .unwrap();
+            assert_eq!(
+                super::super::current_token(&super::super::open(root.path()).unwrap())
+                    .unwrap()
+                    .as_deref(),
+                Some("provider-b")
+            );
+            let before = spool_image(root.path());
+            let result = if private {
+                write_timeline_with_output(
+                    root.path(),
+                    &record,
+                    std::slice::from_ref(&operation),
+                    &batch(&record, old_seq, &[]),
+                )
+            } else {
+                super::super::write_timeline(root.path(), &record, std::slice::from_ref(&operation))
+            };
+            assert!(
+                result.is_err(),
+                "private={private}: retired owner must be refused"
+            );
+            assert_eq!(spool_image(root.path()), before);
+
+            // An accepted successor prevents blanket refusal from satisfying the
+            // negative control; no native callback provenance is inferred.
+            record.incarnation_id = "provider-b".into();
+            operation.incarnation_id = "provider-b".into();
+            record.operations = vec![operation.clone()];
+            if private {
+                write_timeline_with_output(
+                    root.path(),
+                    &record,
+                    std::slice::from_ref(&operation),
+                    &batch(&record, successor, &[]),
+                )
+                .unwrap();
+            } else {
+                super::super::write_timeline(
+                    root.path(),
+                    &record,
+                    std::slice::from_ref(&operation),
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                super::super::read_timeline(root.path())
+                    .unwrap()
+                    .unwrap()
+                    .operations,
+                vec![operation]
+            );
+        }
     }
 
     #[test]

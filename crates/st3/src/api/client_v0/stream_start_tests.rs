@@ -2,6 +2,103 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+/// Run alone with ST3_PROFILE_DIR and ST3_PROFILE_SLOW_MS=0 so the real profile
+/// sink can prove completion before the follower's intentional long-poll idle.
+#[tokio::test]
+#[ignore = "requires an isolated profile sink; run alone with --ignored"]
+async fn conversation_first_frame_profile_lifecycle() {
+    crate::profile::init_from_env();
+    assert!(crate::profile::enabled());
+    let poll_profile = crate::profile::Op::start("profile-poll-fixture", None).unwrap();
+    {
+        let mut pending = std::pin::pin!(conversation_profile_work(
+            Some(&poll_profile), "test/poll", async {
+                assert!(crate::profile::current().is_some());
+                std::future::pending::<()>().await;
+            },
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut context).is_pending());
+        assert!(crate::profile::current().is_none(), "ownership must end before suspension");
+    }
+    poll_profile.finish();
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "profile-fixture");
+    state.store.append_claim(&ClaimInput {
+        subject: "agent/chat".into(), kind: "runtime.observed".into(),
+        actor: Some("agent/chat".into()),
+        fields: serde_json::from_value(json!({"status":"running", "runtime_id":"chat", "incarnation_id":"one"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let app = axum::Router::new().route("/stream", axum::routing::get(move |upgrade: WebSocketUpgrade| {
+        let state = state.clone();
+        async move {
+            let windows = collection_windows::Windows::attach(&state.store);
+            upgrade.on_upgrade(move |socket| collection_stream_socket_with_reader(
+                socket, state, ClientSession::local(None).unwrap(), None,
+                move |state, session, request, permit| {
+                    let windows = windows.clone();
+                    async move { collection_items_with_windows(&state, &session, &request, permit, windows).await }
+                },
+            ))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+    socket.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({"kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":"agent/chat"}).to_string().into(),
+    )).await.unwrap();
+    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    let frame: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    assert_eq!(frame["kind"], "conversation");
+    // A ping/pong fence proves the socket has finished the send branch and its
+    // operation, without a sleep or relying on client receive/server scheduling.
+    socket.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new().into())).await.unwrap();
+    let pong = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    assert!(matches!(pong, tokio_tungstenite::tungstenite::Message::Pong(_)));
+    let path = std::path::PathBuf::from(std::env::var_os("ST3_PROFILE_DIR").unwrap()).join("slow.jsonl");
+    let profiles = || std::fs::read_to_string(&path).unwrap().lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|record| record["label"] == "stream conversation/first-frame").collect::<Vec<_>>();
+    let records = profiles();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["completion"], "finished");
+    let spans = records[0]["spans"].as_array().unwrap();
+    for name in ["conversation/first-frame-total", "conversation/admission-queue",
+        "conversation/owner-resolution", "conversation/first-page",
+        "conversation/frame-preparation", "conversation/serialization-send",
+        "conversation/serialization", "conversation/send",
+        "conversation/owner-read", "conversation/owner-read-queue",
+        "conversation/local-open", "conversation/first-page-read-queue"] {
+        assert!(spans.iter().any(|span| span["name"] == name), "missing {name}: {spans:?}");
+    }
+    for name in ["conversation/admission-queue", "conversation/owner-resolution", "conversation/first-page",
+        "conversation/send", "conversation/owner-read-queue", "conversation/first-page-read-queue"] {
+        let span = spans.iter().find(|span| span["name"] == name).unwrap();
+        assert_eq!(span["cpu_ms"], 0.0);
+        assert_eq!(span["sql_ms"], 0.0);
+    }
+    // The follower is now awaiting changes. Neither this intentional idle nor
+    // unsubscribing it may create another initial-work record.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    socket.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({"kind":"unsubscribe", "id":"chat"}).to_string().into(),
+    )).await.unwrap();
+    socket.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new().into())).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    assert_eq!(profiles(), records);
+    socket.close(None).await.unwrap();
+    // Cancellation/replacement before data delivery must not claim successful completion.
+    let canceled = subscription_first_frame("conversation", "canceled", None).unwrap();
+    drop(canceled);
+    let records = profiles();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1]["completion"], "dropped");
+    server.abort();
+}
+
 #[tokio::test]
 async fn cold_open_four_subscriptions_do_not_wait_for_slow_roster() {
     let root = tempfile::tempdir().unwrap();
@@ -14,7 +111,7 @@ async fn cold_open_four_subscriptions_do_not_wait_for_slow_roster() {
     }).unwrap();
     // Hold the real store-wide cold-roster admission, not a mocked reader. Other
     // collections still use the production shared-window and SQLite snapshot path.
-    let slow_roster = state.store.admit_agent_resources().await;
+    let slow_roster = state.store.admit_agent_resources("other").await;
     let app = axum::Router::new().route("/stream", axum::routing::get(move |upgrade: WebSocketUpgrade| {
         let state = state.clone();
         async move {
@@ -191,7 +288,7 @@ async fn cold_open_remote_transient_failure_does_not_force_resubscribe() {
     let (outbox, mut frames) = tokio::sync::mpsc::unbounded_channel();
     let start = Instant::now();
     let follower = tokio::spawn(follow_conversation(state, ClientSession::local(Some("person/test")).unwrap(),
-        "chat".into(), 1, "session/fixture".into(), Some("host/owner".into()), outbox));
+        "chat".into(), 1, ("session/fixture".into(), Some("host/owner".into())), outbox, Queue::new(Kind::Conversation), (None, None)));
     let (_, _, frame) = tokio::time::timeout(Duration::from_secs(5), frames.recv()).await.unwrap().unwrap();
     println!("cold-open transient owner first frame: {} {:.3} ms, {} owner calls", frame["kind"], start.elapsed().as_secs_f64() * 1000.0, calls.load(Ordering::SeqCst));
     follower.abort();
@@ -208,7 +305,7 @@ async fn cold_open_remote_outage_still_reports_resync() {
     let (outbox, mut frames) = tokio::sync::mpsc::unbounded_channel();
     let start = Instant::now();
     let follower = tokio::spawn(follow_conversation(state, ClientSession::local(Some("person/test")).unwrap(),
-        "chat".into(), 1, "session/fixture".into(), Some("host/owner".into()), outbox));
+        "chat".into(), 1, ("session/fixture".into(), Some("host/owner".into())), outbox, Queue::new(Kind::Conversation), (None, None)));
     let (_, _, frame) = tokio::time::timeout(Duration::from_secs(5), frames.recv()).await.unwrap().unwrap();
     let elapsed = start.elapsed();
     println!("cold-open persistent outage first frame: {} {:.3} ms, {} owner calls", frame["kind"], elapsed.as_secs_f64() * 1000.0, calls.load(Ordering::SeqCst));
@@ -230,7 +327,7 @@ async fn cold_open_remote_authorization_failure_is_not_retried() {
     let (state, calls, server) = remote_fixture(root.path(), OwnerAfterFailure::Unavailable, "forbidden").await;
     let (outbox, mut frames) = tokio::sync::mpsc::unbounded_channel();
     let follower = tokio::spawn(follow_conversation(state, ClientSession::local(Some("person/test")).unwrap(),
-        "chat".into(), 1, "session/fixture".into(), Some("host/owner".into()), outbox));
+        "chat".into(), 1, ("session/fixture".into(), Some("host/owner".into())), outbox, Queue::new(Kind::Conversation), (None, None)));
     let (_, _, frame) = tokio::time::timeout(Duration::from_secs(5), frames.recv()).await.unwrap().unwrap();
     follower.abort();
     server.abort();
@@ -246,7 +343,7 @@ async fn cold_open_remote_stalled_retry_keeps_normal_peer_read_deadline() {
     let (outbox, mut frames) = tokio::sync::mpsc::unbounded_channel();
     let start = Instant::now();
     let follower = tokio::spawn(follow_conversation(state, ClientSession::local(Some("person/test")).unwrap(),
-        "chat".into(), 1, "session/fixture".into(), Some("host/owner".into()), outbox));
+        "chat".into(), 1, ("session/fixture".into(), Some("host/owner".into())), outbox, Queue::new(Kind::Conversation), (None, None)));
     let (_, _, frame) = tokio::time::timeout(Duration::from_secs(20), frames.recv()).await.unwrap().unwrap();
     println!("cold-open stalled retry first frame: {} {:.3} ms, {} owner calls", frame["kind"], start.elapsed().as_secs_f64() * 1000.0, calls.load(Ordering::SeqCst));
     follower.abort();
@@ -265,7 +362,7 @@ async fn cold_open_remote_slow_successful_retry_is_not_canceled() {
     let (outbox, mut frames) = tokio::sync::mpsc::unbounded_channel();
     let start = Instant::now();
     let follower = tokio::spawn(follow_conversation(state, ClientSession::local(Some("person/test")).unwrap(),
-        "chat".into(), 1, "session/fixture".into(), Some("host/owner".into()), outbox));
+        "chat".into(), 1, ("session/fixture".into(), Some("host/owner".into())), outbox, Queue::new(Kind::Conversation), (None, None)));
     let (_, _, frame) = tokio::time::timeout(Duration::from_secs(6), frames.recv()).await.unwrap().unwrap();
     println!("cold-open slow successful retry first frame: {} {:.3} ms, {} owner calls", frame["kind"], start.elapsed().as_secs_f64() * 1000.0, calls.load(Ordering::SeqCst));
     follower.abort();

@@ -137,7 +137,7 @@ const exerciseSession = async (canvasElement: HTMLElement, name: SessionName): P
 }
 const playSession = (name: SessionName): NonNullable<Story['play']> => async ({ canvasElement }) => exerciseSession(canvasElement, name)
 
-const meta = { title: 'Fractal/Kit/Sessions', component: SessionStory, parameters: { layout: 'fullscreen' }, args: { name: 'short-success', scheme: 'dark' }, argTypes: { name: { options: sessionNames, control: 'select' }, scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof SessionStory>
+const meta = { title: 'Fractal/Explore/Sessions', component: SessionStory, parameters: { layout: 'fullscreen' }, args: { name: 'short-success', scheme: 'dark' }, argTypes: { name: { options: sessionNames, control: 'select' }, scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof SessionStory>
 export default meta
 type Story = StoryObj<typeof meta>
 export const ShortSuccess: Story = { args: { name: 'short-success' }, play: playSession('short-success') }

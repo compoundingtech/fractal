@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add eight synthetic Fractal session fixtures and interactive session stories",
+  "replay": {"status": "none", "detail": "Only development fixtures and Storybook stories change; production replay and recovery are unchanged."},
+  "schema": {"status": "none", "detail": "The fixtures decode through the existing timeline schema; no database schema or migration changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes."},
+  "compatibility": {"status": "none", "detail": "The new sessions export is a development fixture API; no client protocol or runtime compatibility changes."},
+  "downtime": {"status": "none", "detail": "No additional service interruption introduced by these development-only fixtures."},
+  "manual": {"status": "none", "detail": "Existing installations require no additional upgrade steps."},
+  "recovery": {"status": "none", "detail": "No production storage or recovery behavior changes."}
+}

@@ -724,6 +724,7 @@ pub(crate) fn fleet_subjects(store: &Store, seats: usize) -> Subjects {
                 &step.subject,
                 "claim",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(agent.clone()),
                     incarnation: Some(incarnation.clone()),
                     summary: None,
@@ -819,6 +820,7 @@ async fn held_seats_can_reclaim_after_orphan_repair() {
             .insert("incarnation_id".into(), json!(incarnation));
         store.append_claim(&running).unwrap();
         let mut request = WorkRequest {
+            wait_ms: None,
             actor: Some(agent.clone()),
             incarnation: Some(incarnation.clone()),
             summary: None,
@@ -930,6 +932,7 @@ async fn seat_loop(
             // none of; the renewal itself is the same write.
             let started = Instant::now();
             let request = WorkRequest {
+                wait_ms: None,
                 actor: Some(holder.clone()),
                 incarnation: Some(incarnation.clone()),
                 summary: None,
@@ -1409,6 +1412,7 @@ pub(crate) fn generate(store: &Store, prefix: &str, scale: f64) {
                     .clone()
                     .unwrap_or_else(|| "agent/bench/seat-0".into());
                 let request = |action: &str, n: usize, summary: bool| WorkRequest {
+                    wait_ms: None,
                     actor: Some(actor.clone()),
                     incarnation: Some(format!("{prefix}-{run}")),
                     summary: summary.then(|| format!("Invented {action} note {n}")),

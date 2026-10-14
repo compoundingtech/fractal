@@ -16,6 +16,8 @@ pub enum AlertTap {
     Answer(String),
     /// Open the alert's whole card in Now, where every kind is answered.
     Open,
+    /// Expand or collapse the band: the `Hit` names the agent's conversation, not an alert.
+    Toggle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +32,12 @@ pub enum Hit {
     NewTerminal,
     /// A row of the Ctrl+S sidebar's list: select it and open it.
     SidebarRow(usize),
+    ResourceRow(usize),
+    ResourceFilter,
+    ResourceNewFolder,
+    ResourceAdd(String),
+    ResourceFolderMenu(String),
+    ResourceFolderDrag(String),
     /// One of the sidebar's sections across its top.
     SidebarSection(usize),
     /// Glasses: the top bar's usage slot, which shows and hides the sidebar's Usage.
@@ -48,6 +56,9 @@ pub enum Hit {
     Enter,
     Escape,
     ToggleTool(String),
+    ContentImage(super::content::Key),
+    ContentOutput(super::content::Key),
+    InlineImage(super::content::Key),
     Pane(st3_conversation_ui::PaneIntent),
     JumpLatest,
     Composer,

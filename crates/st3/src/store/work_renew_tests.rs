@@ -9,6 +9,7 @@ struct Renewal {
 
 fn request(key: &str, summary: Option<&str>) -> WorkRequest {
     WorkRequest {
+        wait_ms: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some("current".into()),
         summary: summary.map(Into::into),
@@ -119,15 +120,16 @@ fn a_renewal_holds_the_writer_for_a_fixed_number_of_statements_whatever_the_clai
     }
     let (short, long) = (costs[0], costs[1]);
     // Every statement the job runs, counted once: the step, its owner, the lease updates, the
-    // idempotency receipt; a published renewal adds its claim append.
+    // idempotency receipt; a published renewal adds its claim append, including the two
+    // transactional batch-rowid high-water statements.
     assert!(
         short.0.statements <= 13,
         "a quiet renewal grew past its 13-statement writer budget: {}",
         short.0.statements
     );
     assert!(
-        short.1.statements <= 25,
-        "a published renewal grew past its 25-statement writer budget: {}",
+        short.1.statements <= 27,
+        "a published renewal grew past its 27-statement writer budget: {}",
         short.1.statements
     );
     assert_eq!(
@@ -187,6 +189,7 @@ fn a_renewal_answers_what_the_writer_answered_when_it_enriched_the_view() {
             subject,
             "extend",
             &WorkRequest {
+                wait_ms: None,
                 reason: Some("more to do".into()),
                 ..request("renewal-extend", None)
             },
@@ -240,6 +243,7 @@ fn a_renewal_answers_what_the_writer_answered_when_it_enriched_the_view() {
                 subject,
                 "renew",
                 &WorkRequest {
+                    wait_ms: None,
                     incarnation: Some("old".into()),
                     ..request("parity-stale", None)
                 },

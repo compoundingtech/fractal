@@ -38,8 +38,20 @@ pub fn refuse_person_recipient(recipient: &str) -> Result<(), St3Error> {
     Ok(())
 }
 
+fn is_zero_u128(value: &u128) -> bool {
+    *value == 0
+}
+
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 fn is_false(value: &bool) -> bool {
@@ -267,8 +279,11 @@ pub fn effective_agent_name<'a>(subject: &'a str, desired: Option<&'a Value>) ->
         .unwrap_or_else(|| subject.strip_prefix("agent/").unwrap_or(subject))
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct DesiredSubject {
+    /// Declared once on a person-authored root; used only by trace resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accountable: Option<String>,
     pub subject: String,
     pub kind: String,
     pub desired: Value,
@@ -280,6 +295,36 @@ pub struct DesiredSubject {
     pub owner_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_step: Option<String>,
+}
+
+// Accountable roots carry a fields envelope too: legacy admission reads that envelope
+// before decoding DesiredSubject, and therefore retains the new field as unknown.
+impl Serialize for DesiredSubject {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // Desired revisions hash CBOR directly. Preserve the derived struct's
+        // definite map length as well as its field order for existing declarations.
+        let len = 3 + usize::from(self.member.is_some())
+            + usize::from(self.owner_run.is_some())
+            + usize::from(self.owner_generation.is_some())
+            + usize::from(self.owner_step.is_some())
+            + 2 * usize::from(self.accountable.is_some());
+        let mut map = serializer.serialize_struct("DesiredSubject", len)?;
+        map.serialize_field("subject", &self.subject)?;
+        map.serialize_field("kind", &self.kind)?;
+        map.serialize_field("desired", &self.desired)?;
+        if let Some(member) = &self.member { map.serialize_field("member", member)?; }
+        if let Some(run) = &self.owner_run { map.serialize_field("owner_run", run)?; }
+        if let Some(generation) = &self.owner_generation { map.serialize_field("owner_generation", generation)?; }
+        if let Some(step) = &self.owner_step { map.serialize_field("owner_step", step)?; }
+        if let Some(person) = &self.accountable {
+            map.serialize_field("accountable", person)?;
+            map.serialize_field("fields", &serde_json::json!({
+                "kind": self.kind, "desired": self.desired, "accountable": person,
+            }))?;
+        }
+        map.end()
+    }
 }
 
 impl DesiredSubject {
@@ -431,6 +476,10 @@ pub struct LoopStopSpec {
     pub plateau_rounds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeated_failure: Option<u32>,
+    /// Stop when this many rounds in a row end with the same metrics and the same exit gate
+    /// results, so nothing a round did changed what the loop can see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
 }
@@ -599,6 +648,9 @@ pub struct MissionSpec {
     /// How long a run may go without progress before it is reported as stalled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Whether silence is reported as a stall; older records default to true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub report_stalls: bool,
     /// Whether a completed run is reported too.
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
@@ -2017,7 +2069,31 @@ pub struct MessageView {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
+    /// A long body's reference, `blob/<sha256>`, when `content` is only its preview. Absent for
+    /// a message whose `content` is the whole text, and on daemons that predate long bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    /// The length in bytes of the whole body, with `body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
+    /// The member holding the body's file, such as `host/laptop`, with `body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_origin: Option<String>,
     pub created_index: u64,
+}
+
+impl MessageView {
+    /// A long body as the attachment record it is kept as: a file on the member that took the
+    /// send, fetched from there like an image. See [`crate::message_body`].
+    pub fn body_attachment(&self) -> Option<MessageAttachment> {
+        Some(MessageAttachment {
+            sha256: crate::message_body::parse_reference(self.body_ref.as_deref()?)?.to_owned(),
+            media_type: crate::message_body::MEDIA_TYPE.into(),
+            name: None,
+            size: self.body_bytes?,
+            origin: self.body_origin.clone()?,
+        })
+    }
 }
 
 /// The daemon's answer to a message send, and what a send's idempotency key landed as. Older
@@ -2449,6 +2525,9 @@ pub struct StepRunView {
     pub worker_reported: bool,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
+    /// The submitting incarnation for this attempt; absent in older submission claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_incarnation: Option<String>,
     pub claim_expires_at_unix_ms: Option<u128>,
     /// The seat whose claim a revision dropped when it carried this ready step
     /// into the current generation, until that seat claims it again.
@@ -2456,6 +2535,12 @@ pub struct StepRunView {
     pub carried_claimant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_started_at_unix_ms: Option<u128>,
+    /// While a declared wait has stopped the execution clock: when the wait ends on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_paused_until_unix_ms: Option<u128>,
+    /// What this attempt has spent in declared waits; a wait has a budget per attempt.
+    #[serde(default, skip_serializing_if = "is_zero_u128")]
+    pub execution_waited_ms: u128,
     #[serde(default)]
     pub execution_elapsed_ms: u128,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2472,6 +2557,10 @@ pub struct StepRunView {
     pub progress_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_at_unix_ms: Option<u128>,
+    /// When st last nudged this attempt's holder for idling with nothing set to wake it, while
+    /// the step is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudged_at_unix_ms: Option<u128>,
     /// The `work complete` summary for the current attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_summary: Option<String>,
@@ -2482,6 +2571,28 @@ pub struct StepRunView {
     pub not_before_unix_ms: Option<u128>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+/// Compare an immutable submission receipt with the expected author and result.
+/// Unknown incarnations (including legacy receipts) never establish a match.
+pub fn work_submission_matches(
+    claim: &ClaimRecord,
+    subject: &str,
+    attempt: u32,
+    actor: &str,
+    incarnation: Option<&str>,
+    evidence: &[String],
+) -> bool {
+    let Some(incarnation) = incarnation.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    claim.kind == "work.submitted"
+        && claim.subject == subject
+        && claim.actor.as_deref() == Some(actor)
+        && fields.get("attempt").and_then(Value::as_u64) == Some(u64::from(attempt))
+        && fields.get("submitted_incarnation").and_then(Value::as_str) == Some(incarnation)
+        && claim.body.get("evidence") == Some(&serde_json::json!(evidence))
 }
 
 pub fn fresh_context_operation(step: &StepRunView) -> String {
@@ -2627,6 +2738,10 @@ pub struct WorkRequest {
     pub reason: Option<String>,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// `work wait`: how long the execution clock stays stopped at most. Absent for every other
+    /// action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
     pub idempotency_key: String,
 }
 
@@ -2775,6 +2890,9 @@ pub struct MissionRunReportRequest {
     pub report_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Override the mission's stall reporting policy; omission inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_stalls: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
     pub idempotency_key: String,
@@ -2788,6 +2906,9 @@ pub struct MissionRunReportView {
     pub report_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Whether silence is reported as a stall; older records default to true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub report_stalls: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
     /// Whether this request changed it.

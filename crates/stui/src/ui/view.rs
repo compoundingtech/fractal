@@ -54,6 +54,11 @@ pub struct World {
     /// Whether the missions window is followed now. Not part of the shared contract.
     #[serde(skip)]
     pub missions_followed: bool,
+    /// Whether the attention and agents windows are st's own on this run, not a cached copy. The
+    /// top bar prints nothing about them until they are, so it never shows one picture and then
+    /// another. Not part of the shared contract.
+    #[serde(skip)]
+    pub settled: bool,
     /// The number of active missions st reports, when the mission rows are not followed.
     #[serde(skip)]
     pub active_missions: Option<usize>,
@@ -79,6 +84,10 @@ pub struct World {
     pub agent_messages: Option<st3_client::AgentMessageEstimate>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
+    #[serde(skip)]
+    pub inventory_supported: Option<bool>,
+    #[serde(skip)]
+    pub inventory_partial: Vec<String>,
 }
 
 /// A client connected to this member, as it describes itself.
@@ -345,6 +354,9 @@ pub enum AgentState {
     Compacting,
     Idle,
     Starting,
+    /// Declared, with no running session after its launch window (st's `down` state): the
+    /// details say since when. Never shown as starting or working.
+    Down,
     Stopped,
     Unknown,
 }
@@ -405,6 +417,9 @@ pub struct AgentDetails {
     /// The next step queued for it, as "mission › step".
     pub next: Option<String>,
     pub queue: Vec<String>,
+    /// The mission each of `next` and `queue` belongs to, by the same place, for opening it.
+    pub next_mission: Option<String>,
+    pub queue_missions: Vec<String>,
     pub queued: u64,
     pub harness_state: Option<String>,
     pub runtime: Option<String>,
@@ -412,6 +427,8 @@ pub struct AgentDetails {
     pub under: Option<String>,
     /// The model its harness last reported using, as reported ("claude-sonnet-5-5").
     pub model: Option<String>,
+    /// The effort level its seat is configured to run at ("high"), when it names one.
+    pub effort: Option<String>,
     /// What the step it holds last reported (`st work progress`): the status a person reads first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<String>,

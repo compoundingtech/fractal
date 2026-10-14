@@ -29,8 +29,14 @@ pub struct Extras {
     pub window_errors: BTreeMap<String, String>,
     /// Whether the missions window is followed and has loaded.
     pub missions_followed: bool,
+    /// Whether st has sent the attention and agents windows on this run: until it has, what the
+    /// model holds is a cache from an earlier run, and nothing built on it is shown as current.
+    pub attention_live: bool,
+    pub agents_live: bool,
     /// st's own counts, when it serves them.
     pub summary: Option<st3_client::Summary>,
+    pub inventory_supported: Option<bool>,
+    pub inventory_partial: Vec<String>,
 }
 
 fn now() -> String {
@@ -161,7 +167,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let stale = extras
         .window_errors
         .iter()
-        .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str()))
+        .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str())
+            || ["clients", "usage", "machines", "devices", "sessions", "terminals"].contains(&name.as_str()))
         .map(|(name, why)| format!("{name}: {why}"))
         .chain(
             extras
@@ -177,13 +184,14 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         diverged,
         stale,
         missions_followed: extras.missions_followed,
+        settled: extras.attention_live && extras.agents_live,
         active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents(model, &missions), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
-        machines: loaded(model.machines.snapshot.is_some(), machines(model)),
+        machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model), extras.window_errors.get("machines")),
         worktrees: Load::Ready(super::demo::world().worktrees.items().to_vec()),
-        devices: loaded(
+        devices: loaded_or_why(
             model.devices.snapshot.is_some(),
             model
                 .devices()
@@ -197,6 +205,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
                     expires: device.expires_at.clone(),
                 })
                 .collect(),
+            extras.window_errors.get("devices"),
         ),
         conversations: extras.conversations.clone(),
         quiet_missions: quiet,
@@ -223,6 +232,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Err(why)) => Load::Failed(why.clone()),
             None => Load::Loading,
         },
+        inventory_supported: extras.inventory_supported,
+        inventory_partial: extras.inventory_partial.clone(),
     }
 }
 
@@ -658,6 +669,8 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                     AgentState::Fault
                 }
                 ("failed", _) => AgentState::Fault,
+                // st decides a seat with no session is down, since when; no app re-derives it.
+                ("down", _) => AgentState::Down,
                 // Signed out of its provider (Claude "Not logged in · Run /login"): a login on
                 // its host fixes it, not a restart (Nathan, 2026-10-04).
                 // st's additive detail names the known error outright; the legacy `unauthenticated`
@@ -725,7 +738,17 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                     .first()
                     .map(|relation| relation.agent_id.clone()),
                 details: AgentDetails {
-                    progress: work.and_then(|work| step_progress(missions, &work.id)),
+                    progress: work
+                        .and_then(|work| {
+                            let reported = step_progress(missions, &work.id);
+                            match work.holder_down_since.as_deref() {
+                                Some(since) => Some(match reported {
+                                    Some(line) => format!("Held by a seat with no session since {since}. Last reported: {line}"),
+                                    None => format!("Held by a seat with no session since {since}"),
+                                }),
+                                None => reported,
+                            }
+                        }),
                     goal: work.and_then(|work| work.goal.as_deref().map(clean_message_text)),
                     claimed: work.map(|work| format!("{} ago", age(&work.since))),
                     next: agent
@@ -737,6 +760,12 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                         .iter()
                         .map(|label| label_text(model, label))
                         .collect(),
+                    next_mission: agent.next_work.as_ref().map(|label| label.mission_id.clone()),
+                    queue_missions: agent
+                        .upcoming_work
+                        .iter()
+                        .map(|label| label.mission_id.clone())
+                        .collect(),
                     queued: agent.queued_work_count,
                     harness_state: agent.harness_state.clone(),
                     runtime: None,
@@ -745,7 +774,16 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                         .as_ref()
                         .and_then(|usage| usage.context.as_ref())
                         .and_then(|context| context.model.clone()),
+                    effort: agent
+                        .extra
+                        .get("effort")
+                        .and_then(Value::as_str)
+                        .filter(|effort| !effort.is_empty())
+                        .map(str::to_owned),
                     fault: agent.fault.clone().or_else(|| {
+                        agent.down_since.as_deref().filter(|_| agent.state == "down")
+                            .map(|since| format!("No running session since {since}"))
+                    }).or_else(|| {
                         agent.delivery.as_ref()
                             .filter(|delivery| delivery.state == "stale")
                             .and_then(|delivery| delivery.reason.clone())
@@ -905,11 +943,57 @@ pub fn names(model: &Model, person: &str) -> BTreeMap<String, String> {
 
 #[cfg(test)]
 use st3_conversation_ui::adapt::from_harness;
-pub use st3_conversation_ui::adapt::{conversation, unreadable_transcript};
+pub use st3_conversation_ui::adapt::unreadable_transcript;
+
+/// Standalone native images need a focusable row even when the text adapter has no words.
+pub fn conversation(timeline: &[st3_client::TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
+    let mut entries = st3_conversation_ui::adapt::conversation(timeline, names);
+    for (index, source) in timeline.iter().enumerate() {
+        let st3_client::TimelineBody::Content(content) = &source.body else { continue };
+        if !super::content::has_images(&content.blocks) { continue; }
+        if content.blocks.iter().all(|block| matches!(block.kind.as_str(), "image" | "source_record"))
+            && content.text.as_deref().is_none_or(|text| {
+                text.is_empty() || matches!(text, "[image]" | "[image · load from owner]")
+            })
+        {
+            // Replace the shared text adapter's image-only placeholder instead
+            // of adding a second row for the same image.
+            let prefix = format!("{}#", source.id);
+            entries.retain(|entry| entry.id != source.id && !entry.id.starts_with(&prefix));
+        }
+        let at = entries.iter().rposition(|entry| entry.id == source.id || entry.id.starts_with(&format!("{}#", source.id)))
+            .map(|at| at + 1)
+            .or_else(|| timeline[index + 1..].iter().find_map(|next| {
+                entries.iter().position(|entry| entry.id == next.id || entry.id.starts_with(&format!("{}#", next.id)))
+            })).unwrap_or(entries.len());
+        entries.insert(at, Entry {
+            id: format!("{}#images", source.id),
+            at: source.timestamp.get(11..16).unwrap_or("").into(),
+            body: Body::Tool { title: "image · Ctrl+Enter details · Ctrl+U load inline".into(),
+                state: st3_conversation_ui::ToolState::Ok, output: Vec::new() },
+        });
+    }
+    entries
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_native_image_blocks_get_a_focusable_inline_row() {
+        let timeline = serde_json::from_value::<Vec<TimelineEntry>>(json!([{
+            "id":"picture","sequence":1,"revision":1,"timestamp":"2026-10-08T10:00:00Z",
+            "role":"assistant","type":"content","final":true,"body":{"media_type":"image/png","blocks":[{
+                "id":"picture-block","kind":"image","source_type":"native","payload":{},
+                "continuation":{"ref":"picture-ref","media_type":"application/octet-stream","reason":"on-demand"}
+            }]}
+        }])).unwrap();
+        let entries = conversation(&timeline, &BTreeMap::new());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "picture#images");
+        assert!(matches!(&entries[0].body, Body::Tool { title, .. } if title.contains("load inline")));
+    }
     use serde_json::json;
 
     #[test]
@@ -1139,6 +1223,22 @@ mod tests {
                 "line",
                 "… st kept only the start of this output"
             ]
+        );
+    }
+
+    #[test]
+    fn a_preview_longer_than_its_line_budget_names_what_it_hides() {
+        let text = (0..450)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let entries = tool_pair(json!({"cmd":"cat notes.txt"}), Value::String(text));
+        let (_, _, output) = tool(&entries);
+        assert_eq!(output.len(), 401, "{:?}", output.last());
+        assert_eq!(output[399], "line 399");
+        assert_eq!(
+            output[400],
+            "… 50 more lines not shown in the timeline preview"
         );
     }
 
@@ -1787,6 +1887,7 @@ mod tests {
             st3_ui_model::missions::StepMetadata {
                 blocked_reason: None,
                 last_progress: Some("  Tests pass on\nmain; opening the PR \n".into()),
+                nudged: None,
             },
         );
         mission.step_metadata.insert(
@@ -1903,6 +2004,25 @@ mod tests {
     }
 
     #[test]
+    fn a_seats_configured_effort_reaches_its_details() {
+        let mut model = Model::default();
+        let resource = |effort: serde_json::Value| {
+            serde_json::json!({
+                "id": "agent/example/seat", "kind": "agent", "revision": "r1",
+                "updated_at": "2026-10-10T12:00:00Z", "name": "example/seat",
+                "state": "running", "reachability": "local", "harness_state": "working",
+                "effort": effort, "runtime_ids": [], "under": [],
+            })
+        };
+        model.agents = window(vec![resource(serde_json::json!("high"))]);
+        assert_eq!(agents(&model, &[])[0].details.effort.as_deref(), Some("high"));
+        model.agents = window(vec![resource(serde_json::Value::Null)]);
+        assert_eq!(agents(&model, &[])[0].details.effort, None);
+        model.agents = window(vec![resource(serde_json::json!(""))]);
+        assert_eq!(agents(&model, &[])[0].details.effort, None);
+    }
+
+    #[test]
     fn a_waiting_human_ask_needs_you_even_while_the_harness_activity_is_working() {
         let mut model = Model::default();
         let resource = |state: &str, activity: &str, blocked_on: Option<&str>| {
@@ -1921,6 +2041,36 @@ mod tests {
         assert_eq!(agents(&model, &[])[0].state, AgentState::Fault);
         model.agents = window(vec![resource("waiting", "indeterminate", Some("human"))]);
         assert_eq!(agents(&model, &[])[0].state, AgentState::Starting);
+    }
+
+    #[test]
+    fn a_down_seat_reads_down_with_its_time_and_marks_the_step_it_holds() {
+        let mut model = Model::default();
+        model.agents = window(vec![serde_json::json!({
+            "id": "agent/example/gone", "kind": "agent", "revision": "r1",
+            "updated_at": "2026-10-12T12:29:00Z", "name": "example/gone",
+            "state": "down", "down_since": "2026-10-12T12:31:00.000Z",
+            "reachability": "reachable", "harness_state": "indeterminate",
+            "observation": "stale", "runtime_ids": [], "under": [],
+            "current_work": [{
+                "id": "step-run/one/build", "mission_id": "mission/example",
+                "mission_run_id": "mission-run/example", "path": "build",
+                "state": "claimed", "since": "2026-10-12T12:00:00.000Z",
+                "holder_down_since": "2026-10-12T12:31:00.000Z"
+            }],
+        })]);
+        let seat = &agents(&model, &[])[0];
+        // Neither "starting" (the stale guess for a waiting seat) nor an idle one.
+        assert_eq!(seat.state, AgentState::Down);
+        assert_eq!(
+            seat.details.fault.as_deref(),
+            Some("No running session since 2026-10-12T12:31:00.000Z")
+        );
+        assert_eq!(
+            seat.details.progress.as_deref(),
+            Some("Held by a seat with no session since 2026-10-12T12:31:00.000Z")
+        );
+        assert_eq!(super::super::screens::agent_word(seat.state), "down");
     }
 
     #[test]

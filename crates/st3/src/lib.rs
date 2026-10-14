@@ -1,5 +1,7 @@
 //! st3 claims graph, API, reconciliation, and CLI support.
 
+pub mod cli_output;
+
 #[cfg(any(test, feature = "test-support"))]
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]
@@ -8,9 +10,12 @@ mod ci_test_paths;
 pub mod accounts;
 pub mod api;
 pub mod archive;
+pub mod attach_image;
 pub mod backup;
 pub mod blobs;
 pub mod boot;
+/// Git-backed change metadata and exact-OID atomic state transitions.
+pub mod changes;
 pub(crate) mod checkout;
 pub mod claude_channel;
 pub mod client;
@@ -23,7 +28,12 @@ pub(crate) mod disk;
 pub mod delivery_hold;
 pub mod driver_hook;
 pub mod environment;
+/// Offline signed gate observations in immutable git notes refs.
+pub mod evidence;
 pub(crate) mod external_sessions;
+pub(crate) mod native_views;
+pub(crate) mod conversation_header;
+pub(crate) mod subagent_sessions;
 pub mod fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub mod silent;
@@ -35,16 +45,22 @@ pub mod gate_kinds;
 pub mod gate_report;
 pub mod github_watch;
 pub mod graph;
+pub mod handoff;
 pub(crate) mod graph_watch_ivm;
 pub mod harness_events;
 /// The lifecycle hook set st3 publishes beneath its own state directory.
 pub mod hooks;
 pub mod incremental;
+pub mod instance;
 pub mod lane;
 pub mod mailbox;
+pub mod message_body;
 /// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
 pub mod maintenance;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod malloc_trim;
 pub(crate) mod memory;
+pub(crate) mod read_cache;
 pub mod mission;
 pub mod model;
 /// A driver relaunches its harness on the native session a suspended seat resumes.
@@ -52,10 +68,12 @@ pub mod native_resume;
 /// Durable seat-scoped first native launch outcomes.
 pub mod native_seed;
 pub mod node_identity;
+pub mod objectives;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 pub mod otel;
+pub mod otel_client_class;
 pub mod otlp;
 pub mod peer;
 pub mod placement;
@@ -65,6 +83,7 @@ pub use smallclaims::{performance, profile};
 pub mod projection;
 pub mod provenance;
 pub mod reconcile;
+mod reconcile_telemetry;
 mod relay_trace;
 pub mod rules;
 /// Observes git and gh calls without changing their command behavior.
@@ -84,14 +103,20 @@ pub mod seat_queue;
 /// Runs any CLI with credentials no seat can read, through a gateway the sekrets user owns.
 pub mod sekrets;
 pub mod service;
+/// First-run configuration and human-only daemon startup.
+pub mod setup;
+pub mod onboarding;
 /// The st agent skill bundled in this binary and installed for each harness.
 pub mod skill;
 pub mod slo;
+pub mod slo_history;
 pub mod startup;
+pub mod startup_telemetry;
 pub mod store;
 pub mod subagents;
 /// Suspends a quiet seat and resumes its own native session.
 pub mod suspension;
+pub(crate) mod publication;
 pub mod seat_snapshot;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]
