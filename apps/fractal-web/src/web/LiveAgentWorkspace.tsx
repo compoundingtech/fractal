@@ -30,6 +30,7 @@ import { useSidebarFolders } from '../folders/useSidebarFolders.ts'
 import { fixtureFolders } from '../folders/fixture.ts'
 import { fixtureSidebarState, sidebarState } from '../shell/sidebar/state.ts'
 import { ResponsiveAgentSidebar, sidebarDrawerBreakpoint, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
+import { parseSidebarQuery } from '../shell/sidebar/filter.ts'
 
 // A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
 // Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
@@ -96,6 +97,7 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
 const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
 // The terminal grid, fonts and native key encoder load only when a terminal pane opens.
 const TerminalDetail = React.lazy(() => import('../terminal/TerminalDetail.tsx').then((module) => ({ default: module.TerminalDetail })))
+const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
 
 const sidebarRatio = persistedAtom({ key: 'round2.sidebarRatio', schema: Schema.Number, defaultValue: 256 / 1440 })
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
@@ -208,8 +210,13 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
     setPanes((rows) => (rows.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === id) ? rows : [...rows, { ref: request.ref, ...(request.presentation === undefined ? {} : { presentation: request.presentation }) }]))
     navigate(current, id)
   }
+  // Stable for the memoized panes: a document named in a conversation or another document opens in a tab.
+  const openLatest = React.useRef(open)
+  openLatest.current = open
+  const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
   const headerRow = agent === undefined ? undefined : sidebarRow({ agent, stale, now })
+  const parsedSearch = parseSidebarQuery(search)
   const folderSource = useDataSource()
   const sidebarFolders = useSidebarFolders({
     roster: agents.map(row => ({ id: row.ref, subject: row.ref, label: row.name, host: row.host })),
@@ -254,7 +261,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                       </div> : null}
                       <AgentFolders {...sidebarFolders} selectedId={current} onSelect={select} renderAgent={node => {
                         const row = agentsByRef.get(node.id)
-                        return row === undefined ? null : <SidebarAgentRow inTree timePlacement="subtitle" item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={search} active={current === row.ref} onOpen={() => select(row.ref)} />
+                        return row === undefined ? null : <SidebarAgentRow inTree timePlacement="subtitle" item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={parsedSearch.query} active={current === row.ref} onOpen={() => select(row.ref)} />
                       }} />
                     </nav>
                     {fleet._tag !== 'Observed' ? (
@@ -321,7 +328,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} ux={ux} />, paneHost)}
+    {paneHost === null ? null : createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} onOpenDocument={openDocument} ux={ux} />, paneHost)}
   </>)
 }
 
@@ -352,7 +359,7 @@ const GatewayConnectionStatus = () => {
  * evict their follows. Render-time history updates avoid a second committed selection.
  * Locking a pane costs O(its rows) in the browser, so the outgoing pane is only covered by the
  * opaque shown pane during the switch frame and locked after that frame paints. */
-export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly ux?: UxTelemetry }) {
+export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool, onOpenDocument, ux }: { readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly ux?: UxTelemetry }) {
   // Reading positions belong to this surface, not its three-pane DOM cache. A new
   // surface (including reload) starts following live; evicted panes keep memory here.
   const [viewportStore] = React.useState(() => new ViewportStore())
@@ -391,9 +398,14 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
       {retained.map(pane => {
         const shown = visible && pane.ref === current
         return <div key={pane.ref} {...stylex.props(styles.retainedPane, shown ? styles.shownPane : visible && pane.ref === switched.covered ? null : styles.hiddenPane)}>
-          <ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} ux={ux} visible={shown} />
+          <ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />
         </div>
       })}
+      {view._tag === 'Document' && onOpenDocument !== undefined ? (
+        <React.Suspense fallback={<p role="status" {...stylex.props(styles.empty)}>Loading document…</p>}>
+          <DocumentPane key={view.ref} name={view.ref} onOpen={onOpenDocument} />
+        </React.Suspense>
+      ) : null}
       {current === '' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
         : view._tag === 'ViewUnavailable' ? <p role="status" {...stylex.props(styles.empty)}>{workspaceViewNotice(view)}</p>
           : null}
@@ -411,7 +423,7 @@ export function WorkspaceBody({ current, rosterRefs, view, agentName, onOpenTool
 /** Roster filter in the live sidebar. */
 export function LiveSidebarSearch({ value, onChange }: { readonly value: string; readonly onChange: (value: string) => void }) {
   return <Aria.SearchField aria-label="Search agents" value={value} onChange={onChange} {...stylex.props(styles.search)}>
-    <Aria.Input placeholder="Search agents" {...stylex.props(styles.searchInput)} />
+    <Aria.Input aria-description="Use machine:dev3 or host:dev3,dev5 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match. Combine with search text." placeholder="Search agents" {...stylex.props(styles.searchInput)} />
   </Aria.SearchField>
 }
 

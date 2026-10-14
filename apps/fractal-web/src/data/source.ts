@@ -40,6 +40,7 @@ import type { SubjectEnvelope } from '../resources/envelope.ts'
 import type { TerminalHistoryFactory } from '../terminal/historySource.ts'
 import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
 import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
+import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
@@ -164,7 +165,8 @@ export type ConversationPortResult<T> =
   | { readonly _tag: 'Success'; readonly value: T }
   | {
       readonly _tag: 'Refused'
-      readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable'
+      /** `unconfirmed`: st said `applied: "unknown"`; the identical request may still complete. */
+      readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable' | 'unconfirmed'
       readonly detail: string
       /** Preserve the daemon's complete refusal, including its retry policy. */
       readonly error?: ErrorEnvelope
@@ -196,7 +198,9 @@ type MessageSendFields = Omit<MessageSendInput, 'parameters' | 'idempotency_key'
  * A first send (`Send`) never carries a caller-owned key: the data layer generates one
  * and paints the optimistic row synchronously. `Resend` is an explicit retry of an
  * uncertain send with its original key; its authoritative identity is reconciled
- * before any optimistic row can duplicate mail the stream already shows.
+ * before any optimistic row can duplicate mail the stream already shows. st deduplicates
+ * a key by its whole request except the fence, so a Resend repeats the original action
+ * id and parameters; a source that recorded the key's first send substitutes them.
  */
 export type AttachmentSendRequest =
   | ({ readonly _tag: 'Send' } & MessageSendFields)
@@ -272,6 +276,8 @@ export interface DataSource {
   readonly terminalInterest?: (terminalRef: string) => Atom.Atom<void>
   /** Explicit recovery for a retryable terminal failure; never retries a healthy or permanent feed. */
   readonly retryTerminal?: (terminalRef: string) => void
+  /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
+  readonly documents?: DocumentPort
   /** Explicit geometry action; never tied to the browser pane dimensions. */
   readonly terminalResize?: TerminalResizePort
   /** Retained owner scrollback, with its own independently granted availability. */

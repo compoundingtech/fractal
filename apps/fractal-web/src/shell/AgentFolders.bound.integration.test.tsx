@@ -101,8 +101,8 @@ describe('bound live folder tree', () => {
       const item = { ...sidebarRow({ agent: projected, stale: false, now: 5000 }), unread }
       try {
         await React.act(async () => { root.render(<AgentFolders tree={tree} canDrop={() => ({ ok: true })} onMove={() => {}} onCreateFolder={() => {}} onRenameFolder={() => {}} onDeleteFolder={() => {}} onToggleCollapsed={() => {}} renderAgent={() => <SidebarAgentRow inTree item={item} now={5000} layout="SR2-B" extraSignals={['X-model']} />} />) })
-        const row = within(host).getByRole('row', { name: 'Atlas Builder host-1 codex' })
-        await expectA11y(row).toHaveAccessibleName('Atlas Builder host-1 codex')
+        const row = within(host).getByRole('row', { name: 'Atlas Builder' })
+        await expectA11y(row).toHaveAccessibleName('Atlas Builder')
         await expectA11y(row).toHaveAccessibleDescription(/idle/i)
         await expectA11y(row).not.toHaveAccessibleDescription(/unknown/i)
         if (unread === undefined) await expectA11y(row).not.toHaveAccessibleDescription(/unread/i)
@@ -110,9 +110,11 @@ describe('bound live folder tree', () => {
         // RAC's old textValue-only name omits the visible host and harness.
         const labelledBy = row.getAttribute('aria-labelledby')!
         row.removeAttribute('aria-labelledby')
-        expect(within(host).queryByRole('row', { name: 'Atlas Builder host-1 codex' })).toBeNull()
+        row.setAttribute('aria-label', 'Obsolete row name')
+        expect(within(host).queryByRole('row', { name: 'Atlas Builder' })).toBeNull()
         row.setAttribute('aria-labelledby', labelledBy)
-        await expectA11y(row).toHaveAccessibleName('Atlas Builder host-1 codex')
+        row.setAttribute('aria-label', 'Atlas Builder')
+        await expectA11y(row).toHaveAccessibleName('Atlas Builder')
         const nextAgent = { ...agent, label: 'Orion Builder' }
         const nextTree = tree.map(node => node._tag === 'Agent' ? nextAgent : { ...node, children: [nextAgent] })
         const nextItem = { ...item, title: 'Orion Builder', status: 'working' as const, statusLabel: 'Working', unread: 4 }
@@ -120,7 +122,7 @@ describe('bound live folder tree', () => {
         row.removeAttribute('aria-labelledby')
         row.removeAttribute('aria-describedby')
         await React.act(async () => { root.render(<AgentFolders tree={nextTree} canDrop={() => ({ ok: true })} onMove={() => {}} onCreateFolder={() => {}} onRenameFolder={() => {}} onDeleteFolder={() => {}} onToggleCollapsed={() => {}} renderAgent={() => <SidebarAgentRow inTree item={nextItem} now={5000} layout="SR2-B" extraSignals={['X-model']} />} />) })
-        const updatedRow = within(host).getByRole('row', { name: 'Orion Builder host-1 codex' })
+        const updatedRow = within(host).getByRole('row', { name: 'Orion Builder' })
         expect(updatedRow).toBe(row)
         await expectA11y(updatedRow).toHaveAccessibleDescription(/Working/)
         await expectA11y(updatedRow).toHaveAccessibleDescription(/Unread: 4/)

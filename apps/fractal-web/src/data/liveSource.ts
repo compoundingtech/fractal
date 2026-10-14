@@ -30,6 +30,7 @@ import { getDebug } from '../telemetry/measurement/index.ts'
 import { unavailableTerminalHistory } from '../terminal/historySource.ts'
 import { gatewayTerminalInput } from '../terminal/terminal-input-port.ts'
 import { gatewayTerminalResize } from '../terminal/terminal-resize-port.ts'
+import { gatewayDocuments } from '../documents/document-port.ts'
 import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
@@ -726,6 +727,9 @@ export const liveSource = ({
     // Until smalltalk#1977 provides owner-side read-after-send visibility, an absent row on
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
     const pending = new Map<string, PendingSend>()
+    // st deduplicates a key by its whole request except the fence. Each key's first action
+    // id and parameters are what every Resend of it repeats, even after its row retires.
+    const sentActions = new Map<string, Pick<AttachmentSendRequest, 'id' | 'parameters'>>()
     let lastSendId: string | undefined
     let sessionId: string | undefined
     let painted = false
@@ -793,7 +797,7 @@ export const liveSource = ({
       const id = `pending/${idempotencyKey}`
       const previousRefusal = pending.get(id)?.refusal
       if (request._tag === 'Resend' && previousRefusal?.error?.retryable === false
-        && previousRefusal.reason !== 'stale-fence' && previousRefusal.reason !== 'ungranted'
+        && previousRefusal.reason !== 'stale-fence' && previousRefusal.reason !== 'ungranted' && previousRefusal.reason !== 'unconfirmed'
         && previousRefusal.error.code !== 'issuer-required') return previousRefusal
       // Capture once, before any await. Retry belongs to this outbox submission,
       // never to the current composer/recipient/session or caller-owned mutable arrays.
@@ -802,12 +806,14 @@ export const liveSource = ({
       request = request._tag === 'Resend'
         ? { ...captured, _tag: 'Resend', idempotencyKey }
         : captured
+      const action = sentActions.get(idempotencyKey) ?? { id: request.id, parameters: request.parameters }
+      sentActions.set(idempotencyKey, action)
       const local: PendingSend = {
         request: captured,
         item: {
           _tag: 'Text', id, role: 'user',
-          text: request.parameters.content ?? '',
-          attachments: request.parameters.attachments.map((attachment) => ({
+          text: action.parameters.content ?? '',
+          attachments: action.parameters.attachments.map((attachment) => ({
             id: attachment.blob,
             mediaType: attachment.media_type,
             // The encoded wire side carries `name: null`; the view model has no null names.
@@ -836,9 +842,9 @@ export const liveSource = ({
           return submitMessage({
             api_version: request.api_version,
             type: request.type,
-            id: request.id,
+            id: action.id,
             fence: { snapshot_id: current.value, subject_revisions: {} },
-            parameters: request.parameters,
+            parameters: action.parameters,
             idempotency_key: idempotencyKey,
           })
         }
@@ -853,12 +859,13 @@ export const liveSource = ({
           local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.', retryable: false } }
         } else if (result._tag === 'Refused') {
           local.refusal = result
-          local.item = { ...local.item, sendState: {
-            _tag: 'Failed', reason: result.reason, detail: result.detail,
-            ...(result.error === undefined ? {} : { code: result.error.code }),
-            retryable: result.reason !== 'invalid' && (result.reason === 'stale-fence' || result.reason === 'ungranted'
-              || result.error?.code === 'issuer-required' || result.error?.retryable !== false),
-          } }
+          local.item = { ...local.item, sendState: result.reason === 'unconfirmed'
+            ? { _tag: 'Unconfirmed', detail: result.detail }
+            : { _tag: 'Failed', reason: result.reason, detail: result.detail,
+              ...(result.error === undefined ? {} : { code: result.error.code }),
+              retryable: result.reason !== 'invalid' && (result.reason === 'stale-fence' || result.reason === 'ungranted'
+                || result.error?.code === 'issuer-required' || result.error?.retryable !== false),
+            } }
         } else if (result._tag === 'Success' && result.value.status === 'completed') {
           const affected = result.value.affected_ids.filter((affected) => affected.startsWith('message/'))
           if (affected.length > 0) timeline.keepOwnSendId(affected, id)
@@ -1116,6 +1123,7 @@ export const liveSource = ({
         if (feed._tag === 'Unavailable' && feed.retryable === true) retainTerminal(ref).retry()
       },
       terminalResize: gatewayTerminalResize(client),
+      documents: gatewayDocuments(client),
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.

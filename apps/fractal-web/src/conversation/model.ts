@@ -63,11 +63,13 @@ export type NoticeKind = typeof NoticeKind.Type
  * Local send lifecycle, not a streaming revision or a server delivery acknowledgement.
  * `Sent`: the gateway action completed authoritatively while the message's own mailbox
  * echo is outside the loaded conversation window; it is kept (never duplicated) until
- * the window shows it.
+ * the window shows it. `Unconfirmed`: st may have taken the send and has not confirmed it
+ * yet; resending the identical request is safe and returns st's first answer.
  */
 export const SendState = Schema.TaggedUnion({
   Pending: {},
   Sent: {},
+  Unconfirmed: { detail: Schema.String },
   Failed: {
     reason: Schema.Literals(['rejected', 'ungranted', 'invalid', 'failed', 'stale-fence', 'snapshot-unavailable']),
     detail: Schema.String,

@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { Agent, decodeUnknownSync, type Attention, type Mission, type TerminalScreen } from '@smalltalk/st3-client/schema'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
+import * as Option from 'effect/Option'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
@@ -80,7 +81,7 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
     const item = sidebarRow({ agent: fleetFromAgents([agent]).agents[0]!, stale: false, now: 5000 })
     await act(async () => root.render(<SidebarAgentRow item={item} now={5000} layout="SR2-A" extraSignals={[]} onOpen={() => undefined} />))
     const row = host.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
-    const visibleName = [row.querySelector('[data-row-column="title-text"]')!.textContent, row.querySelector('[data-row-field="host"]')!.textContent].join(' ')
+    const visibleName = row.querySelector('[data-row-column="title-text"]')!.textContent!
     const button = within(row).getByRole('button', { name: visibleName })
     expect(button.hasAttribute('aria-label')).toBe(false)
     const description = document.getElementById(button.getAttribute('aria-describedby')!)!.textContent
@@ -158,7 +159,7 @@ describe('kit sidebar time placement', () => {
     const item = { ref: 'agent/atlas', id: 'atlas', title: 'Atlas Builder', host: 'host-1', harness: 'seat-1', status: 'unobserved', statusLabel: 'Not observed', freshness: 'live', children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, unread } as const
     await act(async () => root.render(<SidebarAgentRow item={item} now={5000} layout="SR2-B" extraSignals={['X-model']} onOpen={() => undefined} />))
     const row = host.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
-    const button = within(row).getByRole('button', { name: 'Atlas Builder host-1 seat-1' })
+    const button = within(row).getByRole('button', { name: 'Atlas Builder' })
     const description = document.getElementById(button.getAttribute('aria-describedby')!)!.textContent
     expect(description).toContain('Not observed')
     expect(description).not.toMatch(/unknown/i)
@@ -227,5 +228,50 @@ describe('responsive agent navigation', () => {
     expect(Number.parseFloat(sidebar().style.width)).toBeGreaterThanOrEqual(240)
     expect(within(host).getByRole('separator', { name: 'Agent sidebar width' }).getAttribute('aria-valuemin')).toBe('240')
     expect(host.querySelector('[role="dialog"]')).toBeNull()
+  })
+})
+
+describe('shipped live sidebar machine query', () => {
+  it('applies typed hosts to the real roster and preserves substring text and stripped highlights', async () => {
+    const candidates: readonly Agent[] = [
+      { ...agent, id: 'agent/compiler', name: 'Compiler Alpha', host_id: Option.some('host/dev3') },
+      { ...agent, id: 'agent/sidebar', name: 'Sidebar Beta', host_id: Option.some('host/DEV5') },
+      // Text looks like a matching host but must not satisfy a machine facet.
+      { ...agent, id: 'agent/decoy', name: 'Compiler dev3 decoy', host_id: Option.some('host/laptop24') },
+    ]
+    registry.set(agents, observed({ value: candidates }))
+    await mount(1440)
+    const input = sidebar().querySelector<HTMLInputElement>('input')!
+    expect(input.getAttribute('aria-description')).toMatch(/machine:.*host:/)
+    const search = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+    }
+    const names = () => [...roster().querySelectorAll('[data-testid="taste-agent-row"]')].map(row => row.textContent)
+    expect(names()).toHaveLength(3)
+    for (const [query, expected] of [
+      ['machine:dev3', ['Compiler Alpha']],
+      ['machine:dev3,dev5', ['Compiler Alpha', 'Sidebar Beta']],
+      ['HOST:DEV', ['Compiler Alpha', 'Sidebar Beta']],
+      ['machine:dev host:dev3', ['Compiler Alpha']],
+      ['machine:dev3 host:dev5', []],
+      ['machine:dev9', []],
+      ['machine: host:,,', ['Compiler Alpha', 'Sidebar Beta', 'Compiler dev3 decoy']],
+      ['Alpha machine:DEV', ['Compiler Alpha']],
+      ['cmp machine:dev', []],
+      ['dev3', ['Compiler Alpha', 'Compiler dev3 decoy']],
+      ['machine:host/dev3', []],
+    ] as const) {
+      await search(query)
+      expect(names()).toHaveLength(expected.length)
+      expected.forEach(name => expect(roster().textContent).toContain(name))
+    }
+    await search('machine:dev3')
+    expect(roster().querySelectorAll('mark')).toHaveLength(0)
+    await search('Alpha machine:dev3')
+    expect([...roster().querySelectorAll('mark')].map(mark => mark.textContent).join('')).toContain('Alpha')
+    expect([...roster().querySelectorAll('mark')].some(mark => mark.textContent?.includes('machine:'))).toBe(false)
   })
 })

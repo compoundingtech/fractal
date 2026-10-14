@@ -83,7 +83,7 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
     : snapshot.readOnly ? 'Folder editing is unavailable for this connection.'
     : (snapshot.sidebarCandidates?.length ?? 0) > 1 ? 'Several sidebar layouts are available. Using the earliest layout; the others are unchanged.' : undefined
   return {
-    tree: filterSidebarTree(orderingTree, query), orderingTree, status, rowStatus: status, treeStatus, unavailable,
+    tree: filterSidebarTree(orderingTree, query, roster), orderingTree, status, rowStatus: status, treeStatus, unavailable,
     canDrop: (items, target) => ready() ? canDrop({ ...currentDoc(), roster: currentRoster.current }, { items, target }) : { refused: 'Folder editing is unavailable for this connection.' },
     onMove: (intent) => {
       // Agent rows are bound to the subject they showed now; a rebound row key refuses instead of moving another agent.

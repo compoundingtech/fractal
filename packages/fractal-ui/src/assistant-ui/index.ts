@@ -36,7 +36,7 @@ export { Icon as CompositionIcon } from './composition/Icons'
 export { Button as CompositionButton, IconButton as CompositionIconButton } from './composition/Controls'
 
 /** Controlled sidebar row; the host owns clock and data. */
-export { SidebarAgentRow, AgentHoverCard, sidebarRowDescription } from './sidebar/SidebarAgentRow.tsx'
+export { SidebarAgentRow, AgentHoverCard, sidebarRowDescription, sidebarRowAccessibleName } from './sidebar/SidebarAgentRow.tsx'
 export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
 export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
 

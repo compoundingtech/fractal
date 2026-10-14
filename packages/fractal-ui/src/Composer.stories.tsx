@@ -530,15 +530,24 @@ export const FooterWidthBudget: Story = {
 }
 export const FooterWidthBudgetLight: Story = { ...FooterWidthBudget, args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
-/** C1 grows from a pill into a slab once the draft wraps or breaks lines; C3 becomes a slab while focused. */
+/** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab. */
 export const LayoutShapes: Story = {
   beforeEach: clearDrafts,
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.geometryLane(768))}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
   play: async ({ canvasElement }) => {
     const formOf = (layout: ComposerLayout) => canvasElement.querySelector<HTMLElement>(`[data-composer-frame="layout.${layout}"] form`)!
-    await expect(getComputedStyle(formOf('C1')).flexDirection).toBe('row')
-    await expect(getComputedStyle(formOf('C2')).flexDirection).toBe('column')
-    await expect(getComputedStyle(formOf('C3')).flexDirection).toBe('row')
+    await document.fonts.ready
+    await waitFor(() => {
+      for (const layout of ['C1', 'C3'] as const) {
+        const form = formOf(layout)
+        const css = getComputedStyle(form)
+        const inner = form.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight)
+        const footer = form.querySelector<HTMLElement>('[data-testid="composer-footer"]')!
+        const editorBudget = inner - footer.scrollWidth - (parseFloat(css.gap) || 0)
+        expect(css.flexDirection, `${layout}: editor budget at ${form.clientWidth}px`).toBe(editorBudget < 0.65 * inner ? 'column' : 'row')
+      }
+      expect(getComputedStyle(formOf('C2')).flexDirection).toBe('column')
+    })
     await userEvent.click(within(formOf('C3')).getByRole('textbox'))
     await waitFor(() => expect(getComputedStyle(formOf('C3')).flexDirection).toBe('column'))
     await userEvent.click(within(formOf('C1')).getByRole('textbox'))

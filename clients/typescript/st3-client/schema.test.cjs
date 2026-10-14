@@ -4,6 +4,21 @@ const assert = require('node:assert/strict');
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
 
+test('directive notes decode metadata and expiry without becoming gate evidence', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const wire = require('../../../docs/st3/client-v0/fixtures/directive-notes.json').value;
+    const decode = Rich.decodeUnknownSync(Rich.DirectiveNotes, 'strict');
+    const result = Schema.encodeSync(Rich.DirectiveNotes)(decode(wire));
+    assert.equal(result.notes[0].person, 'person/ada');
+    assert.equal(result.notes[0].author, 'person/ada');
+    assert.equal(result.notes[0].expires_at, '2026-10-12T09:00:00.000Z');
+    assert.equal(result.notes[0].text, wire.notes[0].text);
+    assert.deepEqual(Schema.encodeSync(Rich.DirectiveNotes)(decode({ notes: [] })), { notes: [] });
+    const invalid = structuredClone(wire);
+    invalid.notes[0].time = '2026-02-30T09:00:00Z';
+    assert.throws(() => decode(invalid));
+});
+
 test('person-ask mission rows retain actor references through the generated decoder', async () => {
     const [{ Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
@@ -368,4 +383,21 @@ test('relay omission fixture keeps absent fields, nullable values, and unknown b
         });
     }
     assert.equal(fixture.value.items[0].body.reply_to, null);
+});
+
+test('phone observation schema keeps histogram pairs and live-share as separate closed types', async () => {
+    const [{Schema},Rich] = await modules;
+    const decode=Rich.decodeUnknownSync(Rich.ObservationReport,'strict');
+    const interval={carrier:'lan',interval_start:'2026-10-10T15:00:00Z',interval_end:'2026-10-10T15:01:00Z'};
+    const report={report_id:'019a1234-0000-7000-8000-000000000001',samples:[
+        {...interval,kind:'latency',target:'ios-connect',count:100,over_target:1,max_ms:2000,buckets:[[103,99],[2047,1]]},
+        {...interval,kind:'live-share',target:'ios-live-share',foreground_ms:10000,live_ms:9900},
+    ]};
+    assert.deepEqual(Schema.encodeSync(Rich.ObservationReport)(decode(report)),report);
+    for (const samples of [
+        [{...report.samples[0],buckets:[[103,99,1]]}],
+        [{...report.samples[0],buckets:[[103,1000001]]}],
+        [{...report.samples[1],kind:'latency'}],
+        [{...report.samples[1],carrier:'unknown'}],
+    ]) assert.throws(()=>decode({...report,samples}));
 });

@@ -18,11 +18,11 @@ const now = Date.parse('2026-01-15T12:01:00Z')
 const at = '2026-01-15T12:00:00Z'
 const source = 'export const visibleRows = rows.filter(row => row.visible)\nexport const count = visibleRows.length\nexport const labels = visibleRows.map(row => row.label)\nexport const selected = visibleRows.find(row => row.selected)\nexport const first = visibleRows[0]\nexport const last = visibleRows.at(-1)\n'
 const answer = 'The row projection now keeps **visible rows** together and preserves selection.\n\n```ts\nconst count = visibleRows.length\n```\n\nThe focused checks passed.'
-type State = 'settled' | 'expanded' | 'streaming' | 'failed' | 'interrupted' | 'unknown' | 'loading' | 'catching-up' | 'reconnecting' | 'sync-failed' | 'pending-send' | 'failed-send' | 'empty'
+type State = 'settled' | 'expanded' | 'streaming' | 'failed' | 'interrupted' | 'unknown' | 'loading' | 'catching-up' | 'reconnecting' | 'sync-failed' | 'pending-send' | 'failed-send' | 'unconfirmed-send' | 'empty'
 interface TranscriptStoryData { readonly turns: readonly TranscriptTurn[]; readonly sync: SyncStatus; readonly availability?: TranscriptAvailability; readonly history?: TranscriptHistory; readonly emptyState?: React.ReactNode | TranscriptEmptyState }
 function fixture(state: State, prefix: string): TranscriptStoryData {
   const running = state === 'streaming', failed = state === 'failed', interrupted = state === 'interrupted'
-  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : undefined }
+  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : state === 'unconfirmed-send' ? { _tag: 'Unconfirmed', detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.' } : undefined }
   const calls: ConversationItem[] = [
     { _tag: 'ToolCall', id: `${prefix}/read`, callId: `${prefix}/read`, name: 'read', input: { path: 'src/rows.ts' }, status: 'success', result: { content: source, mediaType: 'text/plain', isError: false, at: '2026-01-15T12:00:03Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' },
     { _tag: 'ToolCall', id: `${prefix}/run`, callId: `${prefix}/run`, name: 'run', input: { command: 'pnpm test rows' }, status: failed ? 'error' : interrupted ? 'interrupted' : running ? 'running' : 'success', result: running ? undefined : { content: failed ? 'The row assertion did not match the observed selection.' : interrupted ? 'Stopped before the checks completed.' : '✓ selection retained\n✓ visible count matches\n✓ empty rows handled', mediaType: 'text/x-shellscript', isError: failed, at: '2026-01-15T12:00:18Z' }, callSeen: true, at: '2026-01-15T12:00:05Z' },
@@ -40,7 +40,7 @@ function fixture(state: State, prefix: string): TranscriptStoryData {
   return { turns: state === 'loading' || state === 'empty' ? [] : [{ id: prefix, prompt, items, work, senderCaptions: { [response.id]: 'Assistant' } }], sync }
 }
 const cases: Readonly<Record<State, TranscriptStoryData>> = {
-  settled: fixture('settled', 'settled'), expanded: fixture('expanded', 'expanded'), streaming: fixture('streaming', 'streaming'), failed: fixture('failed', 'failed'), interrupted: fixture('interrupted', 'interrupted'), unknown: fixture('unknown', 'unknown'), loading: fixture('loading', 'loading'), 'catching-up': fixture('catching-up', 'catching-up'), reconnecting: fixture('reconnecting', 'reconnecting'), 'sync-failed': fixture('sync-failed', 'sync-failed'), 'pending-send': fixture('pending-send', 'pending-send'), 'failed-send': fixture('failed-send', 'failed-send'), empty: fixture('empty', 'empty'),
+  settled: fixture('settled', 'settled'), expanded: fixture('expanded', 'expanded'), streaming: fixture('streaming', 'streaming'), failed: fixture('failed', 'failed'), interrupted: fixture('interrupted', 'interrupted'), unknown: fixture('unknown', 'unknown'), loading: fixture('loading', 'loading'), 'catching-up': fixture('catching-up', 'catching-up'), reconnecting: fixture('reconnecting', 'reconnecting'), 'sync-failed': fixture('sync-failed', 'sync-failed'), 'pending-send': fixture('pending-send', 'pending-send'), 'failed-send': fixture('failed-send', 'failed-send'), 'unconfirmed-send': fixture('unconfirmed-send', 'unconfirmed-send'), empty: fixture('empty', 'empty'),
 }
 /** `drop` withholds ids from the runtime adapter, standing in for an adapter that never adopts them. */
 function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
@@ -86,21 +86,182 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
   await userEvent.click(fold)
   await expect(fold).toHaveAttribute('aria-expanded', 'true')
-  await expect(canvas.getByTestId('tool-preview-remaining')).toHaveTextContent('+2 lines')
+  await expect(canvas.queryByTestId('tool-preview-remaining')).toBeNull()
   const previews = canvas.getAllByTestId('tool-detail-preview')
   await expect(previews).toHaveLength(2)
+  await expect(previews[0]!.querySelector('pre')).toBeNull()
+  for (const preview of previews) await userEvent.click(within(preview).getByRole('button', { name: 'Show raw input/output' }))
+  await expect(canvas.getByTestId('tool-preview-remaining')).toHaveTextContent('+2 lines')
   await waitFor(() => expect(previews[0]!.querySelector('[data-syntax-token~="keyword"]')).not.toBeNull())
   await expect(previews[0]).toHaveTextContent('export const visibleRows')
   await expect(previews[1]).toHaveTextContent('selection retained')
   await expect(canvas.getByTestId('work-log-divider')).toBeInTheDocument()
   await expect(canvas.getByRole('button', { name: 'Thinking' })).toHaveAttribute('aria-expanded', 'false')
+  // A silent success with input stays collapsed: no preview, but it can still be expanded for its raw input.
   const empty = canvasElement.querySelector('[data-tool-status="success"]:last-child')!
-  await expect(empty.querySelector('button')).toBeNull()
-  await expect(empty).toHaveTextContent('No output')
+  await expect(empty.querySelector('button')).toHaveAttribute('aria-expanded', 'false')
+  await expect(empty.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
+  await expectNoOutputWithControl(empty as HTMLElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Open read tool detail' }))
   await expect(canvas.getByRole('region', { name: 'Opened tool detail' }).querySelector('pre')?.textContent).toBe(source)
 } }
 export const ExpandedLight: Story = { ...Expanded, args: { state: 'expanded', scheme: 'light' } }
+const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+async function expectNoOutputWithControl(element: HTMLElement) {
+  const assertAbsent = async () => { await expect(element).not.toHaveTextContent('No output') }
+  await assertAbsent()
+  const placeholder = document.createElement('span')
+  placeholder.textContent = ' · No output'
+  element.append(placeholder)
+  try { await expect(assertAbsent()).rejects.toThrow() } finally { placeholder.remove() }
+  await assertAbsent()
+}
+const longCommand = 'pnpm --filter ./packages/rows exec vitest run src/rows.test.ts --reporter=verbose --coverage --coverage.include=src/rows.ts --testNamePattern "selection survives the projection change across visible and hidden rows"'
+const commandRowItems = ([['short', 'pnpm test rows'], ['long', longCommand]] as const).map(([key, command]): ConversationItem => ({ _tag: 'ToolCall', id: `rows/${key}`, callId: `rows/${key}`, name: 'run', input: { command }, status: 'success', result: { content: '✓ selection retained', mediaType: 'text/x-shellscript', isError: false, at: '2026-01-15T12:00:04Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' }))
+const commandRowData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'rows', items: commandRowItems, work: workLogTurnFromItems(commandRowItems, { kindFor: () => 'run', running: false, failed: false, interrupted: false, durationMs: 4000, startedAt: at, completeHistory: true }) }] }
+/** A long command keeps its row to one line: ellipsis in place, full text in the title. */
+export const LongCommandRow: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={commandRowData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(await canvas.findByRole('button', { name: /Worked for 4s/ }))
+  const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
+  await expect(rows).toHaveLength(2)
+  for (const row of rows) await expectNoOutputWithControl(row)
+  const heights = () => rows.map(row => row.getBoundingClientRect().height)
+  const tokenProbe = document.createElement('span')
+  tokenProbe.style.height = g.toolRow
+  tokenProbe.style.display = 'block'
+  canvasElement.append(tokenProbe)
+  const toolRow = parseFloat(getComputedStyle(tokenProbe).height)
+  tokenProbe.remove()
+  await expect(toolRow).toBeGreaterThan(0)
+  const assertTokenHeights = async () => {
+    for (const height of heights()) await expect(height).toBe(toolRow)
+  }
+  const label = rows[1]!.querySelector<HTMLElement>('span[title]')!
+  await expect(label).toHaveAttribute('title', `run ${longCommand}`)
+  await waitFor(() => expect(label.querySelector('[data-syntax-token]')).not.toBeNull())
+  await nextFrame()
+  await assertTokenHeights()
+  await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth)
+  await expect(getComputedStyle(label).textOverflow).toBe('ellipsis')
+  // A wrapped label must fail the token-height check, not merely differ from its sibling.
+  label.style.whiteSpace = 'normal'
+  await nextFrame()
+  try { await expect(assertTokenHeights()).rejects.toThrow() } finally { label.style.whiteSpace = '' }
+  await nextFrame()
+  await assertTokenHeights()
+  // Control: equally oversized rows must also fail.
+  for (const row of rows) row.style.minHeight = `calc(${g.toolRow} * 2)`
+  await nextFrame()
+  try { await expect(assertTokenHeights()).rejects.toThrow() } finally {
+    for (const row of rows) row.style.minHeight = ''
+  }
+  await nextFrame()
+  await assertTokenHeights()
+} }
+export const LongCommandRowLight: Story = { ...LongCommandRow, args: { scheme: 'light' } }
+const rawMarker = 'raw-input-sentinel'
+const rawInputData: TranscriptStoryData = (() => {
+  const base = fixture('failed', 'raw')
+  const turn = base.turns[0]!
+  const inputs: Readonly<Record<string, unknown>> = { 'raw/read': { path: 'src/rows.ts', note: `${rawMarker}:raw/read` }, 'raw/run': { command: 'pnpm test rows', note: `${rawMarker}:raw/run` } }
+  const items = turn.items.map((item): ConversationItem => item._tag === 'ToolCall' && inputs[item.id] !== undefined ? { ...item, input: inputs[item.id] } : item)
+  const work = workLogTurnFromItems([turn.prompt!, ...items], { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: true, interrupted: false, startedAt: at, completeHistory: true, failureNote: 'The run stopped; your conversation and changes are retained.' })
+  return { ...base, turns: [{ ...turn, items, work }] }
+})()
+/** Row expansion shows intent first; exact input requires the second disclosure. */
+export const RawInputOnExpand: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={rawInputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const notice = await canvas.findByRole('alert')
+  // Control: the overlay probe does see promoted output, so its raw-input absence is meaningful.
+  await expect(notice).toHaveTextContent('assertion did not match')
+  await expect(notice.textContent).not.toContain(rawMarker)
+  await expect(canvas.getAllByTestId('tool-detail-preview')).toHaveLength(1)
+  await expect(canvas.queryAllByTestId('tool-raw-input')).toHaveLength(0)
+  await expect(canvasElement.textContent).not.toContain(rawMarker)
+  for (const row of canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')) await expectNoOutputWithControl(row)
+  await userEvent.click(canvas.getByRole('button', { name: /^read src\/rows\.ts/ }))
+  await expect(canvas.queryAllByTestId('tool-raw-input')).toHaveLength(0)
+  const readPreview = canvas.getAllByTestId('tool-detail-preview')[0]!
+  await expect(readPreview).toHaveTextContent('success')
+  await userEvent.click(within(readPreview).getByRole('button', { name: 'Show raw input/output' }))
+  const read = await canvas.findByTestId('tool-raw-input')
+  await expect(read).toHaveTextContent(`"note": "${rawMarker}:raw/read"`)
+  await expect(read).toHaveTextContent('"path": "src/rows.ts"')
+  // Control: the whole-canvas absence probe that passed above now fails.
+  await expect(canvasElement.textContent).toContain(rawMarker)
+  await userEvent.click(canvas.getByRole('button', { name: /^run pnpm test rows/ }))
+  await expect(canvas.getAllByTestId('tool-raw-input')).toHaveLength(1)
+  const runPreview = canvas.getAllByTestId('tool-detail-preview')[1]!
+  await expect(runPreview).toHaveTextContent('error')
+  await userEvent.click(within(runPreview).getByRole('button', { name: 'Show raw input/output' }))
+  await waitFor(() => expect(canvas.getAllByTestId('tool-raw-input')).toHaveLength(2))
+  await expect(canvas.getAllByTestId('tool-raw-input')[1]).toHaveTextContent(`${rawMarker}:raw/run`)
+  await expect(canvas.getByRole('alert').textContent).not.toContain(rawMarker)
+  for (const label of canvasElement.querySelectorAll('[data-tool-status] span[title]')) {
+    await expect(label.textContent).not.toContain(rawMarker)
+    await expect(label.getAttribute('title')).not.toContain(rawMarker)
+  }
+} }
+export const RawInputOnExpandLight: Story = { ...RawInputOnExpand, args: { scheme: 'light' } }
+const rawDefaultTurn = workLogTurnFromItems([{ _tag: 'ToolCall', id: 'raw-default/run', callId: 'raw-default/run', name: 'run', input: `pnpm test rows # ${rawMarker}:default`, status: 'success', result: { content: '✓ selection retained', isError: false, at }, callSeen: true, at }], { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true })
+/** The kit's default detail renderer applies the same rule; a string input stays verbatim. */
+export const RawInputDefaultDetail: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={rawDefaultTurn} /></main>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getByRole('button', { name: 'Worked · 1 command' }))
+  await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
+  await expect(canvasElement.textContent).not.toContain(rawMarker)
+  await expectNoOutputWithControl(canvas.getByRole('button', { name: /^run/ }))
+  await userEvent.click(canvas.getByRole('button', { name: /^run/ }))
+  await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
+  await expect(canvas.getByTestId('work-log')).toHaveTextContent('success')
+  await userEvent.click(canvas.getByRole('button', { name: 'Show raw input/output' }))
+  await expect(await canvas.findByTestId('tool-raw-input')).toHaveTextContent(`pnpm test rows # ${rawMarker}:default`)
+  await expect(canvas.getByTestId('work-call-output')).toHaveTextContent('selection retained')
+  // Control: the absence probe that passed while collapsed now fails.
+  await expect(canvasElement.textContent).toContain(rawMarker)
+} }
+export const RawInputDefaultDetailLight: Story = { ...RawInputDefaultDetail, args: { scheme: 'light' } }
+const silentItems: readonly ConversationItem[] = [
+  { _tag: 'ToolCall', id: 'silent/read', callId: 'silent/read', name: 'read', input: { path: 'src/empty.ts', note: `${rawMarker}:silent/read` }, status: 'success', result: { content: '', isError: false, at }, callSeen: true, at },
+  { _tag: 'ToolCall', id: 'silent/run', callId: 'silent/run', name: 'run', input: { command: 'pnpm test rows', note: `${rawMarker}:silent/run` }, status: 'error', callSeen: true, at },
+]
+const liveItems: readonly ConversationItem[] = [{ _tag: 'ToolCall', id: 'live/run', callId: 'live/run', name: 'run', input: { command: 'pnpm build', note: `${rawMarker}:live/run` }, status: 'running', callSeen: true, at }]
+const withoutOutputData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [
+  { id: 'silent', items: silentItems, work: workLogTurnFromItems(silentItems, { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: true, interrupted: false, startedAt: at, completeHistory: true, failureNote: 'The run stopped; your conversation and changes are retained.' }) },
+  { id: 'live', items: liveItems, work: workLogTurnFromItems(liveItems, { kindFor: () => 'run', running: true, failed: false, interrupted: false, startedAt: at }) },
+] }
+/** Silent success, failure and in-flight calls retain both disclosure stages even without output. */
+export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={withoutOutputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const notice = await canvas.findByRole('alert')
+  const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
+  await expect(rows).toHaveLength(3)
+  for (const row of rows) {
+    await expect(row).toHaveAttribute('aria-expanded', 'false')
+    await expectNoOutputWithControl(row)
+  }
+  await expect(canvas.queryAllByTestId('tool-detail-preview')).toHaveLength(0)
+  await expect(canvasElement.textContent).not.toContain(rawMarker)
+  for (const [index, id] of ['silent/read', 'silent/run', 'live/run'].entries()) {
+    const row = rows[index]!
+    await userEvent.click(row)
+    await expect(row).toHaveAttribute('aria-expanded', 'true')
+    const preview = row.parentElement!.querySelector<HTMLElement>('[data-testid="tool-detail-preview"]')!
+    await expect(within(preview).queryByTestId('tool-raw-input')).toBeNull()
+    await expect(preview).toHaveTextContent(index === 0 ? 'success' : index === 1 ? 'error' : 'running')
+    await userEvent.click(within(preview).getByRole('button', { name: 'Show raw input/output' }))
+    await expect(within(preview).getByTestId('tool-raw-input')).toHaveTextContent(`"note": "${rawMarker}:${id}"`)
+    // Exact input and any readable command, never an empty-output block.
+    await expect(preview.querySelectorAll('pre')).toHaveLength(index === 0 ? 1 : 2)
+    if (index !== 0) await expect(within(preview).getByTestId('tool-command')).toHaveTextContent(index === 1 ? 'pnpm test rows' : 'pnpm build')
+    await expect(preview.textContent).not.toMatch(/No output/)
+  }
+  // Control: the whole-canvas absence probe that passed while collapsed now fails.
+  await expect(canvasElement.textContent).toContain(rawMarker)
+  await expect(notice.textContent).not.toContain(rawMarker)
+} }
+export const RawInputWithoutOutputLight: Story = { ...RawInputWithoutOutput, args: { scheme: 'light' } }
 const nativeOutputItems: readonly ConversationItem[] = [
   { name: 'string output', content: 'String result retained.' },
   { name: 'native array output', content: [{ type: 'text', text: 'First native line.' }, { type: 'image', data: 'synthetic-bytes' }, { type: 'text', text: 'Second native line.' }] },
@@ -114,14 +275,19 @@ export const NativeToolOutput: Story = { render: args => <main {...stylex.props(
   const native = canvas.getByRole('button', { name: /^native array output/ })
   await userEvent.click(native)
   await expect(native).toHaveAttribute('aria-expanded', 'true')
+  await expect(canvas.queryByTestId('work-call-output')).toBeNull()
+  await userEvent.click(within(native.parentElement!).getByRole('button', { name: 'Show raw input/output' }))
   await expect(canvas.getByTestId('work-call-output')).toHaveTextContent('First native line.')
   await expect(canvas.getByTestId('work-call-output')).toHaveTextContent('Second native line.')
   await expect(native).not.toHaveTextContent('No output')
   await userEvent.click(canvas.getByRole('button', { name: /^string output/ }))
+  const stringRow = canvas.getByRole('button', { name: /^string output/ })
+  await expect(canvas.getAllByTestId('work-call-output')).toHaveLength(1)
+  await userEvent.click(within(stringRow.parentElement!).getByRole('button', { name: 'Show raw input/output' }))
   await expect(canvas.getAllByTestId('work-call-output')).toHaveLength(2)
   await expect(canvas.getAllByTestId('work-call-output')[0]).toHaveTextContent('String result retained.')
   await expect(canvas.queryByRole('button', { name: /empty output|non-text output/ })).toBeNull()
-  await expect(canvas.getAllByText(/No output/)).toHaveLength(2)
+  await expectNoOutputWithControl(canvasElement)
 } }
 export const NativeToolOutputLight: Story = { ...NativeToolOutput, args: { scheme: 'light' } }
 export const Streaming: Story = { args: { state: 'streaming' }, play: async ({ canvasElement }) => {
@@ -296,6 +462,19 @@ export const FailedSend: Story = { args: { state: 'failed-send' }, play: async (
   await expect(failure).toHaveTextContent('The connection dropped while sending')
 } }
 export const FailedSendLight: Story = { ...FailedSend, args: { state: 'failed-send', scheme: 'light' } }
+/** st may have taken the send: a neutral status with Send again, never failure copy or an alert. */
+export const UnconfirmedSend: Story = { args: { state: 'unconfirmed-send' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const prompt = await canvas.findByTestId('user-message')
+  await expect(prompt).toHaveAttribute('data-send-state', 'unconfirmed')
+  const notice = await canvas.findByTestId('send-unconfirmed')
+  await expect(notice).toHaveAttribute('role', 'status')
+  await expect(notice).toHaveTextContent('Not confirmed yet')
+  await expect(canvas.queryByTestId('send-failure')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: 'Not confirmed yet' }))
+  await expect(notice).toHaveTextContent('Sending it again is safe')
+} }
+export const UnconfirmedSendLight: Story = { ...UnconfirmedSend, args: { state: 'unconfirmed-send', scheme: 'light' } }
 /** The server echo replaces a pending prompt in place: same item id, one row, no duplicate. */
 function SendIdentityStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [delivered, setDelivered] = React.useState(false)
@@ -430,7 +609,8 @@ function StrandedItemStory({ scheme = 'dark' }: { scheme?: Scheme }) {
 const itemOrder = (turn: Element) => Array.from(turn.querySelectorAll('[data-item-id]'), element => element.getAttribute('data-item-id'))
 export const StrandedItem: Story = { render: args => <StrandedItemStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  const lost = await canvas.findByText('This answer never reached the runtime.')
+  // The virtualized transcript's first paint can exceed findBy's 1s default on a saturated strict host.
+  const lost = await canvas.findByText('This answer never reached the runtime.', undefined, { timeout: 10_000 })
   const lostRow = lost.closest('[data-testid="transcript-stranded"]')
   await expect(lostRow).toHaveAttribute('data-item-id', 'stranded/lost-answer')
   const eventRow = canvasElement.querySelector('[data-testid="transcript-stranded"][data-item-id="stranded/lost-event"]')
@@ -448,7 +628,8 @@ export const StrandedItem: Story = { render: args => <StrandedItemStory scheme={
     await userEvent.click(canvas.getByRole('button', { name: 'Append dropped entry' }))
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="transcript-stranded"][data-item-id="stranded/lost-notice"]')).toHaveTextContent('An appended entry the runtime drops.'))
     await expect(itemOrder(first!)).toEqual(['stranded/prompt', 'stranded/lost-answer', 'stranded/lost-event', 'stranded/answer', 'stranded/lost-notice', 'stranded/late-answer'])
-    await expect(warn).toHaveBeenCalledWith(expect.stringContaining('stranded/lost-notice'))
+    // Stranded content and stable row order are the production contract; diagnostics are development-only.
+    if (import.meta.env.DEV) await expect(warn).toHaveBeenCalledWith(expect.stringContaining('stranded/lost-notice'))
     observer.takeRecords().forEach(record => record.removedNodes.forEach(node => { if (retained.some(element => node === element || node.contains(element))) removed.push(node) }))
     await expect(removed).toHaveLength(0)
     const turns = canvas.getAllByTestId('transcript-turn')
@@ -503,9 +684,18 @@ export const MidTurnHistoryLight: Story = { ...MidTurnHistory, args: { scheme: '
 export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const work = await within(canvasElement).findByTestId('work-log')
   await expect(work.querySelector(':scope > button, :scope > [role="button"]')).toBeNull()
-  const rows = work.querySelectorAll('[data-tool-status]')
+  const rows = work.querySelectorAll<HTMLElement>('[data-tool-status]')
   await expect(rows).toHaveLength(3)
-  for (const row of rows) await expect(row.querySelector('button, [role="button"], [data-row-disclosure]')).toBeNull()
+  for (const row of rows) {
+    await expect(row.querySelector('[data-row-disclosure]')).toBeNull()
+    await expect(row.querySelector('button[aria-label^="Open "]')).toBeNull()
+    const raw = within(row).queryByRole('button', { name: 'Show raw input/output' })
+    if (raw !== null) {
+      await expect(raw).toHaveAttribute('aria-expanded', 'false')
+      await userEvent.click(raw)
+      await expect(raw).toHaveAttribute('aria-expanded', 'true')
+    } else await expectNoOutputWithControl(row)
+  }
   await expect(within(work).getByRole('button', { name: 'Thinking' })).toBeVisible()
   await expect(work).toHaveTextContent('export const last = visibleRows.at(-1)')
   await expect(work).toHaveTextContent('selection retained')
@@ -575,6 +765,7 @@ export const SemanticItems: Story = { render: args => <main {...stylex.props(sty
   await userEvent.click(await canvas.findByRole('button', { name: /Worked for 24s/ }))
   await userEvent.click(canvas.getByRole('button', { name: 'Thinking' }))
   await expect(canvas.getByTestId('tool-detail-preview')).toBeVisible()
+  await userEvent.click(canvas.getByRole('button', { name: 'Show raw input/output' }))
   await expect(canvas.getByTestId('tool-detail-preview')).toHaveTextContent('export const semantic = true')
   for (const text of ['User content retained.', 'System context retained.', 'Notice content retained.', 'Error notice retained.', 'Error detail retained.', 'Message handoff retained.', 'Message untitled-handoff', 'Event title retained.', 'Event body retained.', 'future.semantic.event', 'Status detail retained.', 'Usage · response · 123 input · 45 output', 'Reasoning content retained.', 'Assistant content retained.']) {
     await expect(canvas.getByText(text, { exact: false })).toBeVisible()
