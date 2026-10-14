@@ -11,7 +11,7 @@ import { SyncLine } from '../st3-views/SyncLine'
 import { syncLine } from '../st3-views/sync-line'
 import type { SyncStatus } from '../st3-views/sync-status'
 import { ErrorOverlay, ErrorOverlayHost } from './ErrorOverlay'
-import { HighlightedSource, Markdown, MarkdownImagePolicy, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
+import { HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
 import { ThinkingEntry } from './ThinkingEntry'
 import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
 import { HarnessNotice } from './HarnessNotice'
@@ -49,6 +49,8 @@ export interface TranscriptProps {
   readonly resolveImage?: MarkdownImageResolver
   /** Opens a deferred image outside the page (for hosts whose CSP forbids inline remote images). */
   readonly onLoadImage?: MarkdownImageOpener
+  /** The host's own inline references in message Markdown, such as a `doc/…` name it can open. */
+  readonly renderInlineReference?: InlineReferenceRenderer
   readonly availability?: TranscriptAvailability
   readonly history?: TranscriptHistory
   readonly emptyState?: React.ReactNode | TranscriptEmptyState
@@ -196,7 +198,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter }: TranscriptProps) {
+export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter }: TranscriptProps) {
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. Recording the snapshot after its commit is the adoption epoch.
@@ -242,7 +244,7 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   React.useEffect(() => {
     if (strandedIds !== '' && process.env.NODE_ENV !== 'production') console.warn(`Transcript: the runtime never adopted ${strandedIds}; showing a fallback row.`)
   }, [strandedIds])
-  const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage }), [resolveImage, onLoadImage])
+  const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage, renderInlineReference }), [resolveImage, onLoadImage, renderInlineReference])
   // New rows or changed content are news; send state, tool status and timing are metadata.
   const rows = React.useMemo(() => committed.map(turn => ({ id: turn.id, version: (turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).map(contentVersion).join(' ') })), [committed])
   const running = [...committed].reverse().find(turn => turn.work.running)
