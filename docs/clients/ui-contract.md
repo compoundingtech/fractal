@@ -504,7 +504,9 @@ Sidebar:
 1. the live reserved subject, whatever its name;
 2. otherwise the live arrangement named exactly "Sidebar" with the lowest id, which a client
    created before the reserved id;
-3. otherwise none, and the first edit creates the reserved subject named "Sidebar".
+3. otherwise none, and the first edit creates the reserved subject named "Sidebar". If st refuses
+   that create with `arrangement-retired`, the person removed their Sidebar: the client says
+   restoring a removed Sidebar is not available yet and never tries to create it again.
 
 A client edits the Sidebar it picked and never copies a legacy one, so an older client still
 editing it loses nothing. When two clients create the reserved subject at once, the second gets

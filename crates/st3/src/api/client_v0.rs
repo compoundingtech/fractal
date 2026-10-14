@@ -2616,6 +2616,7 @@ const ACTIONS: &[&str] = &[
     "work.publish-mission",
     "agent.create",
     "agent.stop",
+    "agent.retire",
     "agent.start",
     "agent.suspend",
     "agent.resume",
@@ -2670,6 +2671,7 @@ const AVAILABLE_ACTIONS: &[&str] = &[
     "work.retry",
     "agent.create",
     "agent.stop",
+    "agent.retire",
     "agent.start",
     "agent.suspend",
     "agent.resume",
@@ -9861,7 +9863,12 @@ pub(super) struct ActionRequest {
 fn action_scope(action: &str) -> Option<&'static str> {
     if matches!(
         action,
-        "agent.create" | "agent.stop" | "agent.start" | "agent.suspend" | "agent.resume"
+        "agent.create"
+            | "agent.stop"
+            | "agent.retire"
+            | "agent.start"
+            | "agent.suspend"
+            | "agent.resume"
     ) {
         return Some("control.runtimes");
     }
@@ -11268,6 +11275,31 @@ async fn dispatch_action(
             )])
         }
         "terminal.detach" => Ok(vec![detach_terminal_attachment(state, session, request)?]),
+        "agent.retire" => {
+            require_creation_actor(session)?;
+            let parameters = serde_json::from_value::<st3_client::AgentRetireParameters>(p.clone())
+                .map_err(|error| validation(error.to_string()))?;
+            let agent = client_detail_id("agent", &parameters.agent);
+            let token = request
+                .fence
+                .runtime_desired_revision
+                .as_deref()
+                .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
+            state
+                .store
+                .retire_agent(
+                    &agent,
+                    authority_actor,
+                    &parameters.reason,
+                    token,
+                    request.fence.runtime_incarnation.as_deref(),
+                    &request.idempotency_key,
+                    &state.configured_peers,
+                )
+                .map_err(ApiError::bad)?;
+            signal_changed(state);
+            Ok(vec![agent])
+        }
         action @ ("agent.stop" | "agent.start") => {
             require_creation_actor(session)?;
             let agent = client_detail_id("agent", &parameter_string(p, "agent")?);
@@ -22406,7 +22438,7 @@ mission "example/zero-run" state="ready" {
     fn a_declared_seat_with_no_session_past_its_launch_window_is_down_since_it_began_waiting() {
         let started = 1_790_000_000_000_u64;
         let mut card = sessionless_card(Value::Null);
-        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS + 1);
+        overlay_down(&mut card, Some(started), None, None, started + LAUNCH_WINDOW_MS + 1);
         assert_eq!(card["state"], "down");
         assert_eq!(card["down_since"], client_timestamp(u128::from(started)));
         assert_eq!(card["silent_since"], Value::Null, "a dead holder's activity is not shown as activity");
@@ -22418,12 +22450,12 @@ mission "example/zero-run" state="ready" {
     fn a_seat_inside_its_launch_window_is_still_starting() {
         let started = 1_790_000_000_000_u64;
         let mut card = sessionless_card(Value::Null);
-        overlay_down(&mut card, Some(started), "missing", started + LAUNCH_WINDOW_MS);
+        overlay_down(&mut card, Some(started), None, None, started + LAUNCH_WINDOW_MS);
         assert_eq!(card["state"], "desired");
         assert!(card.get("down_since").is_none());
         assert!(card["current_work"][0].get("holder_down_since").is_none());
         let mut unknown = sessionless_card(Value::Null);
-        overlay_down(&mut unknown, None, "missing", started + 10 * LAUNCH_WINDOW_MS);
+        overlay_down(&mut unknown, None, None, None, started + 10 * LAUNCH_WINDOW_MS);
         assert_eq!(unknown["state"], "desired", "no start time, no claim of how long");
     }
 
@@ -22432,14 +22464,44 @@ mission "example/zero-run" state="ready" {
         let started = 1_790_000_000_000_u64;
         for reported in ["ready", "idle", "working"] {
             let mut card = sessionless_card(json!(reported));
-            overlay_down(&mut card, Some(started), "current", started + 100 * LAUNCH_WINDOW_MS);
+            overlay_down(&mut card, Some(started), Some(5_000), Some(reported), started + 100 * LAUNCH_WINDOW_MS);
             assert_eq!(card["state"], "running", "{reported}");
             assert!(card.get("down_since").is_none());
         }
-        // A report that has gone stale proves nothing: the seat is down, not running.
+    }
+
+    #[test]
+    fn a_seat_that_reports_at_its_idle_heartbeat_is_never_called_down() {
+        // Two seats of the second audit (2026-10-14) had a driver and pty daemon a day old, a
+        // runtime row stuck pending and an idle report every five minutes: older than the 90 s
+        // freshness window nearly all the time, never older than a heartbeat.
+        let started = 1_790_000_000_000_u64;
+        for age in [91_000, 150_000, 299_000, 301_000, HEARTBEAT_MS] {
+            let mut card = sessionless_card(json!("indeterminate"));
+            overlay_down(&mut card, Some(started), Some(age), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
+            assert_eq!(card["state"], "waiting", "{age}");
+            assert!(card.get("down_since").is_none(), "{age}");
+            assert!(card["current_work"][0].get("holder_down_since").is_none(), "{age}");
+        }
+    }
+
+    #[test]
+    fn a_report_older_than_a_heartbeat_proves_nothing_and_an_ended_harness_is_no_session() {
+        let started = 1_790_000_000_000_u64;
         let mut stale = sessionless_card(json!("indeterminate"));
-        overlay_down(&mut stale, Some(started), "stale", started + 100 * LAUNCH_WINDOW_MS);
+        overlay_down(&mut stale, Some(started), Some(HEARTBEAT_MS + 1), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
         assert_eq!(stale["state"], "down");
+        // The launch report of a replacement incarnation is not a session: `agents restart` waits
+        // for `running`, not for the first line the driver writes.
+        let mut launching = sessionless_card(json!("starting"));
+        overlay_down(&mut launching, Some(started), Some(1_000), Some("starting"), started + 1_000);
+        assert_eq!(launching["state"], "desired");
+        let mut launched_long_ago = sessionless_card(json!("starting"));
+        overlay_down(&mut launched_long_ago, Some(started), Some(1_000), Some("starting"), started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(launched_long_ago["state"], "down");
+        let mut ended = sessionless_card(json!("ended"));
+        overlay_down(&mut ended, Some(started), Some(1_000), Some("ended"), started + 100 * LAUNCH_WINDOW_MS);
+        assert_eq!(ended["state"], "down");
     }
 
     #[test]
@@ -22448,7 +22510,7 @@ mission "example/zero-run" state="ready" {
         for state in ["running", "waiting", "stopped", "failed", "suspended"] {
             let mut card = sessionless_card(Value::Null);
             card["state"] = json!(state);
-            overlay_down(&mut card, Some(started), "missing", started + 100 * LAUNCH_WINDOW_MS);
+            overlay_down(&mut card, Some(started), None, None, started + 100 * LAUNCH_WINDOW_MS);
             assert_eq!(card["state"], state);
         }
     }
