@@ -2001,6 +2001,7 @@ command = ["evidence-sign"]
                 panic!("expected refusal, got {reply:?}")
             };
             assert!(reason.contains(expected), "{reason}");
+            drop(client);
             worker.join().unwrap().unwrap();
         }
     }
