@@ -58,7 +58,7 @@
               "pty-core-0.13.0-rust" = pty.narHash;
             };
           };
-        hmModuleEval = nixpkgs.lib.evalModules {
+        mkHmModuleEval = extraConfig: nixpkgs.lib.evalModules {
           specialArgs = {
             inherit pkgs;
             lib = pkgs.lib // {
@@ -86,10 +86,11 @@
                 socket = "/tmp/smalltalk-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/st3/seats/claude.kdl ];
-              };
+              } // extraConfig;
             })
           ];
         };
+        hmModuleEval = mkHmModuleEval { };
         providerRustToolchain = fenix.packages.${system}.combine [
           fenix.packages.${system}.stable.cargo
           fenix.packages.${system}.stable.rustc
@@ -102,7 +103,7 @@
 
         # Cargo.toml is the single source of truth for the version, so a release
         # bump needs no matching edit here.
-        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
         # NixStamp for the shared build-versioning contract: the flake rev is a
         # pure input, so baking it lets a hermetic build know its own identity
@@ -119,8 +120,7 @@
             self.rev
           else
             "nix-dirty.${self.dirtyRev or self.dirtyShortRev or "unknown"}";
-        buildStamp = builtins.toJSON {
-          type = "nix";
+        buildStamp = import ./nix/build-stamp.nix {
           inherit version;
           rev = sourceRev;
           fullRev = self.rev or self.dirtyRev or sourceRev;
@@ -156,6 +156,13 @@
           postInstall = "";
           cargoBuildFlags = [ "-p" "st3" ];
         });
+
+        # Give the historical binary a distinct name in the check-only PATH.
+        # Resolving it there keeps its store identity out of the runtime derivation.
+        messagingCompat = pkgs.runCommand "st3-messaging-compat" { } ''
+          mkdir -p $out/bin
+          ln -s ${messagingBaseline}/bin/st3 $out/bin/st3-messaging-compat
+        '';
 
         # buildRustPackage compiles the workspace once per derivation, so a gate that differs from
         # an existing derivation only by test selection is folded into that derivation's check
@@ -220,9 +227,6 @@
           "st2-pty-stats-component"
           "--exclude"
           "st2-vista-component"
-          # The standalone decision model has its own hermetic gate.
-          "--exclude"
-          "st-decision-fold"
           # `checks.st3` gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
@@ -254,7 +258,7 @@
           inherit cargoDeps;
 
           # The workspace default members include the st3 crates. This package ships only st2;
-          # st3, `st`, stui, and st3-migrate come from the st3 package, so each has one build.
+          # st3, `st`, and st3-migrate come from the st3 package, so each has one build.
           cargoBuildFlags = [
             "-p"
             "st2"
@@ -389,7 +393,7 @@
               fi
             done
           '';
-          # Stamp st3, its shared driver library, and stui from this declared flake source.
+          # Stamp st3, its shared driver library, and the terminal UI library from this declared flake source.
           CLI_BUILD_STAMP = buildStamp;
           inherit cargoDeps;
           cargoBuildFlags = [
@@ -397,8 +401,6 @@
             "st3"
             "-p"
             "st3-migrate"
-            "-p"
-            "stui"
           ];
           # `--no-fail-fast` reports every failing test target in one run.
           cargoTestFlags = [
@@ -436,9 +438,6 @@
               -j "$NIX_BUILD_CORES" ${pkgs.lib.escapeShellArgs st3Check.cargoTestFlags}
             runHook postCheck
           '';
-          ST3_MESSAGING_COMPAT_BIN = "${messagingBaseline}/bin/st3";
-          ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
-          ST3_OTEL_REQUIRE = "1";
           # These two tests put an openpty(3) terminal into raw mode. In the macOS Nix build one
           # fails and the other hangs, so they run on Linux only until they pass on macOS.
           checkFlags = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
@@ -451,6 +450,14 @@
           # macOS /etc/profile otherwise puts host tools (such as /bin/ps, which
           # cannot execute in the sandbox) ahead of their declared Nix equivalents.
           preCheck = ''
+            # These tools enter PATH only through nativeCheckInputs. Do not put
+            # their store paths in attributes inherited by the unchecked package.
+            # Preserve the historical executable name for its CLI dispatch and
+            # fixtures that copy the binary: pass the original .../bin/st3 path.
+            ST3_MESSAGING_COMPAT_BIN=$(readlink -f "$(command -v st3-messaging-compat)")
+            ST3_OTELITE_BIN=$(command -v otelite)
+            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN
+            export ST3_OTEL_REQUIRE=1
             export HOME=$(mktemp -d)
             export SHELL=${pkgs.bashInteractive}/bin/bash
             printf 'export PATH=%q\n' "$PATH" > "$HOME/.bash_profile"
@@ -480,6 +487,7 @@
             pkgs.nodejs
             ptyPackage
             effect-utils.packages.${system}.otelite
+            messagingCompat
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.util-linux pkgs.systemd ]
           # Native session discovery lists processes with ps and lsof on macOS (Linux reads /proc).
@@ -507,14 +515,13 @@
         # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
         st3 = st3Check.overrideAttrs (_: {
           doCheck = false;
-          ST3_MESSAGING_COMPAT_BIN = "";
         });
 
         st3Help = pkgs.runCommand "st3-help-${version}" {
           nativeBuildInputs = [ pkgs.bashInteractive pkgs.fish pkgs.zsh ];
         } ''
           test "$(readlink ${st3}/bin/st)" = st3
-          test -x ${st3}/bin/stui
+          test ! -e ${st3}/bin/stui
           test -x ${st3}/bin/pty
           expected='${version}+${sourceRev}${pkgs.lib.optionalString (sourceDirty && !(pkgs.lib.hasSuffix "-dirty" sourceRev)) "-dirty"}'
           ${st3}/bin/st3 --version > st3.version
@@ -522,7 +529,7 @@
           test "$(wc -l < st3.version)" -eq 1
           ${st3}/bin/st --version --json > version.json
           test "$(${pkgs.jq}/bin/jq -r .machine_version version.json)" = "$expected"
-          ${st3}/bin/stui --version | grep -F "$expected"
+          ${st3}/bin/st ui --version | grep -F "$expected"
           ${st3}/bin/st3 --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
@@ -544,14 +551,14 @@
           pkgs.runCommand "st3-install-layout-${version}" { } ''
             export HOME=$(mktemp -d)
             test "$(readlink ${st3}/bin/st)" = st3
-            printf '%s\n' pty st st3 st3-migrate stui > expected-package-bin
+            printf '%s\n' pty st st3 st3-migrate > expected-package-bin
             ls ${st3}/bin | sort > actual-package-bin
             cmp expected-package-bin actual-package-bin
 
             mkdir built
-            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate ${st3}/bin/stui built/
+            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate built/
             bash ${self}/scripts/install --from built --bin-dir "$PWD/bin"
-            printf '%s\n' st st3 st3-migrate stui > expected-source-bin
+            printf '%s\n' st st3 st3-migrate > expected-source-bin
             ls bin | sort > actual-source-bin
             cmp expected-source-bin actual-source-bin
             test "$(readlink bin/st)" = st3
@@ -559,7 +566,7 @@
             bin/st3 --help > st3.help
             cmp st.help st3.help
             bin/st3-migrate --help > /dev/null
-            bin/stui --help > /dev/null
+            bin/st ui --help > /dev/null
 
             bash ${self}/scripts/install-test
             touch $out
@@ -790,8 +797,7 @@
           # `checks.hooks-replacement`. Its test suite is `checks.st2`'s, on source that differs
           # only by an appended hook comment, so running it again buys nothing.
           doCheck = false;
-          CLI_BUILD_STAMP = builtins.toJSON {
-            type = "nix";
+          CLI_BUILD_STAMP = import ./nix/build-stamp.nix {
             inherit version;
             rev = "hook-successor";
             commitTs = sourceCommitUnix;
@@ -802,6 +808,9 @@
       {
         packages.st2 = st2;
         packages.st = st3;
+        # Release runners need a host linker for Cargo build scripts and stamp tests.
+        # The release target still links through the pinned Zig/glibc-baseline wrapper.
+        packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
@@ -825,11 +834,20 @@
         # wants them.
         checks.st2 = st2;
         checks.st3 = st3Check;
+        checks.st3-runtime-inputs =
+          assert import ./nix/st3-runtime-input-tests.nix {
+            inherit self system;
+            inputs = { inherit nixpkgs flake-utils fenix pty effect-utils messaging-baseline; };
+          };
+          pkgs.runCommand "st3-runtime-inputs" { } ''touch $out'';
         checks.st3-help = st3Help;
         checks.install-layout = installLayout;
         checks.st2-install-layout = st2InstallLayout;
         checks.release-integration = st2ReleaseIntegration;
         checks.debug-assertions = st2DebugAssertions;
+        checks.build-stamp-bounds =
+          assert import ./nix/build-stamp-tests.nix;
+          pkgs.runCommand "build-stamp-bounds" { } ''touch $out'';
         checks.hm-module-eval =
           let
             rendered = hmModuleEval.config;
@@ -880,6 +898,54 @@
           assert (!pkgs.stdenv.hostPlatform.isLinux)
             || rendered.systemd.user.services.smalltalk.Service.MemoryMax == "8G";
           pkgs.runCommand "smalltalk-hm-module-eval" { } "touch $out";
+        checks.hm-module-external-binary-eval =
+          let
+            executable = "/opt/smalltalk/bin/st3";
+            externalConfig = { binary.path = executable; };
+            rendered = (mkHmModuleEval externalConfig).config;
+            successor = (mkHmModuleEval (externalConfig // {
+              package = pkgs.emptyDirectory;
+              ptyPackage = null;
+            })).config;
+            units = config: builtins.toJSON {
+              inherit (config.systemd.user) services;
+              inherit (config.launchd) agents;
+            };
+            unitText = units rendered;
+            forbiddenPaths = map (package: builtins.unsafeDiscardStringContext (toString package)) [
+              rendered.services.smalltalk.package
+              rendered.services.smalltalk.ptyPackage
+              (builtins.head hmModuleEval.config.home.packages)
+            ];
+            applyScript = if pkgs.stdenv.hostPlatform.isLinux then
+              rendered.systemd.user.services.smalltalk-apply.Service.ExecStart
+            else
+              builtins.head rendered.launchd.agents.smalltalk-apply.config.ProgramArguments;
+            args = if pkgs.stdenv.hostPlatform.isLinux then
+              rendered.systemd.user.services.smalltalk.Service.ExecStart
+            else
+              builtins.concatStringsSep " " rendered.launchd.agents.smalltalk.config.ProgramArguments;
+          in
+          assert rendered.home.packages == [ ];
+          assert !(rendered.home.activation ? smalltalkBinary);
+          assert builtins.all (path: !(pkgs.lib.hasInfix path unitText)) forbiddenPaths;
+          assert !(pkgs.lib.hasInfix "X-Restart-Triggers" unitText);
+          assert !(pkgs.lib.hasInfix "SMALLTALK_PACKAGE" unitText);
+          assert pkgs.lib.hasInfix executable args;
+          assert pkgs.lib.hasInfix "${builtins.dirOf executable}/pty" args;
+          # Includes the declaration wrapper's store path: neither it nor a unit
+          # may change when the unused st3 or PTY package changes.
+          assert unitText == units successor;
+          pkgs.runCommand "smalltalk-hm-module-external-binary-eval" { } ''
+            ${pkgs.gnugrep}/bin/grep -F -- ${pkgs.lib.escapeShellArg executable} ${applyScript}
+            for package in ${pkgs.lib.escapeShellArgs forbiddenPaths}; do
+              if ${pkgs.gnugrep}/bin/grep -F -- "$package" ${applyScript}; then
+                echo "Declaration wrapper references a Home Manager-owned package" >&2
+                exit 1
+              fi
+            done
+            touch $out
+          '';
         checks.wasm-resolver-feature = st2WasmResolver;
         checks.wasip2-resource-providers = st2ProviderRuntime;
         checks.provider-components = st2ProviderComponents;
@@ -1152,6 +1218,9 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.git
+            # Git evidence fixtures sign observations and serve API responses with Python.
+            pkgs.openssh
+            pkgs.python3
             pkgs.sccache
             pkgs.cargo-nextest
             pkgs.pkg-config
@@ -1177,7 +1246,9 @@
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           shellHook = ''
+            source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              source ${./scripts/ci-cargo-tools-env} || exit $?
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
           '';
@@ -1197,6 +1268,7 @@
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
           shellHook = ''
+            source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
@@ -1253,6 +1325,8 @@
             ];
             BUCK2_BIN = "${effectUtilsPackages.buck2}/bin/buck2";
             FRACTAL_WEB_BUCK_ROOT = "${buckRoot}";
+            PLAYWRIGHT_MODULE = "${webPkgs.playwright-driver}/index.mjs";
+            CHROMIUM_PATH = webPkgs.lib.optionalString webPkgs.stdenv.hostPlatform.isLinux "${webPkgs.chromium}/bin/chromium";
             shellHook = ''
               mkdir -p repos .buck2
               ln -sfn ${effect-utils} repos/effect-utils

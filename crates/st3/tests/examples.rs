@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 
-use agent_spec::spec::Driver;
 use sha2::{Digest as _, Sha256};
 
 fn assigned_to(step: &st3::model::StepSpec) -> Option<&str> {
@@ -58,8 +57,8 @@ fn authored_harness_counts(source: &str, source_name: &str) -> (usize, usize) {
                     }
                     "codex" => counts.1 += 1,
                     // Pi and OMP use the configured account model and are asserted explicitly by
-                    // the one eval that owns those native transport seats. This historical tuple
-                    // remains the Claude/Codex inventory used by the paired corpus checks below.
+                    // the one eval that owns those native transport seats. This tuple is
+                    // the Claude/Codex inventory used by the current corpus checks below.
                     "pi" | "omp" => {}
                     provider => panic!("{source_name} uses unexpected harness {provider}"),
                 }
@@ -517,6 +516,7 @@ fn st3_eval_inventory_has_twenty_two_model_free_and_twenty_one_model_backed_eval
         "automatic-github-intake",
         "claude-skill-inheritance",
         "codex-compaction-message-delivery",
+        "codex-minimal-access",
         "continuous-stewardship",
         "cross-harness-message-wake",
         "fork-in-the-road",
@@ -722,7 +722,7 @@ fn seat_queue_moves_one_run_and_gates_the_head_without_priming_the_seat() {
 
     let controller = fs::read_to_string(root.join("controller.sh")).unwrap();
     assert!(controller.contains(".value.harness_state"));
-    for required in ["missions start", "agents queue move", "attention approve"] {
+    for required in ["missions start", "agents queue move", "alerts approve"] {
         assert!(
             controller.contains(required),
             "missing `{required}` scenario"
@@ -762,7 +762,7 @@ fn seat_queue_moves_one_run_and_gates_the_head_without_priming_the_seat() {
 }
 
 #[test]
-fn every_selected_eval_has_one_st2_and_one_st3_form() {
+fn every_selected_eval_uses_current_grammar_and_harness_policy() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("evals");
@@ -799,40 +799,17 @@ fn every_selected_eval_has_one_st2_and_one_st3_form() {
         "network-smoke",
         "network-isolation",
     ] {
-        let st2_file = root.join("st2").join(name).join("eval.kdl");
         let st3_file = root.join("st3").join(name).join("eval.kdl");
-        let st2_source = fs::read_to_string(&st2_file).expect("read st2 eval");
         let st3_source = fs::read_to_string(&st3_file).expect("read st3 eval");
-        let st2_document: kdl::KdlDocument = st2_source.parse().expect("parse st2 KDL");
         let st3_document: kdl::KdlDocument = st3_source.parse().expect("parse st3 KDL");
 
-        assert_eq!(
-            st_drivers::kdl_version::document_version(&st2_document).unwrap(),
-            1
-        );
         assert_eq!(
             st_drivers::kdl_version::document_version(&st3_document).unwrap(),
             2
         );
-        let st2_spec = st_drivers::eval_spec::parse_spec(&st2_source)
-            .unwrap_or_else(|error| panic!("{}: {error:#}", st2_file.display()));
         st3::parse_intent(&st3_source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", st3_file.display()));
-        let st2_agents = st2_spec.agents.iter().chain(
-            st2_spec
-                .eval
-                .iter()
-                .flat_map(|evaluation| evaluation.agents.iter()),
-        );
         if model_free.contains(&name) {
-            for agent in st2_agents {
-                assert!(
-                    agent.driver.is_none(),
-                    "{} model-free agent {} must not use a harness",
-                    st2_file.display(),
-                    agent.id
-                );
-            }
             assert_eq!(
                 authored_harness_counts(&st3_source, &st3_file.display().to_string()),
                 (0, 0),
@@ -845,22 +822,14 @@ fn every_selected_eval_has_one_st2_and_one_st3_form() {
                 st3_file.display()
             );
         } else {
-            for agent in st2_agents {
-                assert!(
-                    agent.command.is_none() && agent.driver.is_some(),
-                    "{} agent {} must use a native harness",
-                    st2_file.display(),
-                    agent.id
-                );
-            }
             assert!(
                 authored_harness_counts(&st3_source, &st3_file.display().to_string()) != (0, 0),
                 "{} must contain native agent harnesses",
                 st3_file.display()
             );
         }
-        assert!(st_drivers::eval_spec::parse_spec(&st3_source).is_err());
-        assert!(st3::parse_intent(&st2_source, "local").is_err());
+        let old_version = st3_source.replacen("version 2", "version 1", 1);
+        assert!(st3::parse_intent(&old_version, "local").is_err());
     }
 }
 
@@ -870,43 +839,19 @@ fn selected_eval_harness_counts_match_the_inventory() {
         .join("../..")
         .join("evals");
     let expected = [
-        ("license-mit", (2, 1), (2, 0)),
-        ("ghost-bug", (0, 2), (0, 2)),
-        ("signal-rename", (0, 4), (0, 4)),
-        ("restart-continuity", (2, 0), (2, 0)),
-        ("fork-in-the-road", (0, 4), (0, 4)),
-        ("poisoned-pr", (0, 2), (0, 2)),
-        ("test-writing", (0, 2), (0, 2)),
-        ("weird-git-setup", (0, 1), (0, 1)),
-        ("claude-skill-inheritance", (1, 0), (1, 0)),
+        ("license-mit", (2, 0)),
+        ("ghost-bug", (0, 2)),
+        ("signal-rename", (0, 4)),
+        ("restart-continuity", (2, 0)),
+        ("fork-in-the-road", (0, 4)),
+        ("poisoned-pr", (0, 2)),
+        ("test-writing", (0, 2)),
+        ("weird-git-setup", (0, 1)),
+        ("claude-skill-inheritance", (1, 0)),
     ];
     let mut model_gates = Vec::new();
 
-    for (name, st2_expected, st3_expected) in expected {
-        let st2_source = fs::read_to_string(root.join("st2").join(name).join("eval.kdl")).unwrap();
-        let st2_spec = st_drivers::eval_spec::parse_spec(&st2_source).unwrap();
-        let mut st2_counts = (0, 0);
-        for agent in st2_spec.agents.iter().chain(
-            st2_spec
-                .eval
-                .iter()
-                .flat_map(|evaluation| evaluation.agents.iter()),
-        ) {
-            match agent.driver.as_ref().expect("native st2 harness") {
-                Driver::Claude(driver) => {
-                    assert_eq!(
-                        driver.model.as_deref(),
-                        Some("claude-sonnet-5"),
-                        "st2 {name} Claude seats must use Sonnet"
-                    );
-                    st2_counts.0 += 1;
-                }
-                Driver::Codex(_) => st2_counts.1 += 1,
-                driver => panic!("unexpected st2 harness {}", driver.name()),
-            }
-        }
-        assert_eq!(st2_counts, st2_expected, "st2 {name}");
-
+    for (name, st3_expected) in expected {
         let st3_source = fs::read_to_string(root.join("st3").join(name).join("eval.kdl")).unwrap();
         let st3_counts = authored_harness_counts(&st3_source, &format!("st3 {name}"));
         assert_eq!(st3_counts, st3_expected, "st3 {name}");
@@ -1048,41 +993,19 @@ fn license_mit_st3_fixture_matches_its_claude_team() {
 }
 
 #[test]
-fn restart_continuity_fixtures_match_their_claude_teams() {
+fn restart_continuity_fixture_matches_its_claude_team() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals");
-    for runtime in ["st2", "st3"] {
-        for seat in ["sup", "worker"] {
-            let workspace = if runtime == "st2" {
-                root.join(runtime)
-                    .join("restart-continuity/fixture")
-                    .join(seat)
-            } else {
-                root.join(runtime).join("restart-continuity").join(seat)
-            };
-            assert_eq!(
-                fs::read_to_string(workspace.join("CLAUDE.md")).unwrap(),
-                "@PERSONA.md\n"
-            );
-            assert!(workspace.join("PERSONA.md").is_file());
-            assert!(!workspace.join("AGENTS.md").exists());
-        }
+        .join("evals/st3/restart-continuity");
+    for seat in ["sup", "worker"] {
+        let workspace = root.join(seat);
+        assert_eq!(
+            fs::read_to_string(workspace.join("CLAUDE.md")).unwrap(),
+            "@PERSONA.md\n"
+        );
+        assert!(workspace.join("PERSONA.md").is_file());
+        assert!(!workspace.join("AGENTS.md").exists());
     }
-
-    let st2_source = fs::read_to_string(root.join("st2/restart-continuity/eval.kdl")).unwrap();
-    let st2_spec = st_drivers::eval_spec::parse_spec(&st2_source).unwrap();
-    let supervisor = st2_spec
-        .agents
-        .iter()
-        .find(|agent| agent.id == "rc.sup")
-        .expect("restart supervisor");
-    assert!(
-        supervisor
-            .execs
-            .iter()
-            .any(|process| process.id == "rc.sup.injector")
-    );
 }
 
 #[test]
@@ -1542,48 +1465,34 @@ fn new_paid_eval_fixtures_match_their_native_harnesses() {
         .join("../..")
         .join("evals");
 
-    for runtime in ["st2", "st3"] {
-        let test_root = if runtime == "st2" {
-            root.join(runtime).join("test-writing/fixture")
-        } else {
-            root.join(runtime).join("test-writing")
-        };
-        for seat in ["sup", "worker"] {
-            let workspace = test_root.join(seat);
-            assert!(workspace.join("AGENTS.md").is_file());
-            assert!(!workspace.join("CLAUDE.md").exists());
-        }
-
-        let weird_root = if runtime == "st2" {
-            root.join(runtime).join("weird-git-setup/fixture")
-        } else {
-            root.join(runtime).join("weird-git-setup")
-        };
-        assert!(weird_root.join("persona/AGENTS.md").is_file());
-        let setup = fs::read_to_string(weird_root.join("setup-megarepo.sh")).unwrap();
-        assert!(setup.contains("persona/AGENTS.md"));
-        assert!(!setup.contains("persona/CLAUDE.md"));
-
-        let skill_root = if runtime == "st2" {
-            root.join(runtime).join("claude-skill-inheritance/fixture")
-        } else {
-            root.join(runtime).join("claude-skill-inheritance")
-        };
-        assert_eq!(
-            fs::read_to_string(skill_root.join("repo/CLAUDE.md")).unwrap(),
-            "@PERSONA.md\n"
-        );
-        assert!(
-            skill_root
-                .join("repo/.claude/skills/evalskill-project/SKILL.md")
-                .is_file()
-        );
-        assert!(
-            skill_root
-                .join("plugin/evalpkg/skills/evalskill-plugin/SKILL.md")
-                .is_file()
-        );
+    let test_root = root.join("st3/test-writing");
+    for seat in ["sup", "worker"] {
+        let workspace = test_root.join(seat);
+        assert!(workspace.join("AGENTS.md").is_file());
+        assert!(!workspace.join("CLAUDE.md").exists());
     }
+
+    let weird_root = root.join("st3/weird-git-setup");
+    assert!(weird_root.join("persona/AGENTS.md").is_file());
+    let setup = fs::read_to_string(weird_root.join("setup-megarepo.sh")).unwrap();
+    assert!(setup.contains("persona/AGENTS.md"));
+    assert!(!setup.contains("persona/CLAUDE.md"));
+
+    let skill_root = root.join("st3/claude-skill-inheritance");
+    assert_eq!(
+        fs::read_to_string(skill_root.join("repo/CLAUDE.md")).unwrap(),
+        "@PERSONA.md\n"
+    );
+    assert!(
+        skill_root
+            .join("repo/.claude/skills/evalskill-project/SKILL.md")
+            .is_file()
+    );
+    assert!(
+        skill_root
+            .join("plugin/evalpkg/skills/evalskill-plugin/SKILL.md")
+            .is_file()
+    );
 }
 
 #[test]

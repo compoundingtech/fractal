@@ -37,7 +37,7 @@ const isConnected = (agent: St3.Agent) =>
   agent.reachability === 'reachable'
 
 const activityOf = (agent: St3.Agent): Agent['activity'] => {
-  if (agent.state === 'failed' || Option.isSome(agent.fault)) return 'errored'
+  if (agent.state === 'failed' || agent.state === 'down' || Option.isSome(agent.fault)) return 'errored'
   if (agent.state === 'waiting' || Option.getOrUndefined(agent.blocked_on) === 'human')
     return 'waiting'
   const harnessState = Option.getOrUndefined(agent.harness_state)
@@ -52,6 +52,9 @@ const statusOf = (agent: St3.Agent): string => {
   const title = work === undefined ? undefined : Option.getOrUndefined(work.title)
   return (
     Option.getOrUndefined(agent.fault) ??
+    (agent.state === 'down'
+      ? `down · no session since ${Option.getOrUndefined(agent.down_since) ?? 'unknown'}`
+      : undefined) ??
     (Option.getOrUndefined(agent.blocked_on) === 'human'
       ? `waiting for you${Option.match(agent.ask, { onNone: () => '', onSome: (ask) => ` (${ask})` })}`
       : undefined) ??

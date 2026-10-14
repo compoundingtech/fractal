@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { agentModel, compactFolders, agentName, agentRows, agentSections, agentState, agentTreeLines, filterAgentRows, stepProgress, UNMANAGED_GROUP } from './agentsView.ts';
+import { agentModel, compactFolders, agentName, agentRows, agentSections, agentState, agentTreeLines, agentWord, filterAgentRows, stepProgress, UNMANAGED_GROUP } from './agentsView.ts';
 
 const now = Date.parse('2026-09-30T12:00:00Z');
 const agent = (id, extra = {}) => ({ id: `agent/${id}`, name: id, kind: 'agent', updated_at: '2026-09-30T11:00:00Z', state: 'running', harness_state: 'idle', driver: 'claude', runtime_ids: [], reachability: 'local', ...extra });
@@ -18,6 +18,14 @@ assert.equal(agentState({ state: 'running', harness_state: 'idle' }), 'idle');
 assert.equal(agentState({ state: 'running', harness_state: 'working', fault: 'boom' }), 'fault');
 assert.equal(agentState({ state: 'running', delivery: { state: 'stale' } }), 'fault');
 assert.equal(agentState({ state: 'waiting', harness_state: 'blocked' }), 'needs-you');
+// A harness compacting its conversation is a status of the seat, never an alert; a fault or a login still wins.
+assert.equal(agentState({ state: 'running', harness_state: 'working', activity: 'compacting' }), 'compacting');
+assert.equal(agentState({ state: 'running', harness_state: 'ready', activity: 'compacting' }), 'compacting');
+assert.equal(agentState({ state: 'running', harness_state: 'working', activity: null }), 'working');
+assert.equal(agentState({ state: 'running', harness_state: 'working', activity: 'compacting', fault: 'crashed' }), 'fault');
+assert.equal(agentState({ state: 'stopped', activity: 'compacting' }), 'stopped');
+assert.equal(agentWord('compacting'), 'compacting');
+assert.equal(agentWord('needs-you'), 'alert');
 assert.equal(agentState({ state: 'waiting', harness_state: 'starting' }), 'starting');
 assert.equal(agentState({ state: 'stopped' }), 'stopped');
 assert.equal(agentState({ state: 'failed' }), 'fault');
@@ -39,7 +47,7 @@ const sessions = [
 ];
 const rows = agentRows(agents, sessions, 'example-linux', now);
 assert.deepEqual(rows.map(row => row.name), ['Asks', 'Bad', 'Busy', 'Alpha', 'Zeta', 'Off', 'codex in app']);
-assert.deepEqual(agentSections(rows).map(section => [section.title, section.count]), [['waiting on you', 1], ['broken', 1], ['working', 1], ['idle', 2], ['stopped', 1], [UNMANAGED_GROUP, 1]]);
+assert.deepEqual(agentSections(rows).map(section => [section.title, section.count]), [['alerts', 1], ['broken', 1], ['working', 1], ['idle', 2], ['stopped', 1], [UNMANAGED_GROUP, 1]]);
 assert.equal(agentSections(rows)[0].person, true);
 const found = rows.at(-1);
 assert.deepEqual([found.target, found.harness, found.activity, found.host, found.unmanaged], ['session/found', 'codex', '42s', 'example-linux', true]);
@@ -77,7 +85,7 @@ assert.equal(agentModel({ usage: null }), null);
 assert.equal(agentModel({}), null);
 
 // Signed out of its provider: needs login, said how, and it clears once signed in again.
-import { agentState as stateOf, loginGuidance } from './agentsView.ts';
+import { agentGroup, agentState as stateOf, loginGuidance } from './agentsView.ts';
 assert.equal(stateOf({ state: 'waiting', harness_state: 'unauthenticated', fault: null, delivery: null }), 'needs-login');
 assert.equal(stateOf({ state: 'waiting', harness_state: 'idle', reason: 'providerAuth', fault: null, delivery: null }), 'needs-login');
 assert.equal(stateOf({ state: 'running', harness_state: 'idle', fault: null, delivery: null }), 'idle');
@@ -88,6 +96,11 @@ assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observa
 assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observation: 'current', reachability: 'reachable', fault: null, delivery: null }), 'starting');
 assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observation: null, reachability: 'reachable', fault: null, delivery: null }), 'starting');
 assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observation: 'stale', reachability: 'unreachable', fault: null, delivery: null }), 'starting');
+
+// A seat with no session is down, whatever its stale harness says; st decides, the app only shows it.
+assert.equal(stateOf({ state: 'down', harness_state: 'indeterminate', observation: 'stale', reachability: 'reachable', fault: null, delivery: null }), 'down');
+assert.equal(agentWord('down'), 'down');
+assert.equal(agentGroup({ state: 'down', unmanaged: false }), 'broken');
 
 // st's additive harness_error_state names a login outright, even when the harness state is stale.
 assert.equal(stateOf({ state: 'waiting', harness_state: 'indeterminate', observation: 'stale', reachability: 'reachable', harness_error_state: 'needs-login', fault: null, delivery: null }), 'needs-login');
@@ -104,3 +117,9 @@ assert.equal(stepProgress(missions, 'step-run/example/unknown'), undefined);
 const working = { ...agents[0], id: 'agent/example/doer', current_work: [{ id: 'step-run/example/one', mission_id: 'mission/example/build', path: 'build' }] };
 assert.equal(agentRows([working], [], 'example-linux', now, missions)[0].progress, 'Tests pass on main; opening the PR');
 assert.equal(agentRows([working], [], 'example-linux', now)[0].progress, undefined);
+
+// A compacting seat is listed with the working ones, and says so.
+const compacting = agentRows([agent('example/tidy', { harness_state: 'working', activity: 'compacting' })], [], 'example-linux', now);
+assert.equal(compacting[0].state, 'compacting');
+assert.deepEqual(agentSections(compacting).map(section => [section.title, section.count]), [['working', 1]]);
+assert.equal(agentSections(compacting)[0].person, false);

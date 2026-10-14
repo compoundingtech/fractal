@@ -190,6 +190,7 @@ export const StreamingControlsPersistence: Story = {
       flushSync(() => copy.click())
       await settle()
       if (fence.dataset.copyState !== 'copied' || copied[0] !== fence.querySelector('code')?.textContent) throw new Error('Copy did not write the raw rendered code')
+      if (String(copy.textContent) !== 'Copied' || copy.getAttribute('aria-label') !== 'Copied code') throw new Error('Copied feedback did not match the accessible control name')
       for (let stage = 1; stage < streamChunks.length; stage++) {
         flushSync(() => append.click())
         await settle()
@@ -200,6 +201,7 @@ export const StreamingControlsPersistence: Story = {
       flushSync(() => copy.click())
       await settle()
       if (copied.at(-1) !== fence.querySelector('code')?.textContent || copy.textContent !== 'Copied') throw new Error('Copy after streaming did not use the latest code')
+      if (copy.getAttribute('aria-label') !== 'Copied code') throw new Error('Copy after streaming did not update the accessible control name')
       const second = canvasElement.querySelectorAll<HTMLElement>('[data-testid="markdown-code-block"]')[1]
       if (second?.dataset.wrap !== 'false') throw new Error('A new fence inherited another fence’s local wrap state')
     } finally {

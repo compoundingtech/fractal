@@ -50,16 +50,19 @@ exact address of its own running bridge, as the proof does.
 
 The module is linked in the ordinary build and the Debug/Release guards go; the setting is the
 switch. The Rust XCFramework (device and simulator slices) builds from `modules/st-fabric/build.sh`
-on the Apple host. The debug bundle grew 27.8 MiB with the carrier; the Release size is measured
-before the first install and recorded here. The member-side fabric pin stays explicit
-(0.2.32+e31e53b today); a change to the direct wire needs the byte and daemon interoperability
+on the Apple host. The debug bundle grew 27.8 MiB with the carrier. Measured Release (dev-signed, not
+App Store thinned): 49,625,899 bytes with the bridge against 31,856,010 without, so the bridge adds
+17,769,889 bytes (about 16.9 MiB); zipped, it adds 5,145,126 bytes (about 4.9 MiB). The member-side fabric pin stays explicit
+(0.2.41+84c3208 today); a change to the direct wire needs the byte and daemon interoperability
 checks again.
 
 ### 3. Members
 
 Each member that should serve phones exposes only its paired-only client socket
 (`client_gateway_socket`, never `st3.sock`) as one fabric service and grants the phone's public node
-ID that one service. Operations does this the way it does the terminal exposure: one host at a time,
+ID that one service, inbound-only (`fabric add PHONE_NODE_ID NAME --inbound-only --allow SERVICE`,
+fabric 0.2.41 or later), so the member serves the phone when it connects and never dials or probes it
+([grant](ios-fabric-protocol.md#member-exposure-and-authorization)). Operations does this the way it does the terminal exposure: one host at a time,
 a script with a revoke counterpart, a receipt per host. The phone shows its node ID in Fleet ›
 connection for the owner to send.
 
