@@ -774,6 +774,59 @@ class WorkflowStructure(unittest.TestCase):
                 body = push.group(1) + push.group(2)
                 self.assertRegex(body, r'branches|tags', f'{path.name} has an unfiltered push trigger')
 
+    WIRED = ('genie-freshness', 'typescript-client')
+    NOT_YET_WIRED = ('linux-gate', 'isolation-vm', 'mail-redelivery-canaries')
+
+    def job_text(self, name):
+        text = (ROOT / '.github/workflows/fleet.yml').read_text()
+        return re.search(rf'^  {re.escape(name)}:\n((?:    .*\n|\n)+)', text, re.M).group(1)
+
+    def steps_of(self, name):
+        """(step name or uses, its if or None) for each step of a job, in order."""
+        body = self.job_text(name).split('    steps:\n', 1)[1]
+        steps = []
+        for chunk in re.split(r'^      - ', body, flags=re.M)[1:]:
+            label = re.match(r'(?:name: (.*)|uses: (.*))', chunk)
+            condition = re.search(r'^        if: (.*)$', chunk, re.M)
+            steps.append((label.group(1) or label.group(2), condition.group(1) if condition else None))
+        return steps
+
+    def test_a_wired_check_skips_its_steps_only_when_its_own_gate_says_so(self):
+        for check in self.WIRED:
+            with self.subTest(check):
+                job = self.job_text(check)
+                covered = f"needs.evidence-gate-{check}.outputs.skip != 'true'"
+                header = job.split('    steps:\n', 1)[0]
+                self.assertRegex(header, rf'needs: \[[^\]]*evidence-gate-{re.escape(check)}[^\]]*\]')
+                # The job always runs: its own condition names a status function, so a gate job that failed,
+                # was skipped or never started cannot stop the required check, and never mentions the gate.
+                self.assertIn('!cancelled()', re.search(r'^    if: (.*)$', header, re.M).group(1))
+                self.assertNotIn('evidence-gate', re.search(r'^    if: (.*)$', header, re.M).group(1))
+                steps = self.steps_of(check)
+                self.assertTrue(steps[0][0].startswith('actions/checkout'))
+                self.assertIsNone(steps[0][1], 'the checkout is never skipped')
+                for name, condition in steps[1:]:
+                    if name == 'Report job cache coverage':
+                        self.assertEqual(condition, 'always()')  # the job still reports; it is not gated
+                    elif name == 'evidence covered by a trusted note':
+                        self.assertEqual(condition, f"needs.evidence-gate-{check}.outputs.skip == 'true'")
+                    else:
+                        self.assertIsNotNone(condition, f'{name} would run on a skip')
+                        self.assertIn(covered, condition, name)
+                names = [n for n, _ in steps]
+                self.assertIn('evidence covered by a trusted note', names)
+                self.assertEqual(names[-1], 'Report job cache coverage')
+        # The gate jobs publish exactly the decision and the record the consumers read.
+        for check in self.WIRED + self.NOT_YET_WIRED:
+            self.assertIn('      skip: ${{ steps.gate.outputs.skip }}\n      record: ${{ steps.gate.outputs.record }}\n',
+                          self.job_text(f'evidence-gate-{check}'))
+
+    def test_the_other_required_checks_are_not_wired_to_skip_yet(self):
+        for check in self.NOT_YET_WIRED:
+            with self.subTest(check):
+                self.assertNotIn(f'needs.evidence-gate-{check}', self.job_text(check))
+                self.assertNotIn(f"evidence-gate-{check}", self.job_text(check).split('    steps:\n', 1)[0])
+
     def test_the_gate_jobs_can_write_nothing_and_start_nothing(self):
         text = (ROOT / '.github/workflows/fleet.yml').read_text()
         jobs = re.findall(r'^  (evidence-gate-[a-z-]+):\n((?:    .*\n|\n)+)', text, re.M)

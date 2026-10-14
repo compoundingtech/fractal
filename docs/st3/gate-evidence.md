@@ -528,10 +528,29 @@ check for the typed `nix` observation is a later slice, agreed with the Nix prod
 
 Five non-required jobs, `evidence-gate-<check>` for each required check (`linux-gate`,
 `typescript-client`, `isolation-vm`, `genie-freshness`, `mail-redelivery-canaries`), decide whether
-a trusted note already covers the run's tree. Nothing `needs` them, they hold `contents: read`
-only, write nothing and dispatch nothing, and every problem becomes `decision=run`. **The gate
-decides; it does not yet skip anything.** Wiring a skip into the jobs it would skip is a separate
-change, so this one cannot make any check run less.
+a trusted note already covers the run's tree. They hold `contents: read` only, write nothing and dispatch
+nothing, and every problem becomes `decision=run`. **Today two checks consume the decision:**
+`genie-freshness` and `typescript-client` (below). Nothing else `needs` a gate job; `linux-gate`,
+`isolation-vm` and `mail-redelivery-canaries` still run in full whatever the gate says.
+
+### What a skip does
+
+When `evidence-gate-<check>` decides `skip`, the job of that check still runs and still ends in success, so it
+keeps its name, its place in the required set and every `needs` on it. It runs only the checkout and its own
+cache-coverage report, skips every other step, and adds the step `evidence covered by a trusted note`, which
+writes the record id to the job summary. The wiring is deliberately conservative:
+
+- Each wired job also waits for its gate job (a hosted runner start, typically 10 to 30 seconds), so while no
+  note exists these two checks start slightly later than before. That is the price of a single, auditable
+  decision.
+- A wired job's own `if` names a status function (`!cancelled()`), so a gate job that failed, was skipped or
+  never started cannot skip the required check: its output is empty, which is not `'true'`, and the steps run.
+- The checkout is never skipped, and a step that already had an `if` keeps it, combined with the skip
+  condition. A step that does not know about the skip runs.
+- The observer refuses to record a check whose gate job ran `evidence skip taken`, and the in-job producers
+  refuse to sign for a stage that did not run, so a skip never produces a fresh note for itself.
+- Until a producer writes a note for a check, that check never skips. At the time of writing no note exists for
+  these two, so both run in full; the first skip needs a producer.
 
 ### The skip policy
 
