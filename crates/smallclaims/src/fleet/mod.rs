@@ -31,6 +31,16 @@ use crate::store::Store;
 /// the fleet, pin the anchor, apply the writer floor, sign with the member key, and, on the anchor
 /// itself, admit it once.
 pub fn activate(store: &Store, state_dir: &Path, file: &FleetFile) -> Result<()> {
+    activate_member(store, state_dir, file, true)
+}
+
+/// Restore membership and signing credentials before startup writes. History sealing is a
+/// separate operation, performed by the daemon after both API listeners bind.
+pub fn prepare(store: &Store, state_dir: &Path, file: &FleetFile) -> Result<()> {
+    activate_member(store, state_dir, file, false)
+}
+
+fn activate_member(store: &Store, state_dir: &Path, file: &FleetFile, seal: bool) -> Result<()> {
     store.bind_fleet(&file.fleet_id)?;
     if let Some(anchor) = &file.anchor_key {
         store.pin_fleet_anchor(anchor)?;
@@ -43,9 +53,17 @@ pub fn activate(store: &Store, state_dir: &Path, file: &FleetFile) -> Result<()>
     // Activation may seal work written before a restart or before founding the fleet.
     // Restore the complete signing chain first, including person root and device keys.
     store.use_key_directory(&join::key_directory(state_dir))?;
-    store.set_member_key(Some(Arc::new(key)))?;
+    if seal {
+        store.set_member_key(Some(Arc::new(key)))?;
+    } else {
+        store.load_member_key(Some(Arc::new(key)))?;
+    }
     if file.anchor_key.as_deref() == Some(public.as_str()) {
-        store.admit_fleet_anchor(&file.fleet_id, &public, file.mode.as_str())?;
+        if seal {
+            store.admit_fleet_anchor(&file.fleet_id, &public, file.mode.as_str())?;
+        } else {
+            store.record_fleet_anchor(&file.fleet_id, &public, file.mode.as_str())?;
+        }
     }
     Ok(())
 }

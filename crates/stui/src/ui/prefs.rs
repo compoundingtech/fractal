@@ -9,6 +9,13 @@ pub struct Prefs {
     /// Simplified conversations: a tool call to a line, a run of calls to one line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simple: Option<bool>,
+    /// An agent's tab opens on its terminal rather than its conversation (Nathan, 2026-10-07:
+    /// a setting, and the conversation stays the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_first: Option<bool>,
+    /// Use the daemon after a failed direct attachment; absence means enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_fallback: Option<bool>,
 }
 
 /// `$XDG_STATE_HOME/st3/stui/prefs.json` (or under `~/.local/state`).
@@ -47,7 +54,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("st3").join("stui").join("prefs.json");
         assert_eq!(load(&path), Prefs::default());
-        save(&path, &Prefs { simple: Some(true) }).unwrap();
+        save(
+            &path,
+            &Prefs {
+                simple: Some(true),
+                terminal_first: Some(true),
+                terminal_fallback: Some(false),
+            },
+        )
+        .unwrap();
         assert_eq!(load(&path).simple, Some(true));
+        assert_eq!(load(&path).terminal_first, Some(true));
+        assert_eq!(load(&path).terminal_fallback, Some(false));
+        // A file from before the setting reads as the default: the conversation.
+        std::fs::write(&path, br#"{"simple": false}"#).unwrap();
+        assert_eq!(load(&path).terminal_first, None);
     }
 }

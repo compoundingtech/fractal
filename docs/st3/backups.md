@@ -19,6 +19,11 @@ once admission, projection and digest checks pass. It refuses a destination with
 Without `--database`, restore selects the configured state's `claims.sqlite3`. Stop the node before
 restoring there. Neither command installs services or starts a daemon.
 
+A backup of a member also holds the whole text of the [long messages](long-messages.md) that
+member owns, which are files outside the database; restore checks each against its hash and its
+claim and returns them beside the restored database. The restore report says how many it returned
+and how many long messages the claims name in all, since another member owns the rest.
+
 For rehearsals, make a consistent SQLite copy first, then export that copy:
 
 ```sh
@@ -30,6 +35,42 @@ The offline exporter migrates and finishes upgrade recovery on its input, so use
 build and the schema of that migrated snapshot. A pinned old daemon writes the compatibility test
 fixture; the current exporter archives a copy of that graph and the current restorer verifies
 that its envelope inventory, claim sources and all graph table digests match.
+
+## Rehearse a restore
+
+Use a healthy current daemon and a separate empty directory. These commands neither start a
+daemon nor connect the recovered state to your live fleet:
+
+```sh
+(
+  set -eu
+  umask 077
+  st_recovery_root=$(mktemp -d "${TMPDIR:-/tmp}/st-recovery.XXXXXX")
+  st backup create "$st_recovery_root/claims.jsonl"
+  mkdir -p "$st_recovery_root/restored"
+  st backup restore "$st_recovery_root/claims.jsonl" \
+    --database "$st_recovery_root/restored/claims.sqlite3" --json \
+    > "$st_recovery_root/restore-report.json"
+  printf 'Private rehearsal files: %s\n' "$st_recovery_root"
+  cat "$st_recovery_root/restore-report.json"
+)
+```
+
+Always pass `--database` for this rehearsal. Without it, restore selects the configured live
+state directory; that default is not the separate-state procedure. Stop here if export or
+restore fails. The commands run in a subshell so the umask does not change your interactive shell.
+
+Keep the report private. Check the returned `writer`, `envelopes`, `source_graph_digest`,
+`graph_digest`, `log_digest` and `projections_match` against the format rules below. A different projection
+schema can legitimately rebuild different tables; equal envelope history is mandatory, and a
+successful command alone does not establish identical projections across versions.
+
+To run this recovered node later, configure a **new** state directory, its returned `writer`
+as `node`, and distinct API and gateway sockets. Use the current verified binary and fresh local
+keys. Never point the live service at this directory as part of the rehearsal, copy the original
+writer's keys into it or start two nodes with the same writer identity. Follow [Starting a
+recovered node](#starting-a-recovered-node) for fleet joining. Keep the original member intact
+until a separately planned recovery accounts for writes since the snapshot.
 
 ## Format and verification
 
@@ -79,4 +120,4 @@ configuration, or other local caches. Protect the file like the original graph: 
 bytes can contain private information. A restored standalone graph can be inspected immediately;
 running seats and fleet transport require fresh local setup.
 
-The format deliberately uses sync records. A receive-only continuous backup peer is future work.
+The format uses sync records.

@@ -1,49 +1,55 @@
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
-import { buildEnv, linuxRunner, linuxStageRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
+import { readFileSync } from 'node:fs'
+import { buildEnv, linuxRunner, linuxStageRunner, performanceRunner, readOnlyBinaryCaches } from './workspace-ci.ts'
 
 const snapshotAttempt = "!cancelled() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && (steps.load.outcome == 'success' || steps.load.outcome == 'failure')"
 const snapshotPublished = "!cancelled() && steps.cache.outcome == 'success' && steps.cache.outputs.publish == 'true'"
-const paths = [
-  'crates/smallclaims/**',
-  'crates/st3/src/**',
-  'crates/st3/tests/daemon_*.rs',
-  'crates/st3/tests/perf_load.rs',
-  'crates/st3/Cargo.toml',
-  'Cargo.toml',
-  'Cargo.lock',
-  '.cargo/config.toml',
-  'flake.nix',
-  'flake.lock',
-  'docs/st3/schema.md',
-  'scripts/ci-perf*',
-  'scripts/ci-nix-cache',
-  '.github/workflows/perf.yml',
-]
-
+// Ignore unrelated label events before either the scope job or the load job starts.
+// Give those events separate concurrency groups so they cannot cancel or replace PR work.
+const irrelevantLabel = "github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci-perf'"
+const relevantEvent = `!(${irrelevantLabel})`
 // Performance always stays on Namespace. Main's successful runs seed durable snapshots and
 // real baseline reports. Each PR can also reuse its own snapshots, outside the dependency-cache pool.
-export default githubWorkflow({
+export default githubWorkflow(readyPRJobs({
   name: 'Performance',
   on: {
-    push: { branches: ['main'], paths },
+    push: { branches: ['main'] },
     schedule: [{ cron: '23 2 * * *' }],
-    pull_request: { paths },
+    pull_request: { types: [...readyPullRequestTypes, 'labeled', 'unlabeled'] },
     workflow_dispatch: {},
   },
   permissions: { contents: 'read', actions: 'read', 'pull-requests': 'read' },
   concurrency: {
     // Preserve the existing PR group; replace obsolete main pushes, never pinned controls.
-    group: "perf-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
-    'cancel-in-progress': "${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}",
+    group: `perf-\${{ (${irrelevantLabel}) && github.run_id || github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}`,
+    'cancel-in-progress': `\${{ (${relevantEvent}) && (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}`,
   },
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, ...performanceRunner],
   },
   jobs: {
+    scope: {
+      name: 'Performance scope',
+      if: relevantEvent,
+      'runs-on': 'ubuntu-latest',
+      'timeout-minutes': 5,
+      permissions: { contents: 'read', 'pull-requests': 'read' },
+      outputs: { run: '${{ steps.scope.outputs.run }}' },
+      steps: [{
+        name: 'Admit main, nightly and selected PR Performance', id: 'scope',
+        env: { GH_TOKEN: '${{ github.token }}' },
+        // Workflow bytes from this run's ref (the PR merge ref for pull_request).
+        // Metadata-only: no extra PR checkout or compiler; token is read-only.
+        run: `python3 - <<'PERF_SCOPE_PY'\n${readFileSync(new URL('../../scripts/ci-perf-scope', import.meta.url), 'utf8')}\nPERF_SCOPE_PY`,
+      }],
+    },
     'perf-load': {
       name: 'perf-load',
-      'runs-on': linuxStageRunner,
+      needs: ['scope'],
+      if: `!cancelled() && (${relevantEvent}) && (needs.scope.result != 'success' || needs.scope.outputs.run != 'false')`,
+      'runs-on': performanceRunner,
       'timeout-minutes': 30,
       defaults: { run: { shell: 'bash' } },
       env: {
@@ -89,7 +95,7 @@ printf 'HOME=%s\\nXDG_CONFIG_HOME=%s/.config\\nXDG_CACHE_HOME=%s/.cache\\nXDG_ST
           if: snapshotAttempt,
           run: `if ! python3 scripts/ci-perf-cache check-report; then exit 0; fi
 nix print-dev-env .#perf --profile "$RUNNER_TEMP/perf-shell" > /dev/null
-nix develop .#perf -c env TMPDIR="$RUNNER_TEMP" sccache --show-stats
+nix develop .#perf -c env TMPDIR="$RUNNER_TEMP" sccache --show-stats || echo "::warning::sccache statistics unavailable; retaining the successful build"
 CI_PERF_SHELL_ROOT="$RUNNER_TEMP/perf-shell" bash scripts/ci-nix-cache save
 python3 scripts/ci-perf-cache pack`,
         },
@@ -114,4 +120,4 @@ python3 scripts/ci-perf-cache pack`,
       ],
     },
   },
-})
+}))

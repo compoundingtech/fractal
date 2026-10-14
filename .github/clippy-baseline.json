@@ -7,7 +7,7 @@
     },
     "st-drivers": {
       "clippy::cloned_ref_to_slice_refs": 1,
-      "clippy::collapsible_if": 7,
+      "clippy::collapsible_if": 5,
       "clippy::items_after_test_module": 2,
       "clippy::needless_borrow": 2,
       "clippy::too_many_arguments": 12,
@@ -20,7 +20,7 @@
     },
     "st3": {
       "clippy::cloned_ref_to_slice_refs": 5,
-      "clippy::collapsible_if": 27,
+      "clippy::collapsible_if": 22,
       "clippy::collapsible_match": 1,
       "clippy::derivable_impls": 1,
       "clippy::double_ended_iterator_last": 1,
@@ -33,16 +33,14 @@
       "clippy::needless_return": 2,
       "clippy::redundant_closure": 1,
       "clippy::too_many_arguments": 3,
-      "clippy::type_complexity": 10,
+      "clippy::type_complexity": 8,
       "clippy::unnecessary_get_then_check": 1,
       "clippy::unnecessary_lazy_evaluations": 1,
-      "clippy::useless_format": 1,
-      "clippy::while_let_loop": 1
+      "clippy::useless_format": 1
     },
     "st3-client": {
       "clippy::large_enum_variant": 1,
-      "clippy::manual_is_multiple_of": 1,
-      "unused_imports": 3
+      "clippy::manual_is_multiple_of": 1
     },
     "st3-client-codegen": {
       "clippy::useless_format": 2,
@@ -66,7 +64,7 @@
       "clippy::manual_checked_ops": 1,
       "clippy::too_many_arguments": 1,
       "clippy::type_complexity": 1,
-      "dead_code": 4,
+      "dead_code": 3,
       "unused_assignments": 1
     }
   },

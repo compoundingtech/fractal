@@ -2,17 +2,18 @@
 
 Every pushed Git tag runs **Smalltalk tag release**. Both native builds must pass before a
 GitHub release is published. A release is also published once a day when `main` changed since the
-last one (see [Daily releases](#daily-releases)). Each release contains:
+last one (see [Daily releases](#daily-releases)). A rolling `edge` pre-release follows every green
+`main` commit (see [Edge releases](#edge-releases)). Each release contains:
 
-- `smalltalk-x86_64-unknown-linux-gnu.tar.gz`: Linux x86_64, built on Ubuntu 22.04 (glibc 2.35 or newer).
+- `smalltalk-x86_64-unknown-linux-gnu.tar.gz`: Linux x86_64, linked for glibc 2.35 or newer (Ubuntu 22.04+).
 - `smalltalk-aarch64-apple-darwin.tar.gz`: Apple Silicon, macOS 15 or newer. The executables are
   ad-hoc signed, not Developer ID signed or notarized; macOS may require approval to open them.
 - One `.sha256` checksum per archive, combined `SHA256SUMS`, and `RELEASE.json` with the exact
   source commit, target, Rust compiler version, and PTY runtime revision.
 
-Each archive has `bin/st3`, `bin/st` (a relative symlink to `st3`), `bin/stui`, `bin/st3-migrate`,
-and `bin/pty`, plus `install.sh`, `install-macos.py`, `BUILD.json`, and this guide. PTY is built from the exact
-`flake.lock` runtime revision; this is distinct from the `pty-core` library dependency. These
+Each archive has `bin/st3`, `bin/st` (a relative symlink to `st3`), `bin/pty`, plus `install.sh`, `install-macos.py`, `BUILD.json`, and this guide. Native builds pin Rust1.97.0 in `scripts/release-rust-version`; the workflow and local builder use that same version. PTY is built from the exact
+`flake.lock` runtime revision; this is distinct from the `pty-core` library dependency. Linux builds link against glibc 2.35 with pinned Zig 0.15.2, so optional newer
+libc functions do not add GLIBC_2.39 requirements or loader noise. These
 archives need neither Nix nor Rust installed. Harness CLIs and their logins remain separate.
 
 ## Install or update
@@ -22,25 +23,61 @@ If a populated v0.3.4 store may have unsigned delegation grants, follow the
 keys first. A build containing prevention #1269 can sign preserved unsealed work; it retains
 signature warnings from already-sealed affected payloads.
 
-Choose a tag from the repository's Releases page, then download the archive for your machine
-and its `.sha256` file. For example, with GitHub CLI:
+Install the latest release with curl; neither GitHub CLI nor Rust is required:
 
 ```sh
-tag=v0.3.0 # replace with the release you want
-archive=smalltalk-x86_64-unknown-linux-gnu.tar.gz
-# On Apple Silicon: archive=smalltalk-aarch64-apple-darwin.tar.gz
-gh release download "$tag" --repo compoundingtech/smalltalk \
-  --pattern "$archive" --pattern "$archive.sha256"
-shasum -a 256 -c "$archive.sha256"
-tar -xzf "$archive"
-"./${archive%.tar.gz}/install.sh" --bin-dir "$HOME/.local/bin"
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
 ```
 
-Put the chosen bin directory on `PATH`. The installer stages all four tools and the `st` link,
-then replaces each by rename; existing processes retain their old executable. It does not restart
-anything or erase state. On macOS it installs `st3` and `stui` in the fixed `~/Applications/SmallTalk.app` bundle, registers it with Launch Services, and updates existing daemon/replication LaunchAgent paths. Configure `ST_MACOS_SIGNING_IDENTITY` and optionally `ST_MACOS_SIGNING_TEAM` for persistent signing; no identity uses ad-hoc signing. A configured missing identity fails rather than falling back. See [macOS installation and signing](macos-installation.md). Keep the previous archive to roll back using the
-same procedure. A first daemon install uses `st service install`. For an existing daemon, schedule
-`st service restart` after installation and verify `st doctor --strict` and peer health. Restarting
+The script detects Linux x86_64 or Apple Silicon macOS, downloads the archive and
+its SHA256 checksum, verifies it before installation, then runs `st`. It restores
+terminal input for the `curl | sh` form. To select an exact release or install
+without opening the interface (v0.3.18 below is an example; choose a published tag):
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh -o install.sh
+sh install.sh --tag v0.3.18 --no-run
+```
+
+To follow `main` instead, pass `--edge`; it is the same as `--tag edge` and cannot be combined with
+`--tag`. Without either option the installer still takes the latest versioned release, because
+GitHub's latest release never includes a pre-release:
+
+```sh
+sh install.sh --edge --no-run
+```
+
+An extracted archive can also be installed with `./install.sh --bin-dir
+"$HOME/.local/bin"`; add `--quiet` to suppress installer notices. The archive's
+command payload is `st3`, the relative `st` link, and `pty`. The source migration
+tool remains available as the separate `st3-migrate` Cargo package.
+
+Put the chosen bin directory on `PATH`. The installer serializes installations in that directory,
+stages both tools and the `st` link, preserves the previous files, then replaces each by atomic
+rename. A handled failure or signal restores the previous command set. This is a series of atomic
+file replacements, not a simultaneous switch of all paths; existing processes retain their old
+executable. If restoration itself fails, the error names the retained transaction directory and
+the `.smalltalk-install.lock` remains: restore the files from its `previous` directory before
+removing that lock. macOS retains the helper's app/launchd job and uses its existing restore API,
+with a separate app transaction lock shared across custom bin directories. A late rollback
+checks the app/launchd generation; if another installation changed it, or a completed generation
+is unconfirmed, it leaves the current installation intact and retains the job and locks for
+inspection instead of overwriting it.
+The installer does not restart
+anything or erase state. On macOS it installs `st3` in the fixed `~/Applications/SmallTalk.app` bundle, registers it with Launch Services, and updates existing daemon/replication LaunchAgent paths. Configure `ST_MACOS_SIGNING_IDENTITY` and optionally `ST_MACOS_SIGNING_TEAM` for persistent signing; no identity uses ad-hoc signing. A configured missing identity fails rather than falling back. See [macOS installation and signing](macos-installation.md). Keep the previous archive as recovery material. Installing it again is a supported rollback
+only when its database, claim and driver contracts can read the current state; see
+[upgrade and recovery](../upgrading-st.md#swap-back-or-roll-forward) and the
+[0.x compatibility policy](compatibility.md). Forward-only migrations require roll-forward
+unless the release explicitly documents a downgrade. Before upgrading a healthy populated
+store, make a [claim backup](backups.md) and preserve excluded local data separately.
+
+First-run `st` offers to install the background service. For an upgrade or changed
+executable path, `st service install` refreshes
+service definitions and restarts daemon and replication services. `st service restart` suffices
+when those definitions already point at the intended binaries. Schedule that restart, compare
+`st --version --json` with the daemon's `machine_version` in `st doctor --json`, and verify peer
+health. `st doctor --strict` also treats warnings as failures: inspect each warning rather than
+assuming an optional-tool warning means that the API is unavailable. Restarting
 invalidates an ongoing continuous soak window, so coordinate that separately from downloading or
 installing files.
 
@@ -78,6 +115,27 @@ delivery-presence fixtures. Python, Node, and the Linux process utilities are de
 the historical messaging binary is pinned in the lockfile and supplied before the sandbox starts.
 The native runtime suite and documentation tests remain covered.
 
+## Edge releases
+
+After a `main` run of **Smalltalk tag release** passes every job, its last job (`release-publish-edge`)
+moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
+one release per commit. It builds nothing: it takes the run's `smalltalk-release` artifact, re-checks the
+checksums and the source recorded in each archive, then replaces the assets (both archives, their `.sha256`
+files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
+source commit, a link to the run, and the merged pull request titles since the previous edge (at most 30).
+Archives carry no tag in `BUILD.json`; `source` identifies the commit.
+
+- Versioned releases and tags are unchanged. `edge` is marked as a pre-release and never as latest, so the
+  daily release, `latest/download` and the default installer ignore it.
+- Edge has no upgrade-impact section. Read the changes since the previous edge before installing it on a
+  store that holds work, and take a [claim backup](backups.md) first.
+- A run for a commit older than the current edge changes nothing, so a slow run cannot move edge
+  backwards. Runs are serialized. While assets are being replaced, a download can briefly pair a new
+  archive with an old checksum; the installer fails closed on the mismatch, so retry after a minute.
+- The `edge` tag is excluded from the tag trigger, and a tag moved with the workflow's token starts no workflow.
+- `scripts/release-smalltalk-edge --dry-run --source SHA --dist DIRECTORY` verifies a downloaded artifact
+  and prints the notes without publishing.
+
 ## Daily releases
 
 **Smalltalk daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch. It takes the
@@ -94,15 +152,19 @@ Daily, manual dispatch, and tag publication use the same source-pinned **Upgrade
 section before the change list, and attach `UPGRADE-IMPACT.json`. It describes replay,
 database changes, checkpoint rules/fleet coordination, client and harness compatibility,
 service interruption, manual steps, and recovery. Missing classifications stop publication;
-main builds and merges continue. See [release impact authoring](release-impact.md) for
+main builds continue. PRs above the documented [adoption boundary](release-impact.md)
+also need a fresh valid fragment before merging. See [release impact authoring](release-impact.md) for
 committed fragments, measurements, historical backfills, and a notes-only preview.
 
-Tag names are labels, not embedded package versions: use `BUILD.json`/`RELEASE.json` for exact
-source identity. Tag the tested commit (with this workflow in its tree); pushing a tag does not
+Archive builds carry a clean release stamp: `st --version` reports the package
+version and source revision with `(release)`, and JSON exposes the same machine
+version. A tag build uses its semantic tag version; untagged main builds use the
+Cargo package version and exact revision. Daily publication reuses those tested
+bytes, so its later tag is a label rather than an embedded version. Use
+`BUILD.json`/`RELEASE.json` for exact source identity. Tag the tested commit (with this workflow in its tree); pushing a tag does not
 wait for unrelated CI runs. Tags made with another workflow's default `GITHUB_TOKEN` do not
 trigger another push workflow, and GitHub does not emit tag push events for a push of more than
 three tags: push release tags individually from a person or app credential.
 
 The runner and trigger choices follow GitHub's [runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 and [push event rules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#push).
-The prior `release-portable.yml` remains the separate manual st2 release path.
