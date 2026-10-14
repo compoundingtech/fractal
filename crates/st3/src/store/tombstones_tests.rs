@@ -797,14 +797,32 @@ fn a_trim_never_makes_a_write_wait_long() {
     };
     let mut writes = 0;
     let mut longest = std::time::Duration::ZERO;
+    // Diagnostic-only: retain at most 20 actual samples, without I/O in the timed loop.
+    let diagnostic_path = std::env::var_os("ST3_TRIM_WRITE_DIAGNOSTIC_FILE");
+    let mut diagnostic_samples = diagnostic_path.as_ref().map(|_| Vec::with_capacity(20));
     while !trimming.is_finished() {
         let started = std::time::Instant::now();
         store
             .append_claim(&diagnostic("daemon/birch", writes, "written during a trim"))
             .unwrap();
-        longest = longest.max(started.elapsed());
+        let elapsed = started.elapsed();
+        longest = longest.max(elapsed);
+        if let Some(samples) = &mut diagnostic_samples {
+            if samples.len() < 20 {
+                samples.push((writes, elapsed.as_nanos()));
+            }
+        }
         writes += 1;
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if let Some(path) = diagnostic_path {
+        let report = serde_json::json!({
+            "sample_limit": 20,
+            "total_writes": writes,
+            "longest_append_ns": longest.as_nanos(),
+            "samples": diagnostic_samples.unwrap(),
+        });
+        std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
     }
     let actions = trimming.join().unwrap();
     assert!(
