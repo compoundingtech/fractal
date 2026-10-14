@@ -563,6 +563,21 @@ class EndToEnd(unittest.TestCase):
                 fields = self.assertRuns(base, path)
                 self.assertEqual(fields['outcome'], 'satisfied')  # the note is fine; the change is not skippable
                 self.assertIn('protected', fields['reason'].lower() + 'protected')
+        # Moving a protected file away (rename detection would report only the new name) still counts.
+        for path in EXPECTED_PROTECTED:
+            with self.subTest('moved ' + path):
+                self.f = fixtures.Fixture()
+                self.addCleanup(self.f.tmp.cleanup)
+                self.ci = self.f.key('ci', 'fleet/ci')
+                (self.f.repo / '.github/workflows').mkdir(parents=True, exist_ok=True)
+                (self.f.repo / '.github/workflows/fleet.yml').write_text('name: x\n')
+                (self.f.repo / '.github/workflows/fleet.yml.genie.ts').write_text('export default 1\n')
+                base = self.commit_base()
+                (self.f.repo / 'moved-away').mkdir(exist_ok=True)
+                self.f.git('mv', path, 'moved-away/' + path.replace('/', '_'))
+                commit, tree = self.head()
+                self.note(commit, tree)
+                self.assertRuns(base, 'moved ' + path)
         # An unrelated change to other files still skips.
         self.f = fixtures.Fixture()
         self.addCleanup(self.f.tmp.cleanup)

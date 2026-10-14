@@ -108,7 +108,9 @@ def protected_changes(base):
     """Protected paths that differ between the accepted base and this run's tree; fails closed."""
     if not base:
         return ['<no base>']
-    done = run('git', 'diff', '--name-only', '-z', base, 'HEAD')
+    # --no-renames: with rename detection a moved file is reported only by its new name, which would
+    # hide moving a protected file away.
+    done = run('git', 'diff', '--no-renames', '--name-only', '-z', base, 'HEAD')
     if done.returncode != 0:
         return ['<comparison failed>']
     paths = [p for p in done.stdout.decode(errors='replace').split('\0') if p]
