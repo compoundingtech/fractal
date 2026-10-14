@@ -31,6 +31,8 @@ hmac = "0.12"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+# `--attach` converts and scales images before upload (see src/attach_image.rs).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 kdl = "6"
 libc = "0.2"
 # Exactly pty-terminal's pin: libghostty's C API is not stable between Ghostty commits.
@@ -44,6 +46,7 @@ opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_u
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "1ae8c187301034d2b343b6ec638f2b74c009f92e" }
 pty-core = { git = "https://github.com/compoundingtech/pty", rev = "1ae8c187301034d2b343b6ec638f2b74c009f92e" }
 pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "1ae8c187301034d2b343b6ec638f2b74c009f92e" }
+resvg = "0.48"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }

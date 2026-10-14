@@ -2918,11 +2918,13 @@ enum CheckpointCommand {
 
 #[derive(Subcommand)]
 enum BlobCommand {
-    /// Keep one PNG, JPEG, GIF or WebP image (at most 10 MiB) on this member and print its
-    /// reference. Name it in `conversations send --attach`, or pass the file there directly.
+    /// Keep one image on this member and print its reference. Name it in `conversations send
+    /// --attach`, or pass the file there directly. Without `--media-type` the file is prepared as
+    /// `--attach` prepares it: an SVG or BMP becomes a PNG, and an image over 10 MiB is scaled.
     Put {
         file: PathBuf,
-        /// The image type; by default the file's own bytes decide.
+        /// Upload the bytes exactly, as this type (PNG, JPEG, GIF or WebP); by default the file's own
+        /// bytes decide.
         #[arg(long)]
         media_type: Option<String>,
         /// Who uploads; defaults to ST_AGENT, then the configured person.
@@ -4482,9 +4484,12 @@ struct MessageSendArgs {
     #[arg(long = "from", alias = "as")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     from: String,
-    /// Attach an image (PNG, JPEG, GIF or WebP, at most 10 MiB, up to 4). It is uploaded to this
-    /// member and fetched by the machine that reads or delivers the message.
-    #[arg(long = "attach", value_name = "FILE")]
+    #[arg(
+        long = "attach",
+        value_name = "FILE",
+        help = st3::attach_image::HELP,
+        long_help = st3::attach_image::LONG_HELP
+    )]
     attach: Vec<PathBuf>,
     #[command(flatten)]
     wake: MessageWakeArgs,
@@ -4566,8 +4571,12 @@ struct MessageReplyArgs {
     #[arg(long = "from", alias = "as")]
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     from: String,
-    /// Attach an image (PNG, JPEG, GIF or WebP, at most 10 MiB, up to 4).
-    #[arg(long = "attach", value_name = "FILE")]
+    #[arg(
+        long = "attach",
+        value_name = "FILE",
+        help = st3::attach_image::HELP,
+        long_help = st3::attach_image::LONG_HELP
+    )]
     attach: Vec<PathBuf>,
     #[command(flatten)]
     wake: MessageWakeArgs,
@@ -12785,17 +12794,33 @@ async fn upload_attachment(
         "{} is not a regular file",
         file.display()
     );
+    // A named type uploads the bytes exactly; otherwise an SVG, a BMP or an image over the limit
+    // is converted or scaled first, so read up to what scaling can still bring under it.
+    let largest = if media_type.is_some() {
+        st3::blobs::MAX_BLOB_BYTES as u64
+    } else {
+        st3::attach_image::MAX_INPUT_BYTES
+    };
     anyhow::ensure!(
-        metadata.len() <= st3::blobs::MAX_BLOB_BYTES as u64,
+        metadata.len() <= largest,
         "{} is larger than the {} MiB an attachment may be",
         file.display(),
-        st3::blobs::MAX_BLOB_BYTES / (1024 * 1024)
+        largest / (1024 * 1024)
     );
     let bytes = fs::read(file).with_context(|| format!("read attachment {}", file.display()))?;
-    let media_type = media_type
-        .map(str::to_owned)
-        .or_else(|| st3::blobs::sniff_media_type(&bytes).map(str::to_owned))
-        .with_context(|| format!("{} is not a PNG, JPEG, GIF or WebP image", file.display()))?;
+    let file_name = file
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let (bytes, media_type, name) = match media_type {
+        Some(media_type) => (bytes, media_type.to_owned(), file_name),
+        None => {
+            let prepared = st3::attach_image::prepare(file, bytes)?;
+            if let Some(note) = &prepared.note {
+                eprintln!("{note}");
+            }
+            (prepared.bytes, prepared.media_type.to_owned(), prepared.name)
+        }
+    };
     let uploaded = generated_client(endpoint, Some(actor))?
         .upload_blob(bytes, &media_type)
         .await
@@ -12804,9 +12829,7 @@ async fn upload_attachment(
     Ok(st3::model::AttachmentInput {
         blob: uploaded.blob,
         media_type: uploaded.media_type,
-        name: file
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned()),
+        name,
     })
 }
 
