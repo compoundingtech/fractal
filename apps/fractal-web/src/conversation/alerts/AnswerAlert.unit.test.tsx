@@ -262,24 +262,26 @@ describe('gatewayAlertActions', () => {
     expect(workDone).not.toHaveBeenCalled()
   })
 
-  it('approves the launch\'s latest previewed variant, fenced on the alert, the launch and that variant', async () => {
+  it('approves exactly the variant and preview the alert shows, fenced on the alert, the launch and that variant', async () => {
     const launchApprove = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
     const launchRevise = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
     const launchCancel = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
     const token = (digit: string) => `lpv0:${digit.repeat(64)}`
     const client = {
-      attentionGet: vi.fn(async () => envelope({ ...open, actions: ['launch.approve', 'launch.cancel'], source_id: 'planning-session/launch/nightly' })),
+      // As st raises it: the alert names its variant, and its episode is the preview's hash.
+      attentionGet: vi.fn(async () => envelope({ ...open, actions: ['launch.approve', 'launch.cancel'], source_id: 'planning-session/launch/nightly', variant_id: 'variant/two', episode: token('b') })),
       launchesGet: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { kind: 'launch', id: 'launch/nightly', revision: 'l3' } })),
       launchVariantsList: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { items: [
         { kind: 'launch-variant', id: 'variant/one', revision: 'v1', ordinal: 1, preview_token: token('a') },
         { kind: 'launch-variant', id: 'variant/two', revision: 'v2', ordinal: 2, preview_token: token('b') },
-        { kind: 'launch-variant', id: 'variant/three', revision: 'v3', ordinal: 3, preview_token: null },
+        { kind: 'launch-variant', id: 'variant/three', revision: 'v3', ordinal: 3, preview_token: token('c') },
       ] } })),
       launchApprove, launchRevise, launchCancel,
     } as unknown as St3Client
     const port = gatewayAlertActions(client)
     expect(await port.act({ alert: answered, action: { type: 'launch.approve' } })).toEqual({ _tag: 'Sent' })
     expect(client.launchesGet).toHaveBeenCalledWith('launch/nightly')
+    // A newer previewed variant (three) exists, and is not approved in place of the one shown.
     expect(launchApprove.mock.calls[0]![0]).toMatchObject({
       fence: { snapshot_id: 'snapshot/launch', subject_revisions: { 'attention/ask': 'r1', 'launch/nightly': 'l3', 'variant/two': 'v2' }, preview_token: token('b') },
       parameters: { launch_id: 'launch/nightly', variant_id: 'variant/two' },
@@ -290,20 +292,30 @@ describe('gatewayAlertActions', () => {
     expect(launchCancel.mock.calls[0]![0]).toMatchObject({ parameters: { target_id: 'launch/nightly' } })
   })
 
-  it('approves nothing when the launch has no preview, or not the one the alert names', async () => {
-    const launchApprove = vi.fn()
-    const client = {
-      attentionGet: vi.fn(async () => envelope({ ...open, actions: ['launch.approve'], launch_id: 'launch/nightly', variant_id: 'variant/one' })),
-      launchesGet: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { kind: 'launch', id: 'launch/nightly', revision: 'l3' } })),
-      launchVariantsList: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { items: [
-        { kind: 'launch-variant', id: 'variant/two', revision: 'v2', ordinal: 2, preview_token: `lpv0:${'b'.repeat(64)}` },
-      ] } })),
-      launchApprove,
-    } as unknown as St3Client
-    expect(await gatewayAlertActions(client).act({ alert: answered, action: { type: 'launch.approve' } })).toEqual({
-      _tag: 'Refused', detail: 'This launch has no current preview to approve. Review it in st.',
+  it('approves nothing when the shown preview changed, is gone, or the alert names none', async () => {
+    const token = (digit: string) => `lpv0:${digit.repeat(64)}`
+    const approve = async (alertFields: Record<string, unknown>, items: readonly unknown[]) => {
+      const launchApprove = vi.fn()
+      const client = {
+        attentionGet: vi.fn(async () => envelope({ ...open, actions: ['launch.approve'], launch_id: 'launch/nightly', ...alertFields })),
+        launchesGet: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { kind: 'launch', id: 'launch/nightly', revision: 'l3' } })),
+        launchVariantsList: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { items } })),
+        launchApprove,
+      } as unknown as St3Client
+      const result = await gatewayAlertActions(client).act({ alert: answered, action: { type: 'launch.approve' } })
+      expect(launchApprove).not.toHaveBeenCalled()
+      return result
+    }
+    const two = { kind: 'launch-variant', id: 'variant/two', revision: 'v2', ordinal: 2, preview_token: token('b') }
+    const changed = { _tag: 'Refused', detail: 'The preview this alert shows has changed. Read it again before approving.' }
+    // The same variant previewed again under a new token.
+    expect(await approve({ variant_id: 'variant/two', episode: token('a') }, [two])).toEqual(changed)
+    // The variant shown is gone.
+    expect(await approve({ variant_id: 'variant/one', preview_token: token('a') }, [two])).toEqual(changed)
+    // No variant or preview named.
+    expect(await approve({ episode: token('b') }, [two])).toEqual({
+      _tag: 'Refused', detail: 'This alert does not say which preview it shows, so it cannot be approved here. Review it in st.',
     })
-    expect(launchApprove).not.toHaveBeenCalled()
   })
 
   it('says why st refused, and never sends an unconfirmed answer again', async () => {

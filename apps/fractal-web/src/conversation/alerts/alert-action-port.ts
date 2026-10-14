@@ -48,6 +48,8 @@ type AttentionRead = Read & {
   readonly source_id?: unknown
   readonly launch_id?: unknown
   readonly variant_id?: unknown
+  readonly preview_token?: unknown
+  readonly episode?: unknown
 }
 type VariantRead = Read & { readonly ordinal?: unknown; readonly preview_token?: unknown }
 
@@ -56,14 +58,17 @@ const launchOf = (item: AttentionRead): string =>
   typeof item.launch_id === 'string' ? item.launch_id : String(item.source_id).replace(/^planning-session\//, '')
 
 /**
- * The launch's latest variant that has a preview to approve, and the one the alert names when it
- * names one; what the person read is what is approved.
+ * The variant the alert showed, by the id and preview token it names, or why there is none to
+ * approve. The alert is read again at the same revision the person read, so these are what they
+ * read: a newer variant, or the same one previewed again, is never approved in its place.
  */
-const currentVariant = (items: readonly unknown[], named: unknown): VariantRead | undefined =>
-  (items as readonly VariantRead[])
-    .filter((variant) => variant.kind === 'launch-variant' && typeof variant.preview_token === 'string')
-    .filter((variant) => typeof named !== 'string' || variant.id === named)
-    .reduce<VariantRead | undefined>((latest, variant) => latest === undefined || Number(variant.ordinal) > Number(latest.ordinal) ? variant : latest, undefined)
+const shownVariant = (items: readonly unknown[], item: AttentionRead): VariantRead | 'unnamed' | 'changed' => {
+  // An open launch alert's episode is its preview's hash, which is the preview token.
+  const token = typeof item.preview_token === 'string' ? item.preview_token : typeof item.episode === 'string' ? item.episode : undefined
+  if (typeof item.variant_id !== 'string' || token === undefined) return 'unnamed'
+  const variant = (items as readonly VariantRead[]).find((each) => each.kind === 'launch-variant' && each.id === item.variant_id)
+  return variant !== undefined && variant.preview_token === token ? variant : 'changed'
+}
 
 /**
  * Reads the alert again, then submits once, fenced on the revision the person read. An alert st
@@ -134,8 +139,9 @@ export const gatewayAlertActions = (client: St3Client): AlertActionPort => ({
               })
             }
             const variants = await client.launchVariantsList(launchId, { limit: 50 })
-            const variant = currentVariant((variants.value as { items?: readonly unknown[] }).items ?? [], item.variant_id)
-            if (variant === undefined || typeof variant.id !== 'string' || typeof variant.revision !== 'string') return 'no-preview' as const
+            const variant = shownVariant((variants.value as { items?: readonly unknown[] }).items ?? [], item)
+            if (variant === 'unnamed') return 'unnamed' as const
+            if (variant === 'changed' || typeof variant.id !== 'string' || typeof variant.revision !== 'string') return 'changed' as const
             return client.launchApprove({
               id,
               idempotency_key: id,
@@ -150,7 +156,8 @@ export const gatewayAlertActions = (client: St3Client): AlertActionPort => ({
         }
       })()
       if (response === 'gone') return refused('This launch is gone.')
-      if (response === 'no-preview') return refused('This launch has no current preview to approve. Review it in st.')
+      if (response === 'unnamed') return refused('This alert does not say which preview it shows, so it cannot be approved here. Review it in st.')
+      if (response === 'changed') return refused('The preview this alert shows has changed. Read it again before approving.')
       return (response.value as { status?: unknown }).status === 'rejected'
         ? refused('st did not take this answer.')
         : { _tag: 'Sent' }
