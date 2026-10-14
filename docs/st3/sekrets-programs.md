@@ -101,20 +101,40 @@ arbitrary bytes, caller-selected key/config, Git executable overrides or a clock
 override in production. No GitHub observation API is needed for these local facts.
 
 Every process inside the enrolled runner unit is the same Program caller,
-including code the job executes. The gateway identifies the runner, not the job,
-and `exit_code` and `output_sha256` are caller-supplied. A note signed through this
-route means “a job on this runner reported this result”; it does not prove the
-check ran or that a caller-provided commit is the actual PR head. Keep this
-Program signer at a distinct, weaker signer principal/level than the central
-protected observer in `.st/evidence-keys`. A Program-signed `wrapper` note must
-never satisfy an `observed` skip policy. The verifier owner must test this
-negative boundary; this gateway does not implement skip decisions.
+including same-repository PR code. The gateway identifies the runner, not the
+job, and `exit_code` and `output_sha256` are caller-supplied. A same-repository
+job on the enrolled pool can obtain a fleet-level note for a tree it holds.
 
-Do not grant the signer to a unit that runs untrusted fork or unreviewed PR code.
-First installation must use the reviewed merge-group-only runner unit and its
-actual routing restrictions. A shared runner UID alone cannot distinguish jobs;
-per-job identity or a protected measurement producer is a separate prerequisite
-before expanding enrollment. This isolates key access within that scope. Verifier policy
+In the current rollout phase, a `wrapper` note signed by `fleet/ci` at trust
+level `fleet` may satisfy a skip policy that explicitly accepts that kind for
+the matching check. The verifier still matches the exact tree, command, inputs,
+signer and accepted-base policy; future dates and newer failures prevent skips.
+The ledger and UI must label skips by kind. `observed` remains stricter and may
+be required per check; a wrapper note cannot satisfy an observed-only policy.
+Keep CI and developer signer roles distinct rather than inventing a schema tier.
+
+Fork PRs never sign or enroll. Enrollment on the current CI pools is permitted;
+a merge-group-only runner unit is not required in this phase. Installation must
+verify the actual fork-exclusion routing/guard, not infer it from a unit name.
+The gateway's Program identity alone has no GitHub event/repository provenance.
+
+Known defects in this phase:
+
+- Cooperative measurements: a signature attests to a runner's report, not proof
+  that a hostile job executed the stated check. Same-repository PR code can
+  request a passing or failing note for a tree it holds. The phase policy accepts
+  this gap for matching wrapper-kind skips; it must remain visible and tracked.
+- Bridge key exposure: until the existing wrapper consumer moves behind the
+  protected profile, its environment-secret or local key-file bridge may be
+  reachable by code under test. This source does not remove that bridge. The
+  operator must prove the replacement's key is inaccessible to the job before
+  switching and removing the old key through its owner.
+
+The key-isolation boundary remains exact UID/unit/argv/grant, a root-pinned signer,
+private profile HOME/key/config, no job management, and a read-only authorized
+checkout. Signing a constructed statement does not prove that a caller-provided
+commit is the actual PR head.
+Verifier policy
 must compare exact tree/check/input keys and signer role. Developer/cooperative
 trust is a **different principal/level**, not an invented `cooperative` value in
 the existing `full/degraded/test` schema. The service never decides whether CI is
@@ -123,8 +143,8 @@ skipped. Keep PR and landing policy separate.
 Authored source tests and isolation VM controls cover unit/UID classification, exact argv,
 management refusal, grant/revocation, audit and store/key unreadability before
 any st daemon starts, including private-mount binding, read-only checkout and stdin.
-They must pass before installation; they have not been executed for this source
-pin yet. Those controls do not claim that ci1/ci2 are installed or a
+They must pass before installation; source parsing and formatting alone do not
+qualify these controls. They do not claim that ci1/ci2 are installed or a
 real merge-group note is accepted. Record the actual image, config, grant, run,
 attempt, tree, signed note and verifier job before switching consumers/removing
 the obsolete job-visible key. Namespace's remote signing path and the developer
