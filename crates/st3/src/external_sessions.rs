@@ -4294,6 +4294,13 @@ fn normalize_omp(
             }
             return;
         }
+        Some("custom")
+            if driver == ExternalDriver::Omp
+                && value.get("customType").and_then(Value::as_str) == Some("session_exit") =>
+        {
+            push_omp_exit(items, sequence, &timestamp, &value["data"]);
+            return;
+        }
         Some("custom") => {
             if let Some((kind, view, visibility)) = record_view
                 && view["type"] == "tool_start"
@@ -4354,13 +4361,6 @@ fn normalize_omp(
                     block["visibility"] = json!(visibility);
                 }
             }
-            return;
-        }
-        Some("custom")
-            if driver == ExternalDriver::Omp
-                && value.get("customType").and_then(Value::as_str) == Some("session_exit") =>
-        {
-            push_omp_exit(items, sequence, &timestamp, &value["data"]);
             return;
         }
         kind => {
