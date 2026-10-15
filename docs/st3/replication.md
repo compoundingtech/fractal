@@ -48,15 +48,19 @@ arithmetic bounds, not measured saturated-daemon costs.
 
 The receive path's latest-observation lookup uses a local transport-only side index once
 its background bootstrap completes. Store opening does no work for this index: after both
-APIs serve, a separate connection atomically installs capture triggers and a high-water mark,
-then copies at most 128 source rows per transaction, with 100 ms yields and a 5 ms busy
-timeout. Inserts, identity/kind/time updates and deletes maintain the index in their claim
+APIs serve, the managed background writer queue atomically installs capture triggers and a
+high-water mark, then copies at most 128 source rows per transaction with 100 ms yields.
+Each page releases its background loan; pending foreground writers retain priority.
+Sharing the writer also preserves deferred read-then-write snapshots: no independent
+bootstrap connection can commit across an application writer's pending upgrade.
+Inserts, identity/kind/time updates and deletes maintain the index in their claim
 transaction. Until the final page commits, readers use the original canonical query.
 WAL readers remain available during a copy page; other writers wait only for that page,
 not a whole-history `CREATE INDEX`. `st.db.migration.index.ready{index="transport_observation_seek"}`
 reports the switch; `st.db.migration.index.build.duration` records elapsed build seconds and
-`st.db.migration.index.write_hold.duration` records each page's actual write-lock hold,
-including durable commit. The index is rebuildable local acceleration, not replicated authority.
+`st.db.migration.index.write_hold.duration` records each page's begin-through-commit
+write-hold upper bound, including finalizers and SQLite acquisition wait but excluding
+background queue admission. The index is rebuildable local acceleration, not replicated authority.
 
 Gateways cache filtered links and sealed membership for at most five seconds, including
 per-item `reaches()` checks. Links involving current dial-out members never support

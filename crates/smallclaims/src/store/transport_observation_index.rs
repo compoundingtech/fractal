@@ -1,14 +1,14 @@
 //! Rebuildable transport-only seek index. Nothing here runs during Store::open.
 //! Install capture before taking the backfill high-water mark, then yield the SQLite
 //! writer after each bounded page. Reads keep the original query until completion.
-use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use super::{canonical, canonical_sql};
+use crate::sqlite::WriterConnection;
 
 pub const NAME: &str = "transport_observation_seek";
 pub const PAGE_SIZE: i64 = 128;
@@ -61,19 +61,9 @@ SELECT 1, COALESCE(MAX(store_index),0), 0, 0 FROM claims;
 pub struct Page {
     pub ready: bool,
     pub copied: usize,
-    /// Time from acquiring SQLite's write transaction through durable commit.
+    /// Begin-through-commit upper bound on write hold, including managed finalizers
+    /// and any SQLite acquisition wait, but excluding background queue admission.
     pub write_hold: Duration,
-}
-
-/// Separate, short-wait connection: bootstrap never occupies the application's
-/// writer queue. WAL readers continue to serve while a page owns the write lock.
-pub fn open(path: &Path) -> Result<Connection> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
-    )?;
-    connection.busy_timeout(Duration::from_millis(5))?;
-    Ok(connection)
 }
 
 /// Inspect schema presence before preparing SQL against optional migration tables.
@@ -120,15 +110,18 @@ pub fn latest(connection: &Connection, subject: &str, origin: &str) -> Result<Op
     }).optional()?)
 }
 
-pub fn advance(connection: &mut Connection) -> Result<Page> {
+pub fn advance(connection: &WriterConnection) -> Result<Page> {
+    // All claim writers, including deferred read-then-write transactions, share
+    // this queue. An independent SQLite writer would invalidate their snapshots.
+    let mut writer = connection.write_background();
     // The first page installs empty tables and triggers; no history scan on startup.
     // Subsequent calls never redo DDL or restart the backfill after a crash.
-    let installed: bool = connection.query_row(
+    let installed: bool = writer.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='transport_observation_backfill')",
         [], |row| row.get(0),
     )?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let acquired = Instant::now();
+    let transaction = writer.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if !installed {
         transaction.execute_batch(INSTALL)?;
     }

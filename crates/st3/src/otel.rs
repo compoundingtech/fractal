@@ -597,13 +597,13 @@ static INDEX_MIGRATION: std::sync::LazyLock<IndexMigrationMetrics> = std::sync::
             .build(),
         write_hold: meter.f64_histogram("st.db.migration.index.write_hold.duration")
             .with_unit("s")
-            .with_description("Time each backfill transaction holds the SQLite writer, including commit")
+            .with_description("Begin-through-commit upper bound on page write hold, excluding queue wait")
             .build(),
     }
 });
 
 /// One bounded index name labels readiness, completed build duration and each
-/// page's actual SQLite write-lock hold (including durable commit).
+/// page's begin-through-commit write-hold upper bound (excluding queue admission).
 pub fn record_index_migration(
     index: &'static str,
     ready: bool,

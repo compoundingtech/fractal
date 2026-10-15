@@ -7156,9 +7156,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 }
             });
             spawn_publication_evidence(store.clone());
-            tokio::spawn(build_transport_observation_index(
-                config.state_dir.join("claims.sqlite3"),
-            ));
+            tokio::spawn(build_transport_observation_index(store.clone()));
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
@@ -26412,20 +26410,19 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
     }
 }
 
-/// This starts only after both APIs serve. Separate 5 ms busy-timeout connections
-/// copy at most 128 source rows per transaction, then yield for 100 ms.
-async fn build_transport_observation_index(path: PathBuf) {
+/// This starts only after both APIs serve. Each 128-source-row page joins the
+/// managed background writer queue, releases its loan, then yields for 100 ms.
+async fn build_transport_observation_index(store: Arc<Store>) {
     use smallclaims::store::transport_observation_index as index;
     let started = Instant::now();
     st3::otel::record_index_migration(index::NAME, false, None, None);
     loop {
-        let page_path = path.clone();
+        let page_store = store.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<Option<index::Page>> {
-            let mut connection = index::open(&page_path)?;
-            if index::ready(&connection)? {
+            if index::ready(&page_store.readers.get())? {
                 return Ok(None);
             }
-            index::advance(&mut connection).map(Some)
+            index::advance(&page_store.connection).map(Some)
         }).await;
         match result {
             Ok(Ok(None)) => {

@@ -1,9 +1,15 @@
 use std::sync::{Arc, mpsc};
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use smallclaims::store::{SCHEMA, Store, canonical_sql, runtime::Plain};
 use smallclaims::store::transport_observation_index as index;
+use smallclaims::sqlite::WriterConnection;
+
+fn managed_writer(path: &std::path::Path) -> WriterConnection {
+    WriterConnection::new(Connection::open(path).unwrap(), Arc::new(AtomicU64::new(0)))
+}
 
 fn observation(connection: &Connection, id: &str, origin: &str, sequence: i64, accepted: &str) {
     connection.execute(
@@ -24,7 +30,7 @@ fn original(connection: &Connection, origin: &str) -> Option<(String, String)> {
     }).optional().unwrap()
 }
 
-fn finish(connection: &mut Connection) {
+fn finish(connection: &WriterConnection) {
     let mut max_hold = Duration::ZERO;
     loop {
         let page = index::advance(connection).unwrap();
@@ -37,8 +43,11 @@ fn finish(connection: &mut Connection) {
 
 #[test]
 fn transport_observation_latest_switches_from_original_to_bounded_seek_without_changing_results() {
-    let mut connection = Connection::open_in_memory().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let mut connection = Connection::open(&path).unwrap();
     connection.execute_batch(SCHEMA).unwrap();
+    let writer = managed_writer(&path);
     let transaction = connection.transaction().unwrap();
     for sequence in 0..3000 {
         for origin in ["local", "remote-a", "remote-b", "remote-c"] {
@@ -55,11 +64,11 @@ fn transport_observation_latest_switches_from_original_to_bounded_seek_without_c
     for origin in ["local", "remote-a", "remote-b", "remote-c", "absent"] {
         assert_eq!(index::latest(&connection, "host/peer", origin).unwrap(), original(&connection, origin));
     }
-    let page = index::advance(&mut connection).unwrap();
+    let page = index::advance(&writer).unwrap();
     assert!(!page.ready);
     assert!(!index::ready(&connection).unwrap());
     assert_eq!(index::latest(&connection, "host/peer", "local").unwrap(), original(&connection, "local"));
-    finish(&mut connection);
+    finish(&writer);
     assert!(index::ready(&connection).unwrap());
     for origin in ["local", "remote-a", "remote-b", "remote-c", "absent"] {
         assert_eq!(index::latest(&connection, "host/peer", origin).unwrap(), original(&connection, origin));
@@ -105,14 +114,14 @@ fn transport_observation_capture_precedes_backfill_and_readers_and_writers_work_
     let (resume_sent, resume_received) = mpsc::channel();
     let build_path = path.clone();
     let builder = std::thread::spawn(move || {
-        let mut connection = index::open(&build_path).unwrap();
-        assert!(!index::advance(&mut connection).unwrap().ready);
+        let writer = managed_writer(&build_path);
+        assert!(!index::advance(&writer).unwrap().ready);
         page_sent.send(()).unwrap();
         resume_received.recv().unwrap();
         // Resume on a new connection, exactly as after daemon interruption.
-        drop(connection);
-        let mut connection = index::open(&build_path).unwrap();
-        finish(&mut connection);
+        drop(writer);
+        let writer = managed_writer(&build_path);
+        finish(&writer);
     });
     page_received.recv().unwrap();
     assert!(!index::ready(&foreground).unwrap());
@@ -128,21 +137,14 @@ fn transport_observation_capture_precedes_backfill_and_readers_and_writers_work_
     assert!(index::ready(&foreground).unwrap());
     assert_eq!(index::latest(&foreground, "host/peer", "local").unwrap(), original(&foreground, "local"));
     {
-        let mut writer = index::open(&path).unwrap();
+        let mut writer = Connection::open(&path).unwrap();
         let transaction = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
         transaction.execute(
             "UPDATE transport_observation_index SET subject=subject WHERE claim_id='during-copy'", [],
         ).unwrap();
-        // WAL readers serve the committed index even while another connection owns
-        // SQLite's writer; a competing bootstrap yields at its short busy timeout.
+        // WAL readers serve the committed index even while a write transaction
+        // owns SQLite's writer.
         assert_eq!(index::latest(&foreground, "host/peer", "local").unwrap(), original(&foreground, "local"));
-        let mut competing = index::open(&path).unwrap();
-        let error = index::advance(&mut competing).err().expect("writer must be busy");
-        assert!(error.chain().any(|cause| matches!(
-            cause.downcast_ref::<rusqlite::Error>(),
-            Some(rusqlite::Error::SqliteFailure(code, _))
-                if code.code == rusqlite::ErrorCode::DatabaseBusy
-        )));
         transaction.rollback().unwrap();
     }
     let captured: u32 = foreground.query_row(
@@ -172,4 +174,55 @@ fn transport_observation_capture_precedes_backfill_and_readers_and_writers_work_
     foreground.execute_batch("DROP INDEX transport_observation_seek").unwrap();
     assert!(!index::ready(&foreground).unwrap());
     assert_eq!(index::latest(&foreground, "host/peer", "local").unwrap(), original(&foreground, "local"));
+}
+
+#[test]
+fn transport_observation_bootstrap_waits_for_managed_deferred_read_then_write_transactions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let mut connection = Connection::open(&path).unwrap();
+    connection.execute_batch(SCHEMA).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for sequence in 0..400 {
+        observation(&transaction, &format!("queued-{sequence}"), "local", sequence, &sequence.to_string());
+    }
+    transaction.commit().unwrap();
+    let writer = Arc::new(managed_writer(&path));
+    // Exercise both the initial schema/trigger install and a subsequent copy page.
+    for pass in 0..2 {
+        let mut foreground = writer.write();
+        let transaction = foreground.transaction().unwrap();
+        let before: u32 = transaction.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0)).unwrap();
+        assert_eq!(before, 400);
+        let (started_sent, started_received) = mpsc::channel();
+        let (completed_sent, completed_received) = mpsc::channel();
+        let background_writer = writer.clone();
+        let background = std::thread::spawn(move || {
+            started_sent.send(()).unwrap();
+            let page = index::advance(&background_writer);
+            assert!(completed_sent.send(page).is_ok());
+        });
+        started_received.recv().unwrap();
+        assert!(matches!(
+            completed_received.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ), "a bootstrap page must not commit across a managed deferred snapshot");
+        // An independent bootstrap writer would commit while this snapshot was
+        // held, making this upgrade fail with SQLITE_BUSY_SNAPSHOT, not a retryable
+        // busy wait. The background loan cannot run until the foreground returns.
+        transaction.execute(
+            "INSERT INTO meta(key, value) VALUES ('deferred-upgrade', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [pass.to_string()],
+        ).unwrap();
+        transaction.commit().unwrap();
+        drop(foreground);
+        let page = completed_received.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        assert!(!page.ready);
+        assert_eq!(page.copied, usize::try_from(index::PAGE_SIZE).unwrap());
+        background.join().unwrap();
+    }
+    finish(&writer);
+    assert!(index::ready(&connection).unwrap());
+    assert_eq!(index::latest(&connection, "host/peer", "local").unwrap(), original(&connection, "local"));
 }
