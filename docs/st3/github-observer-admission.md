@@ -10,8 +10,8 @@ hour's reservations; doctor reads them as
 **Default: meter only, no quota enforcement.** The optional DAEMON setting
 `[github].observer_requests_per_hour = 1000` enables the Factory allocation, per
 resource and per caller, with a shared aggregate of1000 rather than1000 for each
-observer. This is a local config setting, not a GitHub setting. No live config is
-changed. Existing production observer usage is UNKNOWN in this source review.
+observer. This is a local config setting, not a GitHub setting. Values1..1000 can narrow the Factory ceiling; raising it requires a new policy
+review. No live config is changed. Existing production observer usage is UNKNOWN in this source review.
 Before setting a cap, the owner must measure current per-resource request rates
 including pagination at the5-minute interval and confirm quota/freshness headroom.
 Meter-only I/O failures are visible gaps and do not stop polling; enforced

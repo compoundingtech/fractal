@@ -91,8 +91,8 @@ impl GithubConfig {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        anyhow::ensure!(self.observer_requests_per_hour.is_none_or(|cap| (1..=100_000).contains(&cap)),
-            "github.observer_requests_per_hour must be1..100000 or omitted for meter-only");
+        anyhow::ensure!(self.observer_requests_per_hour.is_none_or(|cap| (1..=1000).contains(&cap)),
+            "github.observer_requests_per_hour must be1..1000 or omitted for meter-only");
         anyhow::ensure!(self.token_file.is_none() || self.sekrets_profile.is_none(),
             "github.token_file and github.sekrets_profile are mutually exclusive");
         if let Some(profile) = &self.sekrets_profile {
@@ -1014,6 +1014,8 @@ mod tests {
         config.observer_requests_per_hour=Some(1000);
         assert!(config.validate().is_ok());
         config.observer_requests_per_hour=Some(0);
+        assert!(config.validate().is_err());
+        config.observer_requests_per_hour=Some(1001);
         assert!(config.validate().is_err());
     }
 
