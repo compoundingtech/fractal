@@ -34221,7 +34221,7 @@ fn terminalize_projected_generation_steps_tx(
             "UPDATE step_runs
              SET status='cancelled', blocked_reason=?2, lease_owner=NULL,
                  lease_incarnation=NULL, lease_expires_at_unix_ms=NULL,
-                 updated_at_unix_ms=?3
+                 updated_at_unix_ms=CASE WHEN status!='cancelled' THEN ?3 ELSE updated_at_unix_ms END
              WHERE generation_id=?1
                AND (status NOT IN ('completed','failed','cancelled')
                     OR (status='cancelled' AND blocked_reason=?4))",
@@ -34247,7 +34247,7 @@ fn terminalize_projected_run_steps_tx(
             "UPDATE step_runs
              SET status='cancelled', blocked_reason=?2, lease_owner=NULL,
                  lease_incarnation=NULL, lease_expires_at_unix_ms=NULL,
-                 updated_at_unix_ms=?3
+                 updated_at_unix_ms=CASE WHEN status!='cancelled' THEN ?3 ELSE updated_at_unix_ms END
              WHERE run_id=?1
                AND (status NOT IN ('completed','failed','cancelled')
                     OR (status='cancelled' AND blocked_reason=?4))",
@@ -34286,7 +34286,7 @@ fn terminalize_projected_run_tree_tx(
              SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                  phase=CASE WHEN status IN ('running','standing','blocked') THEN 'terminal' ELSE phase END,
                  updated_at_unix_ms=?2
-             WHERE id=?1",
+             WHERE id=?1 AND status IN ('running','standing','blocked')",
             params![run_id, updated_at_unix_ms.to_string()],
         )
         .map_err(internal)?;
@@ -34295,7 +34295,7 @@ fn terminalize_projected_run_tree_tx(
             "UPDATE run_generations
              SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                  updated_at_unix_ms=?2
-             WHERE id=?1",
+             WHERE id=?1 AND status IN ('running','standing','blocked')",
             params![generation, updated_at_unix_ms.to_string()],
         )
         .map_err(internal)?;
@@ -34314,7 +34314,7 @@ fn terminalize_projected_run_tree_tx(
                  SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                      phase=CASE WHEN status IN ('running','standing','blocked') THEN 'terminal' ELSE phase END,
                      updated_at_unix_ms=?2
-                 WHERE id=?1",
+                 WHERE id=?1 AND status IN ('running','standing','blocked')",
                 params![descendant, updated_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
@@ -34323,7 +34323,7 @@ fn terminalize_projected_run_tree_tx(
                 "UPDATE run_generations
                  SET status=CASE WHEN status IN ('running','standing','blocked') THEN 'cancelled' ELSE status END,
                      updated_at_unix_ms=?2
-                 WHERE id=?1",
+                 WHERE id=?1 AND status IN ('running','standing','blocked')",
                 params![child_generation, updated_at_unix_ms.to_string()],
             )
             .map_err(internal)?;
@@ -48747,6 +48747,187 @@ mission "external-blocker" state="ready" {
         assert!(reopened.blockers.is_empty());
         store
             .work_action(&subject, "claim", &request("unblocked-reclaim", None))
+            .unwrap();
+    }
+
+    #[test]
+    fn terminal_cascade_preserves_completed_children_across_three_members() {
+        use smallclaims::store::set_thread_clock;
+        struct ResetClock;
+        impl Drop for ResetClock {
+            fn drop(&mut self) {
+                set_thread_clock(None);
+            }
+        }
+        let _reset = ResetClock;
+        let source = Store::open_memory("alder").unwrap();
+        let birch = Store::open_memory("birch").unwrap();
+        let cedar = Store::open_memory("cedar").unwrap();
+        let members = [&source, &birch, &cedar];
+        let start = now_ms() + 60_000;
+        let at = |time| {
+            set_thread_clock(Some(time));
+            source.set_write_clock_at(time).unwrap();
+        };
+        at(start);
+        publish_mission(
+            &source,
+            r#"version 2
+ mission "terminal-stamps" state="ready" {
+   goal "Keep each completed child's own completion time."
+   step "work" { agentless }
+ }"#,
+            "terminal-stamps-mission",
+        );
+        let request = |key: &str| MissionRunRequest {
+            mission: "terminal-stamps".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        };
+        let root = source.create_mission_run(&request("root")).unwrap();
+        let children = ["child-one", "child-two"].map(|key| {
+            source
+                .create_child_mission_run(
+                    &request(key),
+                    &root,
+                    &root.steps[0].subject,
+                    None,
+                )
+                .unwrap()
+        });
+        let exchange_all = || {
+            for sender in members {
+                for receiver in members {
+                    if sender.origin != receiver.origin {
+                        let exchange =
+                            exchange_from(sender, &receiver.replication_inventory().unwrap());
+                        assert_eq!(
+                            receive_and_project(receiver, &sender.origin, &exchange).invalid,
+                            0
+                        );
+                    }
+                }
+            }
+        };
+        exchange_all();
+        for (index, child) in children.iter().enumerate() {
+            at(start + (index as u128 + 1) * 1_000);
+            assert!(
+                source
+                    .set_mission_run_state(&child.id, "completed", "terminal", None)
+                    .unwrap()
+            );
+            exchange_all();
+        }
+        at(start + 3_000);
+        assert!(
+            source
+                .set_mission_run_state(&root.id, "completed", "terminal", None)
+                .unwrap()
+        );
+        exchange_all();
+
+        let expected = source
+            .replication_status(true, Some(TEST_FLEET), &[])
+            .unwrap()
+            .projection_digests;
+        for member in members {
+            let digests = member
+                .replication_status(true, Some(TEST_FLEET), &[])
+                .unwrap()
+                .projection_digests;
+            for table in ["mission_runs", "run_generations"] {
+                assert_eq!(digests[table], expected[table], "{}: {table}", member.origin);
+            }
+            let connection = member.readers.get();
+            for (index, run) in children.iter().chain([&root]).enumerate() {
+                let state = connection
+                    .query_row(
+                        "SELECT r.status, r.phase, r.updated_at_unix_ms,
+                                g.status, g.updated_at_unix_ms
+                         FROM mission_runs r
+                         JOIN run_generations g ON g.id=r.current_generation_id
+                         WHERE r.id=?1",
+                        [&run.id],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                let completed_at = (start + (index as u128 + 1) * 1_000).to_string();
+                assert_eq!(
+                    state,
+                    (
+                        "completed".into(),
+                        "terminal".into(),
+                        completed_at.clone(),
+                        "completed".into(),
+                        completed_at,
+                    ),
+                    "{}: {}",
+                    member.origin,
+                    run.id
+                );
+            }
+        }
+
+        // A later owner claim may refine the reason for a projected cancellation.
+        // Both step scopes must preserve the time at which the status changed.
+        source
+            .connection
+            .batched(|transaction| -> Result<(), St3Error> {
+                let step = &children[0].steps[0].subject;
+                let generation: String = transaction
+                    .query_row(
+                        "SELECT generation_id FROM step_runs WHERE subject=?1",
+                        [step],
+                        |row| row.get(0),
+                    )
+                    .map_err(internal)?;
+                for by_generation in [false, true] {
+                    transaction
+                        .execute(
+                            "UPDATE step_runs SET blocked_reason='the root mission run is terminal'
+                             WHERE subject=?1",
+                            [step],
+                        )
+                        .map_err(internal)?;
+                    if by_generation {
+                        terminalize_projected_generation_steps_tx(
+                            transaction,
+                            &generation,
+                            "refined reason",
+                            start + 4_000,
+                        )?;
+                    } else {
+                        terminalize_projected_run_steps_tx(
+                            transaction,
+                            &children[0].id,
+                            "refined reason",
+                            start + 4_000,
+                        )?;
+                    }
+                    let state: (String, String) = transaction
+                        .query_row(
+                            "SELECT blocked_reason, updated_at_unix_ms FROM step_runs WHERE subject=?1",
+                            [step],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(internal)?;
+                    assert_eq!(state, ("refined reason".into(), (start + 1_000).to_string()));
+                }
+                Ok(())
+            })
             .unwrap();
     }
 
