@@ -6,7 +6,7 @@ vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, define
 
 describe('palette recents persistence scope', () => {
   it('uses a deterministic opaque key instead of a connection URL', () => {
-    const gateway = 'https://user:password@gateway.example:443/fleet?token=private-token'
+    const gateway = 'https://gateway.example:443/fleet?user=user&login=password&token=private-token'
     const key = paletteRecentsKey(gateway)
     expect(key).toBe(paletteRecentsKey(gateway))
     expect(key).toMatch(/^palette\.recents\.[0-9a-f]+$/)
