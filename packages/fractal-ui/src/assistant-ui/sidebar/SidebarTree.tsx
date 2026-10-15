@@ -455,7 +455,7 @@ const styles = stylex.create({
   root: { position: 'relative', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', color: ink.fg },
   tree: { height: '100%', minHeight: 0, overflowY: 'auto', outline: 'none' },
   item: { outline: 'none' },
-  focused: { outlineStyle: 'solid', outlineWidth: g.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})`, outlineColor: accent.primary },
+  focused: { outlineStyle: 'solid', outlineWidth: g.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})`, outlineColor: ink.fgMuted },
   row: { position: 'relative', display: 'flex', alignItems: 'center', minHeight: g.controlSm, minWidth: 0, boxSizing: 'border-box' },
   guide: { position: 'absolute', top: 0, bottom: 0, width: g.hairline, backgroundColor: border.borderStrong, pointerEvents: 'none' },
   chevron: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
