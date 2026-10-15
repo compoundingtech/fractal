@@ -483,9 +483,11 @@ workflow-level path filters. `linux-gate` does not depend on them.
 
 - `fractal-web-changes` always runs, with a one-minute timeout and no checkout. Its
   embedded `scripts/ci-fractal-web-changes` fetches both commits explicitly without
-  blobs and diffs PR base/head SHAs from their merge base, or a merge group's
-  `base_sha..head_sha`. `--no-renames` counts both sides of a rename. Missing or malformed
-  SHAs, failed fetches and failed diffs fail closed; `workflow_dispatch` forces execution.
+  blobs and diffs PR base/head SHAs from their merge base, a merge group's
+  `base_sha..head_sha`, or a push's `before..after` (the whole pushed range, not just
+  the final commit). `--no-renames` counts both sides of a rename. Missing or malformed
+  SHAs, failed fetches and failed diffs conservatively select every web lane, including
+  kit plays, with a warning; `workflow_dispatch` also forces all lanes.
   Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
   `clients/typescript/st3-views/**`, `clients/typescript/st3-scenarios/**` and `fixtures/**`.
   Within `clients/typescript/st3-client`, only the consumed export graph (`index.ts`,
@@ -518,7 +520,11 @@ workflow-level path filters. `linux-gate` does not depend on them.
   fixtures that must trip both failures, and controls (quoted URLs with parentheses,
   faces declared by the entry's stylesheet) that must pass.
   App, UI kit, Storybook, browser and performance lanes join the script with the
-  packages that add them.
+  packages that add them. The detector separately emits `kit-inputs`: app-only changes
+  skip kit play-index contracts, Storybook and strict browser plays; kit source,
+  its transitive workspace dependencies, lock/toolchain and CI-input changes run them.
+  This selection is the same for PRs, merge groups and pushes. Main pushes currently
+  run Main upkeep's dependency-cache warmer, not a duplicate Workspace CI execution.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
   either no relevant paths changed and execution was skipped, or execution succeeded.
@@ -527,6 +533,23 @@ workflow-level path filters. `linux-gate` does not depend on them.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
+
+The strict kit play lane runs every indexed story at both 440/1440 widths and
+dark/light schemes, with up to six workers bounded by available CPUs. Each worker
+reuses a Chromium context and its HTTP asset cache for the job's immutable build;
+each case still gets a fresh page. Before a new case, the worker closes all prior
+pages/popups, clears cookies and permissions, and clears every origin-storage type
+for all observed HTTP(S) origins. Cookie/quota audits and a first-document
+local/session-storage audit reject residual state. Case-internal navigation may
+retain its own state; it is never inherited by another case.
+
+`kit-play-isolation.browser-test.mjs` runs in the same kit-input-gated CI lane before
+the full play matrix. It exercises storage/service-worker/popup isolation, concurrent
+worker independence, retained HTTP asset caching, and failing-story/leaked-state
+negative controls against real Chromium. The matrix receipt retains story/case/worker
+counts and per-case seconds and adds reset, page-creation, guard, navigation-to-DOM,
+post-DOM readiness, assertion and close timings. The strict lifecycle assertions,
+story-identity checks, matrix size and job timeout are unchanged.
 
 Run SDK tests with their own `vitest.config.ts`, not the parent app's narrower test patterns.
 The rejected-mission diagnostic proof checks its fixture against the generated decoder:
@@ -826,7 +849,10 @@ ST_LOAD_GATE=1 ST_LOAD_HOG=1 ST_LOAD_HOG_REPORT=out nix develop .#perf -c cargo 
 nix develop .#perf -c bash scripts/ci-perf load-hog   # the same, in the perf slot on hetz2
 ```
 
-It is a step of its own and no required check until its numbers are stable. "Without the hog" is
+The Performance workflow runs it as the `perf-load-hog` job, with `continue-on-error` and its table
+in the step summary and the `perf-load-hog-logs` artifact. It runs on pushes to main and manual
+dispatch, not on pull requests: it takes a second performance runner for up to 45 minutes. It is
+no required check until its numbers are stable. "Without the hog" is
 the host's load as it was: on a shared host that is not an idle machine, and the report gives the
 load average. Keep a Mac's load average under 10 outside the test window.
 
