@@ -882,6 +882,7 @@ pub(super) fn finalize_commit(transaction: &Transaction<'_>) -> Result<FoldBudge
     Ok(budget)
 }
 
+#[cfg(test)]
 fn malformed_count(connection: &Connection) -> Result<u64> {
     Ok(connection.query_row("SELECT value FROM meta WHERE key=?1", [MALFORMED_MARKER], |row| row.get::<_, String>(0))
         .optional()?.map(|value| value.parse()).transpose()?.unwrap_or(0))
