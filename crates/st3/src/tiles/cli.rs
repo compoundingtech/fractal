@@ -38,6 +38,13 @@ enum TilesCommand {
         registry: PathBuf,
         name: String,
     },
+    /// End a tile, remove its state and directories, and give its user ID back. Run as root.
+    /// Its registry entry stays; a later launch starts it afresh with a new user ID.
+    Remove {
+        #[arg(long, default_value = DEFAULT_REGISTRY)]
+        registry: PathBuf,
+        name: String,
+    },
     /// Build the tile and run the command in it. The tile's unit runs this as root.
     #[command(hide = true)]
     Enter {
@@ -66,6 +73,7 @@ pub fn run(args: TilesArgs) -> Result<i32> {
             TilesCommand::Prepare { registry, name } => {
                 launch::prepare(&registry, &name).map(|()| 0)
             }
+            TilesCommand::Remove { registry, name } => launch::remove(&registry, &name).map(|()| 0),
             TilesCommand::Enter {
                 registry,
                 name,
