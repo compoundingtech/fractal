@@ -92,7 +92,7 @@ describe('fixture-free native Details projection', () => {
   })
   it('refuses snapshot-dated starts instead of presenting a fresh elapsed time or age', () => {
     expect(nativeDetailsTiming({ row, session: { ...session, started_at: session.updated_at }, now: 10000 })).toEqual({})
-    expect(nativeDetailsTiming({ row, session: { ...session, started_at: DateTime.unsafeMake(10000), ended_at: Option.none(), state: 'running' }, now: 10000 })).toEqual({})
+    expect(nativeDetailsTiming({ row, session: { ...session, started_at: DateTime.makeUnsafe(10000), ended_at: Option.none(), state: 'running' }, now: 10000 })).toEqual({})
     expect(nativeDetailsTiming({ row, session, now: 10000 })).toEqual({ elapsedMs: 2000, sessionAgeMs: 9000 })
     expect(project({ selectedSession: { ...session, started_at: session.updated_at } }).overview.durations?.map(item => item.value)).toEqual(['Unreported', 'Unreported'])
   })
