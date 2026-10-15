@@ -33,6 +33,14 @@ assert 'not owned by root' in signer.unsafe_file('x', fake(REG | 0o755, uid=1000
 assert 'writable by group or others' in signer.unsafe_file('x', fake(REG | 0o775))
 assert 'writable by group or others' in signer.unsafe_file('x', fake(REG | 0o757))
 assert 'not owned by root' in signer.unsafe_file('x', fake(REG | 0o777, uid=1000)), 'the owner is reported first'
+# the Nix store: immutable by content address, so the owner (nobody inside a build sandbox) is not asked, the write bits are
+STORE = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-git-1/bin/git'
+assert signer.unsafe_file(STORE, fake(REG | 0o555, uid=65534)) is None, 'a store file owned by nobody (build sandbox) is acceptable'
+assert signer.unsafe_file(STORE, fake(REG | 0o555, uid=0)) is None
+assert 'write bit in the Nix store' in signer.unsafe_file(STORE, fake(REG | 0o755, uid=0))
+assert 'write bit in the Nix store' in signer.unsafe_file(STORE, fake(REG | 0o775, uid=65534))
+assert 'not executable' in signer.unsafe_file(STORE, fake(REG | 0o444, uid=0))
+assert 'not owned by root' in signer.unsafe_file('/nix/store-lookalike/git', fake(REG | 0o555, uid=65534)), 'only /nix/store/ itself is exempt'
 assert 'not a regular file' in signer.unsafe_file('x', fake(stat_module.S_IFDIR | 0o755))
 assert 'not a regular file' in signer.unsafe_file('x', fake(stat_module.S_IFLNK | 0o777))
 assert 'not executable' in signer.unsafe_file('x', fake(REG | 0o644))
@@ -53,12 +61,14 @@ with tempfile.TemporaryDirectory() as directory:
     link.symlink_to(tool)
     assert signer.unsafe_file(os.path.realpath(link)) == signer.unsafe_file(str(tool)), 'a link is judged by what it resolves to'
     # The host git, judged by the script and by this test's own reading of the same file: the file may be root-owned
-    # (a system package, a Nix store file on a host) or owned by the build user (inside the Nix sandbox, where the
-    # store shows another owner), so the expected answer is computed from the file, not assumed.
+    # (a system package) or in the Nix store, where only the write bits count (inside the Nix sandbox the store
+    # shows another owner), so the expected answer is computed from the file, not assumed.
     real_git = next((str(Path(d) / 'git') for d in os.environ['PATH'].split(':') if 'recorder' not in d and (Path(d) / 'git').exists()), None)
     assert real_git is not None, 'this test needs a git on PATH, as every CI script does'
     found = os.stat(os.path.realpath(real_git))
-    acceptable = stat_module.S_ISREG(found.st_mode) and found.st_uid == 0 and not found.st_mode & 0o022 and bool(found.st_mode & 0o100)
+    in_store = os.path.realpath(real_git).startswith('/nix/store/')
+    acceptable = (stat_module.S_ISREG(found.st_mode) and bool(found.st_mode & 0o100)
+                  and ((not found.st_mode & 0o222) if in_store else (found.st_uid == 0 and not found.st_mode & 0o022)))
     assert (signer.unsafe_file(os.path.realpath(real_git)) is None) == acceptable, (real_git, oct(found.st_mode), found.st_uid)
 print('passed: the same rules hold on real files, links are judged by their target, and the host git is judged the way its owner and mode say')
 

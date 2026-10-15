@@ -358,9 +358,9 @@ Signer launch controls (`scripts/evidence-sign`): each resolved git and ssh-keyg
 by root and closed to group and others, in addition to the directory rules, and the signer runs that resolved file, not the
 link it found. git and ssh-keygen are the only programs the script starts itself; the helper programs git starts come from git's
 own installation, which the launcher's pinned git provides and this script does not enumerate, and the interpreter is the
-launcher's concern too. Inside a Nix build sandbox store files can show another owner, so a root-owned rule that holds on a
-host may refuse them there; the signer is not run in that sandbox, and the hardening test judges the host git from its owner and
-mode instead of assuming either. git and ssh-keygen receive only PATH (the
+launcher's concern too. A file in the Nix store is judged like the store directory: it is content-addressed, so the rule is no write bit and not who
+owns it (inside a Nix build sandbox root-owned store files show as owned by nobody, and the first version of this rule failed the
+sandboxed genie-freshness check for exactly that reason). Outside the store the owner must be root. git and ssh-keygen receive only PATH (the
 signer's own), LC_ALL, HOME, TMPDIR and git settings the signer sets itself (no system or global git configuration; HOME
 and TMPDIR are passed as given, so for a privileged integration only the fixed trusted launcher or profile may supply them,
 and passing them proves nothing about an arbitrary inherited path; the "no global git configuration" setting needs Git 2.32 or

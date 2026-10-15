@@ -18,7 +18,8 @@ Configuration, outside any checkout: $HOME/.config/st/evidence-sign.json
   {"signer": "fleet/dev", "ssh_key": "/abs/key", "scratch_repo": "/abs/bare.git"}
 git and ssh-keygen are looked up only in the signer's own path (the fixed system directories, or the
 configuration's `path`), never through the caller's PATH, and run with that PATH. Each resolved tool FILE
-must be a regular, executable file owned by root and closed to group and others, as well as its directory.
+must be a regular, executable file owned by root and closed to group and others, as well as its directory
+(a Nix store file: no write bit; the store is immutable and its owner shows as nobody in a build sandbox).
 The programs it starts get an explicit environment (PATH, LC_ALL, HOME, TMPDIR and the git settings it
 sets itself) and nothing else; it refuses to start at all when the loader or the interpreter was told to
 load code (LD_PRELOAD, LD_AUDIT, DYLD_INSERT_LIBRARIES, GCONV_PATH, NLSPATH, PYTHONPATH, PYTHONSTARTUP,
@@ -110,14 +111,20 @@ def unsafe_directory(directory):
 def unsafe_file(real, status=None):
     """Why the resolved tool file itself may not be run with the key in reach, or None: not a regular
     executable file, not owned by root, or writable by group or others. (A closed directory does not make
-    a file inside it safe.) `status` is for tests."""
+    a file inside it safe.) A file in the Nix store is judged like the store directory is: content-addressed
+    and immutable, so what matters is that it has no write bit; its owner is not asked for, because inside a
+    Nix build sandbox root-owned store files show as owned by nobody. `status` is for tests."""
     status = os.stat(real) if status is None else status
     if not stat.S_ISREG(status.st_mode):
         return 'is not a regular file'
-    if status.st_uid != 0:
-        return 'is not owned by root'
-    if status.st_mode & 0o022:
-        return 'is writable by group or others'
+    if real.startswith('/nix/store/'):
+        if status.st_mode & 0o222:
+            return 'has a write bit in the Nix store'
+    else:
+        if status.st_uid != 0:
+            return 'is not owned by root'
+        if status.st_mode & 0o022:
+            return 'is writable by group or others'
     if not status.st_mode & 0o100:
         return 'is not executable by its owner'
     return None
