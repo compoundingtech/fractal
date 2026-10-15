@@ -6018,9 +6018,7 @@ fn native_slice_page_at_generation(
             None
         };
         let head = head.as_ref().unwrap_or(&native);
-        if head.basis != source_basis || head.generation != native.generation {
-            return Err(client_page_expired("the transcript changed while reading the header"));
-        }
+        native_head_fence(head, &source_basis, native.generation)?;
         let count = head.items.len().min(CLIENT_MAX_PAGE_ITEMS);
         conversation_page_header(
             state, session, session_id, &head.items[..count],
@@ -6103,11 +6101,22 @@ fn native_slice_page_at_generation(
     Ok((Json(page_value), native.generation, suppressed_sequence))
 }
 
+/// The header's head read must come from the page's own transcript basis and generation.
+fn native_head_fence(
+    head: &conversation_blocks::PreparedSlice, source_basis: &str, generation: u64,
+) -> Result<(), ApiError> {
+    if head.basis != source_basis || head.generation != generation {
+        return Err(client_page_expired("the transcript changed while reading the header"));
+    }
+    Ok(())
+}
+
 /// Refill bounded keyset batches after suppression so an all-echo batch cannot create
 /// an empty page or strand older native entries. Every refill retains the original source fence.
 /// A call examines at most [`NATIVE_ECHO_SCAN_ITEMS`] entries: past that it returns the visible
 /// entries found so far (a short page whose boundary is its last entry, so the next page reads
-/// on with a fresh budget), and refuses only when that many consecutive entries are all hidden.
+/// on with a fresh budget), and refuses (`page-cursor-expired`) only when that many consecutive
+/// entries are all hidden.
 #[allow(clippy::too_many_arguments)]
 fn canonical_native_slice(
     state: &AppState,
@@ -6132,9 +6141,10 @@ fn canonical_native_slice(
             break;
         }
         if budget == 0 {
-            return Err(conversation_replay_gap(
-                session_id, "native-echo-budget",
-                "the correlated native prefix exceeded the bounded keyset read; refresh the conversation",
+            // Not cursor-gap: that code asks the client to reload the newest page, which meets
+            // the same hidden prefix and the same error, so older history would be unreachable.
+            return Err(client_page_expired(
+                "the correlated native prefix exceeded the bounded keyset read; restart pagination",
             ));
         }
         let mut next = conversation_blocks::read_slice(
@@ -20267,7 +20277,8 @@ mission "example/zero-run" state="ready" {
 
     /// Omitting echoes never reads without bound: past the scan budget a page keeps the visible
     /// entries found so far and its boundary is the last of them; only a prefix of nothing but
-    /// hidden entries as long as the budget is refused, and with a full-resync request.
+    /// hidden entries as long as the budget is refused, as an expired page cursor (never a
+    /// full-resync request, which would reload the same hidden prefix).
     #[test]
     fn timeline_send_identity_scan_budget_returns_short_page_then_refuses_hidden_prefix() {
         let root = tempfile::tempdir().unwrap();
@@ -20344,8 +20355,122 @@ mission "example/zero-run" state="ready" {
         };
         let error = native_slice_page(&state, &snapshot, &session, &session_id, &next, &source)
             .unwrap_err();
-        assert_eq!(error.code, "cursor-gap");
-        assert_eq!(error.details["full_resync"], true);
+        assert_eq!(error.code, "page-cursor-expired");
+        assert!(error.details.get("full_resync").is_none());
+    }
+
+    /// A newest prefix of nothing but hidden echoes as long as the budget leaves nothing to show:
+    /// the native read refuses with an expired page cursor, never `cursor-gap` (reloading the
+    /// newest page would meet the same prefix and loop). OPEN falls back to the stored timeline;
+    /// the header's head read and change replay surface the error.
+    #[test]
+    fn timeline_send_identity_budget_without_a_visible_entry_expires_the_native_read() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let transcript = home.join(".codex/sessions/2026/09/24/budget.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let owner = "agent/budget-codex";
+        let incarnation = "native-pty:one";
+        let provider_incarnation = "provider-one";
+        let native_id = "native-budget-codex-test";
+        let state = {
+            let mut state = test_state_named(root.path(), "budget-codex-test");
+            state.native_session_home = Some(home);
+            state
+        };
+        let session_id = super::managed_session_id(owner, incarnation);
+        let mut text = format!("{}\n{}\n",
+            json!({"type":"session_meta","timestamp":"2026-09-24T12:00:00Z","payload":{"id":native_id,"cwd":root.path(),"source":"test"}}),
+            json!({"type":"response_item","timestamp":"2026-09-24T12:00:01Z","payload":{"type":"message","role":"assistant","id":"answer-old","content":[{"type":"output_text","text":"answer-old"}]}}),
+        );
+        std::fs::write(&transcript, &text).unwrap();
+        let directory = state.state_dir.join("drivers")
+            .join(&hex::encode(Sha256::digest(owner.as_bytes()))[..24]).join("state");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("runtime.json"),
+            serde_json::to_vec(&json!({"agent":"budget-codex","incarnation":provider_incarnation})).unwrap()).unwrap();
+        std::fs::write(directory.join("binding.json"),
+            serde_json::to_vec(&json!({"agent":"budget-codex","runtimeIncarnation":provider_incarnation,"threadId":native_id})).unwrap()).unwrap();
+        for (kind, fields) in [
+            ("runtime.observed", BTreeMap::from([
+                ("status".into(), json!("running")), ("runtime_id".into(), json!("budget-codex-pty")),
+                ("incarnation_id".into(), json!(incarnation)), ("terminal".into(), json!(true)),
+            ])),
+            ("harness.observed", BTreeMap::from([
+                ("state".into(), json!("working")), ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("evidence_incarnation".into(), json!(provider_incarnation)),
+            ])),
+        ] {
+            state.store.append_claim(&ClaimInput {
+                subject: owner.into(), kind: kind.into(), actor: Some(owner.into()), fields,
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        // The sends follow the runtime observation: only then do they belong to this session.
+        for number in 0..NATIVE_ECHO_SCAN_ITEMS + 8 {
+            let subject = format!("message/budget-open-{number}");
+            state.store.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: "message.sent".into(), actor: Some("person/alex".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!("person/alex")), ("to".into(), json!(owner)),
+                    ("session_id".into(), json!(session_id)), ("content".into(), json!("send")),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let client_id = st_drivers::codex_app_server::stable_client_user_message_id(owner, native_id, &subject);
+            let second = number + 2;
+            text += &format!("{}\n", json!({
+                "type":"response_item",
+                "timestamp":format!("2026-09-24T13:{:02}:{:02}Z", second / 60 % 60, second % 60),
+                "payload":{"type":"message","role":"user","id":format!("echo-{number}"),"clientId":client_id,
+                    "content":[{"type":"input_text","text":format!("echo-{number}")}]},
+            }));
+        }
+        std::fs::write(&transcript, text).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let expired = |error: ApiError| {
+            assert_eq!(error.status, StatusCode::GONE);
+            assert_eq!(error.code, "page-cursor-expired");
+            assert!(error.details.get("full_resync").is_none());
+        };
+        conversation_blocks::source(&state, &session_id).expect("the managed transcript is bound");
+        // OPEN never answers cursor-gap here (its client would reload into the same prefix): it
+        // keeps the established stored-timeline fallback with no native generation, and change
+        // replay from that cursor surfaces the expired page cursor.
+        let (start, opened) = conversation_open_local(&state, &session, &session_id).unwrap();
+        assert!(opened["items"].as_array().unwrap().iter().all(|item|
+            !item["id"].as_str().unwrap_or_default().starts_with("timeline-entry/native-")), "{opened:#}");
+        assert_eq!(
+            conversation_position(&state, &session_id, start["next_cursor"].as_str().unwrap())
+                .unwrap().source_generation,
+            0,
+        );
+        expired(conversation_read_now(&state, &session, &session_id, start["next_cursor"].as_str()).unwrap_err());
+        // The header's head read is the same bounded read at the page size.
+        let snapshot = new_client_snapshot(&state);
+        let source = conversation_blocks::source(&state, &session_id).unwrap();
+        let messages = native_session_messages(&state, &snapshot, &session_id).unwrap();
+        expired(canonical_native_slice(
+            &state, &snapshot, &source, &session, &session_id, &messages,
+            crate::external_sessions::TimelineOrder::TimestampSequence, None, CLIENT_MAX_PAGE_ITEMS,
+        ).map(|_| ()).unwrap_err());
+    }
+
+    /// The header's head read must be from the page's own basis and generation: a transcript
+    /// rewritten between the two reads is an expired page cursor, not a mixed page.
+    #[test]
+    fn timeline_send_identity_header_head_must_match_the_page_basis_and_generation() {
+        let head = |basis: &str, generation: u64| conversation_blocks::PreparedSlice {
+            items: Vec::new(), has_more: false, basis: basis.into(), generation,
+        };
+        assert!(native_head_fence(&head("basis-a", 7), "basis-a", 7).is_ok());
+        for mismatched in [head("basis-a", 8), head("basis-b", 7)] {
+            let error = native_head_fence(&mismatched, "basis-a", 7).unwrap_err();
+            assert_eq!(error.status, StatusCode::GONE);
+            assert_eq!(error.code, "page-cursor-expired");
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Existing graph row IDs, message IDs, sequences, finality, HTTP pagination snapshots, and conversation cursor encoding are unchanged. Native user rows with an exact supported delivery identity and all their parts are omitted, and the stream still advances over them. Extension-based harnesses and uncorrelated native messages retain previous behavior."
+    "detail": "Existing graph row IDs, message IDs, sequences, finality, HTTP pagination snapshots, and conversation cursor encoding are unchanged. Native user rows with an exact supported delivery identity and all their parts are omitted, and the stream still advances over them. Native keyset pages examine at most 4096 entries while omitting echoes: past that they are short pages (fewer than limit items, has_more true), and a prefix of 4096 or more consecutive hidden echoes with no visible entry answers page-cursor-expired (HTTP 410, not cursor-gap) on a continuation, on the header read and on change replay, so such a transcript cannot be paged past by cursor; OPEN keeps its stored-timeline fallback. Extension-based harnesses and uncorrelated native messages retain previous behavior."
   },
   "downtime": {
     "status": "none",

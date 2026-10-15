@@ -777,6 +777,16 @@ torn read requests a full conversation resync rather than guessing.
 Native keyset pages refill bounded batches after suppressing exact echoes, retaining their
 authenticated ordering boundary and source-generation fence. OPEN and change replay carry
 the suppressed native high-water without exposing the private correlation hint.
+A page examines at most 4096 native entries (the scan budget) while omitting echoes. Past the
+budget with visible entries it is a short page: fewer than `limit` items with `has_more: true`
+and its last visible entry as the boundary, so the next page reads on with a fresh budget. When
+that many consecutive entries are all suppressed echoes and none is visible, the read answers
+`page-cursor-expired` (HTTP 410, no `full_resync`) on a continuation, on the header's head read
+and on change replay; it is not `cursor-gap`, because reloading the newest page would meet the
+same prefix. OPEN keeps its established stored-timeline fallback in that case. A transcript with
+more than 4096 consecutive correlated delivery echoes therefore cannot be paged past by cursor,
+and while its newest 4096 entries are all echoes its native entries cannot be shown; this is an
+accepted, known limit.
 
 Native block `view` and `metadata` (including assistant text/reasoning metadata) use
 the same bounded open-value display convention on full reads and native keyset pages:
