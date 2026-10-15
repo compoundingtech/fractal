@@ -557,6 +557,10 @@ export const fractalWebJobs = {
       ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }),
       megarepoApplyStep,
       { name: 'Restore the pnpm store', id: 'pnpm-store', uses: 'actions/cache/restore@v4', with: fractalWebStoreCache },
+      // GitHub-hosted Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+      // effect-utils Buck TypeScript actions need them for bwrap (effect-utils #1784).
+      // This runner VM is ephemeral; the bwrap sandbox itself is unchanged.
+      { name: 'Enable user namespaces for Buck TypeScript sandbox', run: 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0' },
       {
         ...nixDevelopStep({ name: 'Run the fractal-web lanes and dependency license check', flake: '.#web', command: ['bash', 'scripts/ci-fractal-web'] }),
         env: {

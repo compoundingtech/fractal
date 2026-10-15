@@ -1113,8 +1113,9 @@ jobs:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Check the client, shared views and iOS consumers
+        shell: bash
+        run: "nix develop '.#web' -c bash scripts/ci-typescript-client"
         id: client
-        run: bash scripts/ci-typescript-client
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - if: (always()) && needs.evidence-gate-typescript-client.outputs.skip != 'true'
         continue-on-error: true
@@ -3469,6 +3470,8 @@ jobs:
         with:
           path: "${{ runner.temp }}/pnpm-store"
           key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+      - name: Enable user namespaces for Buck TypeScript sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run the fractal-web lanes and dependency license check
         shell: bash
         run: "nix develop '.#web' -c bash scripts/ci-fractal-web"

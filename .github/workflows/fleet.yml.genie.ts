@@ -463,7 +463,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         },
         // The web shell stages the pinned pnpm source inputs before the frozen root install.
         { ...nixDevelopStep({ name: 'Install the frozen workspace', flake: '.#web', command: ['pnpm', 'install', '--frozen-lockfile'] }), id: 'install', env: pnpmStoreEnv },
-        { name: 'Check the client, shared views and iOS consumers', id: 'client', run: 'bash scripts/ci-typescript-client' },
+        { ...nixDevelopStep({ name: 'Check the client, shared views and iOS consumers', flake: '.#web', command: ['bash', 'scripts/ci-typescript-client'] }), id: 'client' },
         ...evidenceStepSteps('typescript-client', ['bash', 'scripts/ci-typescript-client'], ['install', 'client']),
       ]),
     },
