@@ -19,6 +19,7 @@ import type { TerminalTyping } from './RawTerminal.tsx'
 const paused =
   'Input is paused while this terminal is hidden, disconnected or stale. It resumes when a live screen returns.'
 const unprepared = 'Terminal input could not be prepared. No keystrokes were sent.'
+const pageHidden = 'Typing stopped while this page was hidden; unsent keys were dropped. Click the terminal to type again.'
 
 interface GatewaySession {
   readonly port: Promise<TerminalInputPort | undefined>
@@ -31,6 +32,11 @@ interface GatewaySession {
  * One gateway input session per pane while `enabled`. The first focus, click or key starts it; a
  * different terminal or incarnation, a hidden or stale screen, or a lost grant ends it. A refused or
  * uncertain delivery ends it with its reason, and typing resumes only on the next focus or click.
+ *
+ * Hiding or leaving the page (`visibilitychange` to hidden, `pagehide`) stops the session at once and
+ * drops its queued keys, as main's keyboard did. That binding is then disarmed: a key alone, or the
+ * focus the browser restores on return, does not start a session again; only a click or a focus by
+ * navigation does. A different terminal or incarnation is a new binding and keeps the first-key start.
  */
 export const useGatewayTyping = ({
   factory,
@@ -46,10 +52,17 @@ export const useGatewayTyping = ({
   readonly incarnation: string
   /** The pane is visible, its projected screen is live, and the device holds `terminal.input`. */
   readonly enabled: boolean
-}): Pick<TerminalTyping, 'send' | 'arm' | 'notice'> => {
+}): Pick<TerminalTyping, 'send' | 'arm' | 'notice'> & {
+  /** A page hide stopped this binding; typing waits for the next focus or click. */
+  readonly disarmed: boolean
+} => {
   const registry = React.useContext(RegistryContext)
   const session = React.useRef<GatewaySession | undefined>(undefined)
   const [notice, setNotice] = React.useState<string | undefined>(undefined)
+  const binding = `${subject}\u0000${terminalRef}\u0000${incarnation}`
+  // The binding a page hide stopped. The ref answers keys synchronously; the state re-renders the chip.
+  const hiddenStop = React.useRef<string | undefined>(undefined)
+  const [stoppedFor, setStoppedFor] = React.useState<string | undefined>(undefined)
   React.useEffect(
     () => () => {
       session.current?.stop()
@@ -58,18 +71,40 @@ export const useGatewayTyping = ({
     },
     [factory, registry, subject, terminalRef, incarnation, enabled],
   )
+  React.useEffect(() => {
+    if (!enabled || factory === undefined) return
+    const stopForPage = () => {
+      const entry = session.current
+      session.current = undefined
+      entry?.stop()
+      hiddenStop.current = binding
+      setStoppedFor(binding)
+      setNotice(pageHidden)
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') stopForPage()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', stopForPage)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', stopForPage)
+    }
+  }, [enabled, factory, binding])
   const start = (): GatewaySession | undefined => {
     if (!enabled || factory === undefined) return undefined
     setNotice(undefined)
     let unsubscribe = () => {}
     let stopped = false
+    // Set once the port resolves, so a stop closes it in the same task and drops its queue.
+    let opened: TerminalInputPort | undefined
     const entry: GatewaySession = {
       ended: false,
       stop: () => {
         stopped = true
         entry.ended = true
         unsubscribe()
-        void entry.port.then((port) => port?.close())
+        opened?.close()
       },
       port: factory({ subject, terminalRef, incarnation, registry }).then(
         (port) => {
@@ -83,6 +118,7 @@ export const useGatewayTyping = ({
             setNotice(state.reason)
           })
           port.open()
+          opened = port
           return port
         },
         () => {
@@ -97,11 +133,21 @@ export const useGatewayTyping = ({
   }
   return {
     notice,
+    disarmed: stoppedFor === binding,
     arm: () => {
+      // A hidden page cannot take a gesture; whatever focus it reports there arms nothing.
+      if (document.visibilityState === 'hidden') return
+      // Focus by navigation or a click is the gesture a page hide waits for; RawTerminal does not
+      // call arm for focus the browser restores on return.
+      if (hiddenStop.current !== undefined) {
+        hiddenStop.current = undefined
+        setStoppedFor(undefined)
+      }
       if (session.current === undefined || session.current.ended) start()
     },
     send: (bytes) => {
       if (!enabled) return paused
+      if (hiddenStop.current === binding) return pageHidden
       // A key is itself the gesture that starts the first session; an ended one waits for a click.
       const entry = session.current ?? start()
       if (entry === undefined) return unprepared

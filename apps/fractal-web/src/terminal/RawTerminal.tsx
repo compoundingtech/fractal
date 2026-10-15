@@ -297,6 +297,15 @@ const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, 
   const pointerDown = React.useRef(false)
   const pointerRelease = React.useRef<AbortController | undefined>(undefined)
   const leaving = React.useRef(false)
+  // A key typed on the grid moves focus to the field; that move is not a gesture that resumes typing.
+  const keyHandoff = React.useRef(false)
+  /**
+   * Focus the browser gives back is not a gesture. When the window loses focus (tab or app switch,
+   * hidden page) the element blurs but stays `document.activeElement`; on return the same element
+   * gets focus with no `relatedTarget`. That restore neither arms typing nor hands the grid to the field.
+   */
+  const windowBlurred = React.useRef<EventTarget | null>(null)
+  const restoredFocus = React.useRef(false)
   const [composing, setComposing] = React.useState(false)
   const [notice, setNotice] = React.useState<string | undefined>(undefined)
   // A large paste waits here, already encoded for the modes it was pasted under.
@@ -396,10 +405,18 @@ const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, 
       ref={measureRef}
       data-terminal-input={typing === undefined ? 'read-only' : live ? 'live' : 'paused'}
       {...stylex.props(styles.surface)}
+      onBlur={(event) => {
+        windowBlurred.current = document.activeElement === event.target ? event.target : null
+      }}
+      onFocusCapture={(event) => {
+        // Classified before the field's and the grid's own focus handlers run.
+        restoredFocus.current = windowBlurred.current === event.target && event.relatedTarget === null
+        windowBlurred.current = null
+      }}
       onFocus={(event) => {
         // Keyboard-first typing: a grid focused while live hands focus to the cursor field at once,
         // so an IME's first keydown already composes in an editable element.
-        if (leaving.current) return
+        if (leaving.current || restoredFocus.current) return
         if (!live || pointerDown.current) return
         if (event.target.getAttribute('aria-roledescription') === 'terminal') field.current?.focus({ preventScroll: true })
       }}
@@ -430,7 +447,12 @@ const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, 
         gate.key()
         event.preventDefault()
         send(typing.encoder.key({ event: browserTerminalKey(event.nativeEvent, 'press', layout), modes: typing.modes() }))
-        if (document.activeElement !== field.current) field.current?.focus({ preventScroll: true })
+        if (document.activeElement !== field.current) {
+          // Focus events fire synchronously inside focus(), so the guard covers exactly this handoff.
+          keyHandoff.current = true
+          field.current?.focus({ preventScroll: true })
+          keyHandoff.current = false
+        }
       }}
       onKeyUp={(event) => {
         if (typing === undefined || keyRoute(event) !== 'encode') return
@@ -491,7 +513,8 @@ const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, 
               }}
               onFocus={() => {
                 onTypingChange(true)
-                if (live) typing.arm()
+                // Focus by navigation is the gesture; a browser restore or a key's handoff is not.
+                if (live && !restoredFocus.current && !keyHandoff.current) typing.arm()
               }}
               onBlur={() => onTypingChange(false)}
               onCompositionStart={() => {

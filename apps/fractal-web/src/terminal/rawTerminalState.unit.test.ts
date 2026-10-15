@@ -18,7 +18,12 @@ const attach = { _tag: 'Attach' } as const
 const chip = (raw: RawPreparation, typing = false, input: TerminalInputPath = attach) =>
   terminalChip({ raw, presentation: terminalPresentation(raw), input, typing }).label
 const granted = { terminalInput: 'granted', terminalControl: 'granted' } as const
-const limitedPairing = { terminalInput: 'granted', terminalControl: 'ungranted' } as const
+/**
+ * A hypothetical grant combination, not a current device class: the pinned server grants
+ * `terminal.input` only with the `terminal.control` scope. It pins the decision's input-only branch.
+ */
+const inputWithoutControl = { terminalInput: 'granted', terminalControl: 'ungranted' } as const
+/** What a limited pairing holds on the pinned server: neither scope (compoundingtech/smalltalk#2873). */
 const watchOnly = { terminalInput: 'ungranted', terminalControl: 'ungranted' } as const
 
 describe('input capability decision', () => {
@@ -28,8 +33,8 @@ describe('input capability decision', () => {
     expect(rawModeFor(input)).toBe('attach')
   })
 
-  it('keeps gateway typing, and watches by PEEK, for a limited pairing without terminal.control', () => {
-    const input = terminalInputPath({ raw: true, gateway: true, grants: limitedPairing, attachLost: false })
+  it('keeps gateway typing, and watches by PEEK, for terminal.input without terminal.control (hypothetical grant)', () => {
+    const input = terminalInputPath({ raw: true, gateway: true, grants: inputWithoutControl, attachLost: false })
     expect(input).toEqual({ _tag: 'Gateway' })
     expect(rawModeFor(input)).toBe('peek')
   })
@@ -40,11 +45,13 @@ describe('input capability decision', () => {
   })
 
   it('is read-only without a typing grant, or without a port that can carry the keys', () => {
+    // A limited pairing today: PEEK only, read-only, until the server admits terminal.control.
+    expect(rawModeFor(terminalInputPath({ raw: true, gateway: true, grants: watchOnly, attachLost: false }))).toBe('peek')
     expect(terminalInputPath({ raw: true, gateway: true, grants: watchOnly, attachLost: false })).toEqual({
       _tag: 'ReadOnly',
       reason: 'This device may watch this terminal but not type into it.',
     })
-    expect(terminalInputPath({ raw: true, gateway: false, grants: limitedPairing, attachLost: false })).toEqual({
+    expect(terminalInputPath({ raw: true, gateway: false, grants: inputWithoutControl, attachLost: false })).toEqual({
       _tag: 'ReadOnly',
       reason: 'This gateway does not accept typing into this terminal.',
     })

@@ -67,6 +67,7 @@ afterEach(async () => {
   registry.dispose()
   host.remove()
   vi.unstubAllGlobals()
+  Reflect.deleteProperty(document, 'visibilityState')
 })
 const isFeed = (terminal: Feed<TerminalScreen> | Readonly<Record<string, Feed<TerminalScreen>>>): terminal is Feed<TerminalScreen> =>
   typeof terminal._tag === 'string'
@@ -146,24 +147,53 @@ const rawSessions = () => {
   return { opened, port }
 }
 
-/** Gateway `terminal.input` sessions over the production ordered input; every write is delivered. */
-const gatewaySessions = () => {
+/**
+ * Gateway `terminal.input` sessions over the production ordered input; every write is delivered.
+ * With `hold`, each post stays in flight until the test releases it, so later keys queue behind it.
+ */
+const gatewaySessions = ({ hold = false }: { readonly hold?: boolean } = {}) => {
   const writes: TerminalInputWire[] = []
   const bound: Array<{ readonly subject: string; readonly terminalRef: string; readonly incarnation: string }> = []
+  const held: Array<() => void> = []
   const factory: TerminalInputPortFactory = async ({ registry: sessionRegistry, ...binding }) => {
     bound.push(binding)
     return makeActionTerminalInput({
       registry: sessionRegistry,
       submit: async (wire) => {
         writes.push(wire)
+        if (hold) {
+          const delivered = Promise.withResolvers<void>()
+          held.push(delivered.resolve)
+          await delivered.promise
+        }
         return { _tag: 'Delivered' }
       },
     })
   }
-  return { writes, bound, factory }
+  return { writes, bound, held, factory }
 }
-const limitedPairing: Grants = { actions: 'granted', messageSend: 'ungranted', terminalInput: 'granted', terminalControl: 'ungranted' }
+/**
+ * A hypothetical grant combination, not a current device class: the pinned server grants
+ * `terminal.input` only with the `terminal.control` scope. It pins the input-only branch of the
+ * decision; today the Gateway path is reached after a granted ATTACH is refused or lost.
+ */
+const inputWithoutControl: Grants = { actions: 'granted', messageSend: 'ungranted', terminalInput: 'granted', terminalControl: 'ungranted' }
+/** What a limited pairing holds on the pinned server: PEEK only (compoundingtech/smalltalk#2873). */
 const watchOnly: Grants = { actions: 'granted', messageSend: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }
+/** Let every settled promise run its continuations: one macrotask turn, no timer advance. */
+const drain = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)))
+/** The page goes to the background (hidden tab) or is being unloaded or frozen into the bfcache. */
+const leavePage = (how: 'hidden' | 'pagehide') => act(async () => {
+  if (how === 'pagehide') window.dispatchEvent(new Event('pagehide'))
+  else {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' })
+    document.dispatchEvent(new Event('visibilitychange'))
+  }
+})
+const returnToPage = () => act(async () => {
+  Reflect.deleteProperty(document, 'visibilityState')
+  document.dispatchEvent(new Event('visibilitychange'))
+})
 const press = (key: string, code: string, init: KeyboardEventInit = {}) =>
   field()!.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key, code, ...init }))
 const resizeButton = () => [...host.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === 'Resize terminal')
@@ -443,10 +473,10 @@ describe('input capability', () => {
     expect(resizeButton()).toBeUndefined()
   })
 
-  it('keeps gateway typing on the same surface over a PEEK stream for a limited pairing, with explicit resize only', async () => {
+  it('keeps gateway typing over a PEEK stream for terminal.input without terminal.control (hypothetical grant), with explicit resize only', async () => {
     const { opened, port } = rawSessions()
     const gateway = gatewaySessions()
-    await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory, grants: limitedPairing })
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory, grants: inputWithoutControl })
     await vi.waitFor(() => expect(opened).toHaveLength(1))
     expect(opened[0]!.mode).toBe('peek')
     await live(opened[0]!, 'peek prompt$ ')
@@ -493,9 +523,96 @@ describe('input capability', () => {
     expect(resizeButton()).toBeDefined()
   })
 
+  it.each(['hidden', 'pagehide'] as const)('stops gateway typing when the page is %s, drops queued keys, and waits for a click before typing again', async (how) => {
+    const { opened, port } = rawSessions()
+    const gateway = gatewaySessions({ hold: true })
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    await opened[0]!.go({ _tag: 'Refused', message: 'forbidden', status: 403, code: 'forbidden' })
+    await vi.waitFor(() => expect(opened).toHaveLength(2))
+    await live(opened[1]!, '$ ')
+    expect(chip()?.getAttribute('data-terminal-input-path')).toBe('Gateway')
+    await act(async () => field()!.focus())
+    // `l` is in flight; `a` and `s` queue behind it.
+    await act(async () => {
+      press('l', 'KeyL')
+      press('a', 'KeyA')
+      press('s', 'KeyS')
+    })
+    await vi.waitFor(() => expect(gateway.held).toHaveLength(1))
+    expect(gateway.writes).toEqual([rawInput(utf8.encode('l'))])
+    await leavePage(how)
+    // The in-flight post answers after the hide; the queued keys are gone and nothing else posts.
+    await act(async () => gateway.held[0]!())
+    await drain()
+    expect(gateway.writes).toEqual([rawInput(utf8.encode('l'))])
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(
+      'Typing stopped while this page was hidden; unsent keys were dropped. Click the terminal to type again.',
+    )
+    if (how === 'hidden') await returnToPage()
+    // The field kept focus, but a key alone is not the gesture: it is refused and starts no session.
+    expect(document.activeElement).toBe(field())
+    expect(chip()?.textContent).toBe('Click to type')
+    await act(async () => press('x', 'KeyX'))
+    await drain()
+    expect(gateway.bound).toHaveLength(1)
+    expect(gateway.writes).toEqual([rawInput(utf8.encode('l'))])
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('Click the terminal to type again.')
+    // A click on the terminal is the gesture: a new session starts and the next key posts.
+    await act(async () => field()!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })))
+    expect(chip()?.textContent).toBe('Typing')
+    await act(async () => press('y', 'KeyY'))
+    await vi.waitFor(() => expect(gateway.writes).toEqual([rawInput(utf8.encode('l')), rawInput(utf8.encode('y'))]))
+    expect(gateway.bound).toHaveLength(2)
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+    expect(opened.flatMap((session) => session.sent)).toEqual([])
+  })
+
+  it('does not resume gateway typing on the focus the browser restores after a hidden page; Tab navigation does', async () => {
+    const { opened, port } = rawSessions()
+    const gateway = gatewaySessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    await opened[0]!.go({ _tag: 'Refused', message: 'forbidden', status: 403, code: 'forbidden' })
+    await vi.waitFor(() => expect(opened).toHaveLength(2))
+    await live(opened[1]!, '$ ')
+    await act(async () => field()!.focus())
+    await act(async () => press('l', 'KeyL'))
+    await vi.waitFor(() => expect(gateway.writes).toEqual([rawInput(utf8.encode('l'))]))
+    // Switching tabs blurs the window: the field blurs but stays the document's active element.
+    await act(async () => {
+      field()!.dispatchEvent(new FocusEvent('blur'))
+      field()!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
+    })
+    await leavePage('hidden')
+    // A click reported while the page is hidden is not a gesture.
+    await act(async () => field()!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })))
+    await returnToPage()
+    // On return the browser gives the same field focus back, with no relatedTarget.
+    await act(async () => {
+      field()!.dispatchEvent(new FocusEvent('focus'))
+      field()!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
+    })
+    expect(document.activeElement).toBe(field())
+    expect(chip()?.textContent).toBe('Click to type')
+    await act(async () => press('x', 'KeyX'))
+    await drain()
+    expect(gateway.bound).toHaveLength(1)
+    expect(gateway.writes).toEqual([rawInput(utf8.encode('l'))])
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain('Click the terminal to type again.')
+    // Tab to the grid is navigation: it hands focus to the field and resumes typing.
+    await act(async () => host.querySelector<HTMLElement>('[aria-roledescription="terminal"]')!.focus())
+    expect(document.activeElement).toBe(field())
+    expect(chip()?.textContent).toBe('Typing')
+    await act(async () => press('y', 'KeyY'))
+    await vi.waitFor(() => expect(gateway.writes).toEqual([rawInput(utf8.encode('l')), rawInput(utf8.encode('y'))]))
+    expect(gateway.bound).toHaveLength(2)
+    expect(opened.flatMap((session) => session.sent)).toEqual([])
+  })
+
   it('types through the gateway on the projected screen when the source has no raw stream', async () => {
     const gateway = gatewaySessions()
-    await mount({ terminal: observed({ value: screen }), terminalInput: gateway.factory, grants: limitedPairing })
+    await mount({ terminal: observed({ value: screen }), terminalInput: gateway.factory, grants: inputWithoutControl })
     await vi.waitFor(() => expect(field()).not.toBeNull())
     expect(chip()?.getAttribute('data-terminal-mode')).toBe('Projected')
     expect(chip()?.textContent).toBe('Click to type')
@@ -506,7 +623,7 @@ describe('input capability', () => {
     expect(resizeButton()).toBeDefined()
   })
 
-  it('is read-only on the PEEK stream without a typing grant: no input field, and keys go nowhere', async () => {
+  it('is read-only on the PEEK stream for a limited pairing (no typing grant): no input field, and keys go nowhere', async () => {
     const { opened, port } = rawSessions()
     const gateway = gatewaySessions()
     await mount({ terminal: observed({ value: screen }), terminalRaw: port, terminalInput: gateway.factory, grants: watchOnly })

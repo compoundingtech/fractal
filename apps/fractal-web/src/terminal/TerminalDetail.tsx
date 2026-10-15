@@ -129,7 +129,8 @@ export const TerminalDetail = React.memo(
       decided._tag === 'Gateway' && presentation._tag === 'Projected' && encoder._tag === 'Failed'
         ? { _tag: 'ReadOnly', reason: encoder.message }
         : decided
-    const chip = terminalChip({ raw: raw.preparation, presentation, input, typing })
+    // After a page hide the focused field still waits for a click, so the chip must not say Typing.
+    const chip = terminalChip({ raw: raw.preparation, presentation, input, typing: typing && !(input._tag === 'Gateway' && gateway.disarmed) })
     const controls = (
       <>
         <Badge variant={chipVariant[chip.tone]} size="sm" role="status" data-terminal-mode={presentation._tag} data-terminal-input-path={input._tag}>

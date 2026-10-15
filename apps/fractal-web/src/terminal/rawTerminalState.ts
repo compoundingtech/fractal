@@ -46,6 +46,11 @@ export type TerminalInputPath =
  * The pane's one input decision. A raw ATTACH needs `terminal.control` and a stream that has not
  * already fallen back for this terminal; without it, a device holding `terminal.input` keeps typing
  * through the gateway, as it could before the raw stream existed.
+ *
+ * On the pinned server `terminal.input` is itself gated by the `terminal.control` scope, so the
+ * Gateway path is reached by a device holding both after its ATTACH was refused or lost. A limited
+ * pairing holds neither and reads PEEK only, until the server admits `terminal.control` for it
+ * (compoundingtech/smalltalk#2873).
  */
 export const terminalInputPath = ({
   raw,
