@@ -9,15 +9,6 @@ on:
   schedule:
     - cron: 17 1 * * *
   workflow_dispatch: {}
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
-    paths:
-      - .github/workflows/nix.yml*
-      - .github/messaging-compat-baseline.json
-      - scripts/ci-nix-release*
-      - flake.nix
-      - flake.lock
-      - nix/**
 
 permissions:
   contents: read

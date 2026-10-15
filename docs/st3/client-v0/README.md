@@ -14,7 +14,8 @@ local Unix socket and authenticated paired HTTP over Tailscale or optional Fabri
 [`clients/typescript/st3-client`](../../../clients/typescript/st3-client). Regenerate all three
 clients' contract tables with `cargo run -p st3-client-codegen`;
 CI and local verification use `cargo run -p st3-client-codegen -- --check` for byte stability.
-The contract digest is written once, in `crates/st3-client/src/contract.rs`. When generated
+No digest of the contract is committed: a line every schema change rewrites made any two of them
+conflict, and `--check` already fails when any generated file differs from its source. When generated
 client files conflict in a merge, resolve the schema and template files, take either side of every
 generated file (`git checkout --theirs -- clients crates/st3-client/src/contract.rs
 crates/st3-client/src/generated.rs`), and run the generator again; never edit generated files by
@@ -1843,12 +1844,12 @@ projection time of its cut.
 
 Before the missions list's first publication, and while its refresher fails three folds in a
 row or after it stops, missions windows fold on read and follow commits as before, until a fold
-publishes again. When projections are replaced without a claim (a replay, trim or heal), they
+publishes again. When projections are replaced without a claim (a replay or trim), they
 keep the newest rows, under their own cut, until the list's fold from nothing publishes.
 
 The work list is never folded on read while its refresher runs. Until it has a current
 publication (at startup, after its refresher withdrew it on three failed folds in a row, and
-after a replay, trim or heal until its fold from nothing publishes), a work window receives one
+after a replay or trim until its fold from nothing publishes), a work window receives one
 retryable `resync`, then waits for the list's next publication; neither commits, the reread
 interval nor a repeat of that answer sends it anything more. A paired session's clock still
 rechecks its grant meanwhile, and an expired or revoked grant ends the window. If the work
@@ -1858,7 +1859,7 @@ list's refresher stops for good, a work window receives one `error` frame and en
 `GET /v1/client/work` (the current list, not `history=true`) answers the same way. A first
 page is a slice of the newest publication, under that publication's snapshot. A continuation
 is a slice of the same publication, even after a newer one, a withdrawal or the refresher's end
-(new first pages then refuse), until its cursor expires or a replay, trim or heal replaced the
+(new first pages then refuse), until its cursor expires or a replay or trim replaced the
 projections behind it (`page-cursor-expired`). Asking for the same first page again reuses its
 cursor and its original expiry: a cursor close to expiring can still expire before its next page
 is read, and the client restarts from a first page. The daemon keeps at most 32 cached first pages,
@@ -1875,7 +1876,7 @@ comes, it answers HTTP 503, retryable, with `details.reason: "work-list-not-fres
 asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across every
 attempt. A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
 model, gets that retryable 503 until the work list's first fold after the daemon starts, and again
-after each replay, trim or heal and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
+after each replay or trim and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
 
 A daemon started with `ST3_PUBLISHED_LISTS=off` folds each window and page on read instead.
 
@@ -1955,6 +1956,9 @@ Assistant session errors add `TimelineViewAssistantError` with `status`,
 `superseded_by` with epoch-ms `timestamp`, `response_id`, `provider`, `model`).
 Recovery markers do not invent live retry state. Recovered errors start compact,
 retain original errors on expansion, and superseded errors are not drawn.
+The optional open `native` object preserves exact `stopReason`, `errorMessage`,
+`errorStatus`, `errorId` and `retryRecovery` values, including structured/null
+diagnostics and future fields, without changing the presentation projection.
 
 
 `read.projections` authorizes **raw native conversation content**, including full
@@ -2070,3 +2074,23 @@ matching, even when the expected incarnation is also missing. A summary is not r
 
 The optional claim field changes the registry digest. Older members keep new-field submissions
 as waiting records until upgrade; see [rolling upgrades](../replication.md#rolling-upgrades-and-waiting-claims).
+
+`agent.retire` permanently retires the identity at its declaring host. It requires `{ "agent": "agent/example/worker", "reason": "Work finished" }`, a selected desired claim ID in `fence.runtime_desired_revision`, and a stable idempotency key. Optional `runtime_incarnation` fences a selected process. Rust provides `agent_retire`; Swift and TypeScript provide `agentRetire`. See [terminal retirement](../agent-retirement.md) for the coordinated registry rollout and locally known retirement rule. Fresh sends to a known retired agent return 409 `recipient-retired` with `applied: "none"` and a typed `details.refusal.variant: "Retired"`. Exact accepted retries return their receipt; a lost reply remains unconfirmed. `lifecycle-unavailable` concerns incomplete/conflicting local evidence, never an offline owner alone.
+
+### Exchange carrier observations
+
+`SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each
+an `ExchangeTransport` with `at` (ISO timestamp), `carrier` (an open string:
+`tailscale`, `fabric`, `loopback`, or `unknown` today), and optional `fabric_route`
+(`unknown` for Fabric today). They describe this serving host's last **locally initiated** exchange or attempt of
+each outcome, with its original timestamp, not replicated reachability or advertised
+endpoints. Success and failure records
+are independent: a successful fallback preserves the failed attempt's carrier.
+Incoming exchanges advance ordinary last-seen status and preserve the original
+outbound carrier record and timestamp; an inbound-only peer has no carrier record,
+which means evidence is unknown/unavailable. Fabric's loopback tunnel address cannot
+establish an incoming carrier. Restart clears these records, and probes never change
+them. Idle receipts outside the sync notice set do not notify client streams;
+repeated same-carrier failures likewise stay quiet when the graph is unchanged. Existing sync notice conditions
+remain the same. Older servers omit these optional fields; older clients ignore
+the additions. No API version, scope, operation or claim shape changes.
