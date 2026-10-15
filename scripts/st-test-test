@@ -89,7 +89,7 @@ class StTest(unittest.TestCase):
         cwd = os.getcwd()
         os.chdir(self.work)
         try:
-            with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
                     code = st_test.main(['--base', 'origin/main', '--repository', 'org/repo', '--toolchain-sha256', hashlib.sha256(b'drv').hexdigest(), *args])
                 except st_test.Failure as error:
@@ -174,6 +174,14 @@ class StTest(unittest.TestCase):
             self.assertIsNone(st_test.behind('no-such-ref'))
         finally:
             os.chdir(cwd)
+
+    def test_nothing_about_lag_is_printed_when_it_cannot_be_counted(self):
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'behind', return_value=None):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, err)
+        self.assertNotIn('behind', out)
+        self.assertIn('(HEAD)', out)
 
     def test_a_branch_that_conflicts_with_the_base_is_signed_as_it_is(self):
         self.commit('a.txt', 'feature edit\n')
