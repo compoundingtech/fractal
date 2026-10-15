@@ -485,11 +485,15 @@ impl Store {
                             "SELECT EXISTS(SELECT 1 FROM batches WHERE origin=?1 AND replica_sequence=?2)"
                         )?.query_row(params![writer, sequence - 1], |row| row.get(0))?;
                         let case = if retained { "wrong hash" } else { "absent" };
+                        let arrival = if retained { "" } else {
+                            "; if this writer's history is still arriving, the predecessor may yet arrive; \
+                             settled replication does not prove a complete chain"
+                        };
                         anyhow::bail!(
                             "backup writer chain has a missing or broken predecessor: \
                              writer={writer:?} sequence={sequence} predecessor_sequence={} \
                              expected_hash={link:?}; retained predecessor {case}; \
-                             not covered by a checkpoint",
+                             not covered by a checkpoint{arrival}",
                             sequence - 1,
                         );
                     }
@@ -1282,6 +1286,8 @@ mod tests {
                     "retained predecessor wrong hash"
                 }), "{error}");
                 assert!(error.contains("not covered by a checkpoint"), "{error}");
+                assert_eq!(error.contains("predecessor may yet arrive"), wrong_sequence,
+                    "arrival is only a conditional possibility for an absent row, not wrong hash");
                 assert!(source.write_backup(&mut Vec::new()).is_err());
             }
         }
@@ -1339,6 +1345,8 @@ mod tests {
                 assert!(create.contains(part), "missing {part:?} from {create}");
             }
             assert!(!create.contains("retry"), "unknown history is not a catch-up promise");
+            assert!(create.contains("predecessor may yet arrive"));
+            assert!(create.contains("settled replication does not prove a complete chain"));
             assert!(!target.exists());
         }
 
