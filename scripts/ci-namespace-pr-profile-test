@@ -115,6 +115,14 @@ class Profile(unittest.TestCase):
             values = dict(line.split('=', 1) for line in (tmp/'out').read_text().splitlines())
             self.assertIn(';job.priority=2;', json.loads(values['namespace_pr'])[0])
             self.assertIn(';job.priority=3;', json.loads(values['namespace_pr_optional'])[0])
+            # Compare the emitted priorities with the existing policy constants,
+            # so editing either side alone cannot silently split the queues.
+            import re
+            policy = (ROOT / '.github/workflows/workspace-ci.ts').read_text()
+            required = re.search(r'const workspaceJobPriority = "[^\n]*pull_request\' && (\d+)', policy).group(1)
+            optional = re.search(r'const linuxJobPriority = "[^\n]*\|\| (\d+) }}', policy).group(1)
+            self.assertIn(f';job.priority={required};', json.loads(values['namespace_pr'])[0])
+            self.assertIn(f';job.priority={optional};', json.loads(values['namespace_pr_optional'])[0])
 
 
 if __name__ == '__main__':
