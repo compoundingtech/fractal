@@ -692,6 +692,13 @@ matching and the check runs.
 Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
+A kind's rule may also name `by_level`: for one signer level (the first part of the principal), its own `command`, `required_inputs`,
+`bind_inputs` and `events` (`pull_request` and/or `merge_group`) replace the kind's. The level must be one the kind accepts. It is how a
+host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
+different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
+and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
+`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+
 ### When the gate says skip
 
 `scripts/ci-evidence-gate` takes the verifier from the accepted base and asks it, with the policy,
