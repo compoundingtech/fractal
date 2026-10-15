@@ -700,18 +700,44 @@ matching and the check runs.
 Write `scripts/evidence-verify --policy-from BASE
 --repository OWNER/NAME` to apply it by hand.
 
+A kind's rule may also name `by_level`: for one signer level (the first part of the principal), its own `command`, `required_inputs`,
+`bind_inputs` and `events` (`pull_request` and/or `merge_group`; `events` is required, so an override can never silently cover every event) replace the kind's. The level must be one the kind accepts. It is how a
+host-signed local note (its command is the `nix develop ...` line `scripts/st-test` runs) can satisfy a check whose CI step wrapper records a
+different command and extra inputs, while each signer is still held to exactly its own rule. The verifier reports the `events` that apply
+and the gate skips only on those events: a note whose signer level lists `pull_request` only never covers a `merge_group` run. Today the
+`host` level is admitted for the `wrapper` kind of `genie-freshness` and `typescript-client`, for pull requests only, with `enforce` false.
+
 ### Running the checks locally (`scripts/st-test`)
 
 `scripts/st-test` runs each required check that has a local command (today `genie-freshness` and
-`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the tree the pull request will be
-tested as, and the host's signer records the exit code and output digest. GitHub tests the merge of the branch into
-its base, so when the branch does not hold the base's tip the script computes the merge tree (`git merge-tree`) and
-makes a merge commit with that tree; a merge that conflicts stops it. The command always runs in a fresh throwaway
-worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
+`typescript-client`; `--list` prints them) once, through `evidence-wrap`, on the commit you are pushing (HEAD), and the host's signer
+records the exit code and output digest. The CI gate looks up the note for the pull request head's own tree (see "Which tree a pull
+request run asks about"), so the tree you built and signed is the tree that counts even when main has moved since; the script tells you how
+many commits behind the base the branch is. It no longer signs the merge tree (the merge of the branch into the base): the merge queue still tests
+the integrated tree, and a pass of the merge tree is not made here. The command always runs in a fresh
+throwaway worktree of that commit, so untracked or ignored files in your checkout cannot change the result. A failing run is
 recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
+`scripts/st-test --status` runs nothing and says whether the tree is already covered (exit 0 if all, 3 if not).
+
+A pre-push hook does this without anyone remembering. `scripts/install-git-hooks` (run by the default `nix develop` shell outside CI; it prints
+one line the first time and does nothing when `GITHUB_ACTIONS` or `CI` is set) installs a stub in the repository's hooks directory, never replacing
+a hook it did not write and leaving a configured `core.hooksPath` alone. **The hook and the runner are not the pushed branch's:** the stub takes
+`scripts/evidence-prepush` and `scripts/st-test` from `<remote>/main` into a temporary directory and runs those copies (when the base has none it
+does nothing). The checks they run are the tree's code (`nix develop`, `pnpm install`, the tests), on this machine as you with the host's signing key
+within reach: that is cooperative trust (known defect 22), not something the base-pinned hook protects against. When you push the branch
+you have checked out, the hook asks `st-test --status`; if every check is covered the push goes, silently. Otherwise it runs `st-test --push REMOTE`
+(an interactive push waits for it up to `ST_EVIDENCE_TIME_LIMIT`, default 1200 seconds, then stops it with TERM and KILL of its whole process
+group) and the push goes. A push from an agent (`ST_AGENT` set, or no terminal on stderr) runs inside a tool call with a short timeout, so there the hook
+waits at most `ST_EVIDENCE_AGENT_LIMIT` seconds (default 120), prints that signing continues in the background with its log path, and lets the push go;
+the notes are pushed when the run finishes, and agents should run `scripts/st-test --push origin` before pushing so the first CI run already sees them.
+It never blocks a push: a failing check is recorded and printed, a timeout is printed, and so is every other failure (an exception, a missing `python3`,
+a slow fetch, a signer that `.st/evidence-keys` on main does not list, a missing signing key). `ST_SKIP_EVIDENCE=1` skips it and says so. Tags, deletes,
+other branches and the base branch are pushed untouched, and the notes push inside the run does not run the hook again. A new tree always takes the slow
+path (the checks run once); so does every fixup that changes the tree; a tree that already has notes is instant.
+
 It runs `nix develop` and `pnpm install` from the tree under test, on the signing host as its user: code in that tree runs
 there with the key within reach (cooperative trust, see Host keys). It changes no policy: a check skips only where `enforce` is true.
 
