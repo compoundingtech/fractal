@@ -31,6 +31,55 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
         "32 candidates and one lookahead, before filtering"
     );
     assert_eq!(store.index().unwrap(), before);
+    assert!(
+        rows.iter()
+            .all(|row| row.resolution.is_none() && !row.omitted),
+        "known noise never consumes a resource decode or omission"
+    );
+    let noise = store
+        .claims_for(SEAT, Some("harness.diagnostic"))
+        .unwrap()
+        .into_iter()
+        .rev()
+        .filter(|row| row.body["fields"]["code"] == "history-fixture")
+        .take(3)
+        .collect::<Vec<_>>();
+    let large_noise =
+        json!({"fields":{"code":"history-fixture", "reason":"n".repeat(900_000)}}).to_string();
+    store
+        .connection
+        .batched(|tx| -> Result<()> {
+            for row in &noise {
+                tx.execute(
+                    "UPDATE claims SET body=?1 WHERE id=?2",
+                    params![large_noise, row.id],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
+    let rows = store
+        .read_snapshot(|cut| store.attention_history_candidates(cut, i64::MAX as u64, 32, None))
+        .unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| !row.omitted && row.resolution.is_none()),
+        "three known noise bodies exceed 2MiB but do not use decode budget"
+    );
+    store
+        .connection
+        .batched(|tx| -> Result<()> {
+            for row in &noise {
+                tx.execute(
+                    "UPDATE claims SET body=?1 WHERE id=?2",
+                    params![serde_json::to_string(&row.body)?, row.id],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap()
+        .unwrap();
     let latest = store
         .latest_claim(SEAT, Some("harness.diagnostic"))
         .unwrap()
@@ -57,8 +106,8 @@ fn history_candidate_limits_and_wide_cell_refusal_do_not_write() {
     assert!(rows[0].resolution.is_none());
     assert_eq!(rows[0].store_index, latest.store_index);
     assert!(
-        rows[1].resolution.is_some(),
-        "the following readable candidate survives"
+        !rows[1].omitted && rows[1].resolution.is_none(),
+        "a known noise row neither decodes nor reports a missing resource"
     );
     let older = store
         .read_snapshot(|cut| store.attention_history_candidates(cut, rows[0].store_index, 1, None))

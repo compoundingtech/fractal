@@ -85,6 +85,15 @@ fn select_rows(from: &str, cut: &str) -> String {
         // This is a filter only; resource() still checks the complete source binding.
         format!("CASE WHEN typeof(({owner}))='text' AND octet_length(({owner}))<=4096 THEN ({owner}) END"),
         "coalesce(octet_length(c.body),0)+coalesce(octet_length(e.body),0)".into(),
+        // NULL means the diagnostic body is not safely classifiable. Count an
+        // anonymous omission conservatively; never decode an unbounded body to
+        // decide relevance. Known unrelated diagnostics are always false.
+        format!("CASE WHEN c.kind='work.person-cancelled' THEN 1
+            WHEN c.kind!='harness.diagnostic' THEN 0
+            WHEN octet_length(c.body)>{MAX_BODY_BYTES} THEN NULL
+            WHEN NOT json_valid(c.body) THEN NULL
+            WHEN json_extract({current_body},'$.fields.code')='native-prompt-answered'
+             AND json_extract({current_body},'$.fields.status')='dismiss' THEN 1 ELSE 0 END"),
     ]
     .join(",");
     format!(
@@ -109,6 +118,20 @@ fn decode_rows(mut rows: rusqlite::Rows<'_>, person: Option<&str>) -> Result<Vec
             resolution: None,
             omitted: false,
         };
+        match row.get::<_, Option<bool>>(19)? {
+            Some(false) => {
+                // Keep its index for sparse paging, without retrieving/decoding
+                // a noise body, charging decode budget or reporting an omission.
+                result.push(candidate);
+                continue;
+            }
+            None => {
+                candidate.omitted = true;
+                result.push(candidate);
+                continue;
+            }
+            Some(true) => {}
+        }
         candidate.owner = row.get(17)?;
         // An unrelated person's missing/wide source cannot fail this person's page,
         // consume its decode budget or contribute to its omission count.

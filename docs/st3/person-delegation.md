@@ -147,8 +147,11 @@ sort plan are authored hosted controls, not measured cost or time evidence. If t
 expires before traversal finishes, clients must report incomplete history and refresh;
 they must not claim an empty or complete history or run an unbounded automatic scan.
 
-`page.omitted_items` is present on this history path, including zero. It counts scanned
-candidates that could not be safely decoded, lacked a linked source at the captured cut,
+`page.omitted_items` is present only on this history path, including zero. Known unrelated
+diagnostics are identified by a SQL relevance flag and skipped without Rust decoding,
+decode-budget charge or omission count. A malformed or over-width diagnostic body cannot
+be classified safely; it contributes only an anonymous, conservative omission rather than
+requiring unbounded parsing to prove it is noise. The count covers scanned candidates that could not be safely decoded, lacked a linked source at the captured cut,
 or exceeded the per-page decode/item byte budget. The cursor advances past those indices.
 Clients must retain an incomplete-history warning when this count is nonzero, even on the
 last page, and refresh after source replication/repair. Known foreign-owner rows are
@@ -157,8 +160,12 @@ row is too damaged to establish its owner, only an anonymous omission count is e
 never its identity/text. This count is not a claim that every omitted candidate is an
 attention item. An unreadable exact detail is unavailable (503) only for an authorized or
 unfiltered read; another person's detail stays 404. Existing page paths omit this optional
-field. Older clients can ignore it and cannot present the new completeness guarantee;
-client consumers must honor it before claiming complete history. Rust struct literals
+field. Older Rust and Swift decoders ignore this optional extra field. The TypeScript schema's
+`decodeUnknownSync` and `decodeUnknownEffect` helpers default to `mode="tolerant"` with
+`onExcessProperty: "ignore"`; an explicitly requested `mode="strict"` instead rejects
+unknown fields. The generated fetch client returns JSON without an automatic strict schema
+decode. These are source-path statements, not executed old-build compatibility results.
+Older consumers cannot present the new completeness guarantee; client consumers must honor it before claiming complete history. Rust struct literals
 constructing `PageInfo` also need the new optional `omitted_items` field.
 
 The signed cursor fixes the original cut, recipient and filters for five minutes and
