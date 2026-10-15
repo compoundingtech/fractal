@@ -1190,6 +1190,9 @@ async fn dial_peer<B: Backend>(
         last_attempt_unix_ms = attempt_unix_ms;
         record_worker(&backend, &name, "exchange", attempt_unix_ms, None).await;
         let is_http = matches!(selected, Some(Route::Http(_)));
+        let fabric_route = selected
+            .clone()
+            .filter(|route| matches!(route, Route::Fabric { .. }));
         let url = match selected {
             Some(Route::Http(url)) => Some(url),
             Some(selected @ Route::Fabric { .. }) => {
@@ -1296,6 +1299,22 @@ async fn dial_peer<B: Backend>(
                 // a fresh stream, and try the next route.
                 http = replication_http_client();
                 route = route.wrapping_add(1);
+                // `fabric dial` never connects, so the member's refusal reaches us only as a
+                // tunnel that closed. Ask Fabric whether that is what happened.
+                if let (Some(fabric_route), Some(fabric)) = (&fabric_route, &fleet.fabric)
+                    && error.downcast_ref::<reqwest::Error>().is_some()
+                    && let Route::Fabric { node, protocol } = fabric_route
+                    && let Some(refusal) = fabric.refusal(node, protocol).await
+                {
+                    refused.push((
+                        fabric_route.clone(),
+                        tokio::time::Instant::now() + fabric_refusal_delay(),
+                    ));
+                    let _ = backend
+                        .record_failure(&peer.name, "refused", &refusal.to_string())
+                        .await;
+                    continue;
+                }
                 let overloaded = error.is::<PeerOverloaded>();
                 let status = if overloaded {
                     "overloaded"
