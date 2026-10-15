@@ -132,6 +132,16 @@ describe('fixture-free native Details projection', () => {
     expect(absent.sections.find(section => section.title === 'Missions / queue')?.pending).not.toBe(true)
     expect(absent.sections.find(section => section.title === 'History')?.pending).not.toBe(true)
   })
+  it('carries first native root acquisition instead of declaring missing root prerequisites', () => {
+    const pendingPeriod = project({ selectedPeriod: { _tag: 'Waiting' } })
+    expect(pendingPeriod.nativeRootPending).toBe(true)
+    expect(pendingPeriod.nativeSessionId).toBeUndefined()
+    expect(project().nativeRootPending).toBe(false)
+    expect(project({ selectedPeriod: missing }).nativeRootPending).toBe(false)
+    const pendingRow = projectNativeDetails({ agentRef: row.id, agent: { _tag: 'Waiting' }, row: { _tag: 'Waiting' }, session: { _tag: 'Waiting' }, period: { _tag: 'Waiting' }, declarations: missing, missions: missing, now: 10000, onRetry: () => {} })
+    expect(pendingRow.nativeRootPending).toBe(true)
+    expect(pendingRow.sections.find(section => section.title === 'Declared bindings')?.pending).toBe(true)
+  })
   it('uses the identical occupancy calculation as sidebar, not cumulative totals', () => {
     const agent = createProjections().fleetFromAgents([row]).agents[0]!
     const occupancy = sidebarRow({ agent, now: 10000, stale: false }).context

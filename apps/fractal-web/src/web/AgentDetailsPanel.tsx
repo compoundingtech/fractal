@@ -80,6 +80,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen 
     agentRef,
     ...(scopedRoot === undefined ? {} : { nativeSessionId: scopedRoot }),
     canRefresh: native.nativeSessionId !== undefined,
+    nativeRootPending: native.nativeRootPending,
     ...(native.incarnationId === undefined ? {} : { incarnationId: native.incarnationId }),
     ...(native.host === undefined ? {} : { host: native.host }),
     ...(native.harness === undefined ? {} : { harness: native.harness }),

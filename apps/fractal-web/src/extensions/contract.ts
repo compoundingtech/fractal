@@ -69,6 +69,8 @@ export interface DetailsSupplementQuery {
   readonly nativeSessionId?: string
   /** False permits matching retained observations only, never another provider read. */
   readonly canRefresh?: boolean
+  /** Native identity/root prerequisites are still acquiring; missing fields are not settled absence. */
+  readonly nativeRootPending?: boolean
   readonly incarnationId?: string
   /** Canonical native host reference used for identity, not a formatted display name. */
   readonly host?: string

@@ -14,6 +14,8 @@ export interface NativeDetailsObservation {
   readonly observedAt?: number
   readonly stale: boolean
   readonly nativeSessionId?: string
+  /** The native row or usage-period first read has not settled; absence is not yet known. */
+  readonly nativeRootPending: boolean
   readonly incarnationId?: string
   /** Canonical `Agent.host_id` for identity checks, never the shortened display label. */
   readonly host?: string
@@ -151,7 +153,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     { title: 'Declared bindings', items: declared === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: [
       ...declared.bindings.map((binding, index) => resource({ key: `binding/${index}`, label: `Declared ${binding.kind}`, detail: `${binding.count} reference${binding.count === 1 ? '' : 's'} · revision ${declared.revision} · targets withheld; declared intent, not observed resources.` })),
       ...(declared.declaredModel === undefined ? [] : [resource({ key: 'binding/model', label: 'Declared model', detail: `${declared.declaredModel} · revision ${declared.revision} · declared harness setting, not the observed runtime model.` })]),
-    ] }, pending: declarations._tag === 'Waiting', unavailableReason: factFailure(declarations) },
+    ] }, pending: rowFeed._tag === 'Waiting' || declarations._tag === 'Waiting', unavailableReason: factFailure(declarations) },
     { title: 'Terminals', items: row === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: terminal === undefined ? [] : [{ ...resource({ key: 'terminal', label: 'Agent terminal', detail: 'Observed native runtime terminal; opening uses the app’s existing terminal view.' }), uri: terminal, glyph: 'terminal' }] }, unavailableReason: 'The selected agent runtime terminal is not observed.' },
     { title: 'Missions / queue', items: nativeQueue === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: queuedResources }, pending: queue?._tag === 'Waiting', unavailableReason: queue === undefined ? 'Agent queue is not supplied.' : factFailure(queue) },
     { title: 'Attention', items: projected === undefined || needsMe === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', value: [
@@ -177,6 +179,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
       coverage: { _tag: 'Unavailable', reason: 'not-covered' }, series: unknown('Native historical context/cost series is unsupported.'), turns: unknown('Native per-turn context series is unsupported.'), history: unknown('Historical incarnation trace is unsupported.'), subagents: unknown('Native leased subagents are resources, not a traced-session breakdown.'), subagentsWindow: unknown('Native traced-descendant window is unsupported.'), subagentCount: unknown('Native traced-descendant count is unsupported.'),
     }, state: rowFeed._tag === 'Waiting' ? 'loading' : rowFeed._tag === 'Unavailable' ? 'error' : row === undefined ? 'absent' : stale || !hasPeriod ? 'partial' : projected?.activity === 'working' ? 'busy' : 'idle',
     stale, ...(row === undefined ? {} : { observedAt: DateTime.toEpochMillis(row.updated_at) }), ...(root === undefined ? {} : { nativeSessionId: root }),
+    nativeRootPending: rowFeed._tag === 'Waiting' || periodFeed._tag === 'Waiting',
     ...(incarnationId === undefined ? {} : { incarnationId }), ...(nativeHost === undefined ? {} : { host: nativeHost }), ...(projected?.harness === undefined ? {} : { harness: projected.harness }),
     ...(syncStatus === undefined ? {} : { syncStatus }), onRetry,
   }
