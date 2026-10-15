@@ -11,6 +11,11 @@
 //! exports, `post_signed_to` serializes, digests and signs before `send`). A policy that retries
 //! sooner repeats that local work, including any sealing export does under the writer.
 //!
+//! A passing run records only that each observation fell inside the asserted set. Which branch
+//! it took (an incomplete message or a reset, for the closing link) is printed only when an
+//! assertion fails: nextest keeps a passing test's output only on failure, and the hosted
+//! test-log artifacts do not include this module.
+//!
 //! TLS is not covered. Replication routes in these fleets are plain HTTP (loopback, Fabric
 //! tunnels, configured `http://` peers); a TLS handshake failure must not be assumed to classify
 //! like any case here.
@@ -25,6 +30,9 @@ struct Phase {
     connect: bool,
     timeout: bool,
     body: bool,
+    /// reqwest reports a failure reading a response body after its head as a decode error
+    /// (`Response::bytes` maps it through `error::decode` in 0.12.28), not as a body error.
+    decode: bool,
     /// The kind of each `std::io::Error` in the cause chain, outermost first.
     io: Vec<std::io::ErrorKind>,
     /// Every cause, outermost first.
@@ -47,6 +55,7 @@ impl Phase {
             connect: error.is_connect(),
             timeout: error.is_timeout(),
             body: error.is_body(),
+            decode: error.is_decode(),
             io,
             chain,
         }
@@ -76,7 +85,7 @@ async fn exchange(
 /// Read one request exactly: its head, then the content-length bytes of its body. A connection
 /// closed with request bytes still unread is reset, and a reset can destroy a response head
 /// before the client reads it.
-async fn read_request(stream: &mut tokio::net::TcpStream) {
+async fn read_request(stream: &mut tokio::net::TcpStream) -> usize {
     let mut received = Vec::new();
     let mut buffer = [0_u8; 8192];
     let head_end = loop {
@@ -99,6 +108,7 @@ async fn read_request(stream: &mut tokio::net::TcpStream) {
         assert!(count > 0, "the request ended before its body");
         body += count;
     }
+    length
 }
 
 #[tokio::test]
@@ -108,7 +118,10 @@ async fn a_refused_connection_is_a_connect_error() {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = socket.local_addr().unwrap();
     let seen = Phase::of(&exchange(address, None).await.unwrap_err());
-    assert!(seen.connect && !seen.timeout && !seen.body, "{seen:#?}");
+    assert!(
+        seen.connect && !seen.timeout && !seen.body && !seen.decode,
+        "{seen:#?}"
+    );
     assert!(
         seen.io.contains(&std::io::ErrorKind::ConnectionRefused),
         "{seen:#?}"
@@ -134,7 +147,10 @@ async fn a_link_that_accepts_and_closes_is_not_a_connect_error() {
     }
     link.abort();
     for one in &seen {
-        assert!(!one.connect && !one.timeout && !one.body, "{seen:#?}");
+        assert!(
+            !one.connect && !one.timeout && !one.body && !one.decode,
+            "{seen:#?}"
+        );
         // The close reaches the client as an end of stream before any response (hyper's
         // incomplete message) or, when the request bytes arrived first, as a reset, abort or
         // early end of file, depending on the kernel and timing. All are this class; anything
@@ -204,28 +220,35 @@ async fn a_peer_that_refuses_or_is_overloaded_answers_with_a_response_head() {
     server.abort();
 }
 
-/// A peer that accepts and reads the request but never answers. The per-request timeout stands
-/// in for `REPLICATION_EXCHANGE_TIMEOUT` (20 s), which reports the same way.
+/// A peer that accepts and reads the whole request but never answers. The server reports when it
+/// has read the request, so a failure to connect in time cannot pass as a stall after
+/// connecting. The 2 s per-request timeout stands in for `REPLICATION_EXCHANGE_TIMEOUT` (20 s);
+/// it is a test substitution, not a measurement of the 20 s path.
 #[tokio::test]
 async fn a_peer_that_stalls_before_its_response_head_is_a_timeout() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let (read, request_read) = tokio::sync::oneshot::channel();
     let peer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        let mut buffer = [0_u8; 8192];
-        loop {
-            if stream.read(&mut buffer).await.unwrap_or(0) == 0 {
-                break;
-            }
-        }
+        let length = read_request(&mut stream).await;
+        let _ = read.send(length);
+        // Hold the connection open without answering.
+        std::future::pending::<()>().await;
     });
-    let seen = Phase::of(
-        &exchange(address, Some(Duration::from_millis(300)))
-            .await
-            .unwrap_err(),
-    );
-    assert!(seen.timeout && !seen.connect && !seen.body, "{seen:#?}");
+    let result = exchange(address, Some(Duration::from_secs(2))).await;
     peer.abort();
+    let length = request_read.await;
+    let seen = Phase::of(&result.unwrap_err());
+    assert_eq!(
+        length,
+        Ok(64 * 1024),
+        "the peer read the whole request: {seen:#?}"
+    );
+    assert!(
+        seen.timeout && !seen.connect && !seen.body && !seen.decode,
+        "{seen:#?}"
+    );
 }
 
 /// A peer that sends a response head and then loses the connection mid-body: `send` succeeds,
@@ -236,16 +259,26 @@ async fn a_response_cut_off_after_its_head_fails_reading_the_body() {
     let address = listener.local_addr().unwrap();
     let peer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        read_request(&mut stream).await;
+        let length = read_request(&mut stream).await;
         stream
             .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\npartial")
             .await
             .unwrap();
         stream.shutdown().await.unwrap();
+        length
     });
     let response = exchange(address, None).await.unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let seen = Phase::of(&response.bytes().await.unwrap_err());
-    assert!(seen.body && !seen.connect && !seen.timeout, "{seen:#?}");
-    peer.await.unwrap();
+    let status = response.status();
+    let result = response.bytes().await;
+    assert_eq!(
+        peer.await.unwrap(),
+        64 * 1024,
+        "the peer read the whole request"
+    );
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let seen = Phase::of(&result.unwrap_err());
+    assert!(
+        seen.decode && !seen.body && !seen.connect && !seen.timeout,
+        "{seen:#?}"
+    );
 }
