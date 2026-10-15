@@ -1990,8 +1990,9 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
         metric_points(request, "st.db.writer.hold").into_iter().any(|point| {
             string_attribute(point, "st.db.writer.origin")
                 == Some("POST /v1/internal/replication/receive")
-                && point["count"].as_str().and_then(|value| value.parse::<u64>().ok())
-                    .or_else(|| point["count"].as_u64()).is_some_and(|count| count > 0)
+                && point["count"].as_u64().or_else(|| {
+                    point["count"].as_str().and_then(|value| value.parse::<u64>().ok())
+                }).is_some_and(|count| count > 0)
                 && point["sum"].as_f64().is_some_and(|seconds| seconds > 0.)
         })
     });
