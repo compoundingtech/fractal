@@ -12,7 +12,10 @@ async fn delivery(
     let rendered = st_drivers::ding::st3_notification_with_metadata(
         &message.subject, &message.from, &message.to, message.title.as_deref(),
         &message.content, &st_drivers::ding::st3_body_sha256(&message.content),
-        &[], message.assistant_metadata().as_ref(),
+        st_drivers::ding::NotificationMetadata {
+            attachments: &[],
+            assistant: message.assistant_metadata().as_ref(),
+        },
     );
     axum::Json(json!({"value":{"message":message,"rendered":rendered}}))
 }

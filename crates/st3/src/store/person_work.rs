@@ -635,10 +635,11 @@ impl Store {
         cancel: bool,
         authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
     ) -> Result<StepRunView, St3Error> {
-        if let Some(authorization) = authorization {
-            if authorization.scope != "read.assistant.attention" || authorization.approval_subject.is_none()
-                || authorization.owner != input.actor || cancel
-            { return Err(St3Error::new("forbidden", "assistant authorization does not bind this person answer")); }
+        if let Some(authorization) = authorization
+            && (authorization.scope != "read.assistant.attention" || authorization.approval_subject.is_none()
+                || authorization.owner != input.actor || cancel)
+        {
+            return Err(St3Error::new("forbidden", "assistant authorization does not bind this person answer"));
         }
         #[cfg(feature = "test-support")]
         let _gate = match authorization {

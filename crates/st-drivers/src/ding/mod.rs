@@ -209,6 +209,12 @@ pub struct AssistantMessageMetadata<'a> {
     pub assistant_grant_id: Option<&'a str>,
 }
 
+/// Supplemental envelope data, kept separate from sender-authored message text.
+pub struct NotificationMetadata<'a> {
+    pub attachments: &'a [AttachmentNotice],
+    pub assistant: Option<&'a AssistantMessageMetadata<'a>>,
+}
+
 /// The attachment envelope for an ordinary message, without assistant metadata.
 pub fn st3_notification_with_attachments(
     reference: &str,
@@ -219,7 +225,10 @@ pub fn st3_notification_with_attachments(
     body_sha256: &str,
     attachments: &[AttachmentNotice],
 ) -> String {
-    st3_notification_with_metadata(reference, from, to, subject, body, body_sha256, attachments, None)
+    st3_notification_with_metadata(
+        reference, from, to, subject, body, body_sha256,
+        NotificationMetadata { attachments, assistant: None },
+    )
 }
 
 /// Include separately supplied, verified assistant provenance outside the bounded body. The
@@ -232,9 +241,9 @@ pub fn st3_notification_with_metadata(
     subject: Option<&str>,
     body: &str,
     body_sha256: &str,
-    attachments: &[AttachmentNotice],
-    assistant: Option<&AssistantMessageMetadata<'_>>,
+    metadata: NotificationMetadata<'_>,
 ) -> String {
+    let NotificationMetadata { attachments, assistant } = metadata;
     let person_message = from.starts_with("person/");
     let graph = normalize_field(Some(reference), "message/unknown", ADDRESS_MAX_CHARS);
     let id = graph.strip_prefix("message/").unwrap_or(&graph);

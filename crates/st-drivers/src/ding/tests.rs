@@ -3159,8 +3159,7 @@ fn an_external_assistant_send_carries_the_exact_warning_from_trusted_metadata() 
         Some("Request"),
         "please summarize",
         "0".repeat(64).as_str(),
-        &[],
-        Some(&metadata),
+        NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
     );
     assert!(envelope.starts_with(&format!(
         "[PING from st3] message/abc from assistant/example sender_class=external-assistant: Request\n\
@@ -3180,10 +3179,12 @@ fn an_external_assistant_send_carries_the_exact_warning_from_trusted_metadata() 
         None,
         "please summarize",
         "0".repeat(64).as_str(),
-        &[],
-        Some(&AssistantMessageMetadata {
-            assistant_grant_id: None,
-        }),
+        NotificationMetadata {
+            attachments: &[],
+            assistant: Some(&AssistantMessageMetadata {
+                assistant_grant_id: None,
+            }),
+        },
     );
     assert!(bare.contains(" sender_class=\"external-assistant\">\n"));
     assert!(!bare.contains("assistant_grant_id"));
@@ -3199,10 +3200,12 @@ fn the_external_assistant_warning_survives_body_truncation() {
         Some("Request"),
         &full,
         "0".repeat(64).as_str(),
-        &[],
-        Some(&AssistantMessageMetadata {
-            assistant_grant_id: Some("assistant-grant/one"),
-        }),
+        NotificationMetadata {
+            attachments: &[],
+            assistant: Some(&AssistantMessageMetadata {
+                assistant_grant_id: Some("assistant-grant/one"),
+            }),
+        },
     );
     let warning_line = format!("{EXTERNAL_ASSISTANT_WARNING}\n");
     assert!(

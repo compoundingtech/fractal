@@ -22316,8 +22316,10 @@ fn pi_family_message_frame(
             message.title.as_deref(),
             body,
             &st_drivers::ding::st3_body_sha256(body),
-            attachments,
-            message.assistant_metadata().as_ref(),
+            st_drivers::ding::NotificationMetadata {
+                attachments,
+                assistant: message.assistant_metadata().as_ref(),
+            },
         ), &message.tags.iter().filter(|tag| tag.as_str() != st3::silent::SILENT_TAG || st3::silent::is_held(message)).cloned().collect::<Vec<_>>()),
         "meta": {
             "from": message.from,

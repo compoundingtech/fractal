@@ -42,10 +42,10 @@ fn authorized_grant(connection: &Connection, origin: &str, authorization: &Assis
         || fields["expires_at_unix_ms"].as_u64().map(u128::from).is_none_or(|expiry| expiry <= now_ms())
         || !fields["scopes"].as_array().is_some_and(|scopes| scopes.iter().any(|scope| scope.as_str() == Some(&authorization.scope)))
     { return Err(denied()); }
-    if let Some(recipient) = &authorization.recipient {
-        if !fields["recipient_allowlist"].as_array().is_some_and(|recipients| recipients.iter().any(|value| value.as_str() == Some(recipient))) {
-            return Err(denied());
-        }
+    if let Some(recipient) = &authorization.recipient
+        && !fields["recipient_allowlist"].as_array().is_some_and(|recipients| recipients.iter().any(|value| value.as_str() == Some(recipient)))
+    {
+        return Err(denied());
     }
     if let Some(subject) = &authorization.approval_subject {
         let approved: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='work.person-done' AND actor=?2 AND origin=?3 AND json_extract(body,'$.fields.answer.id')='approve' AND json_extract(body,'$.fields.acted_for') IS NULL)",
