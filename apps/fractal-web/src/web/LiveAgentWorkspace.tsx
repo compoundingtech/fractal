@@ -89,8 +89,8 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
   }
 }
 
-// The kit diff viewer imports Markdown; keep it outside the shell's eager graph too.
-const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
+// Details, its measured resource tabs and Changes import the rich kit; keep them outside the eager shell.
+const AgentDetailsPanel = React.lazy(() => import('./AgentDetailsPanel.tsx').then(module => ({ default: module.AgentDetailsPanel })))
 // The terminal grid, fonts and native key encoder load only when a terminal pane opens.
 const TerminalDetail = React.lazy(() => import('../terminal/TerminalDetail.tsx').then((module) => ({ default: module.TerminalDetail })))
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
@@ -294,9 +294,12 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
               </section>
               {diffOpen && openedTool === undefined && current !== '' ? (
                 <>
-                  <ResizableSplit id="live-change-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Change panel width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setDiffOpen(false)} onReset={() => setPanelFraction(380 / viewport)} />
-                  <React.Suspense fallback={<aside aria-label="Changes" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><p role="status" {...stylex.props(styles.notice)}>Loading captured changes…</p></aside>}>
-                    <ChangesInspector key={current} agentRef={current} width={panelSize} />
+                  <ResizableSplit id="live-change-panel" reverse value={panelSize} min={240} max={maxPanel} collapsed={false} label="Agent inspector width" onChange={setDragPanel} onCommit={(value) => { setPanelFraction(value / viewport); setDragPanel(undefined) }} onToggle={() => setDiffOpen(false)} onReset={() => setPanelFraction(380 / viewport)} />
+                  <React.Suspense fallback={<aside aria-label="Agent inspector" style={{ width: panelSize }} {...stylex.props(styles.changesPanel)}><p role="status" {...stylex.props(styles.notice)}>Loading agent details…</p></aside>}>
+                    <AgentDetailsPanel key={current} agentRef={current} width={panelSize} scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={(uri) => {
+                      const ref = uri.startsWith('agent:') ? `agent/${uri.slice('agent:'.length)}` : uri
+                      open({ ref })
+                    }} />
                   </React.Suspense>
                 </>
               ) : null}

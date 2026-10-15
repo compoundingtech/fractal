@@ -44,6 +44,7 @@ import type { AgentControlPort } from '../agents/agent-control-port.ts'
 import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
+import type { NativeDetailsSource } from './nativeDetailsSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
@@ -251,6 +252,8 @@ export interface DataSource {
   readonly attachments?: AttachmentPort
   /** Schema-coupled native family reads; unsupported native producers carry an explicit reason. */
   readonly subjectReads: SubjectReads
+  /** Visible Details uses shared native getter facts; no private harness decoding. */
+  readonly nativeDetails?: NativeDetailsSource
   readonly connection: Atom.Atom<ConnectionState>
   /** Browser reachability is a local signal, not a claim about the gateway's host. */
   readonly network?: Atom.Atom<NetworkReachability>
