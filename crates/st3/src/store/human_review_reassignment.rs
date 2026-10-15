@@ -108,12 +108,15 @@ pub(super) fn pending_requests_sql(filtered: bool) -> String {
     // Finish answer/supersession filtering before looking up an episode's first request.
     // Otherwise SQLite may run that canonical sort for every historical candidate, including
     // answered episodes that cannot contribute a review or its waiting-since timestamp.
+    // Keep candidates outside hydration too: an ordinary JOIN lets SQLite scan the
+    // partial reviewer index and probe an automatic candidates index for every historical
+    // request, despite the bounded owner seeks inside candidates.
     canonical_sql(&format!(
         "WITH candidates(id) AS ({candidates}),
          unresolved AS MATERIALIZED (
              SELECT request.*
              FROM candidates
-             JOIN claims request ON request.id=candidates.id
+             CROSS JOIN claims request ON request.id=candidates.id
              WHERE request.kind='gate.requested'
                AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
                AND (?1 IS NULL OR {effective_reviewer}=?1)
@@ -595,21 +598,12 @@ mission "review-repair" state="ready" {
 
     #[test]
     fn unfiltered_reviews_cover_owner_shapes_and_deduplicate_overlapping_paths() {
-        let (store, run) = fixture();
-        let step_request = request(&store, &run, "pending", "owner-step", 0);
-        let parent = run.steps.iter().find(|step| step.step == "pending").unwrap();
-        let nested = run.steps.iter().find(|step| step.step == "answered").unwrap();
-        let nested_subject = format!("{}/nested", parent.subject);
-        // The nested loop owner is reachable both by its exact-owner seek and by the
-        // parent's descendant range. Keep both projected steps live to exercise UNION.
-        store.connection.write().execute(
-            "UPDATE step_runs SET subject=?1,step_path='pending/nested' WHERE subject=?2",
-            params![nested_subject, nested.subject],
-        ).unwrap();
+        let (store, completed) = fixture();
+        let template = request(&store, &completed, "pending", "closed-template", 0);
         let append = |owner: &str, definition: &str, attempt: u32, suffix: &str| {
             let operation = format!("gate-operation/review-owner-shapes/{suffix}");
             let mut fields: BTreeMap<String, Value> =
-                serde_json::from_value(step_request.body["fields"].clone()).unwrap();
+                serde_json::from_value(template.body["fields"].clone()).unwrap();
             fields.insert("owner".into(), json!(owner));
             fields.insert("operation".into(), json!(operation));
             fields.insert("step_definition".into(), json!(definition));
@@ -624,6 +618,44 @@ mission "review-repair" state="ready" {
                 idempotency_key: Some(format!("review-owner-shapes:{suffix}")),
             }).unwrap()
         };
+        let completed_step = &completed.steps[0];
+        let completed_loop_owner = format!(
+            "loop-run/{}", completed_step.subject.strip_prefix("step-run/").unwrap(),
+        );
+        let closed_requests = [
+            append(&completed.subject, &completed.revision, 1, "closed-mission"),
+            append(
+                &completed_step.subject, &completed_step.definition_hash,
+                completed_step.attempt, "closed-step",
+            ),
+            append(
+                &completed_loop_owner, &completed_step.definition_hash,
+                completed_step.attempt, "closed-loop",
+            ),
+        ];
+        store.set_mission_run_state(
+            &completed.subject, "completed", "terminal", Some("owner-shape coverage"),
+        ).unwrap();
+        // Finish the historical run first: this mission permits only one active run.
+        let run = store.create_mission_run(&MissionRunRequest {
+            mission: "review-repair".into(),
+            revision: None,
+            workspace: ".".into(),
+            requester: Some("person/operator".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "review-owner-shapes-live".into(),
+        }).unwrap();
+        let step_request = request(&store, &run, "pending", "owner-step", 0);
+        let parent = run.steps.iter().find(|step| step.step == "pending").unwrap();
+        let nested = run.steps.iter().find(|step| step.step == "answered").unwrap();
+        let nested_subject = format!("{}/nested", parent.subject);
+        // The nested loop owner is reachable both by its exact-owner seek and by the
+        // parent's descendant range. Keep both projected steps live to exercise UNION.
+        store.connection.write().execute(
+            "UPDATE step_runs SET subject=?1,step_path='pending/nested' WHERE subject=?2",
+            params![nested_subject, nested.subject],
+        ).unwrap();
         let mission_request = append(&run.subject, &run.revision, 1, "mission");
         let loop_step = run.steps.iter().find(|step| step.step == "stale").unwrap();
         let loop_owner = format!(
@@ -648,33 +680,6 @@ mission "review-repair" state="ready" {
         ).unwrap();
         assert_eq!(matching_owners, 2, "the fixture must exercise overlapping owner seeks");
 
-        let completed = store.create_mission_run(&MissionRunRequest {
-            mission: "review-repair".into(),
-            revision: None,
-            workspace: ".".into(),
-            requester: Some("person/operator".into()),
-            mode: Some("run".into()),
-            inputs: BTreeMap::new(),
-            idempotency_key: "review-owner-shapes-completed".into(),
-        }).unwrap();
-        let completed_step = &completed.steps[0];
-        let completed_loop_owner = format!(
-            "loop-run/{}", completed_step.subject.strip_prefix("step-run/").unwrap(),
-        );
-        let closed_requests = [
-            append(&completed.subject, &completed.revision, 1, "closed-mission"),
-            append(
-                &completed_step.subject, &completed_step.definition_hash,
-                completed_step.attempt, "closed-step",
-            ),
-            append(
-                &completed_loop_owner, &completed_step.definition_hash,
-                completed_step.attempt, "closed-loop",
-            ),
-        ];
-        store.set_mission_run_state(
-            &completed.subject, "completed", "terminal", Some("owner-shape coverage"),
-        ).unwrap();
 
         let reviews = store.pending_human_reviews(None).unwrap();
         let expected = [

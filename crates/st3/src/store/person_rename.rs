@@ -588,6 +588,8 @@ mission "approvals" state="ready" revisions="human-only" revision-reviewer="pers
                 evidence: Vec::new(), expected_subject: None, idempotency_key: Some(format!("inbox-plan:{kind}")),
             }).unwrap();
         }
+        // Raw planning claims need the same projection as replicated planning events.
+        store.replay_replication_graph().unwrap();
         let original_proposal = store.revision_proposal(&proposal.subject).unwrap().unwrap();
         let original_launch = store.planning_session(planning_subject).unwrap().unwrap();
         let original_fault = store.operational_failure("inbox-broken-gate").unwrap().unwrap();
