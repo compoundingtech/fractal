@@ -70,14 +70,16 @@ def selecting(name):
 
 
 SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'CLAUDE', 'ANTHROPIC_')
-KEPT_SEAT = ('ST_AGENT', 'ST_EVIDENCE', 'ST_SKIP_EVIDENCE')
+KEPT_SEAT = ('ST_AGENT', 'ST_SKIP_EVIDENCE')  # exact names, plus every ST_EVIDENCE* switch; this list is the only exception mechanism
 
 
 def scrub_seat_environment():
     """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
     settings), and the checks must see what CI sees: tests that read them fail or behave differently under a seat (the ci-local-gate
-    drill's claude hook tests did). ST_AGENT stays because the host ranks `nix develop` starts by it; the evidence switches stay."""
-    for name in [name for name in os.environ if name.startswith(SEAT_PREFIXES) and not name.startswith(KEPT_SEAT)]:
+    drill's claude hook tests did). ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
+    starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
+    for name in [name for name in os.environ
+                 if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:
         del os.environ[name]
 
 
