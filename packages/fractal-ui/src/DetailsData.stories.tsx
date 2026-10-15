@@ -208,6 +208,29 @@ function falsifyText(root:HTMLElement,selector:string,value:string):HTMLElement 
  return wrong
 }
 
+export const PartialIdleActivity: Story = {
+  args: { state: 'partial', overview: { ...detailsStoryInputs('idle').overview, activity: 'idle' } },
+  play: async ({ canvasElement }) => {
+    const overview = within(pane(canvasElement)).getByRole('region', { name: 'Overview' })
+    requireContract(within(overview).queryByRole('img', { name: /^Working;/ }) === null, 'Partial observation invented working activity')
+    requireContract(within(overview).getByRole('img', { name: /^Idle;/ }), 'Reported idle activity disappeared')
+  },
+}
+export const PartialWorkingActivity: Story = {
+  args: { state: 'partial', overview: { ...detailsStoryInputs('busy').overview, activity: 'working' } },
+  play: async ({ canvasElement }) => {
+    const overview = within(pane(canvasElement)).getByRole('region', { name: 'Overview' })
+    requireContract(within(overview).getByRole('img', { name: /^Working;/ }), 'Partial observation hid reported working activity')
+  },
+}
+export const PartialUnreportedActivity: Story = {
+  args: { state: 'partial', overview: { ...detailsStoryInputs('busy').overview, activity: undefined } },
+  play: async ({ canvasElement }) => {
+    const overview = within(pane(canvasElement)).getByRole('region', { name: 'Overview' })
+    requireContract(within(overview).queryByRole('img') === null, 'Unreported activity invented a status glyph')
+  },
+}
+
 export const PartialCoverage: Story = {
   args: { scenario: 'partial' },
   play: async ({ canvasElement }) => {

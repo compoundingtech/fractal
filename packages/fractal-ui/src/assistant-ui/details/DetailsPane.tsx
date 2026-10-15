@@ -124,7 +124,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const spend=trace.meters.spend
   const dataOnly=variants.empty==='E3'
   const consolidateUnavailable=state==='new'&&dataOnly
-  const glyphStatus=state==='busy'||state==='absent'||state==='partial'?'working':state==='idle'?'idle':state==='new'?'pending':'unobserved'
+  const glyphStatus=overview.activity==='working'||overview.activity==='waiting'||overview.activity==='idle'?overview.activity:'unobserved'
   const knownIdentity=[overview.machine,overview.model].filter(Boolean).join(' · ')
   const fields=[['Status',overview.status],['Machine',overview.machine],['Harness',overview.harness],['Model',overview.model],['Status since',overview.since],['Incarnation age',overview.age]] as const
   const pendingOverview=providedPendingOverview??overview

@@ -179,7 +179,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     projected?.usage._tag === 'Known' && projected.usage.value.context !== undefined ? DateTime.toEpochMillis(projected.usage.value.context.observed_at_unix_ms) : undefined,
   ])
   return {
-    overview: { title: row?.name, status: projected?.status, machine: projected?.host, harness: projected?.harness, model, mission,
+    overview: { title: row?.name, status: projected?.status, activity: projected?.activity, machine: projected?.host, harness: projected?.harness, model, mission,
       durations: [
         { label: 'Managed-session elapsed (from session start to end or now; wall time, not active)', value: timingPending ? 'Loading' : timing.elapsedMs === undefined ? 'Unreported' : durationText(timing.elapsedMs), pending: timingPending, ...(timing.elapsedMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },
         { label: 'Current-incarnation session age (from managed session start; native launch not reported)', value: timingPending ? 'Loading' : timing.sessionAgeMs === undefined ? 'Unreported' : durationText(timing.sessionAgeMs), pending: timingPending, ...(timing.sessionAgeMs === undefined && timingDetail !== undefined ? { detail: timingDetail } : {}) },

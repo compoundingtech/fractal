@@ -18,6 +18,8 @@ export interface DetailsDisplayObservation {
 export interface DetailsOverview {
   readonly title: string | undefined
   readonly status: string | undefined
+  /** Reported activity only; observation completeness never implies work. Omitted means no glyph. */
+  readonly activity?: 'working' | 'waiting' | 'idle' | 'errored'
   readonly machine: string | undefined
   readonly harness: string | undefined
   readonly model: string | undefined

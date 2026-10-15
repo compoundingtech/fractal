@@ -66,7 +66,7 @@ const busyItems: Readonly<Record<DetailsSectionName, DetailsValue<readonly Detai
 }
 /** The one observed machine identity is sanitized; every field maps to a snapshot fact. */
 const busyOverview: DetailsOverview = {
-  title: 'UI redesign milestone', status: 'working', machine: 'workstation-a', harness: 'omp', model: 'reported-model-a',
+  title: 'UI redesign milestone', status: 'working', activity: 'working', machine: 'workstation-a', harness: 'omp', model: 'reported-model-a',
   mission: 'UI redesign milestone',
   since: '1h 08m', age: '9h 23m',
 }
@@ -77,14 +77,14 @@ const pendingOverview: DetailsOverview = {
 }
 function rowOverview(row: SidebarAgentRow): DetailsOverview {
   return {
-    title: row.title, status: row.status, machine: row.host, harness: row.harness, model: row.model,
+    title: row.title, status: row.status, activity: row.status === 'working' || row.status === 'waiting' || row.status === 'idle' ? row.status : undefined, machine: row.host, harness: row.harness, model: row.model,
     since: row.statusSince === undefined ? undefined : detailsDuration(fixtureSidebarNow - row.statusSince),
     age: undefined,
   }
 }
 function createFixture(state: DetailsState): DetailsFixture {
   const overview = state === 'busy' || state === 'partial' || state === 'absent' ? busyOverview
-    : state === 'new' ? { ...busyOverview, title: 'New workspace', mission: undefined, status: 'pending', model: undefined, since: '0s', age: '0s' }
+    : state === 'new' ? { ...busyOverview, title: 'New workspace', mission: undefined, status: 'pending', activity: undefined, model: undefined, since: '0s', age: '0s' }
     : state === 'idle' ? rowOverview(idleRoot)
     : state === 'loading' || state === 'error' ? pendingOverview
     : pendingOverview

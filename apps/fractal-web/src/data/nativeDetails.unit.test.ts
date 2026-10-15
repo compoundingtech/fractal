@@ -18,6 +18,21 @@ const missing = unavailable({ reason: 'unsupported', detail: 'Not reported' })
 const project = ({ selected = row, selectedPeriod = observed({ value: period }), selectedSession = session, sessionFeed, selectedQueue, selectedDeclarations = missing, needsMe }: { readonly selected?: Native.Agent; readonly selectedPeriod?: Feed<Native.UsagePeriod>; readonly selectedSession?: Native.Session; readonly sessionFeed?: Feed<Native.Session>; readonly selectedQueue?: Feed<Native.AgentQueue>; readonly selectedDeclarations?: Feed<NativeDeclarations>; readonly needsMe?: boolean } = {}) => projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: createProjections().fleetFromAgents([selected]).agents[0] }), period: selectedPeriod, session: sessionFeed ?? observed({ value: selectedSession }), declarations: selectedDeclarations, missions: observed({ value: [] }), queue: selectedQueue, needsMe, now: 10000, onRetry: () => undefined })
 
 describe('fixture-free native Details projection', () => {
+  it('keeps reported activity independent of missing period rows and stale observations', () => {
+    const idle = { ...row, harness_state: Option.some('idle') }
+    const working = { ...row, harness_state: Option.some('working') }
+    for (const selectedPeriod of [
+      missing,
+      observed({ value: { ...period, rows: [] } }),
+      { ...observed({ value: period }), freshness: 'stale' as const },
+    ]) {
+      expect(project({ selected: idle, selectedPeriod })).toMatchObject({ state: 'partial', overview: { activity: 'idle' } })
+      expect(project({ selected: working, selectedPeriod })).toMatchObject({ state: 'partial', overview: { activity: 'working' } })
+    }
+    const unreported = projectNativeDetails({ agentRef: row.id, row: observed({ value: row }), agent: observed({ value: undefined }), period: missing, session: missing, declarations: missing, missions: missing, now: 10000, onRetry: () => undefined })
+    expect(unreported.state).toBe('partial')
+    expect(unreported.overview.activity).toBeUndefined()
+  })
   it('sums attributed main cost across models/accounts with exact bounds, independently of cumulative tokens', () => {
     const result = project()
     expect(result.nativeSessionId).toBe('native/root')
