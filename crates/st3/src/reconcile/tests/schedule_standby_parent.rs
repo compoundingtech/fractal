@@ -60,3 +60,48 @@ schedule "orchard" {{ host "ivory"; standby {{ host "jade"; after "50ms" }}
     assert_eq!(after.len(), before.len(), "unknown future detail replayed known primary work");
     assert_eq!(after[0].body["fields"]["mission_run"], run);
 }
+
+
+#[tokio::test]
+async fn future_standby_skip_tick_is_local_until_due_and_eligible() {
+    let (primary, standby, _) = pair();
+    let standby = Arc::new(standby);
+    let root = tempfile::tempdir().unwrap();
+    let anchor = (Utc::now() + chrono::Duration::seconds(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let source = format!(r#"version 2
+mission "harvest" state="ready" {{
+ completion {{ when "all-steps-exhausted" }}
+ step "done" {{ agentless }}
+}}
+schedule "orchard" {{ host "ivory"; standby {{ host "jade"; after "20ms" }}
+ every "10s"; anchor {anchor:?}; catch-up "skip"
+ work {{ mission "harvest"; workspace {:?} }}
+}}"#, root.path().to_str().unwrap());
+    apply_source(&primary, &source, "future-standby-skip");
+    sync(&primary, &standby);
+    let reconciler = Reconciler::new(standby.clone(), Arc::new(FakeRuntime::default()), "jade".into(), Arc::new(Notify::new()));
+    sync(&primary, &standby);
+    reconciler.reconcile_once().unwrap();
+    assert!(standby.claims_for("schedule/orchard", Some("schedule.occurrence-scheduled")).unwrap().is_empty(),
+        "future standby wrote a replicated scheduling claim before eligibility");
+    assert!(reconciler.delayed_restarts.lock().unwrap().keys().any(|key| key.starts_with("standby-due:schedule/orchard:")));
+    let (_, tick, at) = reconciler.standby_due_ticks.lock().unwrap()["schedule/orchard"].clone();
+    assert_eq!(tick, 0);
+    tokio::time::sleep(Duration::from_millis(at.saturating_sub(now_ms() as i64).max(0) as u64 + 10)).await;
+    reconciler.reconcile_once().unwrap();
+    assert!(standby.claims_for("schedule/orchard", Some("schedule.occurrence-scheduled")).unwrap().is_empty(),
+        "fresh heartbeat wrote a scheduling claim");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    reconciler.reconcile_once().unwrap();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let scheduled = standby.claims_for("schedule/orchard", Some("schedule.occurrence-scheduled")).unwrap();
+    assert_eq!(scheduled.len(), 1);
+    assert_eq!(scheduled[0].body["fields"]["occurrence"], 0, "skip lost the preselected due tick");
+    assert_eq!(scheduled[0].body["fields"]["standby"]["host"], "jade");
+    let reached = standby.claims_for("schedule/orchard", Some("schedule.occurrence-reached")).unwrap();
+    assert_eq!(reached.len(), 1);
+    assert_eq!(reached[0].body["fields"]["occurrence"], 0);
+    sync(&standby, &primary);
+    assert_eq!(primary.claims_for("schedule/orchard", Some("schedule.occurrence-scheduled")).unwrap().len(), 1);
+}

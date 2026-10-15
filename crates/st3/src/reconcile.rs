@@ -972,6 +972,8 @@ pub struct Reconciler<R = NativeRuntime> {
     #[cfg(test)]
     background_wake_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// A locally selected future standby tick is not a replicated scheduling claim.
+    standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1149,6 +1151,7 @@ impl Reconciler<NativeRuntime> {
             #[cfg(test)]
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1292,6 +1295,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             #[cfg(test)]
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            standby_due_ticks: Mutex::new(HashMap::new()),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -13737,9 +13741,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             scheduled_at
         };
-        // Before a future tick, arm only its ordinary occurrence timer. The expensive
-        // all-member/legacy fence and heartbeat admission belong to a due standby path.
-        let standby_detail = if spec.host == self.host || scheduled_at > now_ms() as i64 { None } else {
+        let (occurrence, scheduled_at) = if spec.host != self.host {
+            let mut pending = self.standby_due_ticks.lock().unwrap_or_else(PoisonError::into_inner);
+            // Keep a preselected skip tick through its wake: selecting afresh when due
+            // would always choose the next tick. Revalidate revision and catch-up window.
+            let candidate = match pending.get(&schedule.subject) {
+                Some((selected_revision, tick, at)) if selected_revision == &revision
+                    && *at <= now && Self::standby_candidate_current(&spec, *tick, last, now)? => (*tick, *at),
+                _ => (occurrence, scheduled_at),
+            };
+            pending.insert(schedule.subject.clone(), (revision.clone(), candidate.0, candidate.1));
+            candidate
+        } else {
+            self.standby_due_ticks.lock().unwrap_or_else(PoisonError::into_inner).remove(&schedule.subject);
+            (occurrence, scheduled_at)
+        };
+        // Before a future standby tick, arm only a local wake. The next parent pass
+        // revalidates ownership, revision, occurrence and eligibility before any claim.
+        if spec.host != self.host && scheduled_at > now_ms() as i64 {
+            self.arm_restart(&format!("standby-due:{}:{revision}:{}:{occurrence}", schedule.subject, self.host),
+                scheduled_at as u128);
+            return Ok(());
+        }
+        let standby_detail = if spec.host == self.host { None } else {
             // A known reached/run fact defeats a fresh standby start, regardless of origin.
             if self.store.mission_run(&Store::scheduled_mission_run_subject(&schedule.subject, occurrence))?.is_some() {
                 return Ok(());
